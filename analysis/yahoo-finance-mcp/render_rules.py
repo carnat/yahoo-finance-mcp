@@ -75,6 +75,30 @@ def domain_of(rule) -> str:
 
 PRI = {"P0": 0, "P1": 1, "P2": 2}
 rules = data["confirmedRules"]
+
+# Owner corrections (rule_overrides.json) layered over the verbatim workflow output.
+overrides = json.loads((HERE / "rule_overrides.json").read_text())
+for r in rules:
+    card = overrides["cards"].get(r["name"]) if r["priority"] == "P0" else None
+    if card:
+        r["_panelNote"] = r.pop("smeQuestion", None)
+        r.update({k: v for k, v in card.items() if k not in ("ownerDecision", "repair")})
+        r["_ownerDecision"] = card["ownerDecision"]
+        if card.get("repair"):
+            r["_repairRef"] = card["repair"]["ref"]
+            r["_repairWhat"] = card["repair"]["what"]
+    if r.get("suspectedDefect"):
+        r["_repairRef"] = r.get("_repairRef") or overrides["repairs"].get(r["name"])
+
+# When a scheduled repair must ship: before the phase that moves the rule's domain (owner decision Q3i phase rule).
+REPAIR_WINDOW = {"news": "before Phase 3", "sec": "before Phase 4", "shared": "before Phase 4", "envelope": "before Phase 4",
+                 "transport": "before Phase 4"}
+
+
+def repair_window(r) -> str:
+    if (r.get("_repairRef") or "").startswith("Q2a"):
+        return "Phase 1"
+    return REPAIR_WINDOW.get(r["_dom"], "before its Phase 5 unit")
 by_dom = defaultdict(list)
 for r in rules:
     r["_dom"] = domain_of(r)
@@ -99,7 +123,7 @@ w = L.append
 w("# Business Rules — yahoo-finance-mcp\n")
 w("Generated 2026-10-14 by `/modernize-extract-rules` (workflow run `wf_36b55a43-b0d`, 710 agents, 4 extraction rounds) "
   "and rendered by `render_rules.py` from the verbatim workflow output in `rules.json`. Do not hand-edit rule cards; "
-  "fix `rules.json` or re-run the extraction.\n")
+  "owner corrections go in `rule_overrides.json`; anything else means re-running the extraction.\n")
 w("## How these rules were produced\n")
 w("- **Extract:** each round, three extractors read `legacy/yahoo-finance-mcp/` (symlinks to `server.py`, `tool_groups.py`, `yfmcp/`, `worker/src/`, `docs/`, `tool_catalog.json`), each through a different lens (calculations, validations and policies, lifecycle and status). Duplicates across rounds were dropped.")
 w("- **Verify:** a separate referee read each rule's cited code. "
@@ -130,6 +154,15 @@ c = Counter(r["priority"] for r in ordered)
 w(f"| **Total** | **{c['P0']}** | **{c['P1']}** | **{c['P2']}** | **{len(ordered)}** | **{len(sme)}** | **{len(defects)}** |\n")
 w("By category: " + ", ".join(f"{k} {v}" for k, v in Counter(r["category"] for r in ordered).most_common()) + ".\n")
 
+repairs_sched = [r for r in ordered if r.get("_repairRef")]
+w("## Owner decisions applied (2026-10-15)\n")
+w("`OWNER_DECISIONS_20261015.md` resolved the brief's open questions. Its corrections live in `rule_overrides.json` and are applied here; "
+  "`rules.json` stays the verbatim workflow output. Effects on this document:\n")
+w(f"- The 6 P0 cards that were below High confidence were corrected and confirmed by the owner (Q1); each carries an **Owner decision** line.")
+w(f"- {len(repairs_sched)} rules carry a **Scheduled repair**: today's behaviour is characterised as the Phase 2 baseline, then repaired "
+  "in a separate release that ships before the phase that moves the rule's domain (Q3 / Q3i phase rule). "
+  "Suspected defects without a decision are **Q3i triage**: classify as semantic/data-integrity (repair) or cosmetic/intentional (preserve) before their domain moves.\n")
+
 w("## 2. P0 behaviour contract\n")
 w(f"These {len(p0)} rules must be proven equivalent, in both runtimes, before any phase that touches their code ships. "
   f"**{len(p0_blockers)}** have confidence below High and need SME confirmation before their phase starts (marked ⚠).\n")
@@ -142,14 +175,16 @@ w("")
 
 w("## 3. Suspected defects found during extraction\n")
 w("While reading the code, the referees and judges noted places where the code contradicts its own documentation, the other runtime, or itself. "
-  "**These are reported, not fixed.** Under `CLAUDE.md`, resolving a Python/TS divergence, changing an output field or changing a threshold is a planner decision. "
-  "A modernization phase must preserve today's behaviour, defects included, until each item is decided. Rows marked **parity** are cases where the two runtimes already disagree.\n")
-w("| ID | Pri | Rule | Suspected defect |")
-w("|---|---|---|---|")
+  "Under `CLAUDE.md`, resolving a Python/TS divergence, changing an output field or changing a threshold is a planner decision; the owner made those decisions on 2026-10-15. "
+  "A pure-restructuring PR still preserves today's behaviour; each decided repair ships as its own release before the phase that moves its domain. Rows marked **parity** are cases where the two runtimes already disagree.\n")
+w("Decision column: the owner decision that governs each item (`OWNER_DECISIONS_20261015.md`) and when its repair ships; **Q3i triage** = not yet classified.\n")
+w("| ID | Pri | Rule | Suspected defect | Decision |")
+w("|---|---|---|---|---|")
 for r in defects:
     d = clean(r["suspectedDefect"])
     tag = "**parity** " if re.search(r"parity|Worker|TS |worker/src|diverge", d, re.I) else ""
-    w(f"| {r['_id']} | {r['priority']} | {cell(r['name'])} | {tag}{cell(d, 400)} |")
+    dec = f"{r['_repairRef']}: repair {repair_window(r)}" if r.get("_repairRef") else "Q3i triage"
+    w(f"| {r['_id']} | {r['priority']} | {cell(r['name'])} | {tag}{cell(d, 400)} | {dec} |")
 w("")
 
 w("## 4. Rule cards\n")
@@ -175,6 +210,13 @@ for d in dom_order:
                 w(f"  - {clean(e)}")
         if r.get("suspectedDefect"):
             w(f"- **Suspected defect:** {clean(r['suspectedDefect'])}")
+        if r.get("_ownerDecision"):
+            w(f"- **Owner decision (2026-10-15):** {r['_ownerDecision']}")
+        if r.get("_repairRef"):
+            what = f" {r['_repairWhat']}" if r.get("_repairWhat") else ""
+            w(f"- **Scheduled repair ({r['_repairRef']}, ships {repair_window(r)}):**{what or ' see the suspected defect above.'}")
+        if r.get("_panelNote"):
+            w(f"\n<details><summary>P0 panel note (superseded by the owner decision)</summary>\n\n{clean(r['_panelNote'])}\n\n</details>")
         if r.get("smeQuestion"):
             q = clean(r["smeQuestion"])
             if len(q) > 600:

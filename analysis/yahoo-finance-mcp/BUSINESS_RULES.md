@@ -1,6 +1,6 @@
 # Business Rules — yahoo-finance-mcp
 
-Generated 2026-10-14 by `/modernize-extract-rules` (workflow run `wf_36b55a43-b0d`, 710 agents, 4 extraction rounds) and rendered by `render_rules.py` from the verbatim workflow output in `rules.json`. Do not hand-edit rule cards; fix `rules.json` or re-run the extraction.
+Generated 2026-10-14 by `/modernize-extract-rules` (workflow run `wf_36b55a43-b0d`, 710 agents, 4 extraction rounds) and rendered by `render_rules.py` from the verbatim workflow output in `rules.json`. Do not hand-edit rule cards; owner corrections go in `rule_overrides.json`; anything else means re-running the extraction.
 
 ## How these rules were produced
 
@@ -20,29 +20,36 @@ Generated 2026-10-14 by `/modernize-extract-rules` (workflow run `wf_36b55a43-b0
 | Domain | P0 | P1 | P2 | Total | Need SME | Suspected defects |
 |---|---:|---:|---:|---:|---:|---:|
 | Envelope, schemas & cross-cutting | 0 | 7 | 4 | 11 | 2 | 4 |
-| Yahoo pricing, technicals, options & screening | 3 | 32 | 11 | 46 | 5 | 9 |
+| Yahoo pricing, technicals, options & screening | 3 | 32 | 11 | 46 | 4 | 9 |
 | Yahoo fundamentals, analyst & calendar | 0 | 9 | 2 | 11 | 2 | 3 |
 | Third-party fallbacks (key-gated) | 0 | 7 | 4 | 11 | 1 | 2 |
 | SEC EDGAR retrieval | 7 | 21 | 6 | 34 | 0 | 0 |
-| SEC extractors & capital structure | 27 | 75 | 19 | 121 | 23 | 11 |
-| Valuation & reconciliation | 36 | 53 | 8 | 97 | 14 | 8 |
+| SEC extractors & capital structure | 27 | 75 | 19 | 121 | 22 | 11 |
+| Valuation & reconciliation | 36 | 53 | 8 | 97 | 10 | 8 |
 | Earnings intelligence & transcripts | 5 | 33 | 5 | 43 | 8 | 6 |
 | News & public events | 0 | 9 | 1 | 10 | 2 | 4 |
 | Evidence layer | 5 | 35 | 1 | 41 | 2 | 2 |
 | Thai SEC funds | 0 | 5 | 2 | 7 | 0 | 0 |
 | Shared god-file helpers | 1 | 21 | 1 | 23 | 2 | 6 |
-| **Total** | **84** | **307** | **64** | **455** | **61** | **55** |
+| **Total** | **84** | **307** | **64** | **455** | **55** | **55** |
 
 By category: Calculation 181, Validation 122, Policy 97, Lifecycle 55.
 
+## Owner decisions applied (2026-10-15)
+
+`OWNER_DECISIONS_20261015.md` resolved the brief's open questions. Its corrections live in `rule_overrides.json` and are applied here; `rules.json` stays the verbatim workflow output. Effects on this document:
+
+- The 6 P0 cards that were below High confidence were corrected and confirmed by the owner (Q1); each carries an **Owner decision** line.
+- 39 rules carry a **Scheduled repair**: today's behaviour is characterised as the Phase 2 baseline, then repaired in a separate release that ships before the phase that moves the rule's domain (Q3 / Q3i phase rule). Suspected defects without a decision are **Q3i triage**: classify as semantic/data-integrity (repair) or cosmetic/intentional (preserve) before their domain moves.
+
 ## 2. P0 behaviour contract
 
-These 84 rules must be proven equivalent, in both runtimes, before any phase that touches their code ships. **6** have confidence below High and need SME confirmation before their phase starts (marked ⚠).
+These 84 rules must be proven equivalent, in both runtimes, before any phase that touches their code ships. **0** have confidence below High and need SME confirmation before their phase starts (marked ⚠).
 
 | ID | Rule | Category | Source | Confidence |
 |---|---|---|---|---|
 | BR-PRC-001 | Completed-session bar rule (exclude today's unfinished bar) | Lifecycle | `yfmcp/tools/pricing.py:772-822` | High |
-| BR-PRC-002 | Daily price freshness classification (CURRENT / STALE / UNKNOWN) | Validation | `yfmcp/tools/pricing.py:830-864` | Medium ⚠ |
+| BR-PRC-002 | Daily price freshness classification (CURRENT / STALE / UNKNOWN) | Validation | `yfmcp/tools/pricing.py:830-864` | High |
 | BR-PRC-003 | Listing currency to USD conversion with minor units | Calculation | `yfmcp/tools/pricing.py:1449-1489` | High |
 | BR-SEC-001 | Company fiscal-year naming offset | Policy | `legacy/yahoo-finance-mcp/yfmcp/fiscal_calendar.py:101-146` | High |
 | BR-SEC-002 | Equivalent SEC concept selection by newest filing | Policy | `yfmcp/sec_facts.py:18-67` | High |
@@ -65,7 +72,7 @@ These 84 rules must be proven equivalent, in both runtimes, before any phase tha
 | BR-EXT-012 | Instrument-to-total-debt reconciliation | Validation | `yfmcp/capital_structure.py:2947-2993` | High |
 | BR-EXT-013 | Net-share settlement when principal is stated as cash-settled | Calculation | `yfmcp/capital_structure.py:1250-1284,1493-1506; yfmcp/share_scenarios.py:207-214` | High |
 | BR-EXT-014 | Outlook table scale for unscaled amounts | Calculation | `legacy/yahoo-finance-mcp/yfmcp/extraction_rules.py:249-269,396-403` | High |
-| BR-EXT-015 | Release figure scale and loss sign | Calculation | `yfmcp/extraction_rules.py:590-613` | Medium ⚠ |
+| BR-EXT-015 | Release figure scale and loss sign | Calculation | `yfmcp/extraction_rules.py:590-613` | High |
 | BR-EXT-016 | Reported release metric acceptance rules | Validation | `yfmcp/extraction_rules.py:541-616` | High |
 | BR-EXT-017 | Reported release metric eligibility | Validation | `legacy/yahoo-finance-mcp/yfmcp/extraction_rules.py:456-616` | High |
 | BR-EXT-018 | Scenario instrument line inclusion and treasury-stock increment | Calculation | `legacy/yahoo-finance-mcp/yfmcp/share_scenarios.py:107-142` | High |
@@ -81,9 +88,9 @@ These 84 rules must be proven equivalent, in both runtimes, before any phase tha
 | BR-VAL-001 | ADR ordinary-shares-per-quoted-share ratio | Calculation | `yfmcp/valuation.py:29-49,280-302` | High |
 | BR-VAL-002 | ADR ratio applied only for foreign filers when share counts are a whole multiple apart | Calculation | `yfmcp/valuation.py:29-49,280-298` | High |
 | BR-VAL-003 | ADR ratio between SEC ordinary shares and Yahoo quoted shares | Calculation | `legacy/yahoo-finance-mcp/yfmcp/valuation.py:29-49,280-302` | High |
-| BR-VAL-004 | ADR ratio detection and share-basis mismatch | Validation | `yfmcp/valuation.py:29-49,280-302` | Medium ⚠ |
+| BR-VAL-004 | ADR ratio detection and share-basis mismatch | Validation | `yfmcp/valuation.py:29-49,280-302` | High |
 | BR-VAL-005 | Filing balances vs Yahoo balances selection (currency and staleness) | Policy | `yfmcp/valuation.py:25-26,305-339` | High |
-| BR-VAL-006 | Historical balances read at the cash date; no-borrowings means zero debt | Calculation | `yfmcp/valuation_history.py:418-455,666-699` | Medium ⚠ |
+| BR-VAL-006 | Historical balances read at the cash date; no-borrowings means zero debt | Calculation | `yfmcp/valuation_history.py:418-455,666-699` | High |
 | BR-VAL-007 | Historical enterprise value and multiples | Calculation | `legacy/yahoo-finance-mcp/yfmcp/valuation_history.py:474-493,648-733` | High |
 | BR-VAL-008 | Historical EV status precedence and no-borrowings rule | Lifecycle | `legacy/yahoo-finance-mcp/yfmcp/valuation_history.py:418-455,666-702` | High |
 | BR-VAL-009 | Historical market cap status precedence | Lifecycle | `legacy/yahoo-finance-mcp/yfmcp/valuation_history.py:587-646` | High |
@@ -99,10 +106,10 @@ These 84 rules must be proven equivalent, in both runtimes, before any phase tha
 | BR-VAL-019 | Metric reconciliation agreement status | Validation | `yfmcp/metric_reconciliation.py:518-555; server.py:10744-10755` | High |
 | BR-VAL-020 | Metric reconciliation status | Lifecycle | `yfmcp/metric_reconciliation.py:553-555,570-591` | High |
 | BR-VAL-021 | Metric reconciliation tolerance and match | Calculation | `yfmcp/metric_reconciliation.py:45,479-486,518-555; server.py:10744-10753` | High |
-| BR-VAL-022 | Metric source reconciliation status | Calculation | `yfmcp/metric_reconciliation.py:518-555` | Medium ⚠ |
+| BR-VAL-022 | Metric source reconciliation status | Calculation | `yfmcp/metric_reconciliation.py:518-555` | High |
 | BR-VAL-023 | Minor-unit quote conversion and currency comparability | Calculation | `yfmcp/valuation.py:170-177,261-264` | High |
 | BR-VAL-024 | Minor-unit quote conversion and currency comparability for multiples | Calculation | `yfmcp/valuation.py:170-216,261-264` | High |
-| BR-VAL-025 | Parent net income derived from ProfitLoss less NCI | Calculation | `legacy/yahoo-finance-mcp/yfmcp/metric_reconciliation.py:223-295` | Medium ⚠ |
+| BR-VAL-025 | Parent net income derived from ProfitLoss less NCI | Calculation | `legacy/yahoo-finance-mcp/yfmcp/metric_reconciliation.py:223-295` | High |
 | BR-VAL-026 | Point-in-time fact selection and concept precedence | Policy | `legacy/yahoo-finance-mcp/yfmcp/valuation_history.py:143-164` | High |
 | BR-VAL-027 | Point-in-time fact selection: concept priority beats newer filing | Policy | `yfmcp/valuation_history.py:69,143-164` | High |
 | BR-VAL-028 | Point-in-time price with later splits undone | Calculation | `yfmcp/valuation_history.py:219-224,587-598` | High |
@@ -128,65 +135,67 @@ These 84 rules must be proven equivalent, in both runtimes, before any phase tha
 
 ## 3. Suspected defects found during extraction
 
-While reading the code, the referees and judges noted places where the code contradicts its own documentation, the other runtime, or itself. **These are reported, not fixed.** Under `CLAUDE.md`, resolving a Python/TS divergence, changing an output field or changing a threshold is a planner decision. A modernization phase must preserve today's behaviour, defects included, until each item is decided. Rows marked **parity** are cases where the two runtimes already disagree.
+While reading the code, the referees and judges noted places where the code contradicts its own documentation, the other runtime, or itself. Under `CLAUDE.md`, resolving a Python/TS divergence, changing an output field or changing a threshold is a planner decision; the owner made those decisions on 2026-10-15. A pure-restructuring PR still preserves today's behaviour; each decided repair ships as its own release before the phase that moves its domain. Rows marked **parity** are cases where the two runtimes already disagree.
 
-| ID | Pri | Rule | Suspected defect |
-|---|---|---|---|
-| BR-ENV-001 | P1 | Default fact confidence and decision-grade tagging | **parity** A populated value with no confidence inherits HIGH by default (lines 223-225), overstating confidence for untagged facts. |
-| BR-ENV-005 | P1 | SEC accession number format check | **parity** No equivalent accession-format check exists anywhere in worker/src/*.ts (grep found none), so the Worker diverges from Python. |
-| BR-ENV-007 | P1 | Ticker symbol format check | **parity** Parity gap. The Worker's validateTicker (worker/src/validate.ts:1-9) is called only from get_historical_prices, so the Worker accepts malformed tickers in SEC, news and filing tools that Python rejects. |
-| BR-ENV-008 | P2 | Data cache freshness tiers | is_stale (age > 2x TTL) can never be surfaced through get(), which already returns a miss at age >= TTL, so a 'stale but cached' path is unreachable through get(). |
-| BR-PRC-014 | P1 | N-day price slope and direction | **parity** The Python single-ticker path does not validate the ticker, and int(days) raises on non-numeric input. The Worker falls back to 5. |
-| BR-PRC-017 | P1 | Options flow scan: IV vs realized range, put volume proxy, trend and bracket | The deprecated aliases ivPctile and putVolVs10dAvg are still emitted, and their names misdescribe the measures (their fieldNotes say so). |
-| BR-PRC-019 | P1 | Price CAGR over 1, 3 and 5 years | When a listing has less history than the window (e.g. 2 years of data for cagr5y), the code still divides by the nominal 5 years using the earliest available close, understating the annual rate instead of returning null. |
-| BR-PRC-021 | P1 | Price stats: percent distances and CAGR | **parity** When history is shorter than N years (for example a stock listed 2 years ago), the subset is the whole series but the exponent still uses N. The 5-year CAGR is then understated rather than null. Python uses a calendar DateOffset, while the Worker (worker/src/yahoo-finance.ts:2764-2774) uses 365.25-day years and returns null only when the start equals the end, so the two can pick different start b… |
-| BR-PRC-022 | P1 | Price target bracket and tag | **parity** Python uses round() (banker's on binary floats) while TS uses toFixed(1); dataDate falls back to today in TS (yahoo-finance.ts:7899) but null in Python (server.py:7968-7984): a parity divergence |
-| BR-PRC-024 | P1 | Put hedge expiry selection (skip expiries under 7 days) | **parity** The fallback to all expiries brings back the sub-week contracts the rule is meant to skip, and the output does not flag that this happened. |
-| BR-PRC-033 | P1 | Volume ratio and volume flag | **parity** Parity divergence. Python gives ratio null and flag null when lastVolume is 0 ('if last_vol and avg_10d'). The Worker gives ratio 0 and flag LOW (worker/src/yahoo-finance.ts:4170-4177). The Worker also divides by the integer-rounded average while Python uses the unrounded one, so ratios can differ in the third decimal. |
-| BR-PRC-040 | P2 | Market snapshot batch cap and status | **parity** changePct uses `price_stats.pctChangeTodayVsPrevClose or recompute`, so a true 0.0 change falls through to recomputation and precision switches from 4 to 2 decimals; the value stays 0, but the fallback logic treats zero as missing. |
-| BR-PRC-046 | P2 | Stock screener count cap and name allow-list | **parity** The 'US' exchange filter omits NASDAQ Global Market (NGM), Capital Market (NCM) and NYSE American (ASE) listings. |
-| BR-FND-004 | P1 | Credit health operational EBITDA, net debt and coverage | If fewer than 4 income quarters exist, the 'TTM' sum covers fewer quarters but is still treated as annual, which understates EBITDA and coverage. It is flagged only as PARTIAL. |
-| BR-FND-006 | P1 | Credit health: net debt, operational EBITDA and leverage ratios | **parity** If only 'Long Term Debt' exists it stands in for total debt, which understates debt. A TTM built from fewer than 4 quarters is still labelled annual and only flagged PARTIAL. |
-| BR-FND-007 | P1 | Credit stress flag and debt tier | **parity** A loss-making company with net debt gets a negative leverage ratio and is tiered CLEAN. |
-| BR-PRV-002 | P1 | Expanded ownership provider eligibility and scarce fallback opt-in | **parity** If the policy file can't be read, _finnhub_eligible fails open and treats every ticker as eligible. |
-| BR-PRV-003 | P1 | Finnhub market eligibility (fails open) | On any read/parse error the function returns eligible=True, so an unreadable policy silently spends entitlement-dependent calls on ineligible markets. |
-| BR-EXT-003 | P0 | Convertible note if-converted shares and principal basis | **parity** The in-the-money test is price >= conversion price for convertibles and preferred, but price > strike for options and warrants. At exactly the strike, a convertible counts all its shares while an option counts zero (treasury-stock gives 0 anyway), so the boundary rule is inconsistent across instruments. |
-| BR-EXT-035 | P1 | Automatic 20-F fallback for geographic and segment revenue | **parity** On fallback success, confidence defaults to HIGH when the 20-F payload gives none (line 9631), whereas the primary path defaults to NOT_DISCLOSED. |
-| BR-EXT-044 | P1 | Contractual obligation schedule buckets | _add_years copies month-day, so a period end of 2024-02-29 plus one year gives the invalid date '2025-02-29'. |
-| BR-EXT-045 | P1 | Contractual obligation schedule buckets and schedule status | _add_years only replaces the year string. A Feb 29 period end plus 1 year produces an invalid date such as '2025-02-29'. |
-| BR-EXT-059 | P1 | Funding amount range, qualifier and missing-scale rule | **parity** The money regex `(?:US)?\$` also matches the '$' inside 'NT$' or 'A$', but currency is always written as USD, so non-US dollar amounts would be mislabelled. |
-| BR-EXT-063 | P1 | Funding text item amount status and forced UNRESOLVED | **parity** A SCALE_NOT_STATED item keeps its stated classification (for example COMMITTED) with null amounts. It is not moved to UNRESOLVED, even though no usable amount exists. |
-| BR-EXT-064 | P1 | Funding text item eligibility and unresolved reason | **parity** Text amounts are always labelled USD (line 240) regardless of the '$' context (e.g. 'US$' vs other dollar currencies); a non-US filer's dollar figures could be mislabelled. |
-| BR-EXT-082 | P1 | Scenario convertible treatment and in-the-money test | The in-the-money test is inclusive (>=) for convertibles but strict (>) for options and warrants. This may be intentional; confirm with an SME. |
-| BR-EXT-083 | P1 | Scenario convertible treatment including net-share settlement | **parity** In-the-money convention differs: convertibles count at price equal to the conversion price (>=) while options/warrants need price strictly above the strike (>). Probably harmless at equality for treasury stock (yields 0) but should be confirmed for parity with the dilution bridge. |
-| BR-EXT-084 | P1 | Scenario warrant vesting basis | When the 'exercisable' key is missing entirely, outstanding is used under vested_only. Only a key that is present but holds null gives an unresolved line, which seems to go against the stated intent. |
-| BR-EXT-110 | P2 | Contractual obligation bucket dates | **parity** _add_years does string arithmetic on the year, so a 2024-02-29 period end produces the invalid date 2025-02-29 (same in worker addYears and capital_structure.py:2537-2538); server.py:11955-11960 handles Feb 29 correctly. |
-| BR-VAL-019 | P0 | Metric reconciliation agreement status | In Python, float('nan') clamps to 0.0 via min/max before the isfinite check, so a NaN tolerance becomes 0% instead of the documented 0.5% default. |
-| BR-VAL-020 | P0 | Metric reconciliation status | **parity** The worker tool description (worker/src/tools.ts:557) says 'AGREED (two or more providers agree)', while the Python description (server.py:10742) and both codepaths require a latest-SEC baseline. This breaks the documented parity. |
-| BR-VAL-046 | P1 | Enterprise value in valuation snapshot | The convertible-principal deduction (valuation.py:373-377) is not gated on sec_usable, unlike the preferred adjustment (line 382). When SHARE_BASIS_MISMATCH falls back to Yahoo basic shares (no convertible shares counted), debt is still reduced by convertible principal, which understates EV. |
-| BR-VAL-063 | P1 | Reconciliation tolerance input clamp | **parity** Python clamps before the isfinite check, so the check is dead: +inf -> 10, NaN -> 0 (max(0.0, nan) returns 0.0), while TS returns 0.5 for both; violates the runtime parity rule |
-| BR-VAL-064 | P1 | Release figure selection when multiple releases are read | The docstring says 'the first with a scoped figure' but the code takes found[-1] (the newest). Both runtimes match each other but contradict the documentation. |
-| BR-VAL-068 | P1 | Reporting unit and period windows for metric reconciliation | **parity** Q<n> <yyyy> selects by calendar quarter of the period end (ceil(month/3)), so a 52/53-week quarter ending Jan 1-3 is treated as Q1 of the next year, unlike the 7-day drift rule in fiscal_calendar.py. |
-| BR-VAL-074 | P1 | Snapshot enterprise value formula with convertible and preferred adjustments | **parity** The convertible principal is taken out of debt (lines 371-377) whenever the bridge shows incrementalShares > 0, even when the SEC count is unusable (sec_usable false) or the bridge has no dilutedSharesAtPrice, so the shares used are Yahoo/basic counts that do not include the conversion shares. In that case the convertible is in neither debt nor shares and EV is understated. The preferred adjustme… |
-| BR-VAL-082 | P1 | Valuation snapshot enterprise value and status | The convertible principal is taken out of debt whenever the bridge shows incrementalShares > 0, even when sec_usable is false. In that case diluted shares are null and Yahoo's basic count is used, so the convertible is removed from debt without being added to shares. The preferred adjustment does check sec_usable. |
-| BR-ERN-009 | P1 | Earnings call transcript source waterfall | **parity** _next_transcript_fallback treats SKIPPED as untried, and company_ir/public_transcript_url are always SKIPPED, so the recommendation is always company_ir regardless of what else failed. |
-| BR-ERN-010 | P1 | Earnings metrics extraction confidence | No code path assigns HIGH to any metric, so the overall HIGH branch (lines 468-469) is unreachable. |
-| BR-ERN-017 | P1 | Earnings release source URL policy (paywall block) | **parity** The paywall check matches exact hostnames only, so subdomains of blocked publishers pass. The tool description says 'must be SEC or company IR', but no IR check exists. Same in the Worker (worker/src/yahoo-finance.ts:16771-16799). |
-| BR-ERN-018 | P1 | Earnings surprise percentages and near-zero EPS guard | **parity** Actual EPS comes from Yahoo's epsActual first and falls back to the release only when Yahoo has none (lines 738-741). The 'actual' is therefore not the official figure, even though revenue is. Python round() is half-even while the Worker uses toFixed, which can differ on exact .5 ties. |
-| BR-ERN-031 | P1 | Revenue and EPS surprise calculation | **parity** An EPS estimate of exactly 0 goes down the EPS_ESTIMATE_UNAVAILABLE branch, so no epsDelta is calculated, although the near-zero rule exists to give a delta in that case. Also, the actual EPS used is Yahoo's epsActual, not the official release figure. |
-| BR-ERN-039 | P2 | Management commentary confidence by source | The resolver labels EX-99.1 sources 'sec_8k_ex991', which fails the != 'sec_8k' test. So the main SEC press-release path is reported MEDIUM, not HIGH. |
-| BR-NWS-002 | P1 | Event verification query term threshold | Using 0.67 rather than 2/3 means a 3-term query requires all 3 terms (ceil(2.01)=3) and a 6-term query requires 5, which is stricter than the apparent two-thirds intent. |
-| BR-NWS-007 | P1 | News source coverage state and recommended next action | failed_states in _build_coverage (lines 315-320) includes WEBSITE_NOT_AVAILABLE, DISCOVERY_NOT_FOUND, DISCOVERY_BUDGET_EXHAUSTED, FEED_NOT_FOUND and PARSE_ERROR, but _compute_source_coverage (2402-2406) does not, so a response can list failedSources while reporting coverage state FULL. |
-| BR-NWS-008 | P1 | Ticker mention compatible with listing exchange | _normalize_exchange checks 'NYSE' before 'NYSE AMERICAN'/'AMEX', so 'NYSE American' (and 'NYSEArca') normalize to NYSE; also 'GS' substring maps any exchange code containing GS to NASDAQ. |
-| BR-NWS-010 | P2 | Event type from keywords (first matching category wins) | Substring keyword matching misclassifies (e.g. 'takes steps' -> earnings, 'raises capital' -> guidance), which then drives decisionUse for Yahoo items. |
-| BR-EVD-020 | P1 | Evidence cut component status and receipt coverage | The LIMITED regex is a substring match, so for example 'NOT_FOUND' also matches statuses like 'PERIOD_NOT_FOUND' (intended) but would also match any future status containing these fragments. |
-| BR-EVD-041 | P2 | Evidence cut listing order | **parity** LocalDirStore.list sorts ascending then truncates (evidence_store.py:53-54), so 'newest first' drops the newest beyond 1,000 cuts / 400 observation days |
-| BR-SHR-003 | P1 | Analyst price-target direction, mixed signal and strength flag | strengthFlag checks signal == DOWNGRADE before mixed_signal, so a downgrade with a raised target is reported BEARISH, not MIXED, even though mixedSignal is true. Only upgrades can show MIXED. |
-| BR-SHR-004 | P1 | Analyst radar: price-target direction, mixed signal and net sentiment | strengthFlag precedence (server.py:7448-7455) makes a mixed downgrade BEARISH, while a mixed upgrade becomes MIXED, so the treatment is asymmetric. |
-| BR-SHR-006 | P1 | Batch ticker cap of 5 (Worker only) | **parity** Parity divergence. Python processes unlimited batches while the Worker truncates at 5. |
-| BR-SHR-010 | P1 | Current beat streak counted in provider row order | **parity** The code comment says 'consecutive from most recent', but the code iterates in provider order. Yahoo earningsHistory is normally oldest-first (-4q to -1q), so the streak may be measured from the wrong end. The Worker (worker/src/yahoo-finance.ts:4605-4611) does the same. |
-| BR-SHR-012 | P1 | Earnings beat rate, beat streak and pre-revenue rule | **parity** currentBeatStreak walks earningsHistory in provider order and stops at the first miss. If Yahoo/yfinance returns rows oldest first, which yfinance earnings_history usually does, this counts from the oldest quarter, not the most recent. Both runtimes do the same. |
-| BR-SHR-016 | P1 | Form 4 insider transaction value | **parity** Only the first transaction is parsed (root.find / first matching row). A Form 4 with several lines (for example an M exercise followed by an S sale) reports only the first, so the reported value can misstate the filing. |
+Decision column: the owner decision that governs each item (`OWNER_DECISIONS_20261015.md`) and when its repair ships; **Q3i triage** = not yet classified.
+
+| ID | Pri | Rule | Suspected defect | Decision |
+|---|---|---|---|---|
+| BR-ENV-001 | P1 | Default fact confidence and decision-grade tagging | **parity** A populated value with no confidence inherits HIGH by default (lines 223-225), overstating confidence for untagged facts. | Q3i triage |
+| BR-ENV-005 | P1 | SEC accession number format check | **parity** No equivalent accession-format check exists anywhere in worker/src/*.ts (grep found none), so the Worker diverges from Python. | Q3b: repair before Phase 4 |
+| BR-ENV-007 | P1 | Ticker symbol format check | **parity** Parity gap. The Worker's validateTicker (worker/src/validate.ts:1-9) is called only from get_historical_prices, so the Worker accepts malformed tickers in SEC, news and filing tools that Python rejects. | Q3b: repair before Phase 4 |
+| BR-ENV-008 | P2 | Data cache freshness tiers | is_stale (age > 2x TTL) can never be surfaced through get(), which already returns a miss at age >= TTL, so a 'stale but cached' path is unreachable through get(). | Q3i triage |
+| BR-PRC-014 | P1 | N-day price slope and direction | **parity** The Python single-ticker path does not validate the ticker, and int(days) raises on non-numeric input. The Worker falls back to 5. | Q3b: repair before its Phase 5 unit |
+| BR-PRC-017 | P1 | Options flow scan: IV vs realized range, put volume proxy, trend and bracket | The deprecated aliases ivPctile and putVolVs10dAvg are still emitted, and their names misdescribe the measures (their fieldNotes say so). | Q3i triage |
+| BR-PRC-019 | P1 | Price CAGR over 1, 3 and 5 years | When a listing has less history than the window (e.g. 2 years of data for cagr5y), the code still divides by the nominal 5 years using the earliest available close, understating the annual rate instead of returning null. | Q3i: repair before its Phase 5 unit |
+| BR-PRC-021 | P1 | Price stats: percent distances and CAGR | **parity** When history is shorter than N years (for example a stock listed 2 years ago), the subset is the whole series but the exponent still uses N. The 5-year CAGR is then understated rather than null. Python uses a calendar DateOffset, while the Worker (worker/src/yahoo-finance.ts:2764-2774) uses 365.25-day years and returns null only when the start equals the end, so the two can pick different start b… | Q3i: repair before its Phase 5 unit |
+| BR-PRC-022 | P1 | Price target bracket and tag | **parity** Python uses round() (banker's on binary floats) while TS uses toFixed(1); dataDate falls back to today in TS (yahoo-finance.ts:7899) but null in Python (server.py:7968-7984): a parity divergence | Q3d: repair before its Phase 5 unit |
+| BR-PRC-024 | P1 | Put hedge expiry selection (skip expiries under 7 days) | **parity** The fallback to all expiries brings back the sub-week contracts the rule is meant to skip, and the output does not flag that this happened. | Q3i triage |
+| BR-PRC-033 | P1 | Volume ratio and volume flag | **parity** Parity divergence. Python gives ratio null and flag null when lastVolume is 0 ('if last_vol and avg_10d'). The Worker gives ratio 0 and flag LOW (worker/src/yahoo-finance.ts:4170-4177). The Worker also divides by the integer-rounded average while Python uses the unrounded one, so ratios can differ in the third decimal. | Q3c: repair before its Phase 5 unit |
+| BR-PRC-040 | P2 | Market snapshot batch cap and status | **parity** changePct uses `price_stats.pctChangeTodayVsPrevClose or recompute`, so a true 0.0 change falls through to recomputation and precision switches from 4 to 2 decimals; the value stays 0, but the fallback logic treats zero as missing. | Q3i triage |
+| BR-PRC-046 | P2 | Stock screener count cap and name allow-list | **parity** The 'US' exchange filter omits NASDAQ Global Market (NGM), Capital Market (NCM) and NYSE American (ASE) listings. | Q3i triage |
+| BR-FND-004 | P1 | Credit health operational EBITDA, net debt and coverage | If fewer than 4 income quarters exist, the 'TTM' sum covers fewer quarters but is still treated as annual, which understates EBITDA and coverage. It is flagged only as PARTIAL. | Q3i: repair before its Phase 5 unit |
+| BR-FND-006 | P1 | Credit health: net debt, operational EBITDA and leverage ratios | **parity** If only 'Long Term Debt' exists it stands in for total debt, which understates debt. A TTM built from fewer than 4 quarters is still labelled annual and only flagged PARTIAL. | Q3i: repair before its Phase 5 unit |
+| BR-FND-007 | P1 | Credit stress flag and debt tier | **parity** A loss-making company with net debt gets a negative leverage ratio and is tiered CLEAN. | Q3i: repair before its Phase 5 unit |
+| BR-PRV-002 | P1 | Expanded ownership provider eligibility and scarce fallback opt-in | **parity** If the policy file can't be read, _finnhub_eligible fails open and treats every ticker as eligible. | Q3i: repair before its Phase 5 unit |
+| BR-PRV-003 | P1 | Finnhub market eligibility (fails open) | On any read/parse error the function returns eligible=True, so an unreadable policy silently spends entitlement-dependent calls on ineligible markets. | Q3i: repair before its Phase 5 unit |
+| BR-EXT-003 | P0 | Convertible note if-converted shares and principal basis | **parity** The in-the-money test is price >= conversion price for convertibles and preferred, but price > strike for options and warrants. At exactly the strike, a convertible counts all its shares while an option counts zero (treasury-stock gives 0 anyway), so the boundary rule is inconsistent across instruments. | Q3f: repair before its Phase 5 unit |
+| BR-EXT-035 | P1 | Automatic 20-F fallback for geographic and segment revenue | **parity** On fallback success, confidence defaults to HIGH when the 20-F payload gives none (line 9631), whereas the primary path defaults to NOT_DISCLOSED. | Q3i triage |
+| BR-EXT-044 | P1 | Contractual obligation schedule buckets | _add_years copies month-day, so a period end of 2024-02-29 plus one year gives the invalid date '2025-02-29'. | Q3i: repair before its Phase 5 unit |
+| BR-EXT-045 | P1 | Contractual obligation schedule buckets and schedule status | _add_years only replaces the year string. A Feb 29 period end plus 1 year produces an invalid date such as '2025-02-29'. | Q3i: repair before its Phase 5 unit |
+| BR-EXT-059 | P1 | Funding amount range, qualifier and missing-scale rule | **parity** The money regex `(?:US)?\$` also matches the '$' inside 'NT$' or 'A$', but currency is always written as USD, so non-US dollar amounts would be mislabelled. | Q3i: repair before its Phase 5 unit |
+| BR-EXT-063 | P1 | Funding text item amount status and forced UNRESOLVED | **parity** A SCALE_NOT_STATED item keeps its stated classification (for example COMMITTED) with null amounts. It is not moved to UNRESOLVED, even though no usable amount exists. | Q3i triage |
+| BR-EXT-064 | P1 | Funding text item eligibility and unresolved reason | **parity** Text amounts are always labelled USD (line 240) regardless of the '$' context (e.g. 'US$' vs other dollar currencies); a non-US filer's dollar figures could be mislabelled. | Q3i: repair before its Phase 5 unit |
+| BR-EXT-082 | P1 | Scenario convertible treatment and in-the-money test | The in-the-money test is inclusive (>=) for convertibles but strict (>) for options and warrants. This may be intentional; confirm with an SME. | Q3f: repair before its Phase 5 unit |
+| BR-EXT-083 | P1 | Scenario convertible treatment including net-share settlement | **parity** In-the-money convention differs: convertibles count at price equal to the conversion price (>=) while options/warrants need price strictly above the strike (>). Probably harmless at equality for treasury stock (yields 0) but should be confirmed for parity with the dilution bridge. | Q3f: repair before its Phase 5 unit |
+| BR-EXT-084 | P1 | Scenario warrant vesting basis | When the 'exercisable' key is missing entirely, outstanding is used under vested_only. Only a key that is present but holds null gives an unresolved line, which seems to go against the stated intent. | Q3i triage |
+| BR-EXT-110 | P2 | Contractual obligation bucket dates | **parity** _add_years does string arithmetic on the year, so a 2024-02-29 period end produces the invalid date 2025-02-29 (same in worker addYears and capital_structure.py:2537-2538); server.py:11955-11960 handles Feb 29 correctly. | Q3i: repair before its Phase 5 unit |
+| BR-VAL-019 | P0 | Metric reconciliation agreement status | In Python, float('nan') clamps to 0.0 via min/max before the isfinite check, so a NaN tolerance becomes 0% instead of the documented 0.5% default. | Q3e: repair before its Phase 5 unit |
+| BR-VAL-020 | P0 | Metric reconciliation status | **parity** The worker tool description (worker/src/tools.ts:557) says 'AGREED (two or more providers agree)', while the Python description (server.py:10742) and both codepaths require a latest-SEC baseline. This breaks the documented parity. | Q3e: repair before its Phase 5 unit |
+| BR-VAL-046 | P1 | Enterprise value in valuation snapshot | The convertible-principal deduction (valuation.py:373-377) is not gated on sec_usable, unlike the preferred adjustment (line 382). When SHARE_BASIS_MISMATCH falls back to Yahoo basic shares (no convertible shares counted), debt is still reduced by convertible principal, which understates EV. | Q3i: repair before its Phase 5 unit |
+| BR-VAL-063 | P1 | Reconciliation tolerance input clamp | **parity** Python clamps before the isfinite check, so the check is dead: +inf -> 10, NaN -> 0 (max(0.0, nan) returns 0.0), while TS returns 0.5 for both; violates the runtime parity rule | Q3e: repair before its Phase 5 unit |
+| BR-VAL-064 | P1 | Release figure selection when multiple releases are read | The docstring says 'the first with a scoped figure' but the code takes found[-1] (the newest). Both runtimes match each other but contradict the documentation. | Q3i triage |
+| BR-VAL-068 | P1 | Reporting unit and period windows for metric reconciliation | **parity** Q<n> <yyyy> selects by calendar quarter of the period end (ceil(month/3)), so a 52/53-week quarter ending Jan 1-3 is treated as Q1 of the next year, unlike the 7-day drift rule in fiscal_calendar.py. | Q3i triage |
+| BR-VAL-074 | P1 | Snapshot enterprise value formula with convertible and preferred adjustments | **parity** The convertible principal is taken out of debt (lines 371-377) whenever the bridge shows incrementalShares > 0, even when the SEC count is unusable (sec_usable false) or the bridge has no dilutedSharesAtPrice, so the shares used are Yahoo/basic counts that do not include the conversion shares. In that case the convertible is in neither debt nor shares and EV is understated. The preferred adjustme… | Q3i: repair before its Phase 5 unit |
+| BR-VAL-082 | P1 | Valuation snapshot enterprise value and status | The convertible principal is taken out of debt whenever the bridge shows incrementalShares > 0, even when sec_usable is false. In that case diluted shares are null and Yahoo's basic count is used, so the convertible is removed from debt without being added to shares. The preferred adjustment does check sec_usable. | Q3i: repair before its Phase 5 unit |
+| BR-ERN-009 | P1 | Earnings call transcript source waterfall | **parity** _next_transcript_fallback treats SKIPPED as untried, and company_ir/public_transcript_url are always SKIPPED, so the recommendation is always company_ir regardless of what else failed. | Q3i: repair before its Phase 5 unit |
+| BR-ERN-010 | P1 | Earnings metrics extraction confidence | No code path assigns HIGH to any metric, so the overall HIGH branch (lines 468-469) is unreachable. | Q3i triage |
+| BR-ERN-017 | P1 | Earnings release source URL policy (paywall block) | **parity** The paywall check matches exact hostnames only, so subdomains of blocked publishers pass. The tool description says 'must be SEC or company IR', but no IR check exists. Same in the Worker (worker/src/yahoo-finance.ts:16771-16799). | Q2a: repair Phase 1 |
+| BR-ERN-018 | P1 | Earnings surprise percentages and near-zero EPS guard | **parity** Actual EPS comes from Yahoo's epsActual first and falls back to the release only when Yahoo has none (lines 738-741). The 'actual' is therefore not the official figure, even though revenue is. Python round() is half-even while the Worker uses toFixed, which can differ on exact .5 ties. | Q3i: repair before its Phase 5 unit |
+| BR-ERN-031 | P1 | Revenue and EPS surprise calculation | **parity** An EPS estimate of exactly 0 goes down the EPS_ESTIMATE_UNAVAILABLE branch, so no epsDelta is calculated, although the near-zero rule exists to give a delta in that case. Also, the actual EPS used is Yahoo's epsActual, not the official release figure. | Q3i: repair before its Phase 5 unit |
+| BR-ERN-039 | P2 | Management commentary confidence by source | The resolver labels EX-99.1 sources 'sec_8k_ex991', which fails the != 'sec_8k' test. So the main SEC press-release path is reported MEDIUM, not HIGH. | Q3i triage |
+| BR-NWS-002 | P1 | Event verification query term threshold | Using 0.67 rather than 2/3 means a 3-term query requires all 3 terms (ceil(2.01)=3) and a 6-term query requires 5, which is stricter than the apparent two-thirds intent. | Q3i triage |
+| BR-NWS-007 | P1 | News source coverage state and recommended next action | failed_states in _build_coverage (lines 315-320) includes WEBSITE_NOT_AVAILABLE, DISCOVERY_NOT_FOUND, DISCOVERY_BUDGET_EXHAUSTED, FEED_NOT_FOUND and PARSE_ERROR, but _compute_source_coverage (2402-2406) does not, so a response can list failedSources while reporting coverage state FULL. | Q3i: repair before Phase 3 |
+| BR-NWS-008 | P1 | Ticker mention compatible with listing exchange | _normalize_exchange checks 'NYSE' before 'NYSE AMERICAN'/'AMEX', so 'NYSE American' (and 'NYSEArca') normalize to NYSE; also 'GS' substring maps any exchange code containing GS to NASDAQ. | Q3i triage |
+| BR-NWS-010 | P2 | Event type from keywords (first matching category wins) | Substring keyword matching misclassifies (e.g. 'takes steps' -> earnings, 'raises capital' -> guidance), which then drives decisionUse for Yahoo items. | Q3i triage |
+| BR-EVD-020 | P1 | Evidence cut component status and receipt coverage | The LIMITED regex is a substring match, so for example 'NOT_FOUND' also matches statuses like 'PERIOD_NOT_FOUND' (intended) but would also match any future status containing these fragments. | Q3i triage |
+| BR-EVD-041 | P2 | Evidence cut listing order | **parity** LocalDirStore.list sorts ascending then truncates (evidence_store.py:53-54), so 'newest first' drops the newest beyond 1,000 cuts / 400 observation days | Q3i triage |
+| BR-SHR-003 | P1 | Analyst price-target direction, mixed signal and strength flag | strengthFlag checks signal == DOWNGRADE before mixed_signal, so a downgrade with a raised target is reported BEARISH, not MIXED, even though mixedSignal is true. Only upgrades can show MIXED. | Q3i triage |
+| BR-SHR-004 | P1 | Analyst radar: price-target direction, mixed signal and net sentiment | strengthFlag precedence (server.py:7448-7455) makes a mixed downgrade BEARISH, while a mixed upgrade becomes MIXED, so the treatment is asymmetric. | Q3i triage |
+| BR-SHR-006 | P1 | Batch ticker cap of 5 (Worker only) | **parity** Parity divergence. Python processes unlimited batches while the Worker truncates at 5. | Q3c: repair before Phase 4 |
+| BR-SHR-010 | P1 | Current beat streak counted in provider row order | **parity** The code comment says 'consecutive from most recent', but the code iterates in provider order. Yahoo earningsHistory is normally oldest-first (-4q to -1q), so the streak may be measured from the wrong end. The Worker (worker/src/yahoo-finance.ts:4605-4611) does the same. | Q3i: repair before Phase 4 |
+| BR-SHR-012 | P1 | Earnings beat rate, beat streak and pre-revenue rule | **parity** currentBeatStreak walks earningsHistory in provider order and stops at the first miss. If Yahoo/yfinance returns rows oldest first, which yfinance earnings_history usually does, this counts from the oldest quarter, not the most recent. Both runtimes do the same. | Q3i: repair before Phase 4 |
+| BR-SHR-016 | P1 | Form 4 insider transaction value | **parity** Only the first transaction is parsed (root.find / first matching row). A Form 4 with several lines (for example an M exercise followed by an S sale) reports only the first, so the reported value can misstate the filing. | Q3i: repair before Phase 4 |
 
 ## 4. Rule cards
 
@@ -264,6 +273,7 @@ An SEC accession number must have the form 10 digits, dash, 2 digits, dash, 6 di
 - **Edge cases:**
   - Leading and trailing whitespace is stripped before matching
 - **Suspected defect:** No equivalent accession-format check exists anywhere in worker/src/*.ts (grep found none), so the Worker diverges from Python.
+- **Scheduled repair (Q3b, ships before Phase 4):** see the suspected defect above.
 
 #### BR-ENV-006 · SEC document URLs restricted to the EDGAR Archives
 
@@ -296,6 +306,7 @@ A ticker is accepted only if, after trimming and upper-casing, it is 1 to 20 cha
   - Empty string fails the check
   - The Worker runs this check only in get_historical_prices (worker/src/tools.ts:2024-2031). Python runs it in about 30 tools (server.py:2743, 3967, 4025, 8279, 11613 and others)
 - **Suspected defect:** Parity gap. The Worker's validateTicker (worker/src/validate.ts:1-9) is called only from get_historical_prices, so the Worker accepts malformed tickers in SEC, news and filing tools that Python rejects.
+- **Scheduled repair (Q3b, ships before Phase 4):** see the suspected defect above.
 
 #### BR-ENV-008 · Data cache freshness tiers
 
@@ -366,19 +377,26 @@ A daily bar counts as completed only after its trading session has closed and it
 
 #### BR-PRC-002 · Daily price freshness classification (CURRENT / STALE / UNKNOWN)
 
-**P0** · Validation · Confidence **Medium** · P0 panel 2/2  
+**P0** · Validation · Confidence **High** · P0 panel 2/2  
 Source: `yfmcp/tools/pricing.py:830-864`
 
-Outside market hours, the latest completed bar must be on or after the date of Yahoo's last regular-market time. During a session, the previous close must match Yahoo's previousClose, or the last bar must be from the weekday before today.
+Outside market hours, the latest completed bar must be on or after the date of Yahoo's last regular-market time. During a session, the previous close must match Yahoo's previousClose within tolerance, or the last completed bar must be from the weekday before today. Only completed bars count.
 
 - **Given** Market closed, regularMarketTime is 2026-10-13 and the last completed bar is 2026-10-12
 - **When** Freshness is evaluated
 - **Then** freshnessStatus=STALE and expectedCompletedDate=2026-10-13. During a session, a last close of 100.00 against previousClose 100.005 is CURRENT (tolerance max(0.01, 1e-6 x previousClose)).
-- **Parameters:** Close-match tolerance = max(0.01, |previousClose| x 1e-6); weekday fallback uses Mon-Fri only, ignoring holidays
+- **Parameters:** Close-match tolerance = max(0.01, |previousClose| x 1e-6). CURRENT BEHAVIOUR (characterised as-is): the session fallback uses Mon-Fri weekday arithmetic only and ignores exchange holidays.
 - **Edge cases:**
   - After a Monday holiday the weekday fallback cannot prove Tuesday's prior session, so the result is UNKNOWN
   - A missing regularMarketTime gives UNKNOWN
-- **SME question:** Should exchange holidays be considered when proving the previous session (the weekday-only fallback reports UNKNOWN after holidays)?
+- **Owner decision (2026-10-15):** CONFIRM core rule (CURRENT/STALE/UNKNOWN, completed-bar requirement, close-match tolerance). TARGET semantics are exchange-session-aware: a market holiday must not make a valid prior completed session look stale; if the prior exchange session cannot be established reliably the result is UNKNOWN, never CURRENT/STALE inferred from weekday arithmetic. Phase 2 records the weekday fallback exactly as current behaviour.
+- **Scheduled repair (Q1 BR-PRC-002, ships before its Phase 5 unit):** Exchange-session-aware freshness (needs a shared exchange-holiday calendar data file used by both runtimes).
+
+<details><summary>P0 panel note (superseded by the owner decision)</summary>
+
+Should exchange holidays be considered when proving the previous session (the weekday-only fallback reports UNKNOWN after holidays)?
+
+</details>
 
 #### BR-PRC-003 · Listing currency to USD conversion with minor units
 
@@ -569,6 +587,7 @@ Price slope compares the close N completed sessions ago with the latest complete
   - Fewer than days+1 completed bars returns an error
   - The Worker clamps the same way (yahoo-finance.ts:3948, 4037-4042)
 - **Suspected defect:** The Python single-ticker path does not validate the ticker, and int(days) raises on non-numeric input. The Worker falls back to 5.
+- **Scheduled repair (Q3b, ships before its Phase 5 unit):** see the suspected defect above.
 
 #### BR-PRC-015 · Options flow advisory bracket
 
@@ -642,6 +661,7 @@ CAGR % = ((last close / first close in the window) ^ (1/years) - 1) x 100, with 
 - **Edge cases:**
   - Fewer than 2 closes -> null
 - **Suspected defect:** When a listing has less history than the window (e.g. 2 years of data for cagr5y), the code still divides by the nominal 5 years using the earliest available close, understating the annual rate instead of returning null.
+- **Scheduled repair (Q3i, ships before its Phase 5 unit):** see the suspected defect above.
 
 #### BR-PRC-020 · Price slope direction
 
@@ -670,6 +690,7 @@ Percent change versus previous close, 52-week high/low and 50/200-day averages i
   - Start close <= 0 or fewer than 2 points: None
   - Stale bars: status PARTIAL
 - **Suspected defect:** When history is shorter than N years (for example a stock listed 2 years ago), the subset is the whole series but the exponent still uses N. The 5-year CAGR is then understated rather than null. Python uses a calendar DateOffset, while the Worker (worker/src/yahoo-finance.ts:2764-2774) uses 365.25-day years and returns null only when the start equals the end, so the two can pick different start bars.
+- **Scheduled repair (Q3i, ships before its Phase 5 unit):** see the suspected defect above.
 - **SME question:** Should CAGR be null when the price history does not span the full horizon, or should the exponent use actual elapsed years?
 
 #### BR-PRC-022 · Price target bracket and tag
@@ -687,6 +708,7 @@ Current price as a percent of a caller's reference target (rounded to 1 dp) maps
   - target <= 0 rejected
   - rounding before classification shifts boundary cases
 - **Suspected defect:** Python uses round() (banker's on binary floats) while TS uses toFixed(1); dataDate falls back to today in TS (yahoo-finance.ts:7899) but null in Python (server.py:7968-7984): a parity divergence
+- **Scheduled repair (Q3d, ships before its Phase 5 unit):** see the suspected defect above.
 - **SME question:** Is emitting STRONG_BUY/AVOID buy-sell language intended given every other valuation tool enforces decisionUse EVIDENCE_ONLY with action null, and should classification use the rounded or raw percentage (75.04 rounds to 75.0 and becomes STRONG_BUY)?
 
 #### BR-PRC-023 · Put hedge contract eligibility and ask-based cost
@@ -869,6 +891,7 @@ The last completed session's volume is divided by the average of the prior 10 (a
   - A missing latest volume returns status PARTIAL with RETRY
   - 90-day average over a 6mo fetch (about 125 bars) is normally available
 - **Suspected defect:** Parity divergence. Python gives ratio null and flag null when lastVolume is 0 ('if last_vol and avg_10d'). The Worker gives ratio 0 and flag LOW (worker/src/yahoo-finance.ts:4170-4177). The Worker also divides by the integer-rounded average while Python uses the unrounded one, so ratios can differ in the third decimal.
+- **Scheduled repair (Q3c, ships before its Phase 5 unit):** see the suspected defect above.
 - **SME question:** For a zero-volume session, should the flag be LOW (Worker) or null (Python)?
 
 #### BR-PRC-034 · Wilder RSI(14)
@@ -1102,6 +1125,7 @@ Leverage uses the latest quarter's debt minus cash, divided by trailing-four-qua
   - Fewer than 4 quarters are summed anyway; dataQuality becomes PARTIAL
   - Falling back to 'Long Term Debt' leaves out current debt
 - **Suspected defect:** If fewer than 4 income quarters exist, the 'TTM' sum covers fewer quarters but is still treated as annual, which understates EBITDA and coverage. It is flagged only as PARTIAL.
+- **Scheduled repair (Q3i, ships before its Phase 5 unit):** see the suspected defect above.
 
 <details><summary>SME note (panel reasoning, verbatim)</summary>
 
@@ -1172,6 +1196,7 @@ Net debt is total debt minus cash from the latest quarterly balance sheet. Opera
   - netDebtToEbitda is None when operational EBITDA is 0 or missing
   - Interest coverage is None when interest is 0 or missing
 - **Suspected defect:** If only 'Long Term Debt' exists it stands in for total debt, which understates debt. A TTM built from fewer than 4 quarters is still labelled annual and only flagged PARTIAL.
+- **Scheduled repair (Q3i, ships before its Phase 5 unit):** see the suspected defect above.
 
 <details><summary>SME note (panel reasoning, verbatim)</summary>
 
@@ -1227,6 +1252,7 @@ A company is flagged as credit-stressed when net debt/EBITDA is above 2.5x and E
   - Negative EBITDA gives a negative ratio, which is also CLEAN. Only the NEGATIVE_EARNINGS_BASE warning signals the problem
   - Flag is null if either input is missing
 - **Suspected defect:** A loss-making company with net debt gets a negative leverage ratio and is tiered CLEAN.
+- **Scheduled repair (Q3i, ships before its Phase 5 unit):** see the suspected defect above.
 
 #### BR-FND-008 · Free-cash-flow yield and currency-mismatch withholding of multiples
 
@@ -1318,6 +1344,7 @@ Finnhub is tried first unless the ticker or its suffix is on the policy's inelig
 - **Edge cases:**
   - NOT_FOUND without opt-in gives VERIFY_SEC_13F_OR_ENABLE_SCARCE_FALLBACK
 - **Suspected defect:** If the policy file can't be read, _finnhub_eligible fails open and treats every ticker as eligible.
+- **Scheduled repair (Q3i, ships before its Phase 5 unit):** see the suspected defect above.
 
 #### BR-PRV-003 · Finnhub market eligibility (fails open)
 
@@ -1333,6 +1360,7 @@ Tickers listed as ineligible, or ending with an ineligible suffix, in the news-s
 - **Edge cases:**
   - Suffix match is case-insensitive
 - **Suspected defect:** On any read/parse error the function returns eligible=True, so an unreadable policy silently spends entitlement-dependent calls on ineligible markets.
+- **Scheduled repair (Q3i, ships before its Phase 5 unit):** see the suspected defect above.
 - **SME question:** Should a missing or corrupt policy file block Finnhub calls (fail closed) rather than treat all tickers as eligible?
 
 #### BR-PRV-004 · Historical put/call ratio request and response validation
@@ -1982,6 +2010,7 @@ Shares from convertible notes come first from the tagged shares-issuable count a
   - No principal or price: unresolved (null)
   - Component incrementalShares is null only when every instrument is unresolved
 - **Suspected defect:** The in-the-money test is price >= conversion price for convertibles and preferred, but price > strike for options and warrants. At exactly the strike, a convertible counts all its shares while an option counts zero (treasury-stock gives 0 anyway), so the boundary rule is inconsistent across instruments.
+- **Scheduled repair (Q3f, ships before its Phase 5 unit):** see the suspected defect above.
 - **SME question:** Should a convertible whose conversion price equals the market price count as dilutive (current >=), to match the EPS if-converted convention?
 
 #### BR-EXT-004 · Convertible preferred if-converted and liquidation preference
@@ -2158,16 +2187,19 @@ An unscaled guidance dollar amount takes the outlook table's '(in millions)' sty
 
 #### BR-EXT-015 · Release figure scale and loss sign
 
-**P0** · Calculation · Confidence **Medium** · P0 panel 2/2  
+**P0** · Calculation · Confidence **High** · P0 panel 2/2  
 Source: `yfmcp/extraction_rules.py:590-613`
 
-An unscaled dollar figure takes the release's table scale only when the release declares exactly one scale. With more than one, the figure is skipped. Parentheses, a minus sign, 'negative', or 'loss' wording make the value negative. Scaled values are rounded half-up to whole units.
+Release-table scale applies only to metrics that accept a monetary scale; EPS and gross margin never inherit it. Repeated identical scale declarations count as one distinct scale; when more than one distinct scale is declared the candidate figure is skipped (later candidates may still be searched). For ordinary monetary metrics only parentheses, an ASCII minus or qualifying 'negative' wording immediately before the amount set the sign. 'Loss' wording sets the sign only for diluted EPS (and not when the label names both outcomes, e.g. 'income (loss) per share'). Explicit-scale and table-scaled monetary values are rounded half-up to whole units.
 
-- **Given** Release with a single '(in millions)' and 'Revenue was $54,229'; another sentence 'diluted net loss per share of $0.12'
+- **Given** A release with a single '(in millions)' declaration, 'Revenue was $54,229', 'diluted net loss per share of $0.12', and 'net loss of $5 billion'
 - **When** figures are read
-- **Then** revenue 54,229,000,000 (scaleBasis RELEASE_TABLE_IN_MILLIONS); EPS −0.12
+- **Then** revenue = 54,229,000,000 (scaleBasis RELEASE_TABLE_IN_MILLIONS); EPS = -0.12; netIncome from 'net loss of $5 billion' stays +5,000,000,000 (loss wording does not sign monetary metrics in current code)
+- **Parameters:** Scale applies only to money metrics (extraction_rules.py:546); loss wording EPS-only (lines 606-611); 'negative' must directly precede the amount (line 512).
+- **Owner decision (2026-10-15):** CORRECT the card (done here); characterise current behaviour exactly; do not generalise 'loss' wording in the oracle. Unsafe monetary-loss sign cases (e.g. 'net loss of $5 billion' read as positive) are classified as correctness defects under Q3i.
+- **Scheduled repair (Q1 BR-EXT-015 / Q3i, ships before its Phase 5 unit):** Monetary metrics stated as a loss must not be returned as positive values.
 
-<details><summary>SME note (panel reasoning, verbatim)</summary>
+<details><summary>P0 panel note (superseded by the owner decision)</summary>
 
 P0 panel doubts spec fidelity: I read yfmcp/extraction_rules.py:590-613 and its helpers: _RELEASE_MONEY_BASE/_RELEASE_SCALE/_RELEASE_TABLE_SCALE_RE at 494-499, _RELEASE_NEGATIVE_RE/_RELEASE_LOSS_RE/_RELEASE_INCOME_RE/_RELEASE_NET_LOSS_RE at 512-516, _release_scales at 519-525, _whole at 537-538, and the epsDiluted label at 485.
 
@@ -2641,6 +2673,7 @@ Debt principal, operating and finance lease payments, purchase obligations and c
   - Facts but no schedules: NO_TAGGED_SCHEDULES info
   - Status COMPUTED if any contractual row or text item, else NOT_FOUND
 - **Suspected defect:** _add_years copies month-day, so a period end of 2024-02-29 plus one year gives the invalid date '2025-02-29'.
+- **Scheduled repair (Q3i, ships before its Phase 5 unit):** see the suspected defect above.
 - **SME question:** For leap-day period ends, should periodThrough roll to Feb 28 or Mar 1?
 
 #### BR-EXT-045 · Contractual obligation schedule buckets and schedule status
@@ -2659,6 +2692,7 @@ Debt principal, operating and finance lease payments, purchase obligations and c
   - Facts present but no contractual rows gives info warning NO_TAGGED_SCHEDULES
   - Nothing is netted or summed across classifications
 - **Suspected defect:** _add_years only replaces the year string. A Feb 29 period end plus 1 year produces an invalid date such as '2025-02-29'.
+- **Scheduled repair (Q3i, ships before its Phase 5 unit):** see the suspected defect above.
 
 #### BR-EXT-046 · Contractual obligation schedule by due bucket
 
@@ -3041,6 +3075,7 @@ A sentence's first dollar amount is its amount. Two amounts joined by 'to', a da
   - A range borrows the other amount's unit when one side has none
   - Currency is always set to USD when an amount is stated
 - **Suspected defect:** The money regex `(?:US)?\$` also matches the '$' inside 'NT$' or 'A$', but currency is always written as USD, so non-US dollar amounts would be mislabelled.
+- **Scheduled repair (Q3i, ships before its Phase 5 unit):** see the suspected defect above.
 - **SME question:** Should foreign-dollar amounts (NT$, A$, C$) in funding text be excluded or tagged with their own currency instead of USD?
 
 #### BR-EXT-060 · Funding amount reading: range, qualifier and scale-not-stated
@@ -3120,6 +3155,7 @@ Only sentences of 40-1,200 characters that are not list items are considered; se
   - A stated amount with classification UNRESOLVED gets reason 'type not stated'
   - Currency is hard-coded USD for any stated amount, even in a non-USD filer's text
 - **Suspected defect:** Text amounts are always labelled USD (line 240) regardless of the '$' context (e.g. 'US$' vs other dollar currencies); a non-US filer's dollar figures could be mislabelled.
+- **Scheduled repair (Q3i, ships before its Phase 5 unit):** see the suspected defect above.
 - **SME question:** Should funding text amounts from 20-F/40-F filers (e.g. C$ or NT$ contexts) be labelled USD unconditionally?
 
 #### BR-EXT-065 · Funding/capex sentence classification precedence
@@ -3547,6 +3583,7 @@ Convertible notes and convertible preferred add their if-converted shares only w
   - Missing conversion price (non-all treatment) -> unresolved 'conversion price not tagged'
   - Net-share settlement requested but the filing does not state cash principal -> plain if-converted with the method note '; cash settlement of principal not stated'
 - **Suspected defect:** The in-the-money test is inclusive (>=) for convertibles but strict (>) for options and warrants. This may be intentional; confirm with an SME.
+- **Scheduled repair (Q3f, ships before its Phase 5 unit):** see the suspected defect above.
 
 <details><summary>SME note (panel reasoning, verbatim)</summary>
 
@@ -3604,6 +3641,7 @@ Convertible notes and convertible preferred are counted at their if-converted sh
   - Net-share treatment on notes without stated cash settlement falls back to full if-converted with a '; cash settlement of principal not stated' note
   - Missing principal gives unresolved 'principal not tagged'
 - **Suspected defect:** In-the-money convention differs: convertibles count at price equal to the conversion price (>=) while options/warrants need price strictly above the strike (>). Probably harmless at equality for treasury stock (yields 0) but should be confirmed for parity with the dilution bridge.
+- **Scheduled repair (Q3f, ships before its Phase 5 unit):** see the suspected defect above.
 
 <details><summary>SME note (panel reasoning, verbatim)</summary>
 
@@ -4159,6 +4197,7 @@ Tagged debt, lease, purchase and contractual obligation buckets get a 'period th
 - **Edge cases:**
   - The first concept per bucket wins (purchase vs unrecorded obligation)
 - **Suspected defect:** _add_years does string arithmetic on the year, so a 2024-02-29 period end produces the invalid date 2025-02-29 (same in worker addYears and capital_structure.py:2537-2538); server.py:11955-11960 handles Feb 29 correctly.
+- **Scheduled repair (Q3i, ships before its Phase 5 unit):** see the suspected defect above.
 - **SME question:** Should a Feb-29 period end roll to Feb-28 for bucket 'period through' dates?
 
 #### BR-EXT-111 · Event evidence ranking and word stemming
@@ -4360,20 +4399,23 @@ For foreign filers (20-F/40-F) only, if the SEC ordinary-share count is close to
 
 #### BR-VAL-004 · ADR ratio detection and share-basis mismatch
 
-**P0** · Validation · Confidence **Medium** · P0 panel 2/2  
+**P0** · Validation · Confidence **High** · P0 panel 2/2  
 Source: `yfmcp/valuation.py:29-49,280-302`
 
-For foreign filers (20-F or 40-F), SEC ordinary shares within 2% of a whole multiple (at least 1.9x) of Yahoo's quoted shares are treated as ADRs and divided by that ratio. Otherwise, counts more than 1.5x apart mean the SEC count is dropped in favour of Yahoo's.
+For foreign filers (20-F/40-F), SEC ordinary shares within 2% of a whole multiple n >= 1.9 of Yahoo's quoted shares are an ADR ratio n; the inverse (SEC/Yahoo <= 1/1.9 with Yahoo a near-whole multiple k of SEC) gives ratio 1/k. SEC share counts are divided by the ratio and rounded half-up to whole shares. Otherwise counts more than 1.5x apart are SHARE_BASIS_MISMATCH: SEC diluted shares become unusable (null) and value shares fall back to Yahoo's quoted/basic share basis. Domestic filers never get an ADR ratio.
 
 - **Given** A 20-F filer with 25.9B ordinary shares and Yahoo's 5.186B quoted shares (ratio 4.994)
 - **When** valuation_snapshot runs
 - **Then** ADR ratio 5 is applied (ADR_RATIO_APPLIED) and SEC share counts are divided by 5. A domestic filer at 2.0x gets SHARE_BASIS_MISMATCH and Yahoo's count is used.
 - **Parameters:** ADS_MIN_RATIO 1.9; ADS_RATIO_TOLERANCE 2% of n; SHARE_BASIS_MAX_RATIO 1.5; foreign form regex ^(?:20|40)-F
 - **Edge cases:**
-  - The inverse ratio (<= 1/1.9) is also detected
+  - Inverse near-whole ratio (Yahoo a multiple of SEC) gives 1/k and multiplies SEC counts by k for foreign filers
+  - Adjusted counts use round_half_up(shares / ratio) (valuation.py:298)
+  - Mismatch: dilutedShares -> null, share_basis switches from sec_cover_page to the Yahoo quoted basis
   - Yahoo's implied all-class shares replace listed shares when more than 2% larger (valuation.py:234-244)
+- **Owner decision (2026-10-15):** CORRECT the card (done here); PRESERVE current behaviour through the refactor. The ADR-versus-mismatch policy is acceptable for characterisation.
 
-<details><summary>SME note (panel reasoning, verbatim)</summary>
+<details><summary>P0 panel note (superseded by the owner decision)</summary>
 
 P0 panel doubts spec fidelity: I read yfmcp/valuation.py lines 29-49 and 280-302 myself. Both worked examples are correct. 25.9B / 5.186B = 4.9942. That rounds to n=5, and |4.9942-5| = 0.0058 is within the tolerance of 0.02*5 = 0.10 (line 45). So ADR_RATIO_APPLIED fires (line 292) and the SEC counts are divided by 5. A domestic filer is never given an ADR ratio (line 289), so at r=2.0 > 1.5 it gets SHARE_BASIS_MISMATCH and Yahoo's count is used (lines 293-295, 300). The parameters also match: 1.9, 0.02*n, 1.5, and the regex ^(?:20|40)-F.
 
@@ -4411,10 +4453,10 @@ The filing's period-end cash and debt are used unless they are in a different cu
 
 #### BR-VAL-006 · Historical balances read at the cash date; no-borrowings means zero debt
 
-**P0** · Calculation · Confidence **Medium** · P0 panel 2/2  
+**P0** · Calculation · Confidence **High** · P0 panel 2/2  
 Source: `yfmcp/valuation_history.py:418-455,666-699`
 
-Balances are read at the latest tagged cash date only (nothing is carried forward); debt is the first fully tagged concept group plus short-term borrowings/commercial paper, and if the filing tags no borrowing concept at all, debt is zero. EV = market cap + (debt - cash - short-term investments) x FX.
+Balances are read at the latest tagged cash date only (nothing carried forward). Debt is taken from the FIRST debt concept group with AT LEAST ONE component tagged at that date (not necessarily a fully populated group), plus short-term borrowings/commercial paper, which are added only once some group has matched. Debt is set to zero (basis NO_BORROWINGS_TAGGED) only when no group matched, the cash fact carries an accession, borrowing concepts are mapped for the taxonomy, and that accession tags none of them; this is the US-GAAP borrowing-concept route, not a generic IFRS rule. EV = market cap + (debt - cash - short-term investments) x FX.
 
 - **Given** Market cap $2,000M, cash $300M, untagged short-term investments, LongTermDebt $500M plus ShortTermBorrowings $50M, same currency
 - **When** EV is computed
@@ -4424,8 +4466,10 @@ Balances are read at the latest tagged cash date only (nothing is carried forwar
   - No cash tagged: BALANCES_NOT_AVAILABLE
   - Debt not tagged but the filing tags borrowings elsewhere: DEBT_NOT_TAGGED
   - No borrowings tagged: NO_BORROWINGS_TAGGED info warning, leases excluded
+- **Owner decision (2026-10-15):** CORRECT the card (done here); Phase 2 characterises current code faithfully. Possible debt understatement from a partially populated debt group is NOT blessed as economically correct and enters the correctness-repair queue.
+- **Scheduled repair (Q1 BR-VAL-006, ships before its Phase 5 unit):** Partially populated debt group can understate debt; define and implement a completeness rule.
 
-<details><summary>SME note (panel reasoning, verbatim)</summary>
+<details><summary>P0 panel note (superseded by the owner decision)</summary>
 
 P0 panel doubts spec fidelity: P0 is justified. This rule decides which balance-sheet figures go into enterprise value (EV). It also decides when missing debt counts as zero rather than leaving EV null. Both feed every EV multiple (EV/Revenue, EV/EBITDA), so they guard the integrity of the valuation output.
 
@@ -4646,6 +4690,7 @@ Each source's value is compared with the latest SEC value. The tolerance is the 
   - SEC latest and as-first-filed count as one provider
   - A non-finite tolerance_pct falls back to 0.5, but Python max(0.0, NaN) returns 0.0, so NaN becomes 0 rather than the default
 - **Suspected defect:** In Python, float('nan') clamps to 0.0 via min/max before the isfinite check, so a NaN tolerance becomes 0% instead of the documented 0.5% default.
+- **Scheduled repair (Q3e, ships before its Phase 5 unit):** see the suspected defect above.
 
 #### BR-VAL-020 · Metric reconciliation status
 
@@ -4661,6 +4706,7 @@ NOT_FOUND if no source found the value; CONFLICT if any non-SEC source mismatche
 - **Edge cases:**
   - A restatement alone does not cause CONFLICT
 - **Suspected defect:** The worker tool description (worker/src/tools.ts:557) says 'AGREED (two or more providers agree)', while the Python description (server.py:10742) and both codepaths require a latest-SEC baseline. This breaks the documented parity.
+- **Scheduled repair (Q3e, ships before its Phase 5 unit):** see the suspected defect above.
 - **SME question:** Confirm AGREED always requires the SEC baseline, so the worker tool description should be corrected.
 
 #### BR-VAL-021 · Metric reconciliation tolerance and match
@@ -4680,21 +4726,22 @@ Each source matches the latest SEC value if |difference| <= max(SEC value x tole
 
 #### BR-VAL-022 · Metric source reconciliation status
 
-**P0** · Calculation · Confidence **Medium** · P0 panel 2/2  
+**P0** · Calculation · Confidence **High** · P0 panel 2/2  
 Source: `yfmcp/metric_reconciliation.py:518-555`
 
-Each found value is compared with the latest SEC XBRL value within max(tolerance% of SEC value, stated release precision); a mismatch with SEC-as-first-filed is a restatement, any other mismatch is CONFLICT; AGREED needs SEC plus at least one other provider, otherwise PARTIAL; none found is NOT_FOUND.
+Each found value is compared with the latest SEC XBRL value, or with the first found observation when there is no SEC value. Tolerance = max(tolerance% x |reference|, observation precision, reference precision) plus numerical slack 1e-9 x max(1, |reference|). A mismatch with SEC-as-first-filed is a restatement (restated=true, not a conflict, and it may coexist with AGREED); any other mismatch is a conflict. Status precedence: NOT_FOUND (nothing found) > CONFLICT > PARTIAL (no SEC baseline) > AGREED (SEC baseline plus at least one independent matching provider) > PARTIAL. Two SEC observations are one provider. Without SEC, sources can still produce CONFLICT but never AGREED.
 
 - **Given** SEC latest revenue 1,000,000,000; Yahoo 1,004,000,000; tolerance 0.5%
 - **When** reconcile_metric_sources runs
 - **Then** tolerance 5,000,000, difference 4,000,000 -> MATCH, status AGREED, independentChecks 1; Yahoo at 1,006,000,000 -> CONFLICT
-- **Parameters:** DEFAULT_TOLERANCE_PCT 0.5 (clamped 0-10); release precision 0.5 x 10^-decimals x scale (metric_reconciliation.py:483)
+- **Parameters:** DEFAULT_TOLERANCE_PCT 0.5 (clamped 0-10; see Q3e for NaN/inf); release precision 0.5 x 10^-decimals x scale (metric_reconciliation.py:483); slack 1e-9 x max(1,|b|)
 - **Edge cases:**
   - without an SEC baseline the first found source is the reference and status can never be AGREED
   - restatement sets restated=true, not CONFLICT
   - Alpha Vantage is never read
+- **Owner decision (2026-10-15):** CORRECT the card (done here); PRESERVE core semantics including the actual status-precedence order.
 
-<details><summary>SME note (panel reasoning, verbatim)</summary>
+<details><summary>P0 panel note (superseded by the owner decision)</summary>
 
 P0 panel doubts spec fidelity: P0 is justified. This rule decides whether a reported financial figure is labelled AGREED, CONFLICT, PARTIAL or NOT_FOUND across SEC XBRL, the issuer release and Yahoo, and whether it is flagged as restated. That makes it a data-integrity guard on the numbers the tool returns.
 
@@ -4743,20 +4790,22 @@ Prices quoted in pence, cents or agorot (GBp/GBX, ZAc, ILA) are divided by 100 i
 
 #### BR-VAL-025 · Parent net income derived from ProfitLoss less NCI
 
-**P0** · Calculation · Confidence **Medium** · P0 panel 2/2  
+**P0** · Calculation · Confidence **High** · P0 panel 2/2  
 Source: `legacy/yahoo-finance-mcp/yfmcp/metric_reconciliation.py:223-295`
 
-When a filer tags only ProfitLoss, parent net income = ProfitLoss - the noncontrolling-interest share tagged for the same period in the same filing. For revenue tagged under two concepts in one filing, the larger is the total.
+Whenever ProfitLoss is the CHOSEN US-GAAP net-income concept (most recently filed concept wins; ties go to the earlier-listed concept), parent net income = ProfitLoss minus NetIncomeLossAttributableToNoncontrollingInterest matched on the same accession, start date, end date and unit. The first-filed and latest derivations each require their own matched NCI observation. CURRENT BEHAVIOUR: if either required NCI is missing, raw ProfitLoss is reported as net income. Revenue concept tie-breaking (larger magnitude wins for same-date concepts) is a separate behaviour.
 
-- **Given** ProfitLoss $120M and NetIncomeLossAttributableToNoncontrollingInterest $5M in the same accession
+- **Given** ProfitLoss $120M is the chosen concept and NetIncomeLossAttributableToNoncontrollingInterest $5M is tagged in the same accession, period and unit
 - **When** sec_observations runs for net_income
-- **Then** value = $115M with basis PARENT_DERIVED_FROM_PROFITLOSS. For revenue, Revenues $2,023,994,000 beats contract revenue $2,001,614,000
-- **Parameters:** The concept chosen is the most recently filed; ties go to the earlier-listed concept (or the larger magnitude for revenue)
+- **Then** value = $115M with basis PARENT_DERIVED_FROM_PROFITLOSS and derivation shown
+- **Parameters:** Trigger: metric == net_income and taxonomy == us-gaap and chosen concept == ProfitLoss (metric_reconciliation.py:275); NCI match on accn/start/end/unit (lines 233-240).
 - **Edge cases:**
-  - NCI missing for either the first or the latest filing: ProfitLoss reported as-is
-  - Reports both as-first-filed and latest values
+  - Applies even when NetIncomeLoss is also tagged, if ProfitLoss was filed more recently
+  - Missing NCI for either first-filed or latest row: raw ProfitLoss reported (current behaviour; scheduled repair)
+- **Owner decision (2026-10-15):** CORRECT the card (done here) and SCHEDULE A BEHAVIOURAL REPAIR: the raw-ProfitLoss fallback is characterised for baseline equivalence but must not remain decision-grade parent net income. Target: an unresolved/limited parent-income derivation.
+- **Scheduled repair (Q1 BR-VAL-025, ships before its Phase 5 unit):** Missing NCI returns an unresolved/limited parent net income instead of raw ProfitLoss.
 
-<details><summary>SME note (panel reasoning, verbatim)</summary>
+<details><summary>P0 panel note (superseded by the owner decision)</summary>
 
 P0 panel doubts spec fidelity: P0 is justified. This rule decides which reported SEC figure counts as net income or revenue, and it takes the noncontrolling-interest share off consolidated profit. That makes it a data-integrity rule for the financial values the tool reconciles.
 
@@ -5131,6 +5180,7 @@ EV = price x diluted shares + total debt - convertible principal already counted
   - Balances in a different currency from the quote give ENTERPRISE_VALUE_CURRENCY_MISMATCH and no EV
   - Preferred with no tagged liquidation preference is left out, with warning PREFERRED_NOT_IN_ENTERPRISE_VALUE
 - **Suspected defect:** The convertible-principal deduction (valuation.py:373-377) is not gated on sec_usable, unlike the preferred adjustment (line 382). When SHARE_BASIS_MISMATCH falls back to Yahoo basic shares (no convertible shares counted), debt is still reduced by convertible principal, which understates EV.
+- **Scheduled repair (Q3i, ships before its Phase 5 unit):** see the suspected defect above.
 - **SME question:** When the SEC share count is rejected (SHARE_BASIS_MISMATCH) and Yahoo's basic shares are used, should convertible principal still be removed from debt?
 
 #### BR-VAL-047 · Historical balances and zero debt when no borrowings tagged
@@ -5387,6 +5437,7 @@ The caller's reconciliation tolerance is clamped to 0-10%, defaulting to 0.5% wh
 - **Edge cases:**
   - non-numeric string falls back to 0.5 in Python
 - **Suspected defect:** Python clamps before the isfinite check, so the check is dead: +inf -> 10, NaN -> 0 (max(0.0, nan) returns 0.0), while TS returns 0.5 for both; violates the runtime parity rule
+- **Scheduled repair (Q3e, ships before its Phase 5 unit):** see the suspected defect above.
 
 #### BR-VAL-064 · Release figure selection when multiple releases are read
 
@@ -5544,6 +5595,7 @@ Enterprise value = price x diluted shares + total debt - principal of convertibl
   - A currency mismatch adds ENTERPRISE_VALUE_CURRENCY_MISMATCH and leaves EV null
   - Preferred adjustment applies only when SEC shares are usable
 - **Suspected defect:** The convertible principal is taken out of debt (lines 371-377) whenever the bridge shows incrementalShares > 0, even when the SEC count is unusable (sec_usable false) or the bridge has no dilutedSharesAtPrice, so the shares used are Yahoo/basic counts that do not include the conversion shares. In that case the convertible is in neither debt nor shares and EV is understated. The preferred adjustment is guarded by sec_usable but the convertible adjustment is not.
+- **Scheduled repair (Q3i, ships before its Phase 5 unit):** see the suspected defect above.
 - **SME question:** Should the convertible debt deduction apply only when the diluted SEC share count (which includes the if-converted shares) is actually used for equity value?
 
 #### BR-VAL-075 · Snapshot multiples and non-positive denominators
@@ -5701,6 +5753,7 @@ Enterprise value = price x diluted shares + debt - principal of convertibles cou
   - Currency not comparable and Yahoo balances -> ENTERPRISE_VALUE_CURRENCY_MISMATCH, EV null
   - Preferred with no liquidation preference -> PREFERRED_NOT_IN_ENTERPRISE_VALUE warning
 - **Suspected defect:** The convertible principal is taken out of debt whenever the bridge shows incrementalShares > 0, even when sec_usable is false. In that case diluted shares are null and Yahoo's basic count is used, so the convertible is removed from debt without being added to shares. The preferred adjustment does check sec_usable.
+- **Scheduled repair (Q3i, ships before its Phase 5 unit):** see the suspected defect above.
 - **SME question:** When the SEC share count is rejected (SHARE_BASIS_MISMATCH), should convertible principal still be removed from debt?
 
 #### BR-VAL-083 · Valuation snapshot enterprise value formula
@@ -6087,6 +6140,7 @@ Transcripts are sought in order: validated SEC 8-K exhibit, company IR (always s
 - **Edge cases:**
   - Explicit Yahoo request skips the automatic Yahoo attempt
 - **Suspected defect:** _next_transcript_fallback treats SKIPPED as untried, and company_ir/public_transcript_url are always SKIPPED, so the recommendation is always company_ir regardless of what else failed.
+- **Scheduled repair (Q3i, ships before its Phase 5 unit):** see the suspected defect above.
 - **SME question:** Since company_ir is always recorded as SKIPPED, should the fallback recommendation still point users to company IR first every time?
 
 #### BR-ERN-010 · Earnings metrics extraction confidence
@@ -6209,6 +6263,7 @@ A caller-supplied earnings release URL must be https and not on a blocked paywal
   - Subdomains such as markets.wsj.com or on.wsj.com are not blocked (exact host match)
   - Any https host that is not an SEC Archive URL is accepted as company_ir, with no check that it is the company's investor-relations site
 - **Suspected defect:** The paywall check matches exact hostnames only, so subdomains of blocked publishers pass. The tool description says 'must be SEC or company IR', but no IR check exists. Same in the Worker (worker/src/yahoo-finance.ts:16771-16799).
+- **Scheduled repair (Q2a, ships Phase 1):** see the suspected defect above.
 - **SME question:** Should the paywall block cover all subdomains of the blocked publishers, and should company_ir URLs be restricted to a known IR-page registry?
 
 #### BR-ERN-018 · Earnings surprise percentages and near-zero EPS guard
@@ -6228,6 +6283,7 @@ Revenue surprise % is (actual − estimate) ÷ |estimate| × 100, computed only 
   - Revenue estimate 0: no revenue surprise
   - Period not MATCHED: no revenue surprise, but EPS surprise is still computed
 - **Suspected defect:** Actual EPS comes from Yahoo's epsActual first and falls back to the release only when Yahoo has none (lines 738-741). The 'actual' is therefore not the official figure, even though revenue is. Python round() is half-even while the Worker uses toFixed, which can differ on exact .5 ties.
+- **Scheduled repair (Q3i, ships before its Phase 5 unit):** see the suspected defect above.
 
 #### BR-ERN-019 · Guidance amount parsing with shared unit
 
@@ -6482,6 +6538,7 @@ Revenue surprise % is calculated only when periods are MATCHED and a non-zero es
 - **Then** revenueSurprisePct 5.00; epsDelta 0.002; epsSurprisePct omitted with EPS_NEAR_ZERO_ESTIMATE_BASE; confidence MEDIUM
 - **Parameters:** near-zero EPS base $0.02; rounding 2 dp (pct), 4 dp (delta)
 - **Suspected defect:** An EPS estimate of exactly 0 goes down the EPS_ESTIMATE_UNAVAILABLE branch, so no epsDelta is calculated, although the near-zero rule exists to give a delta in that case. Also, the actual EPS used is Yahoo's epsActual, not the official release figure.
+- **Scheduled repair (Q3i, ships before its Phase 5 unit):** see the suspected defect above.
 
 #### BR-ERN-032 · SEC 8-K transcript exhibit validation
 
@@ -6753,6 +6810,7 @@ Coverage is PARTIAL if any source is unconfigured, ineligible, errored, rate lim
 - **Edge cases:**
   - A resolved_action passed by the caller overrides the derived action
 - **Suspected defect:** failed_states in _build_coverage (lines 315-320) includes WEBSITE_NOT_AVAILABLE, DISCOVERY_NOT_FOUND, DISCOVERY_BUDGET_EXHAUSTED, FEED_NOT_FOUND and PARSE_ERROR, but _compute_source_coverage (2402-2406) does not, so a response can list failedSources while reporting coverage state FULL.
+- **Scheduled repair (Q3i, ships before Phase 3):** see the suspected defect above.
 - **SME question:** Should discovery/feed/parse failures make coverage PARTIAL, matching their inclusion in failedSources?
 
 #### BR-NWS-008 · Ticker mention compatible with listing exchange
@@ -7600,6 +7658,7 @@ A batch request processes at most the first 5 tickers. The rest are listed in a 
 - **Edge cases:**
   - Python batches (yfmcp/tools/pricing.py:25-42, 1017-1019) have no cap and process every ticker
 - **Suspected defect:** Parity divergence. Python processes unlimited batches while the Worker truncates at 5.
+- **Scheduled repair (Q3c, ships before Phase 4):** see the suspected defect above.
 - **SME question:** Is the 5-ticker cap a business limit that Python should also enforce, or a Worker-only resource limit?
 
 #### BR-SHR-007 · Consensus curve policy inputs
@@ -7658,6 +7717,7 @@ The beat streak counts consecutive beats starting from the first row of Yahoo's 
 - **Edge cases:**
   - Rows missing actual or estimate are skipped without breaking the streak
 - **Suspected defect:** The code comment says 'consecutive from most recent', but the code iterates in provider order. Yahoo earningsHistory is normally oldest-first (-4q to -1q), so the streak may be measured from the wrong end. The Worker (worker/src/yahoo-finance.ts:4605-4611) does the same.
+- **Scheduled repair (Q3i, ships before Phase 4):** see the suspected defect above.
 - **SME question:** Is Yahoo earningsHistory delivered newest-first or oldest-first, and should the streak count back from the most recent reported quarter?
 
 #### BR-SHR-011 · Earnings beat rate, average surprise and historical surprise signal
@@ -7687,6 +7747,7 @@ Beat rate is the share of quarters with actual EPS strictly above the estimate. 
 - **Then** beatRate 0.75, avgSurprisePct 2.50
 - **Parameters:** pre-revenue epsilon 1e-9 (server.py:434)
 - **Suspected defect:** currentBeatStreak walks earningsHistory in provider order and stops at the first miss. If Yahoo/yfinance returns rows oldest first, which yfinance earnings_history usually does, this counts from the oldest quarter, not the most recent. Both runtimes do the same.
+- **Scheduled repair (Q3i, ships before Phase 4):** see the suspected defect above.
 - **SME question:** Is earningsHistory guaranteed newest-first in both the yfinance and Worker sources? If not, should the streak sort by quarter date descending first?
 
 #### BR-SHR-013 · Earnings momentum: EPS revision percentages and flags
@@ -7750,6 +7811,7 @@ An insider transaction's value is shares × price per share (2dp), labelled by F
   - No price: value None
   - XML parse failure falls back to HTML table parsing
 - **Suspected defect:** Only the first transaction is parsed (root.find / first matching row). A Form 4 with several lines (for example an M exercise followed by an S sale) reports only the first, so the reported value can misstate the filing.
+- **Scheduled repair (Q3i, ships before Phase 4):** see the suspected defect above.
 
 #### BR-SHR-017 · Forward revision signal and composite momentum
 
@@ -7854,13 +7916,12 @@ Event/news requests clamp max results to 1-100 and lookback to 1-3,650 days; uns
 
 ## Appendix A — Rules needing SME confirmation
 
-61 rules have confidence below High. Each one's card states the question to answer.
+55 rules have confidence below High. Each one's card states the question to answer.
 
 | ID | Pri | Rule | Why |
 |---|---|---|---|
 | BR-ENV-001 | P1 | Default fact confidence and decision-grade tagging | Should a value with no stated confidence and no evidence default to HIGH, or to NOT_DECISION_GRADE? |
 | BR-ENV-008 | P2 | Data cache freshness tiers | Is a stale-while-revalidate window (serve up to 2x TTL) intended for any tool, or is is_stale dead code? |
-| BR-PRC-002 | P0 | Daily price freshness classification (CURRENT / STALE / UNKNOWN) | Should exchange holidays be considered when proving the previous session (the weekday-only fallback reports UNKNOWN after holidays)? |
 | BR-PRC-012 | P1 | Liquidity gate: $10M average daily traded value | P0 panel split on whether this moves money / is regulatory (Faithful: yes. In yfmcp/tools/pricing.py, line 1441 sets LIQUIDITY_GATE_MIN_ADV_USD = 10_000_000. Lines 1458-1462 (_average_traded_value) return the mean of vo… |
 | BR-PRC-021 | P1 | Price stats: percent distances and CAGR | Should CAGR be null when the price history does not span the full horizon, or should the exponent use actual elapsed years? |
 | BR-PRC-022 | P1 | Price target bracket and tag | Is emitting STRONG_BUY/AVOID buy-sell language intended given every other valuation tool enforces decisionUse EVIDENCE_ONLY with action null, and should classification use the rounded or raw percentage (75.04 rounds to … |
@@ -7868,7 +7929,6 @@ Event/news requests clamp max results to 1-100 and lookback to 1-3,650 days; uns
 | BR-FND-004 | P1 | Credit health operational EBITDA, net debt and coverage | P0 panel split on whether this moves money / is regulatory (I read server.py:6686-6747 and the helpers above it (_safe_get, and _ttm_sum at 6649-6665). Faithful: yes. - Total debt is taken from the latest balance-sheet … |
 | BR-FND-006 | P1 | Credit health: net debt, operational EBITDA and leverage ratios | P0 panel split on whether this moves money / is regulatory (The rule card matches the code, but I don't think this should be P0 when judged for compliance. Faithful: yes. I read /home/user/yahoo-finance-mcp/server.py li… |
 | BR-PRV-003 | P1 | Finnhub market eligibility (fails open) | Should a missing or corrupt policy file block Finnhub calls (fail closed) rather than treat all tickers as eligible? |
-| BR-EXT-015 | P0 | Release figure scale and loss sign | P0 panel doubts spec fidelity: I read yfmcp/extraction_rules.py:590-613 and its helpers: _RELEASE_MONEY_BASE/_RELEASE_SCALE/_RELEASE_TABLE_SCALE_RE at 494-499, _RELEASE_NEGATIVE_RE/_RELEASE_LOSS_RE/_RELEASE_INCOME_RE/_R… |
 | BR-EXT-035 | P1 | Automatic 20-F fallback for geographic and segment revenue | Should a 20-F fallback value with no stated confidence default to HIGH? |
 | BR-EXT-041 | P1 | Capped call economic offset in scenarios | P0 panel split on whether this moves money / is regulatory (The rule card matches the code. In yfmcp/share_scenarios.py:219-234 the offset is only computed when t["capped_calls"] == "offset_when_stated". It reads only c… |
 | BR-EXT-046 | P1 | Contractual obligation schedule by due bucket | P0 panel split on whether this moves money / is regulatory (I read the cited code in /home/user/yahoo-finance-mcp/yfmcp/funding_schedule.py at lines 40-102 and 258-307. The citation's legacy/ prefix does not exist; the … |
@@ -7891,10 +7951,6 @@ Event/news requests clamp max results to 1-100 and lookback to 1-3,650 days; uns
 | BR-EXT-097 | P1 | Treasury-stock incremental shares for options and warrants | P0 panel split on whether this moves money / is regulatory (I read the cited code and the Given/When/Then matches it. The formula is at yfmcp/capital_structure.py:501-502 (`_treasury_stock`) and again at yfmcp/share_sce… |
 | BR-EXT-098 | P1 | Treasury-stock method for options and warrants in scenarios | P0 panel split on whether this moves money / is regulatory (Verdict: the rule card matches the code, but the P0 rating is not justified. I'd rate it P1. I checked it against /home/user/yahoo-finance-mcp/yfmcp/share_scen… |
 | BR-EXT-107 | P2 | Companies House issuer match | Removing 'Holdings', 'Group' and 'Limited' can merge distinct legal entities (a holding company and its operating subsidiary). Is matching on the active entity with the same stem acceptable? |
-| BR-VAL-004 | P0 | ADR ratio detection and share-basis mismatch | P0 panel doubts spec fidelity: I read yfmcp/valuation.py lines 29-49 and 280-302 myself. Both worked examples are correct. 25.9B / 5.186B = 4.9942. That rounds to n=5, and \|4.9942-5\| = 0.0058 is within the tolerance o… |
-| BR-VAL-006 | P0 | Historical balances read at the cash date; no-borrowings means zero debt | P0 panel doubts spec fidelity: P0 is justified. This rule decides which balance-sheet figures go into enterprise value (EV). It also decides when missing debt counts as zero rather than leaving EV null. Both feed every … |
-| BR-VAL-022 | P0 | Metric source reconciliation status | P0 panel doubts spec fidelity: P0 is justified. This rule decides whether a reported financial figure is labelled AGREED, CONFLICT, PARTIAL or NOT_FOUND across SEC XBRL, the issuer release and Yahoo, and whether it is f… |
-| BR-VAL-025 | P0 | Parent net income derived from ProfitLoss less NCI | P0 panel doubts spec fidelity: P0 is justified. This rule decides which reported SEC figure counts as net income or revenue, and it takes the noncontrolling-interest share off consolidated profit. That makes it a data-i… |
 | BR-VAL-037 | P1 | ADR ratio detection and share-basis mismatch | P0 panel split on whether this moves money / is regulatory (I checked the rule card against yfmcp/valuation.py:29-49 and 280-302. The legacy/ copy is laid out the same way. The card is accurate. The constants match: _AD… |
 | BR-VAL-045 | P1 | Enterprise value formula | P0 panel split on whether this moves money / is regulatory (The rule card matches the code. In yfmcp/valuation.py:396-397, EV = equity_value + debt - convertible_adjustment + preferred_adjustment - cash - short_term. eq… |
 | BR-VAL-046 | P1 | Enterprise value in valuation snapshot | When the SEC share count is rejected (SHARE_BASIS_MISMATCH) and Yahoo's basic shares are used, should convertible principal still be removed from debt? |

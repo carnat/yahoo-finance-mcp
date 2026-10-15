@@ -1,0 +1,109 @@
+{
+ "_doc": "Owner corrections applied on top of rules.json by render_rules.py. rules.json stays the verbatim workflow output. Source: OWNER_DECISIONS_20261015.md.",
+ "decisionSource": "Owner decision 2026-10-15 (OWNER_DECISIONS_20261015.md \u00a7Q1)",
+ "cards": {
+  "Daily price freshness classification (CURRENT / STALE / UNKNOWN)": {
+   "confidence": "High",
+   "plainEnglish": "Outside market hours, the latest completed bar must be on or after the date of Yahoo's last regular-market time. During a session, the previous close must match Yahoo's previousClose within tolerance, or the last completed bar must be from the weekday before today. Only completed bars count.",
+   "parameters": "Close-match tolerance = max(0.01, |previousClose| x 1e-6). CURRENT BEHAVIOUR (characterised as-is): the session fallback uses Mon-Fri weekday arithmetic only and ignores exchange holidays.",
+   "ownerDecision": "CONFIRM core rule (CURRENT/STALE/UNKNOWN, completed-bar requirement, close-match tolerance). TARGET semantics are exchange-session-aware: a market holiday must not make a valid prior completed session look stale; if the prior exchange session cannot be established reliably the result is UNKNOWN, never CURRENT/STALE inferred from weekday arithmetic. Phase 2 records the weekday fallback exactly as current behaviour.",
+   "repair": {
+    "ref": "Q1 BR-PRC-002",
+    "what": "Exchange-session-aware freshness (needs a shared exchange-holiday calendar data file used by both runtimes)."
+   }
+  },
+  "Release figure scale and loss sign": {
+   "confidence": "High",
+   "plainEnglish": "Release-table scale applies only to metrics that accept a monetary scale; EPS and gross margin never inherit it. Repeated identical scale declarations count as one distinct scale; when more than one distinct scale is declared the candidate figure is skipped (later candidates may still be searched). For ordinary monetary metrics only parentheses, an ASCII minus or qualifying 'negative' wording immediately before the amount set the sign. 'Loss' wording sets the sign only for diluted EPS (and not when the label names both outcomes, e.g. 'income (loss) per share'). Explicit-scale and table-scaled monetary values are rounded half-up to whole units.",
+   "given": "A release with a single '(in millions)' declaration, 'Revenue was $54,229', 'diluted net loss per share of $0.12', and 'net loss of $5 billion'",
+   "when": "figures are read",
+   "then": "revenue = 54,229,000,000 (scaleBasis RELEASE_TABLE_IN_MILLIONS); EPS = -0.12; netIncome from 'net loss of $5 billion' stays +5,000,000,000 (loss wording does not sign monetary metrics in current code)",
+   "parameters": "Scale applies only to money metrics (extraction_rules.py:546); loss wording EPS-only (lines 606-611); 'negative' must directly precede the amount (line 512).",
+   "ownerDecision": "CORRECT the card (done here); characterise current behaviour exactly; do not generalise 'loss' wording in the oracle. Unsafe monetary-loss sign cases (e.g. 'net loss of $5 billion' read as positive) are classified as correctness defects under Q3i.",
+   "repair": {
+    "ref": "Q1 BR-EXT-015 / Q3i",
+    "what": "Monetary metrics stated as a loss must not be returned as positive values."
+   }
+  },
+  "ADR ratio detection and share-basis mismatch": {
+   "confidence": "High",
+   "plainEnglish": "For foreign filers (20-F/40-F), SEC ordinary shares within 2% of a whole multiple n >= 1.9 of Yahoo's quoted shares are an ADR ratio n; the inverse (SEC/Yahoo <= 1/1.9 with Yahoo a near-whole multiple k of SEC) gives ratio 1/k. SEC share counts are divided by the ratio and rounded half-up to whole shares. Otherwise counts more than 1.5x apart are SHARE_BASIS_MISMATCH: SEC diluted shares become unusable (null) and value shares fall back to Yahoo's quoted/basic share basis. Domestic filers never get an ADR ratio.",
+   "edgeCases": [
+    "Inverse near-whole ratio (Yahoo a multiple of SEC) gives 1/k and multiplies SEC counts by k for foreign filers",
+    "Adjusted counts use round_half_up(shares / ratio) (valuation.py:298)",
+    "Mismatch: dilutedShares -> null, share_basis switches from sec_cover_page to the Yahoo quoted basis",
+    "Yahoo's implied all-class shares replace listed shares when more than 2% larger (valuation.py:234-244)"
+   ],
+   "ownerDecision": "CORRECT the card (done here); PRESERVE current behaviour through the refactor. The ADR-versus-mismatch policy is acceptable for characterisation."
+  },
+  "Historical balances read at the cash date; no-borrowings means zero debt": {
+   "confidence": "High",
+   "plainEnglish": "Balances are read at the latest tagged cash date only (nothing carried forward). Debt is taken from the FIRST debt concept group with AT LEAST ONE component tagged at that date (not necessarily a fully populated group), plus short-term borrowings/commercial paper, which are added only once some group has matched. Debt is set to zero (basis NO_BORROWINGS_TAGGED) only when no group matched, the cash fact carries an accession, borrowing concepts are mapped for the taxonomy, and that accession tags none of them; this is the US-GAAP borrowing-concept route, not a generic IFRS rule. EV = market cap + (debt - cash - short-term investments) x FX.",
+   "ownerDecision": "CORRECT the card (done here); Phase 2 characterises current code faithfully. Possible debt understatement from a partially populated debt group is NOT blessed as economically correct and enters the correctness-repair queue.",
+   "repair": {
+    "ref": "Q1 BR-VAL-006",
+    "what": "Partially populated debt group can understate debt; define and implement a completeness rule."
+   }
+  },
+  "Metric source reconciliation status": {
+   "confidence": "High",
+   "plainEnglish": "Each found value is compared with the latest SEC XBRL value, or with the first found observation when there is no SEC value. Tolerance = max(tolerance% x |reference|, observation precision, reference precision) plus numerical slack 1e-9 x max(1, |reference|). A mismatch with SEC-as-first-filed is a restatement (restated=true, not a conflict, and it may coexist with AGREED); any other mismatch is a conflict. Status precedence: NOT_FOUND (nothing found) > CONFLICT > PARTIAL (no SEC baseline) > AGREED (SEC baseline plus at least one independent matching provider) > PARTIAL. Two SEC observations are one provider. Without SEC, sources can still produce CONFLICT but never AGREED.",
+   "parameters": "DEFAULT_TOLERANCE_PCT 0.5 (clamped 0-10; see Q3e for NaN/inf); release precision 0.5 x 10^-decimals x scale (metric_reconciliation.py:483); slack 1e-9 x max(1,|b|)",
+   "ownerDecision": "CORRECT the card (done here); PRESERVE core semantics including the actual status-precedence order."
+  },
+  "Parent net income derived from ProfitLoss less NCI": {
+   "confidence": "High",
+   "plainEnglish": "Whenever ProfitLoss is the CHOSEN US-GAAP net-income concept (most recently filed concept wins; ties go to the earlier-listed concept), parent net income = ProfitLoss minus NetIncomeLossAttributableToNoncontrollingInterest matched on the same accession, start date, end date and unit. The first-filed and latest derivations each require their own matched NCI observation. CURRENT BEHAVIOUR: if either required NCI is missing, raw ProfitLoss is reported as net income. Revenue concept tie-breaking (larger magnitude wins for same-date concepts) is a separate behaviour.",
+   "given": "ProfitLoss $120M is the chosen concept and NetIncomeLossAttributableToNoncontrollingInterest $5M is tagged in the same accession, period and unit",
+   "when": "sec_observations runs for net_income",
+   "then": "value = $115M with basis PARENT_DERIVED_FROM_PROFITLOSS and derivation shown",
+   "parameters": "Trigger: metric == net_income and taxonomy == us-gaap and chosen concept == ProfitLoss (metric_reconciliation.py:275); NCI match on accn/start/end/unit (lines 233-240).",
+   "edgeCases": [
+    "Applies even when NetIncomeLoss is also tagged, if ProfitLoss was filed more recently",
+    "Missing NCI for either first-filed or latest row: raw ProfitLoss reported (current behaviour; scheduled repair)"
+   ],
+   "ownerDecision": "CORRECT the card (done here) and SCHEDULE A BEHAVIOURAL REPAIR: the raw-ProfitLoss fallback is characterised for baseline equivalence but must not remain decision-grade parent net income. Target: an unresolved/limited parent-income derivation.",
+   "repair": {
+    "ref": "Q1 BR-VAL-025",
+    "what": "Missing NCI returns an unresolved/limited parent net income instead of raw ProfitLoss."
+   }
+  }
+ },
+ "repairs": {
+  "Ticker symbol format check": "Q3b",
+  "SEC accession number format check": "Q3b",
+  "N-day price slope and direction": "Q3b",
+  "Volume ratio and volume flag": "Q3c",
+  "Batch ticker cap of 5 (Worker only)": "Q3c",
+  "Price target bracket and tag": "Q3d",
+  "Metric reconciliation status": "Q3e",
+  "Metric reconciliation agreement status": "Q3e",
+  "Reconciliation tolerance input clamp": "Q3e",
+  "Convertible note if-converted shares and principal basis": "Q3f",
+  "Scenario convertible treatment including net-share settlement": "Q3f",
+  "Scenario convertible treatment and in-the-money test": "Q3f",
+  "Earnings release source URL policy (paywall block)": "Q2a",
+  "Current beat streak counted in provider row order": "Q3i",
+  "Earnings beat rate, beat streak and pre-revenue rule": "Q3i",
+  "Form 4 insider transaction value": "Q3i",
+  "Contractual obligation bucket dates": "Q3i",
+  "Contractual obligation schedule buckets": "Q3i",
+  "Contractual obligation schedule buckets and schedule status": "Q3i",
+  "Funding amount range, qualifier and missing-scale rule": "Q3i",
+  "Funding text item eligibility and unresolved reason": "Q3i",
+  "Credit health: net debt, operational EBITDA and leverage ratios": "Q3i",
+  "Credit health operational EBITDA, net debt and coverage": "Q3i",
+  "Credit stress flag and debt tier": "Q3i",
+  "Price stats: percent distances and CAGR": "Q3i",
+  "Price CAGR over 1, 3 and 5 years": "Q3i",
+  "Expanded ownership provider eligibility and scarce fallback opt-in": "Q3i",
+  "Finnhub market eligibility (fails open)": "Q3i",
+  "Enterprise value in valuation snapshot": "Q3i",
+  "Snapshot enterprise value formula with convertible and preferred adjustments": "Q3i",
+  "Valuation snapshot enterprise value and status": "Q3i",
+  "Earnings call transcript source waterfall": "Q3i",
+  "Earnings surprise percentages and near-zero EPS guard": "Q3i",
+  "Revenue and EPS surprise calculation": "Q3i",
+  "News source coverage state and recommended next action": "Q3i"
+ }
+}
