@@ -311,6 +311,7 @@ class TestMarketSnapshotSchema(unittest.TestCase):
             return json.dumps({
                 "ticker": ticker,
                 "adv20d": 20516600,
+                "adv20dTradedValueUsd": 20516600.0,
                 "ratio20d": 1.05,
                 "gatePass": True,
             })
@@ -372,6 +373,25 @@ class TestMarketSnapshotSchema(unittest.TestCase):
         result = json.loads(_run(self.srv.get_market_snapshot("ASTS")))
         self.assertIsNotNone(result["volume"]["liquidityGatePass"])
         self.assertIsInstance(result["volume"]["liquidityGatePass"], bool)
+
+    def test_volume_meets_minimum_follows_min_adv_usd(self):
+        """2.8.0: volume.meetsMinimum compares the 20d traded value with the caller's min_adv_usd; liquidityGatePass stays."""
+        self._mock_all_components(self.srv)
+        plain = json.loads(_run(self.srv.get_market_snapshot("ASTS")))["volume"]
+        self.assertIsNone(plain["meetsMinimum"])
+        self.assertIsNone(plain["minAdvUsd"])
+        self.assertIs(plain["liquidityGatePass"], True)
+        above = json.loads(_run(self.srv.get_market_snapshot("ASTS", min_adv_usd=20_000_000)))["volume"]
+        below = json.loads(_run(self.srv.get_market_snapshot("ASTS", min_adv_usd=30_000_000)))["volume"]
+        self.assertEqual((above["meetsMinimum"], above["minAdvUsd"]), (True, 20_000_000))
+        self.assertEqual((below["meetsMinimum"], below["minAdvUsd"]), (False, 30_000_000))
+        self.assertIs(below["liquidityGatePass"], True)
+        batch = json.loads(_run(self.srv.get_market_snapshot(["ASTS"], min_adv_usd=30_000_000)))
+        self.assertIs(batch["tickers"]["ASTS"]["volume"]["meetsMinimum"], False)
+        for bad in ("abc", 0, -1, True):
+            refused = json.loads(_run(self.srv.get_market_snapshot("ASTS", min_adv_usd=bad)))
+            self.assertEqual(refused["error"]["message"], "min_adv_usd must be a positive number when supplied.")
+            self.assertEqual(refused["error"]["code"], "INPUT_VALIDATION_ERROR")
 
     def test_freshness_class_present(self):
         self._mock_all_components(self.srv)

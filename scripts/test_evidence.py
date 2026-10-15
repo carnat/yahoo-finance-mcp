@@ -950,6 +950,34 @@ class TestAuthorityBoundaryOnEveryResult(unittest.TestCase):
         failed = json.loads(_envelope_tool_result("get_historical_valuation_context", BOUNDARY_CASES[1][1]))
         self.assertEqual((failed["ok"], failed["data"]), (False, None))
 
+    def test_deprecation_notice_is_in_meta_warnings_and_the_payload_is_unchanged(self) -> None:
+        """2.8.0 (Q14-N2): the seven always-null fields stay in data; DEPRECATED_FIELD goes to meta.warnings only."""
+        from unittest.mock import patch
+        from yfmcp.envelope import _envelope_tool_result
+
+        action, raw = BOUNDARY_CASES[0]
+        before = json.loads(ev.with_authority_boundary(action, raw))  # the data payload as it was before RN
+        out = json.loads(_envelope_tool_result(action, raw))
+        self.assertEqual(out["data"], before)
+        self.assertEqual(json.dumps(out["data"], sort_keys=True), json.dumps(before, sort_keys=True))
+        self.assertEqual(out["meta"]["warnings"], [{
+            "code": "DEPRECATED_FIELD",
+            "message": "g2, opportunity, action, priceTarget, scenarioWeights, selectedMethod, selectedMultiple are always null "
+                       "and will be removed in the next major version; decisionUse=EVIDENCE_ONLY marks the evidence boundary.",
+            "severity": "info",
+            "fields": ["g2", "opportunity", "action", "priceTarget", "scenarioWeights", "selectedMethod", "selectedMultiple"],
+            "replacement": "decisionUse",
+        }])
+        self.assertEqual(list(out["meta"]["warnings"][0]), ["code", "message", "severity", "fields", "replacement"])
+        self.assertNotIn("DEPRECATED_FIELD", json.dumps(out["data"]))
+        # No notice on a failure, for a tool that is not evidence-only, or in the legacy envelope.
+        failed = json.loads(_envelope_tool_result(*BOUNDARY_CASES[1]))
+        self.assertEqual(failed["meta"]["warnings"], [])
+        other = json.loads(_envelope_tool_result(*BOUNDARY_CASES[2]))
+        self.assertEqual(other["meta"]["warnings"], [])
+        with patch.dict(os.environ, {"MCP_ENVELOPE_V2": "false"}):
+            self.assertEqual(json.loads(_envelope_tool_result(action, raw)), before)
+
     def test_every_evidence_only_action_is_a_catalog_action_and_worker_applies_it(self) -> None:
         catalog = (ROOT / "tool_catalog.json").read_text(encoding="utf-8")
         for action in ev.EVIDENCE_ONLY_ACTIONS:
