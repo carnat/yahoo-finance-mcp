@@ -242,6 +242,12 @@ if data["injectionFlags"]:
         w(f"- {cell(s)}")
 (HERE / "BUSINESS_RULES.md").write_text("\n".join(L) + "\n")
 
+# Machine-readable index for the Phase 2 parity harness (scripts/parity/).
+index = [{"id": r["_id"], "name": clean(r["name"]), "priority": r["priority"], "category": r["category"],
+          "domain": r["_dom"], "source": clean(r["source"]), "repair": r.get("_repairRef"),
+          "confidence": r["confidence"]} for r in ordered]
+(HERE / "rule_index.json").write_text(json.dumps(index, indent=1) + "\n")
+
 # ------------------------------------------------------------- DATA_OBJECTS
 name_to_id = {clean(r["name"]).lower(): r["_id"] for r in ordered}
 D = ["# Data Objects — yahoo-finance-mcp\n",

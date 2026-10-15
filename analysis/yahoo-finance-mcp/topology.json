@@ -31,7 +31,7 @@
       "name": "index.ts",
       "kind": "module",
       "language": "typescript",
-      "loc": 159,
+      "loc": 163,
       "file": "worker/src/index.ts"
      },
      {
@@ -55,7 +55,7 @@
       "name": "tools.ts",
       "kind": "module",
       "language": "typescript",
-      "loc": 2548,
+      "loc": 2551,
       "file": "worker/src/tools.ts"
      },
      {
@@ -87,7 +87,7 @@
       "name": "system.py",
       "kind": "module",
       "language": "python",
-      "loc": 65,
+      "loc": 67,
       "file": "yfmcp/tools/system.py"
      }
     ]
@@ -110,7 +110,7 @@
       "name": "request-context.ts",
       "kind": "module",
       "language": "typescript",
-      "loc": 82,
+      "loc": 99,
       "file": "worker/src/request-context.ts"
      },
      {
@@ -158,7 +158,7 @@
       "name": "schemas.py",
       "kind": "module",
       "language": "python",
-      "loc": 859,
+      "loc": 860,
       "file": "yfmcp/schemas.py"
      },
      {

@@ -1,6 +1,6 @@
 # Modernization Brief — yahoo-finance-mcp
 
-**Status: DRAFT v2, owner decisions applied, NOT YET APPROVED (§8).** This document is the executable plan. The execution commands read it, and they treat each phase's scope, entry criteria and exit criteria as binding gates. **To steer execution, edit this file.** An edited entry criterion is honoured; a note in chat is not.
+**Status: v2 APPROVED 2026-10-15 for Phase 2, R3, RN and Phase 3 (§8). Later phases await the post-pilot brief.** This document is the executable plan. The execution commands read it, and they treat each phase's scope, entry criteria and exit criteria as binding gates. **To steer execution, edit this file.** An edited entry criterion is honoured; a note in chat is not.
 
 v2 (2026-10-15) folds in the owner's answers to every v1 open question. The source is `OWNER_DECISIONS_20261015.md`; my verification of its claims against the code is summarised in §7.
 
@@ -135,11 +135,11 @@ C4Container
 
 ## 3. Phased Sequence
 
-**Ordering principle.** Leaf-first by coupling:
-1. Secure the public surface.
-2. Build the safety net.
-3. Repair what the next move would otherwise fossilise.
-4. Prove the move recipe on the least-coupled domain.
+**Ordering principle.** Leaf-first by coupling, with the security phase deferred by owner decision (Q16):
+1. Build the safety net.
+2. Repair what the next move would otherwise fossilise.
+3. Prove the move recipe on the least-coupled domain.
+4. Secure the public surface (Phase 1, deferred until after the pilot).
 5. Extract the shared hub.
 6. Extract the remaining domains.
 7. Clean up.
@@ -158,7 +158,7 @@ C4Container
 
 ```mermaid
 flowchart LR
-  P1["Phase 1<br/>Harden public surface<br/>/modernize-harden · S"]
+  P1["Phase 1 (deferred, Q16)<br/>Harden public surface<br/>/modernize-harden · S"]
   P2["Phase 2<br/>Behaviour-contract harness<br/>/modernize-transform (characterisation) · M"]
   R3["R3 · repairs before news move<br/>BR-NWS-007 · Q3h · Q7 news extraction<br/>+ RN neutrality deprecation release · S"]
   P3["Phase 3 · PILOT<br/>Extract News & events · M"]
@@ -167,34 +167,37 @@ flowchart LR
   R5["R5-‹unit› · repairs before each domain move<br/>Q1 repairs · Q3c-f · Q3i · Q5 · Q7 extraction · M"]
   P5["Phase 5<br/>Extract remaining domains · XL"]
   P6["Phase 6<br/>Cleanup & docs · S"]
-  P1 --> R3
   P2 --> R3
   R3 --> P3
-  P3 -->|"PLAYBOOK.md + brief regenerated"| R4
+  P3 -->|"PLAYBOOK.md + brief regenerated"| P1
+  P1 --> R4
   R4 --> P4
   P4 --> R5
   R5 --> P5
   P5 --> P6
 ```
 
-Phases 1 and 2 are independent and may run in parallel. Sizes are relative shares of the production-code COCOMO-II index (≈ 261 over 59.1 KSLOC, from `ASSESSMENT.md`). **They rank phases against each other and are not durations.**
+**Execution order (Q16): Phase 2 → R3 + RN → Phase 3 (pilot) → Phase 1 → R4 → Phase 4 → R5 → Phase 5 → Phase 6.** Phase numbers are kept as identifiers. Sizes are relative shares of the production-code COCOMO-II index (≈ 261 over 59.1 KSLOC, from `ASSESSMENT.md`). **They rank phases against each other and are not durations.**
 
 Every PR follows `CLAUDE.md`: the TS change first, then the `python-mirror` port, then parity tests, then a section in `docs/provider-runtime-guidance.md`, then `release-clerk`, then `live-verifier` after deploy.
 
-### Phase 1 — Harden the public surface
+### Phase 1 — Harden the public surface (DEFERRED: runs after Phase 3, before R4; Q16)
 - **Command:** `/modernize-harden yahoo-finance-mcp`.
 - **Scope:**
   - **Q2a:** strict HTTPS allow-list. SEC Archives and approved SEC endpoints, the exact Yahoo hosts needed by the transcript and news workflows, and the exact hosts of IR-registry entries with status `approved`. Every redirect hop is re-validated. Private, loopback, link-local and IP-literal destinations are rejected. No wildcards. `raw_text` is caller content only and never auto-fetches. This also covers the earnings-release URL policy (BR-ERN-017).
-  - **Q2b:** `/mcp` requires a static bearer token behind a replaceable auth abstraction. Rate limits and provider budgets are keyed by credential, not IP. An unauthenticated `/health` may exist only if it makes no provider calls. Paid providers need auth **and** explicit caller opt-in, and default waterfalls never force them. Budget exhaustion returns a typed non-evidence state, never `NOT_FOUND`.
+  - **Q2b + Q13:** `/mcp` requires the static credential behind a replaceable auth abstraction, supplied as `Authorization: Bearer <token>` or the secret path `/mcp/<token>`. The path segment is redacted from every log, export and error. The claude.ai connector is re-added with the secret-path URL in the same release window. Rate limits and provider budgets are keyed by credential, not IP. An unauthenticated `/health` may exist only if it makes no provider calls. Paid providers need auth **and** explicit caller opt-in, and default waterfalls never force them. Budget exhaustion returns a typed non-evidence state, never `NOT_FOUND`.
   - **S-03:** JSON-RPC batch cap of **1 tool call per HTTP request** (Q12) and a body cap.
+  - **News budget follow-through (moved from R3, Q16):** sources starved by the subrequest budget are reported `PROVIDER_BUDGET_EXHAUSTED` and coverage states the budget cause (today's live MSFT 0-item case).
   - **Per-invocation subrequest budget guard (V3, required on any plan):** count `fetch()` and Cache API calls in the request scope against the **50-per-invocation Free limit** (leave a reserve for the response path), stop starting new upstream work before the limit, and mark the affected sources `PROVIDER_BUDGET_EXHAUSTED`, never `PROVIDER_ERROR` or clean absence. Production already exceeds Free's 50 (V3).
   - **S-05:** evidence-store `list()` guard.
   - **S-07/S-09:** workflow permissions, `--ignore-scripts`, actions pinned to SHAs.
   - **S-10/S-11:** dependency upgrades, `uv sync --frozen`, audit gates.
   - **S-13:** restrict CORS once auth exists.
 - **Entry criteria:**
+  - [ ] Phase 3 exit criteria are met (Q16: Phase 1 runs after the pilot).
+  - [ ] Phase 2 harness cases that touch `/mcp` transport, canaries or the two fetching tools are updated in the same release, because they characterised the unauthenticated behaviour.
   - [x] §7 Q12 decided 2026-10-15: stay on Free; per-tool caps; JSON-RPC batch = 1 tool call.
-  - [ ] §7 V1: owner confirms the **Request headers** section is available in claude.ai's Add custom connector dialog, **or** Q13 is decided.
+  - [x] §7 V1 / Q13 resolved 2026-10-15: no Request headers in claude.ai, so the credential is accepted as a bearer header **or** the secret path `/mcp/<token>`.
   - [ ] Scripts send `Authorization` from an `MCP_TOKEN` secret (all 9 scripts that post to `MCP_URL`).
   - [x] §7 Q11 names confirmed (2026-10-15): `AUTH_REQUIRED`, `BATCH_LIMIT_EXCEEDED`, `PROVIDER_BUDGET_EXHAUSTED`, `PROVIDER_OPT_IN_REQUIRED`.
   - [ ] The owner acknowledges §7 V2: with **0 approved IR entries** today, company-IR URL fetches are refused until entries are approved.
@@ -239,7 +242,7 @@ Each R-release is a set of **separately released** behaviour changes that must b
   - **Release mechanics:** additive, so a minor version bump. Frozen-contract tests and canaries are updated in the same release. The harness pins both old and new fields.
 - **R3 (before Phase 3):**
   - BR-NWS-007: news coverage must not report `FULL` while required sources have failed (Q3i).
-  - V3 news follow-through: sources starved by the subrequest budget are reported `PROVIDER_BUDGET_EXHAUSTED` and coverage states the budget cause. This is today's live MSFT 0-item case.
+  - *(V3 news budget follow-through moved to Phase 1 with the budget guard it depends on; Q16.)*
   - Q3h: `sources` omitted or null means the defaults; `sources=[]` means attempt none; requested, attempted, skipped and defaulted metadata kept separate; `sourceStatus` describes what actually happened.
   - **Q7:** targeted rule extraction for News (`/modernize-extract-rules` with a news `modulePattern`), with the new rules folded into Phase 2's harness.
 - **R4 (before Phase 4):**
@@ -281,7 +284,7 @@ Each R-release is a set of **separately released** behaviour changes that must b
   - The tools are `get_company_news`, `search_company_news`, `get_company_press_releases`, `get_public_event_timeline`, `get_sec_recent_events` and `verify_company_event`. `get_uk_company_filings` moves with providers.
   - Output must be byte-identical. Imports back into the god files are allowed and recorded.
 - **Entry criteria:**
-  - [ ] Phase 1 and Phase 2 exit criteria are met.
+  - [ ] Phase 2 exit criteria are met. (Phase 1 is no longer a prerequisite: Q16.)
   - [ ] R3 is released and live-verified.
   - [ ] The Q7 news rules are in the harness.
 - **Exit criteria:**
@@ -500,7 +503,11 @@ These are the **84 P0 rules** in `BUSINESS_RULES.md` §2 (data integrity of publ
   - The Worker has no OAuth endpoints and `/mcp` ignores credentials, so either a request header is already configured (the beta is available, so V1 passes) or the flag is registration metadata. This is not decidable from inside a session.
   - Confirm either in claude.ai (connector settings show a Request header) or in Cloudflare Workers logs (Claude's requests carry `Authorization`).
 
-  **Result: V1 PASSES only if the owner's claude.ai account shows Request headers.** If it doesn't, a static bearer locks out every claude.ai-based client (connector, Desktop/mobile remote use, the live verifier), and Q13 applies.
+  **Measured 2026-10-15 after release 2.6.0 (build `c2dd5e4`, Worker version `6fd44cd9…`):** `system/health_check` called through this session's claude.ai `Yahoo Finance MCP` connector returned **`authorizationHeaderPresent: false`**. The connector currently sends no `Authorization` header, so `isAuthless: false` was registration metadata and not a configured header.
+  - **Consequence:** enforcing a static bearer token today would lock this connector out. **Q13 must be decided before Phase 1.**
+  - **Escape hatch:** if the owner later finds Request headers in the Add custom connector dialog and re-adds the connector with `Bearer <token>`, re-run the same call. `true` restores the header-only path.
+
+  **Result (2026-10-15): V1 FAILS.** The owner confirmed the Add custom connector dialog shows **no Request headers section**, consistent with the measured `authorizationHeaderPresent: false`. Resolved by Q13 (a). If it doesn't, a static bearer locks out every claude.ai-based client (connector, Desktop/mobile remote use, the live verifier), and Q13 applies.
 - **V2 (acknowledge before Phase 1).** `worker/src/company-ir-page-registry.json` has **0 `approved` entries** (2 `candidate`). Under Q2a, company-IR URL fetches are refused until entries are approved; `raw_text` is the only route meanwhile.
 - **V3 (gates the Q3c cap in R4): measured 2026-10-15; see `v3/V3_SUBREQUESTS.md`. Plan = Workers FREE (owner-confirmed).**
   - **Limits, checked against the raw Cloudflare docs:**
@@ -563,6 +570,13 @@ These are the **84 P0 rules** in `BUSINESS_RULES.md` §2 (data integrity of publ
   | `t2_inputs` | `pricePositionInputs` | current price, 52-week high/low, % from high/low |
   | `t4_inputs` | `earningsInputs` | beat rate, beat streak, average surprise, momentum flag, pre-revenue |
   | `t5_inputs` | `technicalInputs` | MACD, MACD histogram, moving-average trend, last close |
+- [x] **Q16. Phase ordering: DEFER ALL OF PHASE 1 (owner decision 2026-10-15).** Owner, verbatim: "defer all phase 1". Phase 1 now runs after the Phase 3 pilot and before R4. Its scope is unchanged, plus the R3 news budget follow-through that depends on its budget guard. Phase 3 no longer requires Phase 1.
+  - **Risk accepted by the owner until Phase 1 ships** (production 2.6.0 verified unauthenticated on 2026-10-15):
+    - **S-01:** an open fetch proxy through `parse_public_transcript` / `index_earnings_release`. Abuse originates from Cloudflare under the owner's account.
+    - **S-02:** anonymous callers can spend Finnhub, Alpha Vantage and Marketaux quota and trigger the 6-hour provider-denial memo for everyone.
+    - **Free-plan daily cap:** anonymous traffic can exhaust 100,000 requests per day (Error 1027 until midnight UTC).
+    - **Subrequest overflow** keeps mislabelling starved news sources as `PROVIDER_ERROR` (V3).
+  - The split alternative (a minimal 1a with auth plus the allow-list first) was offered and declined.
 - [ ] **Downstream notice (not a gate).** The Sniper Doctrine, and any other consumer, should move to the universal fields within the RN window. The deprecation notices in payloads and docs carry the mapping.
 - [x] **Q12. Cloudflare plan strategy: STAY ON WORKERS FREE WITH PER-TOOL CAPS (owner decision 2026-10-15).** Q3c's single cap of 10 is superseded by the measured constraint (V3). Caps are advertised in each tool's schema as `maxItems`, enforced identically in **both runtimes** (Python too, for parity, although it has no subrequest limit), and an oversize request is rejected with `BATCH_LIMIT_EXCEEDED` instead of being truncated:
 
@@ -584,18 +598,28 @@ These are the **84 P0 rules** in `BUSINESS_RULES.md` §2 (data integrity of publ
   - The 10 ms CPU limit stays a live risk: Q10 telemetry must record `exceededCpu`/`exceededResources` per action.
   - The 100,000 requests/day cap makes Phase 1 auth an availability control. Also choose the route's fail mode for Error 1027 (fail-closed recommended, so no request bypasses auth).
   - Re-open this decision if the telemetry shows sustained 1102 errors or daily-cap exhaustion.
-- [ ] **V1:** owner checks claude.ai for the **Request headers** section (see V1).
-- [ ] **Q13 (only if V1 fails; gates Phase 1).** How the static credential reaches the Worker when claude.ai can't send headers. The auth abstraction from Q2b stays; only the transport differs:
-  - **(a) Secret path segment** (`/mcp/<token>`), accepted alongside the bearer header. It works with no-auth connectors, needs no OAuth, and is replaceable later. The cost is that the token is in the URL, so it must be redacted from Workers logs and the Q10 telemetry, and rotation means re-adding the connector.
-  - **(b) OAuth (DCR/CIMD).** The only per-user option claude.ai supports by default, but the owner ruled OAuth out of this program (Q2b).
-  - **(c) Request-header beta access.** Ask Anthropic for the feature and keep the bearer as decided.
-  - Recommendation: **(a) now, (c) when available**, both behind the same abstraction.
+- [x] **V1:** resolved, see Q13.
+- [x] **Q13. Credential transport: (a) SECRET PATH, decided 2026-10-15.** The owner confirmed claude.ai has no Request headers section (V1 fails) and followed the planner recommendation "(c) if available, otherwise (a)".
+  - **Accepted credentials:** the Worker accepts the static credential **either** as `Authorization: Bearer <token>` **or** as a path segment `/mcp/<token>`, both compared in constant time behind the replaceable auth abstraction (Q2b).
+  - **Rejections:** plain `/mcp` without a credential returns `AUTH_REQUIRED` (HTTP 401). `/health` stays unauthenticated and makes no provider calls.
+  - **Connector setup:** the claude.ai connector is re-added with URL `https://yahoo-finance-mcp.artinatw.workers.dev/mcp/<token>` (no sign-in).
+  - **Mitigations, required:**
+    - The token is at least 32 random bytes, URL-safe, and held as a Worker secret (e.g. `MCP_TOKEN`).
+    - The path segment is stripped from any URL the Worker logs or exports (Q10 telemetry, error messages, `/health`).
+    - Cloudflare invocation logs (`[observability.logs] persist = true`) will contain the token; they are account-private, so treat log access as secret access.
+    - Rotation = new secret plus re-adding the connector. Rotating the token restores protection if it ever leaks.
+    - Canaries and smoke scripts use the header form from the `MCP_TOKEN` GitHub secret.
+  - **Later:** if Request headers becomes available, switch the connector to the header form and optionally disable the path form. No code change is needed beyond a config flag.
+  - **Not chosen:** OAuth (ruled out in Q2b; heavy on the Free plan). It remains a possible later project behind the same abstraction.
 
 ## 8. Approval Block
 
 ```
-Approved by: ________________  Date: __________
-Approval covers: Phase 1 only | Phases 1–3 (incl. R3, RN) | Full plan
+Approved by: repository owner (carnat), in session  Date: 2026-10-15
+Approval covers: Phase 2, R3, RN and Phase 3 (pilot)
+Owner's words, verbatim: "approve Phase 2, R3, RN and Phase 3"
 ```
 
-The Doctrine no longer gates approval (Q14/N4). Before signing, settle **V1** (claude.ai Request headers; otherwise Q13). All naming decisions (Q11, Q15, Q15a) are closed. Recommended scope: **Phases 1–3 including R3 and RN**. Phase 3 is the pilot, and the brief will be regenerated for R4 onward.
+**Not approved yet:** Phase 1 (deferred, Q16), R4, Phases 4–6 and R5. They are approved against the brief regenerated after the Phase 3 pilot.
+
+The Doctrine no longer gates approval (Q14/N4). **All open questions are resolved** (V1 and Q13 on 2026-10-15; naming Q11/Q15/Q15a closed). The brief is ready to sign. Recommended scope under Q16: **Phase 2, R3, RN and Phase 3 (pilot)**; Phase 1 then follows. Phase 3 is the pilot, and the brief will be regenerated afterwards for Phase 1, R4 and onward. Q16 records the security exposure accepted in the meantime.
