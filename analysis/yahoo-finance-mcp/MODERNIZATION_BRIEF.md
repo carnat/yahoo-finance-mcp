@@ -183,7 +183,7 @@ Every PR follows `CLAUDE.md`: the TS change first, then the `python-mirror` port
   - **S-13:** restrict CORS once auth exists.
 - **Entry criteria:**
   - [ ] §7 V1 is verified: every client in use (the claude.ai connector, Claude Desktop, deploy canaries, the live verifier) can send a static `Authorization` header, or a fallback is recorded here.
-  - [ ] §7 Q11 names are confirmed for the auth-failure code, the batch-oversize code and the budget-exhausted state.
+  - [x] §7 Q11 names confirmed (2026-10-15): `AUTH_REQUIRED`, `BATCH_LIMIT_EXCEEDED`, `PROVIDER_BUDGET_EXHAUSTED`, `PROVIDER_OPT_IN_REQUIRED`.
   - [ ] The owner acknowledges §7 V2: with **0 approved IR entries** today, company-IR URL fetches are refused until entries are approved.
   - [ ] `main` CI is green.
   - [ ] S-01 and S-02 are reproduced as failing tests in both runtimes.
@@ -244,7 +244,7 @@ Each R-release is a set of **separately released** behaviour changes that must b
   - **Fundamentals and providers** each get a **Q7** targeted rule extraction before their R5 release.
 - **Entry criteria (each R-release):**
   - [ ] Its pinned assertions exist (Phase 2).
-  - [ ] Any new name it introduces is confirmed in §7 Q11.
+  - [x] Any new name it introduces is confirmed in §7 Q11 (all accepted 2026-10-15; a name not in that table needs a new owner decision).
 - **Exit criteria (each R-release):**
   - [ ] Its pinned assertions are flipped and pass in both runtimes.
   - [ ] The rest of the harness diff is 0.
@@ -472,22 +472,27 @@ These are the **84 P0 rules** in `BUSINESS_RULES.md` §2 (data integrity of publ
 
 ### Still open
 
-- [ ] **Q11 (gates each R-release that introduces a name; `CLAUDE.md` planner decision).** Confirm exact spellings. Proposed:
+- [x] **Q11. Names for new codes and fields. Accepted by the owner 2026-10-15 as proposed.** Checked against the code: no name clashes with an existing name of different meaning. Three already exist with the same meaning; the repair extends the existing usage instead of adding a parallel name.
 
-  | Concept | Proposed name | Kind |
-  |---|---|---|
-  | Unauthenticated `/mcp` | `AUTH_REQUIRED` (HTTP 401) | error code |
-  | Oversize ticker batch | `BATCH_LIMIT_EXCEEDED` | error code |
-  | Paid-provider budget spent | `PROVIDER_BUDGET_EXHAUSTED` | per-source status (non-evidence) |
-  | Paid provider not opted in | `PROVIDER_OPT_IN_REQUIRED` | per-source status (skipped) |
-  | Zero-volume session | `ZERO_VOLUME_NO_RATIO` | warning code |
-  | Fewer than 4 quarters | `TTM_PARTIAL` | status / basis |
-  | Loss-making with net debt | `NEGATIVE_EARNINGS_BASE` | credit tier state |
-  | NCI missing for ProfitLoss | `NCI_NOT_TAGGED` | `unresolvedReason` |
-  | Short history for CAGR window | `INSUFFICIENT_HISTORY` | `unresolvedReason` |
-  | Exact accession not found | `ACCESSION_NOT_FOUND` | error code |
-  | Prior exchange session unknown | `SESSION_CALENDAR_UNKNOWN` | freshness reason |
-  | Source metadata | `requestedSources`, `attemptedSources`, `skippedSources`, `defaultSourcesApplied` | fields |
+  | Concept | Name | Kind | Existing usage |
+  |---|---|---|---|
+  | Unauthenticated `/mcp` | `AUTH_REQUIRED` (HTTP 401) | error code | new |
+  | Oversize ticker batch | `BATCH_LIMIT_EXCEEDED` | error code | new |
+  | Paid-provider budget spent | `PROVIDER_BUDGET_EXHAUSTED` | per-source status (non-evidence) | new; follows existing `DISCOVERY_BUDGET_EXHAUSTED` / `COMPANY_IR_DISCOVERY_BUDGET_EXHAUSTED` naming |
+  | Paid provider not opted in | `PROVIDER_OPT_IN_REQUIRED` | per-source status (skipped) | new |
+  | Zero-volume session | `ZERO_VOLUME_NO_RATIO` | warning code | new |
+  | Fewer than 4 quarters | `TTM_PARTIAL` | status / basis | new |
+  | Loss-making with net debt | `NEGATIVE_EARNINGS_BASE` | credit-tier state | **exists** as a credit-health warning code (`server.py:6847`, `yahoo-finance.ts:4403`); the repair adds it as the tier value replacing a mechanical `CLEAN`, and keeps the warning |
+  | NCI missing for ProfitLoss | `NCI_NOT_TAGGED` | `unresolvedReason` | new |
+  | Short history for CAGR window | `INSUFFICIENT_HISTORY` | `unresolvedReason` | new |
+  | Exact accession not found | `ACCESSION_NOT_FOUND` | error code | new |
+  | Prior exchange session unknown | `SESSION_CALENDAR_UNKNOWN` | freshness reason | new |
+  | Requested sources | `requestedSources` | field | new |
+  | Attempted sources | `attemptedSources` | field | **exists** in the transcript tool (`earnings.py:1741`); news uses the same list shape |
+  | Skipped sources | `skippedSources` | field | **exists** in the news coverage block (`server.py:350`); Q3h keeps its row shape and adds the explicit-empty and opt-in reasons |
+  | Defaults substituted | `defaultSourcesApplied` | field (boolean) | new |
+
+  Every name lands as a deliberate frozen-contract change: `public_tool_contract.py`, canaries and docs are updated in the release that introduces it, with a minor version bump.
 - [ ] **Doctrine refinement.** Refine the Sniper Doctrine MCP contract against these decisions; then re-tag R2's operative set and regenerate this brief.
 - [ ] **V1, V3:** answer before their gates.
 
