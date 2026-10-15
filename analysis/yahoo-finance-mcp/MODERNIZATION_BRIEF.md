@@ -113,7 +113,7 @@ C4Container
 | `server.py#news` + `yahoo-finance.ts#news` | `yfmcp/news.py` + `worker/src/news.ts` (**pilot**) | Phase 3 |
 | Worker ignores `accession_number` | Honoured with Python-equivalent fail-closed semantics (Q3a) | R4 |
 | Ticker/accession validation scattered (Worker mostly unvalidated) | One validation module per runtime applied to every relevant action (Q3b) | R4 |
-| Worker batch truncation at 5; Python unlimited | Advertised cap(s) in both runtimes per Q12 (10 on Paid, per-tool on Free), oversize rejected explicitly (Q3c) | R4 |
+| Worker batch truncation at 5; Python unlimited | Per-tool advertised caps in both runtimes (Q12, Free plan), oversize rejected with `BATCH_LIMIT_EXCEEDED` (Q3c) | R4 |
 | `SMOKE_TICKER_CIK_FALLBACKS` in the production lookup (`yahoo-finance.ts:535`, `edgar.py:56`) | Test-only injected fixture (Q4, resolution R1) | R4 |
 | No production telemetry | Privacy-minimised Worker telemetry export (Q10) | R4 |
 | `mcp[cli]>=1.6.0,<3` with private-internals use | Pinned to `>=2.2,<3`, public APIs only (Q8) | R4 |
@@ -176,14 +176,14 @@ Every PR follows `CLAUDE.md`: the TS change first, then the `python-mirror` port
 - **Scope:**
   - **Q2a:** strict HTTPS allow-list. SEC Archives and approved SEC endpoints, the exact Yahoo hosts needed by the transcript and news workflows, and the exact hosts of IR-registry entries with status `approved`. Every redirect hop is re-validated. Private, loopback, link-local and IP-literal destinations are rejected. No wildcards. `raw_text` is caller content only and never auto-fetches. This also covers the earnings-release URL policy (BR-ERN-017).
   - **Q2b:** `/mcp` requires a static bearer token behind a replaceable auth abstraction. Rate limits and provider budgets are keyed by credential, not IP. An unauthenticated `/health` may exist only if it makes no provider calls. Paid providers need auth **and** explicit caller opt-in, and default waterfalls never force them. Budget exhaustion returns a typed non-evidence state, never `NOT_FOUND`.
-  - **S-03:** JSON-RPC batch cap and body cap (the batch cap value follows Q12).
-  - **Per-invocation subrequest budget guard (V3, required on any plan):** count `fetch()` and Cache API calls in the request scope against the plan limit, stop starting new upstream work before the limit, and mark the affected sources `PROVIDER_BUDGET_EXHAUSTED`, never `PROVIDER_ERROR` or clean absence. Production already exceeds Free's 50 (V3).
+  - **S-03:** JSON-RPC batch cap of **1 tool call per HTTP request** (Q12) and a body cap.
+  - **Per-invocation subrequest budget guard (V3, required on any plan):** count `fetch()` and Cache API calls in the request scope against the **50-per-invocation Free limit** (leave a reserve for the response path), stop starting new upstream work before the limit, and mark the affected sources `PROVIDER_BUDGET_EXHAUSTED`, never `PROVIDER_ERROR` or clean absence. Production already exceeds Free's 50 (V3).
   - **S-05:** evidence-store `list()` guard.
   - **S-07/S-09:** workflow permissions, `--ignore-scripts`, actions pinned to SHAs.
   - **S-10/S-11:** dependency upgrades, `uv sync --frozen`, audit gates.
   - **S-13:** restrict CORS once auth exists.
 - **Entry criteria:**
-  - [ ] §7 Q12 is decided (plan strategy and batch-cap values).
+  - [x] §7 Q12 decided 2026-10-15: stay on Free; per-tool caps; JSON-RPC batch = 1 tool call.
   - [ ] §7 V1 is verified: every client in use (the claude.ai connector, Claude Desktop, deploy canaries, the live verifier) can send a static `Authorization` header, or a fallback is recorded here.
   - [x] §7 Q11 names confirmed (2026-10-15): `AUTH_REQUIRED`, `BATCH_LIMIT_EXCEEDED`, `PROVIDER_BUDGET_EXHAUSTED`, `PROVIDER_OPT_IN_REQUIRED`.
   - [ ] The owner acknowledges §7 V2: with **0 approved IR entries** today, company-IR URL fetches are refused until entries are approved.
@@ -229,7 +229,7 @@ Each R-release is a set of **separately released** behaviour changes that must b
 - **R4 (before Phase 4):**
   - Q3a: the Worker honours exact `accession_number` with fail-closed semantics.
   - Q3b: central ticker and accession validation in both runtimes, on every relevant action, including the Python paths that skip it.
-  - Q3c: advertised batch cap(s) with explicit oversize rejection: one cap of 10 if Q12 = Paid, the per-tool caps if Q12 = Free.
+  - Q3c + Q12: the per-tool ticker caps from the §7 Q12 table, advertised as schema `maxItems` and rejected with `BATCH_LIMIT_EXCEEDED` in both runtimes. Measure `get_market_snapshot` first and set its cap. Correct the stale comment at `yahoo-finance.ts:58–64`.
   - Q4: smoke-ticker table out of the production lookup.
   - Q8: pin `mcp>=2.2,<3` and replace private-internals use (`_tool_manager._tools`, the `FastMCP.tool` monkey-patch) with public APIs, failing loudly.
   - Q10: privacy-minimised telemetry export capturing a **baseline window before any Phase 4 merge**.
@@ -442,7 +442,7 @@ These are the **84 P0 rules** in `BUSINESS_RULES.md` §2 (data integrity of publ
 - [x] **Q2b (gates Phase 1).** `/mcp` uses a static bearer token for this modernization behind a replaceable auth abstraction. Rate limits/provider budgets key from authenticated identity. Anonymous `/mcp` provider calls are not allowed. Paid providers require authenticated explicit opt-in; budget exhaustion is typed failure/non-evidence, never NOT_FOUND.
 - [x] **Q3a.** CHANGE: Worker must honor exact `accession_number` with Python-equivalent fail-closed semantics before Phase 4.
 - [x] **Q3b.** CHANGE: centralize ticker/accession validation and apply it consistently across both runtimes/public actions.
-- [x] **Q3c.** CHANGE: zero-volume ratio/flag = null/UNKNOWN with explicit warning. Remove silent Worker truncation; one advertised cross-runtime batch cap, initially 10, with explicit oversize rejection.
+- [x] **Q3c.** CHANGE: zero-volume ratio/flag = null/UNKNOWN with explicit warning. Remove silent Worker truncation; one advertised cross-runtime batch cap, initially 10, with explicit oversize rejection. — *Cap value superseded by Q12 (per-tool caps on the Free plan); the zero-volume rule and explicit rejection stand.*
 - [x] **Q3d.** CHANGE: thresholds use unrounded raw values; display rounding is deterministic and cross-runtime; missing `dataDate` stays null and never falls back to today.
 - [x] **Q3e.** CHANGE: NaN/inf tolerance -> documented 0.5% default before finite clamp; align AGREED definition to latest SEC + >=1 independent matching provider.
 - [x] **Q3f.** CHANGE: use inclusive `>=` ITM boundary consistently across instrument classes; treasury-stock math still yields zero incremental option/warrant shares at exact strike.
@@ -474,7 +474,7 @@ These are the **84 P0 rules** in `BUSINESS_RULES.md` §2 (data integrity of publ
     - **100,000 requests per day**, after which every request gets Error 1027 until midnight UTC.
   - **Measured on reachable batch tools:** `analyze_credit_health` about 62 at n=10; `get_company_news` (defaults) about 61; `analyze_financial_ratios` about 42. Others stay at or under about 32.
   - **Already broken in production at today's cap of 5:** a live 2-ticker `get_company_news` call with company-IR and newswire sources returned 11 × "Too many subrequests". MSFT came back with 0 items, its sources mislabelled `PROVIDER_ERROR` / `DISCOVERY_BUDGET_EXHAUSTED`, under a top-level `ok: true`.
-  - **Verdict:** **a cap of 10 is not safe on Free.** The decision moves to Q12.
+  - **Verdict:** **a cap of 10 is not safe on Free.** Resolved by Q12: stay on Free with per-tool caps.
   - **Daily-cap risk:** on Free, the unauthenticated `/mcp` (S-02) also lets anyone exhaust the 100,000/day quota and take the whole endpoint down until midnight UTC. That raises Phase 1 auth from a quota problem to an availability problem.
   - **Stale comment:** `yahoo-finance.ts:58–64` ("1000 on paid", "1–3 per ticker") is out of date; fix it with Q3c.
 - **V4 (informs R5-extractors).** Q3f changes the published `inTheMoney` flag for options and warrants at exactly the strike (`capital_structure.py:604, 610, 1069`). Incremental shares stay 0. Q3d similarly moves boundary cases between brackets, because today's thresholds compare the rounded value (`server.py:7945–7954`).
@@ -506,18 +506,26 @@ These are the **84 P0 rules** in `BUSINESS_RULES.md` §2 (data integrity of publ
 
   Every name lands as a deliberate frozen-contract change: `public_tool_contract.py`, canaries and docs are updated in the release that introduces it, with a minor version bump.
 - [ ] **Doctrine refinement.** Refine the Sniper Doctrine MCP contract against these decisions; then re-tag R2's operative set and regenerate this brief.
-- [ ] **Q12 (gates Phase 1 batch caps and the Q3c cap in R4). Cloudflare plan strategy, decided by measurement (V3).** Q3c set 10 "unless a measured production constraint justifies another value", and V3 is that constraint.
-  - **(A) Upgrade to Workers Paid.** 10,000 subrequests per invocation (configurable), 30 s CPU and no daily request cap. Keeps Q3c's single advertised cap of 10 and removes the Free CPU and daily-cap risks.
-  - **(B) Stay on Free.** Replace the single cap with **cost-aware per-tool caps**, all at or under 40 of the 50:
-    - quote, profile, fund, MA, volume, price performance, rating changes, earnings momentum: 10;
-    - `analyze_financial_ratios`: 5;
-    - `analyze_credit_health`: 5;
-    - `get_company_news` with default sources: 5;
-    - news with any of `company_ir`, `company_ir_page` or `newswire`: 1;
-    - JSON-RPC batches: 1 tool call.
+- [x] **Q12. Cloudflare plan strategy: STAY ON WORKERS FREE WITH PER-TOOL CAPS (owner decision 2026-10-15).** Q3c's single cap of 10 is superseded by the measured constraint (V3). Caps are advertised in each tool's schema as `maxItems`, enforced identically in **both runtimes** (Python too, for parity, although it has no subrequest limit), and an oversize request is rejected with `BATCH_LIMIT_EXCEEDED` instead of being truncated:
 
-    Each cap is advertised in the schema and an oversize request is rejected with `BATCH_LIMIT_EXCEEDED`.
-  - **Under either option:** the per-invocation subrequest budget guard (Phase 1) is required.
+  | Public action(s) | Ticker cap | Measured at that cap (cold) |
+  |---|---:|---:|
+  | `get_market_quote`, `get_company_profile`, `get_fund_profile`, `analyze_moving_average_position`, `analyze_volume_ratio` | 10 | ≤ ~12 |
+  | `analyze_price_performance` | 10 | ~22 |
+  | `get_analyst_rating_changes`, `analyze_earnings_momentum` | 10 | ~32 |
+  | `analyze_financial_ratios` | 5 | 22 |
+  | `analyze_credit_health` | 5 | 32 |
+  | `get_company_news`, default sources | 5 | 32 (+ paid providers when keyed) |
+  | `get_company_news` when `sources` includes `company_ir`, `company_ir_page` or `newswire` | 1 | ~39 |
+  | `get_market_snapshot` | 5 (today's value) | **not measured**; measure in R4 and set a cap of at most 40 |
+  | JSON-RPC batch (Phase 1, S-03) | 1 tool call per HTTP request | — |
+
+  **Consequences accepted with this choice:**
+  - The 50-subrequest ceiling cannot be raised.
+  - The per-invocation budget guard is the only protection against overflow, and it is **required**.
+  - The 10 ms CPU limit stays a live risk: Q10 telemetry must record `exceededCpu`/`exceededResources` per action.
+  - The 100,000 requests/day cap makes Phase 1 auth an availability control. Also choose the route's fail mode for Error 1027 (fail-closed recommended, so no request bypasses auth).
+  - Re-open this decision if the telemetry shows sustained 1102 errors or daily-cap exhaustion.
 - [ ] **V1:** answer before Phase 1.
 
 ## 8. Approval Block
