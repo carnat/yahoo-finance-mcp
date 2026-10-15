@@ -131,7 +131,7 @@ C4Container
 | Python reading `worker/src/*.json` | Shared data dir | Phase 6 |
 | `doctrineUse` (ALLOWED / VERIFY_ONLY / DIAGNOSTICS_ONLY / BLOCKED), Worker only; `DoctrineToolStatus` type | Universal `reliabilityClass` (`RELIABLE` / `VERIFY_BEFORE_USE` / `DIAGNOSTIC` / `UNRELIABLE`) in **both** runtimes; old field deprecated, then removed (N1) | RN deprecate → Phase 6 remove |
 | Always-null boundary fields `g2`, `opportunity`, `action`, `priceTarget`, `scenarioWeights`, `selectedMethod`, `selectedMultiple` | `decisionUse: EVIDENCE_ONLY` as the single universal marker; null fields deprecated, then removed (N2) | RN deprecate → Phase 6 remove |
-| Strategy labels and thresholds: price-target `bracket` (STRONG_BUY / ACCEPTABLE / CAUTION / AVOID at 75/90/100%), `inferredTag` (SPECULATIVE / LONG / NEAR / INVERTED); liquidity gate (fixed $10M average daily value traded); `t1_inputs` | Raw measures plus neutral, caller-parameterised comparisons: `priceAtOrAboveTarget`; optional caller `min_adv_usd` → `meetsMinimum`; `t1_inputs` → `inputs`. Labels deprecated, then removed (N3) | RN deprecate → Phase 6 remove |
+| Strategy labels and thresholds: price-target `bracket` (STRONG_BUY / ACCEPTABLE / CAUTION / AVOID at 75/90/100%), `inferredTag` (SPECULATIVE / LONG / NEAR / INVERTED); liquidity gate (fixed $10M average daily value traded); tier-numbered `t1/t2/t4/t5_inputs` | Raw measures plus neutral, caller-parameterised comparisons: `priceAtOrAboveTarget`; optional caller `min_adv_usd` → `meetsMinimum`; `t1_inputs`/`t2_inputs`/`t4_inputs`/`t5_inputs` → topic-named groups (Q15a). Labels deprecated, then removed (N3) | RN deprecate → Phase 6 remove |
 
 ## 3. Phased Sequence
 
@@ -233,8 +233,8 @@ Every PR follows `CLAUDE.md`: the TS change first, then the `python-mirror` port
 Each R-release is a set of **separately released** behaviour changes that must be live before the move it precedes. All follow the TS → Python mirror → parity flip → docs → version bump → live-verify order.
 
 - **RN: neutrality deprecation release (Q14, N1–N3); ships with or right after R3, before Phase 3.** One cross-cutting release in both runtimes:
-  - **Add the universal fields:** `reliabilityClass` on every tool status (Python gains it too, which also closes the Worker-only parity gap), `priceAtOrAboveTarget`, the optional `min_adv_usd` input with `meetsMinimum`, and `inputs`.
-  - **Keep the old fields for the window:** `doctrineUse`, the seven null boundary fields, `bracket`, `inferredTag`, the fixed liquidity-gate fields and `t1_inputs` are still emitted with **identical values**, marked deprecated in the schema descriptions and `docs/provider-runtime-guidance.md`, with a `DEPRECATED_FIELD` notice naming each field's replacement.
+  - **Add the universal fields:** `reliabilityClass` on every tool status (Python gains it too, which also closes the Worker-only parity gap), `priceAtOrAboveTarget`, the optional `min_adv_usd` input with `meetsMinimum`, and the four topic-named input groups (Q15a).
+  - **Keep the old fields for the window:** `doctrineUse`, the seven null boundary fields, `bracket`, `inferredTag`, the fixed liquidity-gate fields and the four `t*_inputs` groups are still emitted with **identical values**, marked deprecated in the schema descriptions and `docs/provider-runtime-guidance.md`, with a `DEPRECATED_FIELD` notice naming each field's replacement.
   - **Window:** at least **one minor version**. The removal release is in Phase 6.
   - **Release mechanics:** additive, so a minor version bump. Frozen-contract tests and canaries are updated in the same release. The harness pins both old and new fields.
 - **R3 (before Phase 3):**
@@ -355,7 +355,7 @@ Each R-release is a set of **separately released** behaviour changes that must b
   - Stale comments and the "79 tools" text (Debt #10).
   - `docs/architecture.md` with the module map.
   - Q3i items triaged as "preserve" get documented as intentional.
-  - **Neutrality removal release (N1–N3):** after at least one minor version since RN, remove `doctrineUse`, the seven null boundary fields, `bracket`, `inferredTag`, the fixed liquidity-gate fields and `t1_inputs` from both runtimes. This is a breaking public-contract change, so it needs a **major version bump** under the README's semver policy (or the owner records an exception). Rename the internal `DoctrineToolStatus` type and `TOOL_DOCTRINE_STATUS` table to neutral names.
+  - **Neutrality removal release (N1–N3):** after at least one minor version since RN, remove `doctrineUse`, the seven null boundary fields, `bracket`, `inferredTag`, the fixed liquidity-gate fields and the four `t*_inputs` groups from both runtimes. This is a breaking public-contract change, so it needs a **major version bump** under the README's semver policy (or the owner records an exception). Rename the internal `DoctrineToolStatus` type and `TOOL_DOCTRINE_STATUS` table to neutral names.
   - **Neutrality audit:** every label-producing field in the contract must be either a factual classification or derived from documented thresholds the caller can override. Doctrine or strategy vocabulary stays out of names, enums and descriptions (extends `docs/tool-naming.md`). Generic market terms (bullish/bearish, credit tiers) are reviewed against that rule.
 - **Entry criteria:**
   - [ ] Phase 5 exit criteria are met.
@@ -540,15 +540,23 @@ These are the **84 P0 rules** in `BUSINESS_RULES.md` §2 (data integrity of publ
   - **N3:** strategy labels and fixed thresholds become raw measures plus caller-parameterised neutral comparisons.
   - **N4:** the Doctrine no longer gates this plan; it adapts to versioned contract changes like any consumer.
   - **Mechanics:** deprecate in RN (at least one minor version), remove in Phase 6 (major version).
-- [ ] **Q15 (gates RN; `CLAUDE.md` naming decision). Proposed universal names:**
+- [x] **Q15. Universal names: ACCEPTED by the owner 2026-10-15.** Checked against the code: none collides with an existing name. The deprecation notice follows the existing `DEPRECATED_TOOL` code's naming. **One row was corrected after acceptance and needs confirmation (Q15a).**
 
   | Replaces | Proposed | Values / meaning |
   |---|---|---|
   | `doctrineUse` | `reliabilityClass` | `RELIABLE` (was ALLOWED) · `VERIFY_BEFORE_USE` (VERIFY_ONLY) · `DIAGNOSTIC` (DIAGNOSTICS_ONLY) · `UNRELIABLE` (BLOCKED, e.g. unverified section markdown) |
   | `bracket`, `inferredTag`, `invertedFlag` | `priceAtOrAboveTarget` (boolean); raw `referenceTargetPct` and `distanceToTargetPct` already exist | no labels |
   | fixed $10M liquidity gate fields | optional input `min_adv_usd`; output `meetsMinimum` (null when no minimum is supplied); raw ADV value already exists | caller-defined threshold |
-  | `t1_inputs` | `inputs` | same content |
+  | ~~`t1_inputs` → `inputs`~~ | *superseded by Q15a* | — |
   | deprecation notice | warning code `DEPRECATED_FIELD` (names the field and its replacement) | — |
+- [ ] **Q15a (gates RN). Correction to the `t1_inputs` row.** `analyze_position_signals` returns four doctrine-numbered tier groups, not one: `t1_inputs`, `t2_inputs`, `t4_inputs` and `t5_inputs` (`server.py:8116–8119`, `worker/src/tools.ts:1180–1183`; there is no t3). Renaming only `t1_inputs` to `inputs` would leave three tier keys and make `inputs` ambiguous. Proposed topic names, keeping content identical:
+
+  | Replaces | Proposed | Holds |
+  |---|---|---|
+  | `t1_inputs` | `analystInputs` | upgrades/initiations (30d), net sentiment, dominant rating, analyst count |
+  | `t2_inputs` | `pricePositionInputs` | current price, 52-week high/low, % from high/low |
+  | `t4_inputs` | `earningsInputs` | beat rate, beat streak, average surprise, momentum flag, pre-revenue |
+  | `t5_inputs` | `technicalInputs` | MACD, MACD histogram, moving-average trend, last close |
 - [ ] **Downstream notice (not a gate).** The Sniper Doctrine, and any other consumer, should move to the universal fields within the RN window. The deprecation notices in payloads and docs carry the mapping.
 - [x] **Q12. Cloudflare plan strategy: STAY ON WORKERS FREE WITH PER-TOOL CAPS (owner decision 2026-10-15).** Q3c's single cap of 10 is superseded by the measured constraint (V3). Caps are advertised in each tool's schema as `maxItems`, enforced identically in **both runtimes** (Python too, for parity, although it has no subrequest limit), and an oversize request is rejected with `BATCH_LIMIT_EXCEEDED` instead of being truncated:
 
@@ -584,4 +592,4 @@ Approved by: ________________  Date: __________
 Approval covers: Phase 1 only | Phases 1–3 (incl. R3, RN) | Full plan
 ```
 
-The Doctrine no longer gates approval (Q14/N4). Before signing, settle **V1** (claude.ai Request headers; otherwise Q13) and **Q15** names. Recommended scope: **Phases 1–3 including R3 and RN**. Phase 3 is the pilot, and the brief will be regenerated for R4 onward.
+The Doctrine no longer gates approval (Q14/N4). Before signing, settle **V1** (claude.ai Request headers; otherwise Q13) and **Q15a**. Recommended scope: **Phases 1–3 including R3 and RN**. Phase 3 is the pilot, and the brief will be regenerated for R4 onward.
