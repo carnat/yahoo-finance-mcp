@@ -9113,9 +9113,29 @@ function clampInt(value: number, fallback: number, min: number, max: number): nu
   return Math.min(max, Math.max(min, n));
 }
 
+// Default source sets the news tools apply when `sources` is omitted or null (Q3h, 2.7.0).
+// An explicit array, including [], is used as given: [] attempts no source.
+export const DEFAULT_NEWS_SOURCES = ["yahoo_finance_news", "yahoo_finance_press_releases", "finnhub", "marketaux"];
+export const DEFAULT_PRESS_RELEASE_SOURCES = ["sec", "company_ir_page", "yahoo_finance_press_releases"];
+export const DEFAULT_EVENT_SOURCES = ["sec", "company_ir_page", "company_ir", "yahoo_finance_news", "yahoo_finance_press_releases", "finnhub", "marketaux"];
+const NOT_ATTEMPTED_SOURCE_STATUSES = new Set(["NOT_ELIGIBLE", "NOT_NEEDED", "UNCONFIGURED"]);
+
+/** What the caller asked for and what was actually tried (Q3h): requestedSources is null when sources was omitted. */
+export function sourceRequestFields(requestedSources: string[] | null, sourceStatus: Record<string, unknown>): Record<string, unknown> {
+  const attemptedSources: Record<string, unknown>[] = [];
+  for (const [source, value] of Object.entries(sourceStatus)) {
+    if (!value || typeof value !== "object") continue;
+    const info = value as Record<string, unknown>;
+    const status = _str(info.status);
+    if (info.attempted === false || NOT_ATTEMPTED_SOURCE_STATUSES.has(status)) continue;
+    attemptedSources.push({ sourceType: source, status });
+  }
+  return { requestedSources, defaultSourcesApplied: requestedSources === null, attemptedSources };
+}
+
 function normalizeSources(sources: string[] | undefined, defaults: string[]): { selected: string[]; warnings: Record<string, unknown>[] } {
   const warnings: Record<string, unknown>[] = [];
-  const input = (sources && sources.length > 0 ? sources : defaults).map(s => _str(s).toLowerCase().trim()).filter(Boolean);
+  const input = (sources ?? defaults).map(s => _str(s).toLowerCase().trim()).filter(Boolean);
   const seen = new Set<string>();
   const selected: string[] = [];
   for (const src of input) {
@@ -9128,7 +9148,22 @@ function normalizeSources(sources: string[] | undefined, defaults: string[]): { 
       selected.push(src);
     }
   }
-  return { selected: selected.length ? selected : defaults, warnings };
+  // An explicit list is used as given (Q3h): [] or only unsupported names selects no source.
+  return { selected, warnings };
+}
+
+/**
+ * An explicit sources list that selects no supported source attempts nothing (Q3h). The result is
+ * neither a provider failure nor confirmed absence, so it reads as source-limited.
+ */
+function markNoSourceSelected(payload: Record<string, unknown>, requestedSources: string[] | null): Record<string, unknown> {
+  if (requestedSources === null || normalizeSources(requestedSources, []).selected.length > 0) return payload;
+  payload.status = "SOURCE_LIMITED_NOT_FOUND";
+  payload.sourceCoverage = "PARTIAL";
+  if (payload.coverage && typeof payload.coverage === "object") {
+    payload.coverage = { ...(payload.coverage as Record<string, unknown>), state: "PARTIAL", recommendedNextAction: "CHECK_OFFICIAL_RELEASES" };
+  }
+  return payload;
 }
 
 type NewsCompanyIdentity = {
@@ -11919,8 +11954,9 @@ export async function getCompanyNews(
   ticker: string | string[],
   maxResults = 10,
   lookbackDays = 14,
-  sources: string[] = ["yahoo_finance_news", "yahoo_finance_press_releases", "finnhub", "marketaux"],
+  requestedSources: string[] | null = null,
 ): Promise<string> {
+  const sources = requestedSources ?? DEFAULT_NEWS_SOURCES;
   if (
     (typeof ticker === "string" && ticker.trim() === "")
     || (Array.isArray(ticker) && (ticker.length === 0 || ticker.some((item) => typeof item !== "string" || item.trim() === "")))
@@ -11937,7 +11973,7 @@ export async function getCompanyNews(
   // fetched per ticker; there is no combined query that could zero out the
   // whole batch under low-news conditions.
   if (Array.isArray(ticker)) {
-    return runPartialBatch(ticker, (t) => getCompanyNews(t, maxResults, lookbackDays, sources));
+    return runPartialBatch(ticker, (t) => getCompanyNews(t, maxResults, lookbackDays, requestedSources));
   }
   // Collect a wider pool, then keep the most relevant items: an item that
   // only mentions the company in passing should not displace one about it.
@@ -11956,9 +11992,10 @@ export async function getCompanyNews(
     sourceCoverage,
     coverage,
     sourceStatus,
+    ...sourceRequestFields(requestedSources, sourceStatus),
   };
   if (status) payload.status = status;
-  return JSON.stringify(payload);
+  return JSON.stringify(markNoSourceSelected(payload, requestedSources));
 }
 
 export async function searchCompanyNews(
@@ -11966,9 +12003,10 @@ export async function searchCompanyNews(
   query: string,
   startDate = "",
   endDate = "",
-  sources: string[] = ["yahoo_finance_news", "yahoo_finance_press_releases", "finnhub", "marketaux"],
+  requestedSources: string[] | null = null,
   maxResults = 10
 ): Promise<string> {
+  const sources = requestedSources ?? DEFAULT_NEWS_SOURCES;
   // The query filters the full collected pool; filtering only the first
   // max_results items found almost nothing.
   const out = await collectCompanyEvents(ticker, {
@@ -11998,17 +12036,19 @@ export async function searchCompanyNews(
     sourceCoverage,
     coverage,
     sourceStatus,
+    ...sourceRequestFields(requestedSources, sourceStatus),
   };
   if (status) payload.status = status;
-  return JSON.stringify(payload);
+  return JSON.stringify(markNoSourceSelected(payload, requestedSources));
 }
 
 export async function getCompanyPressReleases(
   ticker: string,
   lookbackDays = 90,
   maxResults = 20,
-  sources: string[] = ["sec", "company_ir_page", "yahoo_finance_press_releases"]
+  requestedSources: string[] | null = null
 ): Promise<string> {
+  const sources = requestedSources ?? DEFAULT_PRESS_RELEASE_SOURCES;
   const safeMax = clampInt(maxResults, 20, 1, 100);
   const safeLookback = clampInt(lookbackDays, 90, 1, 3650);
   const { selected, warnings: sourceWarnings } = normalizeSources(sources, ["sec", "company_ir_page", "yahoo_finance_press_releases"]);
@@ -12182,6 +12222,7 @@ export async function getCompanyPressReleases(
     sourceCoverage,
     coverage,
     sourceStatus,
+    ...sourceRequestFields(requestedSources, sourceStatus),
     coverageStatus,
     decisionGrade: payloadDecisionGrade,
     decisionGradeBasis,
@@ -12193,7 +12234,7 @@ export async function getCompanyPressReleases(
   if (irPageEvidence.length > 0) payload.irPageEvidence = irPageEvidence;
   if (candidateSources.length > 0) payload.candidateSources = candidateSources;
   if (status) payload.status = status;
-  return JSON.stringify(payload);
+  return JSON.stringify(markNoSourceSelected(payload, requestedSources));
 }
 
 export async function getSecRecentEvents(
@@ -12225,10 +12266,11 @@ export async function getPublicEventTimeline(
   ticker: string,
   startDate = "",
   endDate = "",
-  sources: string[] = ["sec", "company_ir", "newswire", "yahoo_finance_news", "yahoo_finance_press_releases", "finnhub"],
+  requestedSources: string[] | null = null,
   maxResults = 50,
   newestFirst = false
 ): Promise<string> {
+  const sources = requestedSources ?? DEFAULT_EVENT_SOURCES;
   const out = await collectCompanyEvents(ticker, { maxResults, lookbackDays: 365, startDate, endDate, sources });
   const timeline = out.items
     .filter(item => _str(item.publishedAt))
@@ -12264,9 +12306,10 @@ export async function getPublicEventTimeline(
     sourceCoverage,
     coverage,
     sourceStatus,
+    ...sourceRequestFields(requestedSources, sourceStatus),
   };
   if (status) payload.status = status;
-  return JSON.stringify(payload);
+  return JSON.stringify(markNoSourceSelected(payload, requestedSources));
 }
 
 export async function verifyCompanyEvent(
@@ -12274,8 +12317,9 @@ export async function verifyCompanyEvent(
   eventQuery: string,
   startDate = "",
   endDate = "",
-  sources: string[] = ["sec", "company_ir", "newswire", "yahoo_finance_news", "yahoo_finance_press_releases", "finnhub"]
+  requestedSources: string[] | null = null
 ): Promise<string> {
+  const sources = requestedSources ?? DEFAULT_EVENT_SOURCES;
   // Match against everything collected: a cap of the newest 50 let a flood of
   // aggregator items push the official release out before matching (ASTS
   // BlueBird launch, 2.4.5).
@@ -12464,7 +12508,7 @@ export async function verifyCompanyEvent(
   }
   const failureMode = status === "SOURCE_LIMITED_NOT_FOUND" ? coverageFailureMode : null;
   const retryable = ["WORKER_SUBREQUEST_LIMIT", "RATE_LIMITED", "PROVIDER_TIMEOUT"].includes(_str(failureMode));
-  return JSON.stringify({
+  const payload: Record<string, unknown> = {
     ticker: ticker.toUpperCase(),
     query: eventQuery,
     queryPolicy: {
@@ -12480,12 +12524,14 @@ export async function verifyCompanyEvent(
     sourceCoverage,
     coverage,
     sourceStatus,
+    ...sourceRequestFields(requestedSources, sourceStatus),
     failureMode,
     retryable,
     recommendedAction: failureMode
       ? "Inspect sourceStatus and retry with a narrower sources list that excludes failed providers; do not treat this result as confirmed absence."
       : null,
-  });
+  };
+  return JSON.stringify(markNoSourceSelected(payload, requestedSources));
 }
 
 // ── get_sec_filing_index ───────────────────────────────────────────────────────
