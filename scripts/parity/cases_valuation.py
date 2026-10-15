@@ -605,7 +605,7 @@ _CORE = _psel("marketCap.status", "marketCap.value", "enterpriseValue.status", "
 def _core(mcap, ev, ev_rev, p_s, rev=1150 * M, **over) -> dict:
     e = {"marketCap.status": "OK", "marketCap.value": mcap, "enterpriseValue.status": "OK", "enterpriseValue.value": ev,
          "multiples.LTM.evToRevenue.status": "OK", "multiples.LTM.evToRevenue.value": ev_rev, "multiples.LTM.priceToSales.value": p_s,
-         "multiples.LTM.priceToEarnings.status": "NOT_MEANINGFUL_NONPOSITIVE_DENOMINATOR" if False else None, "multiples.LTM.priceToEarnings.value": None,
+         "multiples.LTM.priceToEarnings.status": None, "multiples.LTM.priceToEarnings.value": None,
          "denominators.LTM.revenue.value": rev, "denominators.LTM.revenue.method": "LFY_PLUS_YTD_MINUS_PRIOR_YTD", "warningCodes": []}
     e.update(over)
     return e
@@ -734,6 +734,15 @@ BAL_HIST_CASES = [
         expect={"balances.status": "OK", "balances.reason": None, "balanceDate": "2024-12-31", "debt.status": "NOT_TAGGED", "debt.value": None, "debt.basis": None,
                 "debt.concepts": [], "sti.status": "NOT_MAPPED", "marketCap.status": "OK", "ev.status": "DEBT_NOT_TAGGED", "ev.value": None, "warningCodes": []}),
 
+    # Finding (Phase 2, for Q3i triage): the zero-debt rule looks only at the accession that reported the cash. Debt tagged in the 10-K (k24,
+    # 500M at 2024-12-31) but not in the 10-Q that reported the later cash balance (q225) reads as "no borrowings": debt 0, EV 1,700M. Both runtimes
+    # agree; the SYN fixture of scripts/test_valuation_history_and_reconcile.py shows the same shape when a debt line is tagged at a different date.
+    _hv("val.hist.balances.finding_debt_only_in_older_filing_reads_as_zero_debt", ["BR-VAL-006", "BR-VAL-008", "BR-VAL-047"],
+        _inp(_facts(_us(CashAndCashEquivalentsAtCarryingValue=_cash(), LongTermDebt=[_f(None, "2024-12-31", 500 * M, *K24)]), _COVER())), select=_bsel,
+        expect={"balances.status": "OK", "balances.reason": None, "balanceDate": "2025-06-30", "debt.status": "OK", "debt.value": 0, "debt.basis": "NO_BORROWINGS_TAGGED",
+                "debt.concepts": [], "sti.status": "NOT_TAGGED", "marketCap.status": "OK", "ev.status": "OK", "ev.value": 1700 * M,
+                "warningCodes": ["NO_BORROWINGS_TAGGED", "SHORT_TERM_INVESTMENTS_NOT_TAGGED"]}),
+
     # ── EV status ladder: MARKET_CAP_NOT_AVAILABLE > BALANCES_NOT_AVAILABLE > DEBT_NOT_TAGGED > FX_NOT_AVAILABLE > BALANCES_STALE > OK ──
     _hv("val.hist.ev_status.market_cap_unavailable_beats_missing_balances", ["BR-VAL-008", "BR-VAL-009"],
         _inp(_facts(_us(), None)), select=_bsel,
@@ -775,6 +784,10 @@ BAL_HIST_CASES = [
 
 def _days_before(date: str, n: int) -> str:
     return (_dt.date.fromisoformat(date) - _dt.timedelta(days=n)).isoformat()
+
+
+def _days_after(date: str, n: int) -> str:
+    return (_dt.date.fromisoformat(date) + _dt.timedelta(days=n)).isoformat()
 
 
 _PRICE_SEL = _psel("price.tradingDate", "price.closeAsAdjusted", "price.laterSplitFactor", "price.close", "price.currency", codes=None)
@@ -878,7 +891,7 @@ MCAP_CASES = [
                 "shares.ageDays": 401, "enterpriseValue.status": "MARKET_CAP_NOT_AVAILABLE", "warningCodes": ["SHARE_COUNT_STALE"]}),
     # Share count preference: cover page over a newer balance-sheet count; the balance-sheet count when there is no cover page.
     _sh("val.hist.market_cap.cover_page_beats_newer_balance_sheet_count", ["BR-VAL-011", "BR-VAL-030", "BR-VAL-060"], [_f(None, "2025-02-10", 10 * M, *K24)],
-        us=_us(CommonStockSharesOutstanding=None) if False else {**_us(), "CommonStockSharesOutstanding": {"units": {"shares": [_f(None, "2025-06-30", 60 * M, *Q225)]}}},
+        us={**_us(), "CommonStockSharesOutstanding": {"units": {"shares": [_f(None, "2025-06-30", 60 * M, *Q225)]}}},
         expect={"marketCap.status": "OK", "marketCap.value": 200 * M, "shares.basis": "COVER_PAGE", "shares.value": 10 * M, "shares.asOf": "2025-02-10", "shares.ageDays": 204,
                 "enterpriseValue.status": "BALANCES_NOT_AVAILABLE", "warningCodes": []}),
     _sh("val.hist.market_cap.balance_sheet_count_without_cover_page", ["BR-VAL-011", "BR-VAL-030", "BR-VAL-060"], None,
@@ -966,4 +979,549 @@ COVER_PARSE_CASES = [
                  ["VALUE_NOT_PARSED", None, None, None, []]]),
 ]
 
-CASES = ADR_CASES + SHARE_BASIS_CASES + BALANCE_CASES + CURRENCY_CASES + EV_CASES + EV_CASES_HIST + BAL_HIST_CASES + PRICE_CASES + MCAP_CASES + COVER_CASES + COVER_PARSE_CASES
+
+# ───────────────────────────────────────────────────────────────── LTM = LFY + YTD - prior YTD (cards BR-VAL-014 ... 018)
+
+def _ff(start, end, val, concept="Revenues", form="10-K", filed="2025-02-15", accn="a1") -> dict:
+    return {"concept": concept, "start": start, "end": end, "val": val, "filed": filed, "form": form, "accn": accn}
+
+
+def _flow(v: dict) -> dict:
+    out: dict = {}
+    for k in ("LFY", "LTM"):
+        r = v[k]
+        out[k] = [r["status"], r.get("value"), r.get("method") or r.get("reason"), r.get("periodStart"), r.get("periodEnd"), r.get("latestPeriodEnd")]
+    out["signs"] = [c["sign"] for c in v["LTM"].get("components", [])]
+    out["componentValues"] = [c["value"] for c in v["LTM"].get("components", [])]
+    return out
+
+
+def _flows(name: str, ids: list[str], facts: list[dict], expect: dict, **kw) -> Case:
+    return Case(name=name, ids=ids, py=lambda: vh.flow_bases(copy.deepcopy(facts)), ts={"module": "valuationHistory", "fn": "flowBases", "args": [facts]},
+                select=_flow, expect=expect, **kw)
+
+
+def _ok_ltm(lfy_start, lfy_end, lfy_val, ltm_val, ltm_end, comps) -> dict:
+    return {"LFY": ["OK", lfy_val, "REPORTED_FISCAL_YEAR", lfy_start, lfy_end, None],
+            "LTM": ["OK", ltm_val, "LFY_PLUS_YTD_MINUS_PRIOR_YTD", None, ltm_end, None], "signs": [1, 1, -1], "componentValues": comps}
+
+
+_NO_ANNUAL = {"LFY": ["NOT_AVAILABLE", None, "NO_ANNUAL_PERIOD_FILED", None, None, None], "LTM": ["NOT_AVAILABLE", None, "NO_ANNUAL_PERIOD_FILED", None, None, None],
+              "signs": [], "componentValues": []}
+_FY24 = _ff("2024-01-01", "2024-12-31", 1000)
+_YTD25 = _ff("2025-01-01", "2025-06-30", 600, form="10-Q", filed="2025-08-05", accn="q2")
+_PRIOR24 = _ff("2024-01-01", "2024-06-30", 450, form="10-Q", filed="2025-08-05", accn="q2")
+
+
+def _prior_ending(gap: int, start: str = "2024-01-01") -> dict:
+    return _ff(start, _days_before("2025-06-30", gap), 450, form="10-Q", filed="2025-08-05", accn="q2")
+
+
+FLOW_CASES = [
+    _flows("val.hist.ltm.card_014_lfy_plus_ytd_minus_prior_ytd", ["BR-VAL-014", "BR-VAL-017", "BR-VAL-018"], [_FY24, _YTD25, _PRIOR24],
+           _ok_ltm("2024-01-01", "2024-12-31", 1000, 1150, "2025-06-30", [1000, 600, 450])),
+    _flows("val.hist.ltm.card_015_nine_month_ytd", ["BR-VAL-015", "BR-VAL-014"],
+           [_ff("2025-01-01", "2025-12-31", 1000), _ff("2026-01-01", "2026-09-30", 900, form="10-Q", accn="q3"), _ff("2025-01-01", "2025-09-30", 750, form="10-Q", accn="q3")],
+           _ok_ltm("2025-01-01", "2025-12-31", 1000, 1150, "2026-09-30", [1000, 900, 750])),
+    _flows("val.hist.ltm.card_016_six_month_ytd", ["BR-VAL-016", "BR-VAL-014"],
+           [_ff("2025-01-01", "2025-12-31", 400), _ff("2026-01-01", "2026-06-30", 230, form="10-Q", accn="q2"), _ff("2025-01-01", "2025-06-30", 190, form="10-Q", accn="q2")],
+           _ok_ltm("2025-01-01", "2025-12-31", 400, 440, "2026-06-30", [400, 230, 190])),
+    _flows("val.hist.ltm.card_017_fy2023_nine_months", ["BR-VAL-017", "BR-VAL-014"],
+           [_ff("2023-01-01", "2023-12-31", 1000), _ff("2024-01-01", "2024-09-30", 800, form="10-Q", accn="q3"), _ff("2023-01-01", "2023-09-30", 700, form="10-Q", accn="q3")],
+           _ok_ltm("2023-01-01", "2023-12-31", 1000, 1100, "2024-09-30", [1000, 800, 700])),
+    # Card BR-VAL-018 plus "the longest YTD wins": two YTD periods end 2025-09-30 (one starting 3 days late, listed first); a standalone Q3 is not a YTD.
+    _flows("val.hist.ltm.card_018_longest_ytd_wins", ["BR-VAL-018", "BR-VAL-014", "BR-VAL-017"],
+           [_FY24, _ff("2025-01-04", "2025-09-30", 300, form="10-Q", accn="q3"), _ff("2025-07-01", "2025-09-30", 400, form="10-Q", accn="q3"),
+            _ff("2025-01-01", "2025-09-30", 900, form="10-Q", accn="q3"), _ff("2024-01-01", "2024-09-30", 700, form="10-Q", accn="q3")],
+           _ok_ltm("2024-01-01", "2024-12-31", 1000, 1200, "2025-09-30", [1000, 900, 700])),
+    _flows("val.hist.ltm.fiscal_year_is_latest_period", ["BR-VAL-014", "BR-VAL-015", "BR-VAL-016", "BR-VAL-017", "BR-VAL-018"],
+           [_FY24, _ff("2024-01-01", "2024-06-30", 450, form="10-Q", accn="q2")],
+           {"LFY": ["OK", 1000, "REPORTED_FISCAL_YEAR", "2024-01-01", "2024-12-31", None], "LTM": ["OK", 1000, "LAST_FISCAL_YEAR_IS_LATEST", "2024-01-01", "2024-12-31", None],
+            "signs": [1], "componentValues": [1000]}),
+    _flows("val.hist.ltm.no_annual_period_filed", ["BR-VAL-014", "BR-VAL-016", "BR-VAL-018"], [_ff("2025-01-01", "2025-03-31", 260, form="10-Q", accn="q1"), _YTD25], _NO_ANNUAL),
+    _flows("val.hist.ltm.instant_facts_are_not_periods", ["BR-VAL-014"], [_ff(None, "2024-12-31", 1000)], _NO_ANNUAL),
+    _flows("val.hist.ltm.latest_annual_period_is_lfy", ["BR-VAL-015", "BR-VAL-016"], [_ff("2024-01-01", "2024-12-31", 1000), _ff("2023-01-01", "2023-12-31", 800)],
+           {"LFY": ["OK", 1000, "REPORTED_FISCAL_YEAR", "2024-01-01", "2024-12-31", None], "LTM": ["OK", 1000, "LAST_FISCAL_YEAR_IS_LATEST", "2024-01-01", "2024-12-31", None],
+            "signs": [1], "componentValues": [1000]}),
+    # Only a standalone quarter follows the fiscal year: no year-to-date period starts within 4 days of its end.
+    _flows("val.hist.ltm.year_to_date_not_filed", ["BR-VAL-014", "BR-VAL-015", "BR-VAL-016", "BR-VAL-017", "BR-VAL-018"],
+           [_FY24, _ff("2025-04-01", "2025-06-30", 300, form="10-Q", accn="q2"), _ff("2024-04-01", "2024-06-30", 240, form="10-Q", accn="q2")],
+           {"LFY": ["OK", 1000, "REPORTED_FISCAL_YEAR", "2024-01-01", "2024-12-31", None],
+            "LTM": ["NOT_AVAILABLE", None, "YEAR_TO_DATE_NOT_FILED", None, None, "2025-06-30"], "signs": [], "componentValues": []}),
+    _flows("val.hist.ltm.prior_year_to_date_not_filed", ["BR-VAL-014", "BR-VAL-015", "BR-VAL-016", "BR-VAL-017", "BR-VAL-018"], [_FY24, _YTD25],
+           {"LFY": ["OK", 1000, "REPORTED_FISCAL_YEAR", "2024-01-01", "2024-12-31", None],
+            "LTM": ["NOT_AVAILABLE", None, "PRIOR_YEAR_TO_DATE_NOT_FILED", None, None, "2025-06-30"], "signs": [], "componentValues": []}),
+    # Year-to-date start gap: 4 days after the fiscal year end is accepted (2025-01-04), 5 days is not.
+    _flows("val.hist.ltm.ytd_starting_4_days_after_lfy_end_is_used", ["BR-VAL-014", "BR-VAL-015", "BR-VAL-017"],
+           [_FY24, _ff("2025-01-04", "2025-06-30", 600, form="10-Q", accn="q2"), _PRIOR24],
+           _ok_ltm("2024-01-01", "2024-12-31", 1000, 1150, "2025-06-30", [1000, 600, 450])),
+    _flows("val.hist.ltm.ytd_starting_5_days_after_lfy_end_is_not", ["BR-VAL-014", "BR-VAL-015", "BR-VAL-017"],
+           [_FY24, _ff("2025-01-05", "2025-06-30", 600, form="10-Q", accn="q2"), _PRIOR24],
+           {"LFY": ["OK", 1000, "REPORTED_FISCAL_YEAR", "2024-01-01", "2024-12-31", None],
+            "LTM": ["NOT_AVAILABLE", None, "YEAR_TO_DATE_NOT_FILED", None, None, "2025-06-30"], "signs": [], "componentValues": []}),
+    # Prior-year period must end 358 to 372 days before the current YTD end.
+    _flows("val.hist.ltm.prior_ytd_ending_358_days_before_is_used", ["BR-VAL-014", "BR-VAL-018"], [_FY24, _YTD25, _prior_ending(358, "2024-01-05")],
+           _ok_ltm("2024-01-01", "2024-12-31", 1000, 1150, "2025-06-30", [1000, 600, 450])),
+    _flows("val.hist.ltm.prior_ytd_ending_357_days_before_is_not", ["BR-VAL-014", "BR-VAL-018"], [_FY24, _YTD25, _prior_ending(357, "2024-01-05")],
+           {"LFY": ["OK", 1000, "REPORTED_FISCAL_YEAR", "2024-01-01", "2024-12-31", None],
+            "LTM": ["NOT_AVAILABLE", None, "PRIOR_YEAR_TO_DATE_NOT_FILED", None, None, "2025-06-30"], "signs": [], "componentValues": []}),
+    _flows("val.hist.ltm.prior_ytd_ending_372_days_before_is_used", ["BR-VAL-014", "BR-VAL-018"], [_FY24, _YTD25, _prior_ending(372)],
+           _ok_ltm("2024-01-01", "2024-12-31", 1000, 1150, "2025-06-30", [1000, 600, 450])),
+    _flows("val.hist.ltm.prior_ytd_ending_373_days_before_is_not", ["BR-VAL-014", "BR-VAL-018"], [_FY24, _YTD25, _prior_ending(373)],
+           {"LFY": ["OK", 1000, "REPORTED_FISCAL_YEAR", "2024-01-01", "2024-12-31", None],
+            "LTM": ["NOT_AVAILABLE", None, "PRIOR_YEAR_TO_DATE_NOT_FILED", None, None, "2025-06-30"], "signs": [], "componentValues": []}),
+    Case(name="val.hist.ltm.annual_period_length_350_to_380_days", ids=["BR-VAL-015", "BR-VAL-016"],
+         py=lambda: [vh.flow_bases([_ff("2024-01-01", _days_after("2024-01-01", n), 1000)])["LFY"]["status"] for n in (349, 350, 380, 381)],
+         ts={"js": "return args[0].map((f) => m.valuationHistory.flowBases([f]).LFY.status);",
+             "args": [[_ff("2024-01-01", _days_after("2024-01-01", n), 1000) for n in (349, 350, 380, 381)]]},
+         expect=["NOT_AVAILABLE", "OK", "OK", "NOT_AVAILABLE"]),
+]
+
+
+# ───────────────────────────────────────────────────────────────── point-in-time fact selection (cards BR-VAL-026, 027, 029)
+
+_EX = "RevenueFromContractWithCustomerExcludingAssessedTax"
+_FY24_ROW = lambda val, form, filed, accn: _f("2024-01-01", "2024-12-31", val, form, filed, accn)  # noqa: E731
+_REV_SEL = _psel("denominators.LFY.revenue.status", "denominators.LFY.revenue.reason", "denominators.LFY.revenue.value", "denominators.LFY.revenue.components.0.concept",
+                 "denominators.LFY.revenue.components.0.form", "denominators.LFY.revenue.components.0.filed", "denominators.LFY.revenue.components.0.accessionNumber", codes=None)
+
+
+def _pit_rev(name, ids, us, date, expect) -> Case:
+    facts = _facts(us, [_f(None, "2025-02-10", 100 * M, *K24)])
+    return _hv(name, ids, _inp(facts, date=date), select=_REV_SEL, expect=expect)
+
+
+def _rev_expect(concept, val, form, filed, accn) -> dict:
+    return {"denominators.LFY.revenue.status": "OK", "denominators.LFY.revenue.reason": None, "denominators.LFY.revenue.value": val,
+            "denominators.LFY.revenue.components.0.concept": concept, "denominators.LFY.revenue.components.0.form": form,
+            "denominators.LFY.revenue.components.0.filed": filed, "denominators.LFY.revenue.components.0.accessionNumber": accn}
+
+
+_NI_SEL = _psel("denominators.LFY.netIncome.status", "denominators.LFY.netIncome.value", "denominators.LFY.netIncome.components.0.concept",
+                "denominators.LFY.netIncome.components.0.filed", codes=None)
+
+
+def _pit_ni(name, ids, ni_rows, date, expect) -> Case:
+    us = {"Revenues": _usd(_f("2022-01-01", "2022-12-31", 1000 * M, "10-K", "2023-02-01", "k22")), **{c: _usd(*rows) for c, rows in ni_rows.items()}}
+    facts = _facts(us, [_f(None, "2023-01-20", 100 * M, "10-K", "2023-02-01", "k22")])
+    return _hv(name, ids, _inp(facts, date=date), select=_NI_SEL, expect=expect)
+
+
+_NI22 = lambda val, filed, accn, form="10-K": _f("2022-01-01", "2022-12-31", val, form, filed, accn)  # noqa: E731
+
+PIT_CASES = [
+    # Card BR-VAL-026: contract revenue (listed first) filed 2025-02-15; Revenues re-filed in a 10-K/A on 2025-04-01 does not displace it;
+    # a later filing of the first concept (2025-06-15) is after the 2025-05-01 date and ignored.
+    _pit_rev("val.hist.pit.card_026_listed_first_concept_beats_newer_10ka", ["BR-VAL-026", "BR-VAL-027", "BR-VAL-029"],
+             {_EX: _usd(_FY24_ROW(1000 * M, *K24), _FY24_ROW(9999 * M, "10-K", "2025-06-15", "kx")), "Revenues": _usd(_FY24_ROW(1100 * M, "10-K/A", "2025-04-01", "k24a"))},
+             "2025-05-01", _rev_expect(_EX, 1000 * M, "10-K", "2025-02-15", "k24")),
+    # Card BR-VAL-029: contract revenue 2025-02-01, Revenues 2025-05-01, read as of 2025-06-01: the first-listed concept still wins.
+    _pit_rev("val.hist.pit.card_029_first_listed_concept_despite_later_revenues_filing", ["BR-VAL-029", "BR-VAL-026", "BR-VAL-027"],
+             {_EX: _usd(_FY24_ROW(1000 * M, "10-K", "2025-02-01", "k24")), "Revenues": _usd(_FY24_ROW(1100 * M, "10-K/A", "2025-05-01", "k24a"))},
+             "2025-06-01", _rev_expect(_EX, 1000 * M, "10-K", "2025-02-01", "k24")),
+    # Within one concept the newest filing by the date wins (a restatement known on the date), not one filed later.
+    _pit_rev("val.hist.pit.same_concept_newer_filing_replaces", ["BR-VAL-026", "BR-VAL-027", "BR-VAL-029"],
+             {_EX: _usd(_FY24_ROW(1000 * M, *K24), _FY24_ROW(1010 * M, "10-K/A", "2025-04-01", "k24a"))},
+             "2025-05-01", _rev_expect(_EX, 1010 * M, "10-K/A", "2025-04-01", "k24a")),
+    _pit_rev("val.hist.pit.restatement_filed_after_date_is_not_known", ["BR-VAL-026", "BR-VAL-029"],
+             {_EX: _usd(_FY24_ROW(1000 * M, *K24), _FY24_ROW(1010 * M, "10-K/A", "2025-04-01", "k24a"))},
+             "2025-03-01", _rev_expect(_EX, 1000 * M, "10-K", "2025-02-15", "k24")),
+    # The same filing date does not replace: the first row stays.
+    _pit_rev("val.hist.pit.same_filing_date_keeps_first_row", ["BR-VAL-026", "BR-VAL-029"],
+             {_EX: _usd(_FY24_ROW(1000 * M, *K24), _FY24_ROW(1005 * M, "10-K", "2025-02-15", "k24b"))},
+             "2025-05-01", _rev_expect(_EX, 1000 * M, "10-K", "2025-02-15", "k24")),
+    # Only 10-K, 10-Q, 20-F and 40-F filings count: an 8-K row is no fiscal-year revenue.
+    _pit_rev("val.hist.pit.non_periodic_forms_ignored", ["BR-VAL-026", "BR-VAL-029"], {"Revenues": _usd(_FY24_ROW(777 * M, "8-K", "2025-02-15", "e1"))}, "2025-05-01",
+             {"denominators.LFY.revenue.status": "NOT_AVAILABLE", "denominators.LFY.revenue.reason": "NO_ANNUAL_PERIOD_FILED", "denominators.LFY.revenue.value": None,
+              "denominators.LFY.revenue.components.0.concept": None, "denominators.LFY.revenue.components.0.form": None, "denominators.LFY.revenue.components.0.filed": None,
+              "denominators.LFY.revenue.components.0.accessionNumber": None}),
+    _pit_rev("val.hist.pit.20f_and_40f_forms_count", ["BR-VAL-026", "BR-VAL-029"], {"Revenues": _usd(_FY24_ROW(500 * M, "20-F", "2025-02-15", "f24"))}, "2025-05-01",
+             _rev_expect("Revenues", 500 * M, "20-F", "2025-02-15", "f24")),
+    # Card BR-VAL-027: NetIncomeLoss filed 2023-02-01 beats ProfitLoss filed 2023-05-01 (listed first), as of 2023-06-01.
+    _pit_ni("val.hist.pit.card_027_net_income_loss_beats_newer_profit_loss", ["BR-VAL-027", "BR-VAL-026", "BR-VAL-029"],
+            {"NetIncomeLoss": [_NI22(100 * M, "2023-02-01", "k22")], "ProfitLoss": [_NI22(110 * M, "2023-05-01", "k22a", "10-K/A")]}, "2023-06-01",
+            {"denominators.LFY.netIncome.status": "OK", "denominators.LFY.netIncome.value": 100 * M, "denominators.LFY.netIncome.components.0.concept": "NetIncomeLoss",
+             "denominators.LFY.netIncome.components.0.filed": "2023-02-01"}),
+    # The lower-priority concept is used only while the higher one has nothing filed by the date.
+    _pit_ni("val.hist.pit.lower_priority_concept_used_until_listed_first_is_filed", ["BR-VAL-027", "BR-VAL-026"],
+            {"NetIncomeLoss": [_NI22(100 * M, "2023-07-01", "k22b", "10-K/A")], "ProfitLoss": [_NI22(110 * M, "2023-05-01", "k22a", "10-K/A")]}, "2023-06-01",
+            {"denominators.LFY.netIncome.status": "OK", "denominators.LFY.netIncome.value": 110 * M, "denominators.LFY.netIncome.components.0.concept": "ProfitLoss",
+             "denominators.LFY.netIncome.components.0.filed": "2023-05-01"}),
+]
+
+
+# ───────────────────────────────────────────────────────────────── recorded fixtures: NVDA split, AEHR zero debt, TSM IFRS ADR
+
+def _chart(name: str) -> tuple[list[dict], list[dict]]:
+    """Split-adjusted, dividend-unadjusted daily closes and split events from a recorded Yahoo chart, as server._daily_history_sync builds them."""
+    result = fixture(f"yahoo/chart_{name}_5y.json")["chart"]["result"][0]
+    offset = result["meta"].get("gmtoffset", 0)
+    closes = result["indicators"]["quote"][0]["close"]
+    bars = []
+    for ts, close in zip(result["timestamp"], closes):
+        if close is not None:
+            bars.append({"date": (_dt.datetime(1970, 1, 1) + _dt.timedelta(seconds=ts + offset)).strftime("%Y-%m-%d"), "close": close})
+    splits = [{"date": (_dt.datetime(1970, 1, 1) + _dt.timedelta(seconds=e["date"] + offset)).strftime("%Y-%m-%d"), "ratio": e["numerator"] / e["denominator"]}
+              for e in (result.get("events", {}).get("splits") or {}).values()]
+    return bars, splits
+
+
+_NVDA_BARS, _NVDA_SPLITS = _chart("NVDA")
+
+
+def _nvda_points(v: dict) -> list:
+    return [[p["date"], p["price"]["tradingDate"], p["price"]["laterSplitFactor"], p["price"]["close"], p["shares"]["value"], p["shares"]["asOf"],
+             p["marketCap"]["status"], p["marketCap"]["value"], (p["marketCap"].get("split") or {}).get("date")] for p in v["points"]]
+
+
+RECORDED_CASES = [
+    # NVDA's 10-for-1 split on 2024-06-10. On 2023-06-30 Yahoo's split-adjusted close (42.30) is undone to the 423.02 the share count was filed against.
+    # On 2024-06-28 the newest count (the 10-Q cover as of 2024-05-24, filed 2024-05-29) predates the split, so market cap is withheld.
+    _hv("val.hist.recorded.nvda_split_price_and_market_cap", ["BR-VAL-012", "BR-VAL-013", "BR-VAL-028", "BR-VAL-009"],
+        _inp(fixture("sec/companyfacts_NVDA.json"), bars=_NVDA_BARS, splits=_NVDA_SPLITS, dates=["2023-06-30", "2024-06-28"]),
+        select=_nvda_points,
+        # Market cap multiplies the unrounded unadjusted close (423.0199813...) by the count, not the 4-decimal price shown.
+        expect=[["2023-06-30", "2023-06-30", 10, 423.02, 2_470_000_000, "2023-05-19", "OK", 1_044_859_354_019, None],
+                ["2024-06-28", "2024-06-28", 1, 123.54, 2_460_000_000, "2024-05-24", "SPLIT_AFTER_SHARE_COUNT", None, "2024-06-10"]]),
+    # AEHR files 10-Ks and 10-Qs that tag no borrowing concept at any date: debt is zero, not "not tagged" (zero-debt route).
+    # The close is a synthetic 20.00 (no recorded AEHR chart).
+    _hv("val.hist.recorded.aehr_no_borrowings_means_zero_debt", ["BR-VAL-006", "BR-VAL-008", "BR-VAL-047"],
+        _inp(fixture("sec/companyfacts_AEHR.json"), date="2026-08-14", close=20.0), select=_bsel,
+        # Market cap 20.00 x 32,620,450 (10-K cover, 2026-07-20) = 652,409,000; EV = that + 0 debt - 116,358,000 cash (2026-05-29).
+        expect={"balances.status": "OK", "balances.reason": None, "balanceDate": "2026-05-29", "debt.status": "OK", "debt.value": 0, "debt.basis": "NO_BORROWINGS_TAGGED",
+                "debt.concepts": [], "sti.status": "NOT_TAGGED", "marketCap.status": "OK", "ev.status": "OK", "ev.value": 536_051_000,
+                "warningCodes": ["NO_BORROWINGS_TAGGED", "SHORT_TERM_INVESTMENTS_NOT_TAGGED"]}),
+    # TSM (20-F, IFRS, TWD): ordinary shares divided by 5 per ADS, FX at the 20-F date; IFRS maps no short-term investments.
+    _hv("val.hist.recorded.tsm_ifrs_adr_fx_and_ads_ratio", ["BR-VAL-009", "BR-VAL-010", "BR-VAL-030", "BR-VAL-008"],
+        {**_inp(fixture("sec/companyfacts_TSM.json"), date="2025-06-02", close=180.0, ads=5), "fx": {"pair": "TWDUSD=X", "bars": [{"date": "2025-05-30", "close": 0.0305}]}},
+        select=_psel("marketCap.value", "shares.value", "shares.quotedShareEquivalent", "shares.basis", "fx.rate", "reportingCurrency", "secCompanyfactsCadence",
+                     "enterpriseValue.status", "enterpriseValue.value", "balances.balanceDate", "balances.shortTermInvestments.status", "balances.debt.value"),
+        # Market cap 180 x 25,932,733,242 / 5 = 933,578,396,712 USD; EV adds (91,682,300,000 debt - 2,127,627,000,000 cash) TWD x 0.0305.
+        expect={"marketCap.value": 933_578_396_712, "shares.value": 25_932_733_242, "shares.quotedShareEquivalent": 5_186_546_648, "shares.basis": "COVER_PAGE",
+                "fx.rate": 0.0305, "reportingCurrency": "TWD", "secCompanyfactsCadence": "ANNUAL", "enterpriseValue.status": "OK", "enterpriseValue.value": 871_482_083_362,
+                "balances.balanceDate": "2024-12-31", "balances.shortTermInvestments.status": "NOT_MAPPED", "balances.debt.value": 91_682_300_000,
+                "warningCodes": ["SHORT_TERM_INVESTMENTS_NOT_TAGGED"]}),
+]
+
+
+# ═══════════════════════════════════════════════════════════════════ metric reconciliation (metric_reconciliation)
+
+def _o(source: str, value, precision=0, provider: str | None = None, status: str = "FOUND") -> dict:
+    return {"source": source, "provider": provider or ("SEC" if source.startswith("SEC") else source), "status": status, "value": value, "precision": precision}
+
+
+def _cmp(source, against, value, baseline, difference, pct, tolerance, result) -> dict:
+    return {"source": source, "against": against, "value": value, "baselineValue": baseline, "difference": difference, "differencePct": pct, "tolerance": tolerance, "result": result}
+
+
+_SEC = "SEC_XBRL_LATEST"
+_SEC1 = "SEC_XBRL_AS_FIRST_FILED"
+_REL = "ISSUER_RELEASE"
+_YAH = "YAHOO"
+
+
+def _rec(name: str, ids: list[str], obs: list[dict], tol: float, comparisons: list, status: str, restated: bool, **kw) -> Case:
+    return Case(name=name, ids=ids, py=lambda: mr.reconcile_observations(copy.deepcopy(obs), tol),
+                ts={"js": "const r = m.metricReconciliation.reconcileObservations(args[0], args[1]); return [r.comparisons, r.status, r.restated];", "args": [obs, tol]},
+                expect=[comparisons, status, restated], **kw)
+
+
+RECON_OBS_CASES = [
+    # Card BR-VAL-019: SEC 31,500,000, release "$31.5 million" (precision 50,000), tolerance 0.5% = 157,500 -> MATCH, AGREED.
+    _rec("val.recon.card_019_release_matches_within_tolerance", ["BR-VAL-019", "BR-VAL-020", "BR-VAL-021", "BR-VAL-022"],
+         [_o(_SEC, 31_500_000), _o(_SEC1, 31_500_000), _o(_REL, 31_500_000, 50_000)], 0.5,
+         [_cmp(_SEC1, _SEC, 31_500_000, 31_500_000, 0, 0, 157_500, "MATCH"), _cmp(_REL, _SEC, 31_500_000, 31_500_000, 0, 0, 157_500, "MATCH")], "AGREED", False),
+    # Card BR-VAL-021: SEC 31,512,000 vs release 31,500,000 (precision 50,000): tolerance max(157,560, 50,000); difference -12,000 = -0.0381%.
+    _rec("val.recon.card_021_difference_pct_and_tolerance", ["BR-VAL-021", "BR-VAL-019", "BR-VAL-022"], [_o(_SEC, 31_512_000), _o(_REL, 31_500_000, 50_000)], 0.5,
+         [_cmp(_REL, _SEC, 31_500_000, 31_512_000, -12_000, -0.0381, 157_560, "MATCH")], "AGREED", False),
+    # A release's stated precision widens the tolerance when the percentage is smaller (tolerance 0%).
+    _rec("val.recon.release_precision_widens_tolerance", ["BR-VAL-019", "BR-VAL-021"], [_o(_SEC, 31_500_000), _o(_REL, 31_540_000, 50_000)], 0.0,
+         [_cmp(_REL, _SEC, 31_540_000, 31_500_000, 40_000, 0.127, 50_000, "MATCH")], "AGREED", False),
+    _rec("val.recon.release_beyond_precision_is_conflict", ["BR-VAL-019", "BR-VAL-021"], [_o(_SEC, 31_500_000), _o(_REL, 31_560_000, 50_000)], 0.0,
+         [_cmp(_REL, _SEC, 31_560_000, 31_500_000, 60_000, 0.1905, 50_000, "MISMATCH")], "CONFLICT", False),
+    # Card BR-VAL-022: SEC 1,000,000,000, Yahoo 1,004,000,000 at 0.5% -> MATCH, AGREED; 1,006,000,000 -> CONFLICT; exactly 5,000,000 apart still matches.
+    _rec("val.recon.card_022_yahoo_within_tolerance_agreed", ["BR-VAL-022", "BR-VAL-020", "BR-VAL-021"], [_o(_SEC, 1_000_000_000), _o(_YAH, 1_004_000_000)], 0.5,
+         [_cmp(_YAH, _SEC, 1_004_000_000, 1_000_000_000, 4_000_000, 0.4, 5_000_000, "MATCH")], "AGREED", False),
+    _rec("val.recon.card_022_yahoo_beyond_tolerance_conflict", ["BR-VAL-022", "BR-VAL-020", "BR-VAL-021"], [_o(_SEC, 1_000_000_000), _o(_YAH, 1_006_000_000)], 0.5,
+         [_cmp(_YAH, _SEC, 1_006_000_000, 1_000_000_000, 6_000_000, 0.6, 5_000_000, "MISMATCH")], "CONFLICT", False),
+    _rec("val.recon.difference_exactly_at_tolerance_matches", ["BR-VAL-021", "BR-VAL-022"], [_o(_SEC, 1_000_000_000), _o(_YAH, 1_005_000_000)], 0.5,
+         [_cmp(_YAH, _SEC, 1_005_000_000, 1_000_000_000, 5_000_000, 0.5, 5_000_000, "MATCH")], "AGREED", False),
+    _rec("val.recon.wider_tolerance_turns_conflict_into_agreed", ["BR-VAL-021", "BR-VAL-022"], [_o(_SEC, 1000), _o(_YAH, 1099)], 10,
+         [_cmp(_YAH, _SEC, 1099, 1000, 99, 9.9, 100, "MATCH")], "AGREED", False),
+    # Without SEC the first found source is the reference: a disagreement is CONFLICT (not PARTIAL), agreement never AGREED.
+    _rec("val.recon.no_sec_agreeing_sources_are_partial", ["BR-VAL-019", "BR-VAL-020", "BR-VAL-021", "BR-VAL-022"], [_o(_REL, 100.0), _o(_YAH, 100.0)], 0.5,
+         [_cmp(_YAH, _REL, 100, 100, 0, 0, 0.5, "MATCH")], "PARTIAL", False),
+    _rec("val.recon.no_sec_disagreeing_sources_are_conflict", ["BR-VAL-019", "BR-VAL-020", "BR-VAL-021", "BR-VAL-022"], [_o(_REL, 100.0), _o(_YAH, 120.0)], 0.5,
+         [_cmp(_YAH, _REL, 120, 100, 20, 20, 0.5, "MISMATCH")], "CONFLICT", False),
+    # The reference's own stated precision widens the tolerance too.
+    _rec("val.recon.reference_precision_widens_tolerance", ["BR-VAL-021", "BR-VAL-022"], [_o(_REL, 31_500_000, 50_000), _o(_YAH, 31_540_000)], 0.0,
+         [_cmp(_YAH, _REL, 31_540_000, 31_500_000, 40_000, 0.127, 50_000, "MATCH")], "PARTIAL", False),
+    # SEC as first filed and as latest filed are one provider: they cannot make AGREED, and a difference is a restatement, not a conflict.
+    _rec("val.recon.two_sec_observations_are_one_provider", ["BR-VAL-019", "BR-VAL-020", "BR-VAL-022"], [_o(_SEC, 100), _o(_SEC1, 100)], 0.5,
+         [_cmp(_SEC1, _SEC, 100, 100, 0, 0, 0.5, "MATCH")], "PARTIAL", False),
+    _rec("val.recon.restatement_alone_is_partial_not_conflict", ["BR-VAL-020", "BR-VAL-022"], [_o(_SEC, 110), _o(_SEC1, 100)], 0.5,
+         [_cmp(_SEC1, _SEC, 100, 110, -10, -9.0909, 0.55, "RESTATED")], "PARTIAL", True),
+    # A restatement can coexist with AGREED when an independent provider matches the latest value.
+    _rec("val.recon.restatement_with_independent_match_is_agreed", ["BR-VAL-020", "BR-VAL-022"], [_o(_SEC, 110), _o(_SEC1, 100), _o(_YAH, 110)], 0.5,
+         [_cmp(_SEC1, _SEC, 100, 110, -10, -9.0909, 0.55, "RESTATED"), _cmp(_YAH, _SEC, 110, 110, 0, 0, 0.55, "MATCH")], "AGREED", True),
+    _rec("val.recon.one_conflicting_provider_beats_agreeing_one", ["BR-VAL-020", "BR-VAL-022"], [_o(_SEC, 1000), _o(_REL, 1000), _o(_YAH, 2000)], 0.5,
+         [_cmp(_REL, _SEC, 1000, 1000, 0, 0, 5, "MATCH"), _cmp(_YAH, _SEC, 2000, 1000, 1000, 100, 5, "MISMATCH")], "CONFLICT", False),
+    _rec("val.recon.conflict_and_restatement_together", ["BR-VAL-020", "BR-VAL-022"], [_o(_SEC, 100), _o(_SEC1, 90), _o(_YAH, 120)], 0.5,
+         [_cmp(_SEC1, _SEC, 90, 100, -10, -10, 0.5, "RESTATED"), _cmp(_YAH, _SEC, 120, 100, 20, 20, 0.5, "MISMATCH")], "CONFLICT", True),
+    _rec("val.recon.nothing_found_is_not_found", ["BR-VAL-020", "BR-VAL-022"],
+         [_o(_SEC, None, status="NOT_FOUND"), _o(_REL, None, status="NOT_FOUND_IN_TEXT"), _o(_YAH, None, status="NOT_READ")], 0.5, [], "NOT_FOUND", False),
+    _rec("val.recon.unfound_providers_are_ignored", ["BR-VAL-020", "BR-VAL-022"], [_o(_SEC, 100), _o(_REL, None, status="NOT_FOUND_IN_TEXT"), _o(_YAH, None, status="FIELD_EMPTY")], 0.5,
+         [], "PARTIAL", False),
+    # Zero baseline: percentage is null; no tolerance, so any difference is a mismatch.
+    _rec("val.recon.zero_baseline_has_no_percentage", ["BR-VAL-021", "BR-VAL-022"], [_o(_SEC, 0), _o(_YAH, 0)], 0.5, [_cmp(_YAH, _SEC, 0, 0, 0, None, 0, "MATCH")], "AGREED", False),
+    _rec("val.recon.zero_baseline_any_difference_conflicts", ["BR-VAL-021", "BR-VAL-022"], [_o(_SEC, 0), _o(_YAH, 5)], 0.5, [_cmp(_YAH, _SEC, 5, 0, 5, None, 0, "MISMATCH")], "CONFLICT", False),
+]
+
+
+# Full path: companyfacts + release text + Yahoo rows. A restated Q2 2025 revenue (20.0M first filed, 21.0M latest) and the Q2 2026 quarter.
+_RECON_FACTS = {"facts": {"us-gaap": {"RevenueFromContractWithCustomerIncludingAssessedTax": _usd(
+    _f("2025-04-01", "2025-06-30", 20_000_000, "10-Q", "2025-08-11", "q225"),
+    _f("2025-04-01", "2025-06-30", 21_000_000, "10-Q", "2026-08-10", "q226"),
+    _f("2026-04-01", "2026-06-30", 31_512_000, "10-Q", "2026-08-10", "q226"))}}}
+_RELEASE = {"status": "READ", "url": "https://www.sec.gov/r.htm", "filingDate": "2026-08-10", "accessionNumber": "r1",
+            "text": "Second quarter 2026 revenue was $31.5 million from government and commercial customers."}
+_RELEASE_JS = ("const [facts, metric, spec, releases, rows, tol] = args; const mrm = m.metricReconciliation; "
+               "return mrm.metricReconciliation({ ticker: 'tst', metric, period: mrm.resolvePeriod(facts, metric, spec), companyfacts: facts, releases, yahooRows: rows, tolerancePct: tol });")
+
+
+def _rsel(v: dict) -> dict:
+    basis = v["agreementBasis"]
+    return {"status": v["status"], "restated": v["restated"], "agreeing": basis["providersAgreeingWithSec"], "independentChecks": basis["independentChecks"],
+            "found": basis["providersFound"], "missing": v["missingProviders"], "notRead": basis["notRead"], "tolerancePct": v["tolerancePct"],
+            "comparisons": [[c["source"], c["result"], c["value"], c["difference"], c["differencePct"], c["tolerance"]] for c in v["comparisons"]]}
+
+
+def _recon(name: str, ids: list[str], spec: str, releases: list, rows, tol: float, expect: dict, facts: dict = _RECON_FACTS, metric: str = "revenue", **kw) -> Case:
+    return Case(name=name, ids=ids,
+                py=lambda: mr.metric_reconciliation(ticker="tst", metric=metric, period=mr.resolve_period(facts, metric, spec), companyfacts=facts, releases=copy.deepcopy(releases),
+                                                    yahoo_rows=copy.deepcopy(rows), tolerance_pct=tol),
+                ts={"js": _RELEASE_JS, "args": [facts, metric, spec, releases, rows, tol]}, select=_rsel, expect=expect, **kw)
+
+
+def _recon_expect(status, comparisons, *, restated=False, agreeing=(), found=("SEC",), notread=("ALPHA_VANTAGE",), tol=0.5) -> dict:
+    missing = [p for p in ("SEC", "ISSUER_RELEASE", "YAHOO") if p not in found]
+    return {"status": status, "restated": restated, "agreeing": list(agreeing), "independentChecks": len(agreeing), "found": list(found), "missing": missing,
+            "notRead": list(notread), "tolerancePct": tol, "comparisons": comparisons}
+
+
+RECON_FLOW_CASES = [
+    # Card BR-VAL-020: SEC and Yahoo both found revenue within tolerance, release not found -> AGREED, providersAgreeingWithSec ['YAHOO'], independentChecks 1.
+    _recon("val.recon.card_020_sec_and_yahoo_agree_release_not_found", ["BR-VAL-020", "BR-VAL-019", "BR-VAL-022"], "latest_quarter", [],
+           [{"date": "2026-06-30", "totalRevenue": 31_520_000.0}], 0.5,
+           _recon_expect("AGREED", [[_SEC1, "MATCH", 31_512_000, 0, 0, 157_560], [_YAH, "MATCH", 31_520_000, 8_000, 0.0254, 157_560]], agreeing=["YAHOO"], found=("SEC", "YAHOO"))),
+    # Release text read through the whole path: "$31.5 million" has precision 50,000 and matches 31,512,000 (card BR-VAL-021).
+    _recon("val.recon.release_text_precision_through_full_path", ["BR-VAL-021", "BR-VAL-019", "BR-VAL-022"], "latest_quarter", [_RELEASE], None, 0.5,
+           _recon_expect("AGREED", [[_SEC1, "MATCH", 31_512_000, 0, 0, 157_560], [_REL, "MATCH", 31_500_000, -12_000, -0.0381, 157_560]], agreeing=["ISSUER_RELEASE"], found=("SEC", "ISSUER_RELEASE"))),
+    _recon("val.recon.release_and_yahoo_both_agree", ["BR-VAL-019", "BR-VAL-020", "BR-VAL-022"], "latest_quarter", [_RELEASE], [{"date": "2026-06-30", "totalRevenue": 31_512_000.0}], 0.5,
+           _recon_expect("AGREED", [[_SEC1, "MATCH", 31_512_000, 0, 0, 157_560], [_REL, "MATCH", 31_500_000, -12_000, -0.0381, 157_560], [_YAH, "MATCH", 31_512_000, 0, 0, 157_560]],
+                         agreeing=["ISSUER_RELEASE", "YAHOO"], found=("SEC", "ISSUER_RELEASE", "YAHOO"))),
+    _recon("val.recon.yahoo_dates_within_7_days_matched", ["BR-VAL-022"], "latest_quarter", [], [{"date": "2026-07-07", "totalRevenue": 31_512_000.0}], 0.5,
+           _recon_expect("AGREED", [[_SEC1, "MATCH", 31_512_000, 0, 0, 157_560], [_YAH, "MATCH", 31_512_000, 0, 0, 157_560]], agreeing=["YAHOO"], found=("SEC", "YAHOO"))),
+    _recon("val.recon.yahoo_row_8_days_off_not_found", ["BR-VAL-022"], "latest_quarter", [], [{"date": "2026-07-08", "totalRevenue": 31_512_000.0}], 0.5,
+           _recon_expect("PARTIAL", [[_SEC1, "MATCH", 31_512_000, 0, 0, 157_560]])),
+    # Two SEC observations are one provider; a restated value alone is PARTIAL and restated, never a conflict.
+    _recon("val.recon.restated_sec_value_alone_is_partial", ["BR-VAL-019", "BR-VAL-020", "BR-VAL-022"], "Q2 2025", [], None, 0.5,
+           _recon_expect("PARTIAL", [[_SEC1, "RESTATED", 20_000_000, -1_000_000, -4.7619, 105_000]], restated=True)),
+    # Restatement + AGREED: Yahoo matches the latest (21.0M) value, so the restated first-filed value does not stop AGREED.
+    _recon("val.recon.restatement_with_yahoo_match_is_agreed", ["BR-VAL-019", "BR-VAL-020", "BR-VAL-022"], "Q2 2025", [], [{"date": "2025-06-30", "totalRevenue": 21_000_000.0}], 0.5,
+           _recon_expect("AGREED", [[_SEC1, "RESTATED", 20_000_000, -1_000_000, -4.7619, 105_000], [_YAH, "MATCH", 21_000_000, 0, 0, 105_000]],
+                         restated=True, agreeing=["YAHOO"], found=("SEC", "YAHOO"))),
+    # Yahoo holding the first-filed value (20.0M) disagrees with the latest SEC value: a conflict as well as a restatement.
+    _recon("val.recon.yahoo_with_first_filed_value_conflicts", ["BR-VAL-020", "BR-VAL-022"], "Q2 2025", [], [{"date": "2025-06-30", "totalRevenue": 20_000_000.0}], 0.5,
+           _recon_expect("CONFLICT", [[_SEC1, "RESTATED", 20_000_000, -1_000_000, -4.7619, 105_000], [_YAH, "MISMATCH", 20_000_000, -1_000_000, -4.7619, 105_000]],
+                         restated=True, found=("SEC", "YAHOO"))),
+    _recon("val.recon.release_mismatch_beats_yahoo_match", ["BR-VAL-020", "BR-VAL-022"], "latest_quarter",
+           [{**_RELEASE, "text": "Second quarter 2026 revenue was $33.0 million."}], [{"date": "2026-06-30", "totalRevenue": 31_512_000.0}], 0.5,
+           _recon_expect("CONFLICT", [[_SEC1, "MATCH", 31_512_000, 0, 0, 157_560], [_REL, "MISMATCH", 33_000_000, 1_488_000, 4.722, 157_560], [_YAH, "MATCH", 31_512_000, 0, 0, 157_560]],
+                         agreeing=["YAHOO"], found=("SEC", "ISSUER_RELEASE", "YAHOO"))),
+    _recon("val.recon.nothing_found_net_income_is_not_found", ["BR-VAL-020", "BR-VAL-022"], "latest_quarter", [], None, 0.5,
+           _recon_expect("NOT_FOUND", [], found=()), metric="net_income"),
+]
+
+
+# ───────────────────────────────────────────────────────────────── parent net income from ProfitLoss (cards BR-VAL-025, 056)
+
+_BE_FILED = ("10-K", "2026-02-26", "be26")
+_NCI = "NetIncomeLossAttributableToNoncontrollingInterest"
+
+
+def _ni_facts(**concepts) -> dict:
+    us = {"Revenues": _usd(_f("2025-01-01", "2025-12-31", 2000 * M, *_BE_FILED))}
+    us.update({c: _usd(*rows) for c, rows in concepts.items()})
+    return {"facts": {"us-gaap": us}}
+
+
+def _ni_row(val, form="10-K", filed="2026-02-26", accn="be26", start="2025-01-01", end="2025-12-31") -> dict:
+    return _f(start, end, val, form, filed, accn)
+
+
+def _nsel(v: list) -> list:
+    out = []
+    for o in v:
+        ev = o.get("evidence") or {}
+        out.append([o["source"], o["status"], o["value"], o.get("basis"), ev.get("concept"), ev.get("profitLoss"), ev.get("noncontrollingInterest"), ev.get("derivation")])
+    return out
+
+
+def _secobs(name: str, ids: list[str], facts: dict, expect: list, metric: str = "net_income", **kw) -> Case:
+    return Case(name=name, ids=ids,
+                py=lambda: mr.sec_observations(facts, metric, mr.resolve_period(facts, metric, "latest_annual")),
+                ts={"js": "const p = m.metricReconciliation.resolvePeriod(args[0], args[1], 'latest_annual'); return m.metricReconciliation.secObservations(args[0], args[1], p);",
+                    "args": [facts, metric]},
+                select=_nsel, expect=expect, **kw)
+
+
+_DERIVATION = "ProfitLoss - NetIncomeLossAttributableToNoncontrollingInterest"
+
+
+def _derived(value, profit_loss, nci) -> list:
+    return [["SEC_XBRL_LATEST", "FOUND", value, "PARENT_DERIVED_FROM_PROFITLOSS", "ProfitLoss", profit_loss, nci, _DERIVATION],
+            ["SEC_XBRL_AS_FIRST_FILED", "FOUND", value, "PARENT_DERIVED_FROM_PROFITLOSS", "ProfitLoss", profit_loss, nci, _DERIVATION]]
+
+
+def _raw(concept, latest, first) -> list:
+    return [["SEC_XBRL_LATEST", "FOUND", latest, None, concept, None, None, None], ["SEC_XBRL_AS_FIRST_FILED", "FOUND", first, None, concept, None, None, None]]
+
+
+_BE_PINNED = dict(mode="pinned", decision="Q1 BR-VAL-025")
+
+NET_INCOME_CASES = [
+    # Card BR-VAL-025: ProfitLoss 120M is the chosen concept, NCI 5M in the same accession, period and unit -> 115M, PARENT_DERIVED_FROM_PROFITLOSS.
+    _secobs("val.recon.net_income.card_025_profit_loss_less_nci", ["BR-VAL-025", "BR-VAL-056"],
+            _ni_facts(ProfitLoss=[_ni_row(120 * M)], **{_NCI: [_ni_row(5 * M)]}), _derived(115 * M, 120 * M, 5 * M)),
+    # Also when NetIncomeLoss is tagged, if ProfitLoss was filed more recently (a 10-K/A with its own NCI row).
+    _secobs("val.recon.net_income.profit_loss_filed_later_than_net_income_loss", ["BR-VAL-025", "BR-VAL-056"],
+            _ni_facts(NetIncomeLoss=[_ni_row(100 * M)], ProfitLoss=[_ni_row(110 * M, "10-K/A", "2026-03-15", "be26a")], **{_NCI: [_ni_row(5 * M, "10-K/A", "2026-03-15", "be26a")]}),
+            _derived(105 * M, 110 * M, 5 * M)),
+    # A tie on filing date goes to the earlier-listed concept (NetIncomeLoss): no derivation.
+    _secobs("val.recon.net_income.same_filing_tie_goes_to_net_income_loss", ["BR-VAL-025", "BR-VAL-056"],
+            _ni_facts(NetIncomeLoss=[_ni_row(100 * M)], ProfitLoss=[_ni_row(110 * M)], **{_NCI: [_ni_row(5 * M)]}), _raw("NetIncomeLoss", 100 * M, 100 * M)),
+    # The first-filed and latest derivations each use their own filing's NCI: ProfitLoss restated 118M -> 120M, NCI 4M -> 5M.
+    _secobs("val.recon.net_income.restated_profit_loss_uses_each_filings_nci", ["BR-VAL-025", "BR-VAL-056"],
+            _ni_facts(ProfitLoss=[_ni_row(118 * M), _ni_row(120 * M, "10-K/A", "2026-03-15", "be26a")],
+                      **{_NCI: [_ni_row(4 * M), _ni_row(5 * M, "10-K/A", "2026-03-15", "be26a")]}),
+            [["SEC_XBRL_LATEST", "FOUND", 115 * M, "PARENT_DERIVED_FROM_PROFITLOSS", "ProfitLoss", 120 * M, 5 * M, _DERIVATION],
+             ["SEC_XBRL_AS_FIRST_FILED", "FOUND", 114 * M, "PARENT_DERIVED_FROM_PROFITLOSS", "ProfitLoss", 118 * M, 4 * M, _DERIVATION]]),
+    # Q1 BR-VAL-025 (owner decision): with no NCI tagged, raw ProfitLoss (which includes the noncontrolling interest) is reported as net income,
+    # with no basis field. The repair returns an unresolved/limited parent net income instead.
+    _secobs("val.recon.net_income.pinned_missing_nci_reports_raw_profit_loss", ["BR-VAL-025", "BR-VAL-056"], _ni_facts(ProfitLoss=[_ni_row(120 * M)]),
+            _raw("ProfitLoss", 120 * M, 120 * M), **_BE_PINNED),
+    # Both the latest and the first-filed row need a matched NCI: here only the latest has one, so both stay raw.
+    _secobs("val.recon.net_income.pinned_nci_missing_for_first_filed_row_reports_raw", ["BR-VAL-025", "BR-VAL-056"],
+            _ni_facts(ProfitLoss=[_ni_row(118 * M), _ni_row(120 * M, "10-K/A", "2026-03-15", "be26a")], **{_NCI: [_ni_row(5 * M, "10-K/A", "2026-03-15", "be26a")]}),
+            _raw("ProfitLoss", 120 * M, 118 * M), **_BE_PINNED),
+    # NCI must come from the same accession (a different filing's figure is not matched).
+    _secobs("val.recon.net_income.pinned_nci_from_other_filing_reports_raw", ["BR-VAL-025", "BR-VAL-056"],
+            _ni_facts(ProfitLoss=[_ni_row(120 * M)], **{_NCI: [_ni_row(5 * M, accn="other")]}), _raw("ProfitLoss", 120 * M, 120 * M), **_BE_PINNED),
+    # ... and for the same period start and end.
+    _secobs("val.recon.net_income.pinned_nci_for_other_period_reports_raw", ["BR-VAL-025", "BR-VAL-056"],
+            _ni_facts(ProfitLoss=[_ni_row(120 * M)], **{_NCI: [_ni_row(5 * M, end="2025-09-30")]}), _raw("ProfitLoss", 120 * M, 120 * M), **_BE_PINNED),
+    # Finding (Phase 2, for Q3i triage): IFRS ProfitLoss (which includes non-controlling interests) is reported as net income without any
+    # derivation when the owners-of-parent concept is not tagged; the derivation is US-GAAP only. Both runtimes agree; recorded as current behaviour.
+    _secobs("val.recon.net_income.ifrs_profit_loss_is_not_derived", ["BR-VAL-025", "BR-VAL-056"],
+            {"facts": {"ifrs-full": {"Revenue": {"units": {"TWD": [_ni_row(2000 * M)]}}, "ProfitLoss": {"units": {"TWD": [_ni_row(120 * M)]}}}}},
+            _raw("ProfitLoss", 120 * M, 120 * M)),
+    # Revenue concept tie-break (separate behaviour in the same function): same-day concepts, the larger magnitude wins.
+    _secobs("val.recon.net_income.revenue_same_filing_larger_magnitude_wins", ["BR-VAL-025"],
+            {"facts": {"us-gaap": {"RevenueFromContractWithCustomerExcludingAssessedTax": _usd(_ni_row(2_001_614_000)), "Revenues": _usd(_ni_row(2_023_994_000))}}},
+            [["SEC_XBRL_LATEST", "FOUND", 2_023_994_000, None, "Revenues", None, None, None], ["SEC_XBRL_AS_FIRST_FILED", "FOUND", 2_023_994_000, None, "Revenues", None, None, None]],
+            metric="revenue"),
+]
+
+# Recorded BE (Bloom Energy) FY2025 10-K: net income tagged only as ProfitLoss (-87,140,000) with +1,294,000 attributable to noncontrolling interests.
+NET_INCOME_CASES.append(
+    _secobs("val.recon.net_income.recorded_be_profit_loss_less_nci", ["BR-VAL-025", "BR-VAL-056"], fixture("sec/companyfacts_BE.json"),
+            [["SEC_XBRL_LATEST", "FOUND", -88_434_000, "PARENT_DERIVED_FROM_PROFITLOSS", "ProfitLoss", -87_140_000, 1_294_000, _DERIVATION],
+             ["SEC_XBRL_AS_FIRST_FILED", "FOUND", -88_434_000, "PARENT_DERIVED_FROM_PROFITLOSS", "ProfitLoss", -87_140_000, 1_294_000, _DERIVATION]]))
+
+
+# ───────────────────────────────────────────────────────────────── reconcile_metric_sources tolerance input (Q3e: cards BR-VAL-019, 020, 063)
+# The clamp lives in the tool wrappers (server.py reconcile_metric_sources, yahoo-finance.ts reconcileMetricSources), so these cases run the whole
+# tool against canned SEC responses and compare the tolerance the result echoes. Yahoo statements are unavailable on both sides (only SEC is read).
+
+_TOL_ROUTES = {
+    "https://www.sec.gov/files/company_tickers.json": {"json": {"0": {"cik_str": 1234567, "ticker": "TST", "title": "Test Co"}}},
+    "https://data.sec.gov/submissions/CIK0001234567.json": {"json": {"cik": "1234567", "filings": {"recent": {
+        "accessionNumber": [], "filingDate": [], "form": [], "primaryDocument": [], "items": [], "reportDate": []}}}},
+    "https://data.sec.gov/api/xbrl/companyfacts/CIK0001234567.json": {"json": _RECON_FACTS},
+}
+_NAN, _INF = float("nan"), float("inf")
+_OMIT = "__omit__"
+
+
+def _tolerances_py(values: list) -> list:
+    """The tolerancePct echoed by server.reconcile_metric_sources for each caller value (no network: CIK cached, Yahoo statements unavailable)."""
+    import asyncio
+    import json
+    from unittest.mock import patch
+
+    import server
+    from yfmcp.clients import edgar
+
+    def no_yahoo(*_a, **_k):
+        raise RuntimeError("Yahoo statements unavailable")
+
+    out = []
+    with patch.dict(edgar._FILING_CIK_CACHE, {"TST": "0001234567"}), patch.object(server, "_yahoo_statement_rows_sync", no_yahoo):
+        for v in values:
+            args = ("TST", "revenue", "latest_quarter") + (() if v == _OMIT else (v,))
+            result = json.loads(asyncio.run(server.reconcile_metric_sources(*args)))
+            out.append(result.get("tolerancePct", result))
+    return out
+
+
+_TOLERANCES_JS = ("const out = []; for (const v of args[0]) { const t = v === '__omit__' ? [] : [v === 'NaN' ? NaN : v === 'Infinity' ? Infinity : v === '-Infinity' ? -Infinity : v]; "
+                  "const r = JSON.parse(await m.yahooFinance.reconcileMetricSources('TST', 'revenue', 'latest_quarter', ...t)); out.push(r.tolerancePct ?? r); } return out;")
+
+
+def _tolerances(name: str, ids: list[str], values: list, **kw) -> Case:
+    js_values = [("NaN" if v != v else "Infinity" if v == _INF else "-Infinity" if v == -_INF else v) if isinstance(v, float) else v for v in values]
+    return Case(name=name, ids=ids, py=lambda: _tolerances_py(values), ts={"js": _TOLERANCES_JS, "args": [js_values], "isolate": True}, routes=_TOL_ROUTES, **kw)
+
+
+TOLERANCE_CASES = [
+    # In range, out of range, default (argument omitted), and values that are not numbers: clamped to 0-10, else 0.5.
+    _tolerances("val.recon.tolerance_clamp_finite_and_unusable_values", ["BR-VAL-021", "BR-VAL-022", "BR-VAL-063"], [15.0, -1.0, 3.0, 10.0, 0.0, _OMIT, "abc", None],
+                expect=[10, 0, 3, 10, 0, 0.5, 0.5, 0.5]),
+    # Q3e: Python clamps before its finiteness check (min(10, max(0, nan)) is 0.0; +inf is 10), so NaN -> 0 and +inf -> 10; the Worker tests finiteness
+    # first and answers the 0.5 default for NaN and both infinities. The repair makes them agree.
+    _tolerances("val.recon.pinned_tolerance_nan_and_infinity", ["BR-VAL-019", "BR-VAL-063", "BR-VAL-021"], [_NAN, _INF, -_INF],
+                mode="pinned", decision="Q3e", expect_py=[0, 10, 0], expect_ts=[0.5, 0.5, 0.5]),
+    # Finding (Phase 2, for Q3e triage): a numeric string is coerced by Python's float() ("5" -> 5.0) but not by the Worker's Number.isFinite (-> 0.5).
+    # Only reachable if the MCP layer passes the string through; the schema declares a number.
+    _tolerances("val.recon.pinned_tolerance_numeric_string", ["BR-VAL-063"], ["5"],
+                mode="pinned", decision="FINDING: numeric-string tolerance_pct is 5.0 in Python (float() coerces) but the 0.5 default in the Worker (Number.isFinite does not coerce)",
+                expect_py=[5], expect_ts=[0.5]),
+]
+
+
+def _agreed_wording_py() -> str:
+    import asyncio
+
+    import server
+    tool = next(t for t in asyncio.run(server.yfinance_server.list_tools()) if t.name == "reconcile_metric_sources")
+    return tool.description
+
+
+_AGREED_PHRASE = re.compile(r"Status AGREED.*?with source evidence")
+
+DESCRIPTION_CASES = [
+    # Q3e (card BR-VAL-020 suspected defect): the Worker's tool description says AGREED needs "two or more providers agree"; the Python description
+    # (and both code paths) require the latest SEC value plus at least one independent matching provider. The repair corrects the Worker text.
+    Case(name="val.recon.pinned_tool_description_agreed_wording", ids=["BR-VAL-020", "BR-VAL-019"],
+         py=_agreed_wording_py,
+         ts={"js": "return m.tools.TOOLS.find((t) => t.name === 'reconcile_metric_sources').description;"},
+         select=lambda v: _AGREED_PHRASE.search(v).group(0),
+         mode="pinned", decision="Q3e",
+         expect_py="Status AGREED requires latest SEC plus at least one independent matching provider; PARTIAL covers a missing SEC baseline or only one provider; "
+                   "otherwise CONFLICT or NOT_FOUND, with source evidence",
+         expect_ts="Status AGREED (two or more providers agree), PARTIAL (one provider), CONFLICT or NOT_FOUND, with source evidence"),
+]
+
+CASES = (ADR_CASES + SHARE_BASIS_CASES + BALANCE_CASES + CURRENCY_CASES + EV_CASES + EV_CASES_HIST + BAL_HIST_CASES + PRICE_CASES + MCAP_CASES + COVER_CASES
+         + COVER_PARSE_CASES + FLOW_CASES + PIT_CASES + RECORDED_CASES + RECON_OBS_CASES + RECON_FLOW_CASES + NET_INCOME_CASES + TOLERANCE_CASES + DESCRIPTION_CASES)

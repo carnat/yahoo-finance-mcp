@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import json
+import re
 import zoneinfo
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -1172,4 +1173,542 @@ CASES += [
                 [("2023-10-09", 75.0), ("2025-10-09", 90.0), (STATS_END, 100.0)], ("cagr3y",),
                 mode="pinned", decision="FINDING: Python (calendar DateOffset) and Worker (365.25-day years) pick different CAGR start bars at the horizon boundary",
                 expect_py={"cagr3y": 10.0642}, expect_ts={"cagr3y": 3.5744}),
+]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+# BR-PRC-022 (Q3d): price target bracket and tag (get_price_target_bracket)
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+BRACKET_NOW = _epoch("2026-10-09", "12:00", "UTC")
+BRACKET_KEYS = ("referenceTargetPct", "bracket", "inferredTag", "distanceToTargetPct", "invertedFlag", "dataDate", "error", "message")
+
+
+def _bracket_case(name: str, ids: list[str], price: float, target: float, keys=BRACKET_KEYS, market_time: int | None = None,
+                  post=None, **kw) -> Case:
+    def py():
+        info = {"regularMarketTime": market_time, "marketState": "CLOSED"} if market_time else {"marketState": "CLOSED"}
+        company = SimpleNamespace(fast_info={"lastPrice": price}, info=info)
+        with patch.object(server.yf, "Ticker", lambda _t: company):
+            return asyncio.run(server.get_price_target_bracket("TST", target))
+
+    summary = {"quoteSummary": {"result": [{"price": {
+        "currency": "USD", "quoteType": "EQUITY", "regularMarketPrice": {"raw": price}, "marketState": "CLOSED",
+        **({"regularMarketTime": {"raw": market_time}} if market_time else {})}, "summaryDetail": {}, "defaultKeyStatistics": {}}]}}
+    return Case(
+        name=name, ids=ids, py=py,
+        ts={"js": _ts_with_clock(BRACKET_NOW, f'return JSON.parse(await m.yahooFinance.getPriceTargetBracket("TST", {target}));'), "isolate": True},
+        routes={**YAHOO_AUTH_ROUTES, "https://query1.finance.yahoo.com/v10/finance/quoteSummary/TST?*": {"json": summary}},
+        select=(lambda v: post(_pick(*keys)(v))) if post else _pick(*keys), **kw)
+
+
+QUOTE_TIME = _epoch("2026-10-08", "20:00", "UTC")
+CASES += [
+    # Card: price $70, reference target $100 -> 70.0, STRONG_BUY, LONG, distance 42.9.
+    _bracket_case("prc.bracket.card_example_strong_buy_long", ["BR-PRC-022"], 70.0, 100.0, market_time=QUOTE_TIME,
+                  expect={"referenceTargetPct": 70.0, "bracket": "STRONG_BUY", "inferredTag": "LONG", "distanceToTargetPct": 42.9,
+                          "invertedFlag": False, "dataDate": "2026-10-08", "error": None, "message": None}),
+    _bracket_case("prc.bracket.eighty_five_pct_is_acceptable_long_boundary", ["BR-PRC-022"], 85.0, 100.0, market_time=QUOTE_TIME,
+                  keys=("referenceTargetPct", "bracket", "inferredTag"),
+                  expect={"referenceTargetPct": 85.0, "bracket": "ACCEPTABLE", "inferredTag": "NEAR"}),
+    _bracket_case("prc.bracket.exactly_75_is_strong_buy", ["BR-PRC-022"], 75.0, 100.0, market_time=QUOTE_TIME,
+                  keys=("referenceTargetPct", "bracket", "inferredTag"),
+                  expect={"referenceTargetPct": 75.0, "bracket": "STRONG_BUY", "inferredTag": "LONG"}),
+    _bracket_case("prc.bracket.exactly_100_is_caution_and_inverted", ["BR-PRC-022"], 100.0, 100.0, market_time=QUOTE_TIME,
+                  keys=("referenceTargetPct", "bracket", "inferredTag", "invertedFlag"),
+                  expect={"referenceTargetPct": 100.0, "bracket": "CAUTION", "inferredTag": "INVERTED", "invertedFlag": True}),
+    _bracket_case("prc.bracket.above_target_is_avoid", ["BR-PRC-022"], 120.0, 100.0, market_time=QUOTE_TIME,
+                  keys=("referenceTargetPct", "bracket", "inferredTag", "distanceToTargetPct"),
+                  expect={"referenceTargetPct": 120.0, "bracket": "AVOID", "inferredTag": "INVERTED", "distanceToTargetPct": -16.7}),
+    _bracket_case("prc.bracket.below_forty_pct_is_speculative", ["BR-PRC-022"], 39.9, 100.0, market_time=QUOTE_TIME,
+                  keys=("referenceTargetPct", "bracket", "inferredTag"),
+                  expect={"referenceTargetPct": 39.9, "bracket": "STRONG_BUY", "inferredTag": "SPECULATIVE"}),
+    _bracket_case("prc.bracket.non_positive_target_is_rejected", ["BR-PRC-022"], 70.0, 0.0, market_time=QUOTE_TIME,
+                  keys=("error", "message"),
+                  expect={"error": True, "message": "reference_target_price (or io_pt alias) must be a positive number"}),
+    # Q3d: thresholds compare the value rounded to 1 dp: 75.04 reads as 75.0 and is STRONG_BUY.
+    _bracket_case("prc.bracket.q3d_threshold_uses_the_rounded_percentage", ["BR-PRC-022"], 75.04, 100.0, market_time=QUOTE_TIME,
+                  keys=("referenceTargetPct", "bracket"), mode="pinned", decision="Q3d",
+                  expect={"referenceTargetPct": 75.0, "bracket": "STRONG_BUY"}),
+    # Q3d: Python round() is half-even, JS toFixed(1) rounds an exact tie up: 301/400 x 100 = 75.25 exactly.
+    _bracket_case("prc.bracket.q3d_rounding_differs_python_round_vs_ts_tofixed", ["BR-PRC-022"], 301.0, 400.0, market_time=QUOTE_TIME,
+                  keys=("referenceTargetPct", "bracket"), mode="pinned", decision="Q3d",
+                  expect_py={"referenceTargetPct": 75.2, "bracket": "ACCEPTABLE"},
+                  expect_ts={"referenceTargetPct": 75.3, "bracket": "ACCEPTABLE"}),
+    # Q3d: with no quote time the Worker reports today as dataDate; Python reports null.
+    _bracket_case("prc.bracket.q3d_missing_quote_time_python_null_worker_today", ["BR-PRC-022"], 70.0, 100.0,
+                  keys=("dataDate", "bracket"), mode="pinned", decision="Q3d",
+                  # `new Date()` ignores the Date.now override, so the Worker's date is the real current date: only its
+                  # presence (a YYYY-MM-DD string) is pinned.
+                  post=lambda v: {"dataDate": None if v["dataDate"] is None else ("<today YYYY-MM-DD>" if re.fullmatch(r"\d{4}-\d{2}-\d{2}", v["dataDate"]) else v["dataDate"]),
+                                  "bracket": v["bracket"]},
+                  expect_py={"dataDate": None, "bracket": "STRONG_BUY"}, expect_ts={"dataDate": "<today YYYY-MM-DD>", "bracket": "STRONG_BUY"}),
+]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+# BR-FND-004 / BR-FND-006 / BR-FND-007: credit health (get_credit_health)
+# Python: server.get_credit_health on stubbed yfinance quarterly statements.
+# Worker: getCreditHealth on a canned fundamentals-timeseries response.
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+M = 1_000_000
+QUARTERS = ["2026-06-30", "2026-03-31", "2025-12-31", "2025-09-30"]  # newest first
+CREDIT_NOW = _epoch("2026-10-09", "12:00", "UTC")
+
+# Python statement row names and the Worker timeseries types for each synthetic field.
+_PY_ROWS = {"debt": "Total Debt", "long_term_debt": "Long Term Debt", "cash": "Cash And Cash Equivalents",
+            "op": "Operating Income", "da": "Reconciled Depreciation", "int": "Interest Expense Non Operating", "ebitda": "EBITDA"}
+_TS_TYPES = {"debt": "quarterlyTotalDebt", "cash": "quarterlyCashAndCashEquivalents", "op": "quarterlyOperatingIncome",
+             "da": "quarterlyReconciledDepreciation", "int": "quarterlyInterestExpenseNonOperating", "ebitda": "quarterlyEBITDA"}
+
+
+def _frame(rows: dict, dates: list[str]) -> pd.DataFrame:
+    data = {name: [vals[i] if i < len(vals) else float("nan") for i in range(len(dates))] for name, vals in rows.items()}
+    return pd.DataFrame(data, index=[pd.Timestamp(d) for d in dates]).T
+
+
+def _timeseries(rows: dict, dates: list[str]) -> dict:
+    result = []
+    for field, vals in rows.items():
+        if field not in _TS_TYPES:  # e.g. "Long Term Debt": the Worker never requests it
+            continue
+        t = _TS_TYPES[field]
+        result.append({"meta": {"type": [t]}, t: [{"asOfDate": dates[i], "reportedValue": {"raw": v}}
+                                                  for i, v in enumerate(vals) if v is not None and i < len(dates)]})
+    return {"timeseries": {"result": result}}
+
+
+def _credit_case(name: str, ids: list[str], balance: dict, income: dict, keys: tuple, income_dates: list[str] | None = None,
+                 **kw) -> Case:
+    """`balance` / `income`: field -> values newest first (None = missing)."""
+    income_dates = income_dates or QUARTERS[: max(len(v) for v in income.values())]
+    bs_dates = QUARTERS[:1]
+
+    def py():
+        bs_rows = {_PY_ROWS[k]: [float("nan") if x is None else x for x in v] for k, v in balance.items()}
+        inc_rows = {_PY_ROWS[k]: [float("nan") if x is None else x for x in v] for k, v in income.items()}
+        company = SimpleNamespace(quarterly_balance_sheet=_frame(bs_rows, bs_dates), quarterly_income_stmt=_frame(inc_rows, income_dates))
+        with patch.object(server.yf, "Ticker", lambda _t: company):
+            return asyncio.run(server.get_credit_health("TST"))
+
+    base = "https://query2.finance.yahoo.com/ws/fundamentals-timeseries/v1/finance/timeseries/TST?type="
+    routes = {
+        base + "quarterlyTotalDebt*": {"json": _timeseries(balance, bs_dates)},
+        base + "quarterlyEBITDA*": {"json": _timeseries(income, income_dates)},
+    }
+    return Case(
+        name=name, ids=ids, py=py,
+        ts={"js": _ts_with_clock(CREDIT_NOW, 'return JSON.parse(await m.yahooFinance.getCreditHealth("TST"));'), "isolate": True},
+        routes={**YAHOO_AUTH_ROUTES, **routes},
+        select=lambda v: {**{k: v.get(k) for k in keys}, **({"warningCodes": sorted(w["code"] for w in v["warnings"])} if "warningCodes" in keys else {})},
+        **kw)
+
+
+RATIO_KEYS = ("netDebtUsd", "operationalEbitdaUsd", "operationalEbitdaSource", "netDebtToEbitda",
+              "interestCoverageEbit", "interestCoverageEbitda", "creditStressFlag", "debtTier")
+
+
+def _credit_inputs(debt, cash, op_q, da_q, int_q, quarters=4):
+    return ({"debt": [debt], "cash": [cash]}, {"op": [op_q] * quarters, "da": [da_q] * quarters, "int": [int_q] * quarters})
+
+
+CASES += [
+    # Card BR-FND-004: debt $500M, cash $20M, TTM op income $120M, D&A $40M, interest $50M.
+    _credit_case("fnd.credit.card_ttm_example_leverage_and_coverage", ["BR-FND-004", "BR-FND-006"],
+                 *_credit_inputs(500 * M, 20 * M, 30 * M, 10 * M, 12.5 * M), RATIO_KEYS,
+                 expect={"netDebtUsd": 480 * M, "operationalEbitdaUsd": 160 * M, "operationalEbitdaSource": "ttm_operating_income_plus_da",
+                         "netDebtToEbitda": 3.0, "interestCoverageEbit": 2.4, "interestCoverageEbitda": 3.2,
+                         "creditStressFlag": True, "debtTier": "ELEVATED"}),
+    # Card BR-FND-006: debt $500M, cash $100M; 4 quarters of op income 40M, D&A 10M, interest 8M.
+    _credit_case("fnd.credit.card_net_debt_and_coverage_example", ["BR-FND-006"],
+                 *_credit_inputs(500 * M, 100 * M, 40 * M, 10 * M, 8 * M), RATIO_KEYS,
+                 expect={"netDebtUsd": 400 * M, "operationalEbitdaUsd": 200 * M, "operationalEbitdaSource": "ttm_operating_income_plus_da",
+                         "netDebtToEbitda": 2.0, "interestCoverageEbit": 5.0, "interestCoverageEbitda": 6.25,
+                         "creditStressFlag": False, "debtTier": "MODERATE"}),
+    # Card BR-FND-007: leverage 3.10x and EBIT coverage 2.40x -> stressed flag, ELEVATED.
+    _credit_case("fnd.credit.card_stress_flag_and_elevated_tier", ["BR-FND-007"],
+                 {"debt": [410 * M], "cash": [100 * M]}, {"op": [15 * M] * 4, "da": [10 * M] * 4, "int": [6.25 * M] * 4},
+                 ("netDebtToEbitda", "interestCoverageEbit", "creditStressFlag", "debtTier"),
+                 expect={"netDebtToEbitda": 3.1, "interestCoverageEbit": 2.4, "creditStressFlag": True, "debtTier": "ELEVATED"}),
+    # Tier boundaries (net debt / operational EBITDA of 100M): <1 CLEAN, <=2.5 MODERATE, <=4 ELEVATED, >4 STRESSED.
+    *[_credit_case(f"fnd.credit.tier_boundary_{label}", ["BR-FND-007"],
+                   {"debt": [int(net * M) + 10 * M], "cash": [10 * M]}, {"op": [20 * M] * 4, "da": [5 * M] * 4, "int": [1 * M] * 4},
+                   ("netDebtToEbitda", "debtTier"), expect={"netDebtToEbitda": ratio, "debtTier": tier})
+      for label, net, ratio, tier in [("0_9x_is_clean", 90, 0.9, "CLEAN"), ("1_0x_is_moderate", 100, 1.0, "MODERATE"),
+                                     ("2_5x_is_moderate", 250, 2.5, "MODERATE"), ("4_0x_is_elevated", 400, 4.0, "ELEVATED"),
+                                     ("4_5x_is_stressed", 450, 4.5, "STRESSED")]],
+    # Stress needs both leverage above 2.5x and EBIT coverage under 3x: coverage of exactly 3.00 is not stressed.
+    _credit_case("fnd.credit.coverage_of_exactly_three_is_not_stressed", ["BR-FND-007"],
+                 {"debt": [410 * M], "cash": [100 * M]}, {"op": [15 * M] * 4, "da": [10 * M] * 4, "int": [5 * M] * 4},
+                 ("netDebtToEbitda", "interestCoverageEbit", "creditStressFlag"),
+                 expect={"netDebtToEbitda": 3.1, "interestCoverageEbit": 3.0, "creditStressFlag": False}),
+    _credit_case("fnd.credit.net_cash_gives_negative_leverage_and_clean_tier", ["BR-FND-007"],
+                 {"debt": [50 * M], "cash": [250 * M]}, {"op": [40 * M] * 4, "da": [10 * M] * 4, "int": [1 * M] * 4},
+                 ("netDebtUsd", "netDebtToEbitda", "debtTier", "creditStressFlag"),
+                 expect={"netDebtUsd": -200 * M, "netDebtToEbitda": -1.0, "debtTier": "CLEAN", "creditStressFlag": False}),
+    _credit_case("fnd.credit.missing_interest_leaves_coverage_and_stress_flag_null", ["BR-FND-006", "BR-FND-007"],
+                 {"debt": [500 * M], "cash": [100 * M]}, {"op": [40 * M] * 4, "da": [10 * M] * 4},
+                 ("netDebtToEbitda", "interestCoverageEbit", "interestCoverageEbitda", "creditStressFlag", "debtTier", "dataQuality"),
+                 expect={"netDebtToEbitda": 2.0, "interestCoverageEbit": None, "interestCoverageEbitda": None,
+                         "creditStressFlag": None, "debtTier": "MODERATE", "dataQuality": "PARTIAL"}),
+    _credit_case("fnd.credit.provider_ebitda_is_the_fallback_when_da_is_missing", ["BR-FND-004", "BR-FND-006"],
+                 {"debt": [500 * M], "cash": [100 * M]}, {"op": [40 * M] * 4, "ebitda": [50 * M] * 4},
+                 ("operationalEbitdaUsd", "operationalEbitdaSource", "netDebtToEbitda"),
+                 expect={"operationalEbitdaUsd": 200 * M, "operationalEbitdaSource": "provider_ebitda_fallback", "netDebtToEbitda": 2.0}),
+    _credit_case("fnd.credit.zero_operational_ebitda_gives_no_leverage", ["BR-FND-006"],
+                 {"debt": [500 * M], "cash": [100 * M]}, {"op": [10 * M] * 4, "da": [-10 * M] * 4, "int": [1 * M] * 4},
+                 ("operationalEbitdaUsd", "netDebtToEbitda", "debtTier", "creditStressFlag"),
+                 expect={"operationalEbitdaUsd": 0, "netDebtToEbitda": None, "debtTier": None, "creditStressFlag": None}),
+
+    # Q3i: a loss-maker with net debt gets a negative leverage ratio and the CLEAN tier; only the warning flags it.
+    _credit_case("fnd.credit.q3i_loss_maker_with_net_debt_is_tiered_clean", ["BR-FND-007"],
+                 {"debt": [300 * M], "cash": [200 * M]}, {"op": [-10 * M] * 4, "da": [5 * M] * 4, "int": [2 * M] * 4},
+                 ("operationalEbitdaUsd", "netDebtToEbitda", "debtTier", "creditStressFlag", "warningCodes"),
+                 mode="pinned", decision="Q3i",
+                 expect={"operationalEbitdaUsd": -20 * M, "netDebtToEbitda": -5.0, "debtTier": "CLEAN", "creditStressFlag": False,
+                         "warningCodes": ["NEGATIVE_EARNINGS_BASE"]}),
+    # Q3i: three income quarters are summed as if they were a year. Python marks dataQuality PARTIAL; the Worker
+    # reports OK (it flags only missing components) -- the figures themselves are identical.
+    _credit_case("fnd.credit.q3i_three_quarter_ttm_python_partial_worker_ok", ["BR-FND-004", "BR-FND-006"],
+                 {"debt": [500 * M], "cash": [100 * M]},
+                 {"op": [40 * M] * 3, "da": [10 * M] * 3, "int": [8 * M] * 3, "ebitda": [50 * M] * 3},
+                 ("operationalEbitdaUsd", "netDebtToEbitda", "interestCoverageEbit", "dataQuality"),
+                 mode="pinned", decision="Q3i",
+                 expect_py={"operationalEbitdaUsd": 150 * M, "netDebtToEbitda": 2.67, "interestCoverageEbit": 5.0, "dataQuality": "PARTIAL"},
+                 expect_ts={"operationalEbitdaUsd": 150 * M, "netDebtToEbitda": 2.67, "interestCoverageEbit": 5.0, "dataQuality": "OK"}),
+    # Python falls back to "Long Term Debt" (which omits current debt) when no total debt row exists; the Worker
+    # reads total debt only, so net debt is unavailable.
+    _credit_case("fnd.credit.q3i_long_term_debt_fallback_exists_only_in_python", ["BR-FND-004", "BR-FND-006"],
+                 {"long_term_debt": [300 * M], "cash": [100 * M]}, {"op": [40 * M] * 4, "da": [10 * M] * 4, "int": [8 * M] * 4},
+                 ("totalDebtUsd", "netDebtUsd", "netDebtToEbitda"),
+                 mode="pinned", decision="Q3i",
+                 expect_py={"totalDebtUsd": 300 * M, "netDebtUsd": 200 * M, "netDebtToEbitda": 1.0},
+                 expect_ts={"totalDebtUsd": None, "netDebtUsd": None, "netDebtToEbitda": None}),
+]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+# BR-SHR-010 / BR-SHR-012: earnings beat rate, surprise, beat streak, pre-revenue rule (get_earnings_momentum)
+# Python: server.get_earnings_momentum on stubbed yfinance tables. Worker: getEarningsMomentum on a canned
+# quoteSummary earningsHistory.
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+def _momentum_case(name: str, ids: list[str], history: list | None, keys: tuple, **kw) -> Case:
+    """`history`: (epsActual, epsEstimate, surprisePercent) rows in provider order (None = missing)."""
+    def py():
+        frame = None
+        if history:
+            frame = pd.DataFrame(
+                {"epsActual": [r[0] for r in history], "epsEstimate": [r[1] for r in history],
+                 "surprisePercent": [r[2] for r in history]},
+                index=pd.DatetimeIndex([f"2025-{3 * (i + 1):02d}-28" for i in range(len(history))], name="quarter"), dtype=object)
+        company = SimpleNamespace(fast_info=SimpleNamespace(currency="USD"), eps_trend=None, earnings_history=frame)
+        with patch.object(server.yf, "Ticker", lambda _t: company):
+            return asyncio.run(server.get_earnings_momentum("TST"))
+
+    def cell(v):
+        return None if v is None else {"raw": v, "fmt": str(v)}
+
+    hist_json = [{"epsActual": cell(a), "epsEstimate": cell(e), "surprisePercent": cell(s)} for a, e, s in (history or [])]
+    summary = {"quoteSummary": {"result": [{"earningsTrend": {"trend": []},
+                                            "earningsHistory": {"history": hist_json} if hist_json else {}}], "error": None}}
+    return Case(
+        name=name, ids=ids, py=py,
+        ts={"js": _ts_with_clock(CREDIT_NOW, 'return JSON.parse(await m.yahooFinance.getEarningsMomentum("TST"));'), "isolate": True},
+        routes={**YAHOO_AUTH_ROUTES, "https://query1.finance.yahoo.com/v10/finance/quoteSummary/TST?*": {"json": summary}},
+        select=lambda v: {**{k: v.get(k) for k in keys}, **({"warningCodes": sorted(w["code"] for w in v["warnings"])} if "warningCodes" in keys else {})},
+        **kw)
+
+
+BEAT, MISS = (1.05, 1.00, 0.05), (0.95, 1.00, -0.05)
+MOMENTUM_KEYS = ("beatRate", "beatCount", "totalQuarters", "avgSurprisePct", "currentBeatStreak", "preRevenue", "momentumFlag")
+
+CASES += [
+    # Card BR-SHR-012: 4 quarters, 3 beats, surprise ratios 0.05, 0.02, -0.01, 0.04 -> beatRate 0.75, avgSurprisePct 2.50.
+    _momentum_case("shr.momentum.card_beat_rate_and_average_surprise", ["BR-SHR-012"],
+                   [(1.05, 1.00, 0.05), (1.02, 1.00, 0.02), (0.99, 1.00, -0.01), (1.04, 1.00, 0.04)],
+                   ("beatRate", "beatCount", "totalQuarters", "avgSurprisePct", "preRevenue"),
+                   expect={"beatRate": 0.75, "beatCount": 3, "totalQuarters": 4, "avgSurprisePct": 2.5, "preRevenue": False}),
+    _momentum_case("shr.momentum.equal_actual_and_estimate_is_not_a_beat", ["BR-SHR-012"],
+                   [(1.00, 1.00, 0.0), (1.00, 1.00, 0.0)], ("beatRate", "beatCount", "currentBeatStreak"),
+                   expect={"beatRate": 0, "beatCount": 0, "currentBeatStreak": 0}),
+    _momentum_case("shr.momentum.rows_missing_actual_or_estimate_are_skipped", ["BR-SHR-010", "BR-SHR-012"],
+                   [BEAT, (None, 1.00, None), BEAT, MISS], ("beatRate", "totalQuarters", "currentBeatStreak"),
+                   expect={"beatRate": 0.67, "totalQuarters": 3, "currentBeatStreak": 2}),
+    # Q3i (BR-SHR-010): the streak counts from the FIRST provider row. Rows beat, beat, miss, beat -> 2, although
+    # the most recent quarter (the last row, if the provider lists oldest first) gives 1.
+    _momentum_case("shr.momentum.q3i_beat_streak_counts_from_the_first_provider_row", ["BR-SHR-010", "BR-SHR-012"],
+                   [BEAT, BEAT, MISS, BEAT], ("currentBeatStreak", "beatRate"),
+                   mode="pinned", decision="Q3i", expect={"currentBeatStreak": 2, "beatRate": 0.75}),
+    _momentum_case("shr.momentum.q3i_beat_streak_reversed_rows_give_a_different_streak", ["BR-SHR-010"],
+                   [BEAT, MISS, BEAT, BEAT], ("currentBeatStreak", "beatRate"),
+                   mode="pinned", decision="Q3i", expect={"currentBeatStreak": 1, "beatRate": 0.75}),
+    # Pre-revenue rule: no history, or every actual EPS effectively zero (< 1e-9).
+    _momentum_case("shr.momentum.no_history_is_pre_revenue", ["BR-SHR-012"], None, MOMENTUM_KEYS + ("warningCodes", "dataQuality"),
+                   expect={"beatRate": None, "beatCount": 0, "totalQuarters": 0, "avgSurprisePct": None, "currentBeatStreak": 0,
+                           "preRevenue": True, "momentumFlag": "NO_HISTORY", "warningCodes": ["PRE_REVENUE_NO_HISTORY"], "dataQuality": "PARTIAL"}),
+    _momentum_case("shr.momentum.all_zero_actuals_are_pre_revenue_and_hide_average_surprise", ["BR-SHR-012"],
+                   [(0.0, 0.05, -1.0), (5e-10, 0.04, -0.99)], MOMENTUM_KEYS,
+                   expect={"beatRate": 0, "beatCount": 0, "totalQuarters": 2, "avgSurprisePct": None, "currentBeatStreak": 0,
+                           "preRevenue": True, "momentumFlag": "NO_HISTORY"}),
+    _momentum_case("shr.momentum.actual_of_exactly_epsilon_is_not_pre_revenue", ["BR-SHR-012"],
+                   [(1e-9, 0.05, -1.0)], ("preRevenue", "momentumFlag", "avgSurprisePct"),
+                   expect={"preRevenue": False, "momentumFlag": None, "avgSurprisePct": -100}),
+]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+# BR-PRV-002 / BR-PRV-003: Finnhub market eligibility in get_expanded_institutional_ownership
+# Neither runtime has a Finnhub key here, so an eligible ticker stops at SOURCE_UNCONFIGURED (attempted=false) without any HTTP call.
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+import os  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+from yfmcp.tools import provider_gaps  # noqa: E402
+
+
+def _ownership_case(name: str, ids: list[str], ticker: str, *, allow_fallback: bool = False, max_holders: int = 50,
+                    policy_missing: bool = False, **kw) -> Case:
+    def py():
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch.dict(os.environ, {}, clear=False))  # restores any key removed below
+            for var in ("FINNHUB_API_KEY", "FINNHUB_TOKEN", "ALPHA_VANTAGE_API_KEY"):
+                os.environ.pop(var, None)
+            if policy_missing:
+                stack.enter_context(patch.object(provider_gaps, "_SOURCE_POLICY_PATH", Path("/nonexistent/news-source-capabilities.json")))
+            return asyncio.run(provider_gaps.get_expanded_institutional_ownership(ticker, allow_fallback, max_holders))
+
+    js = f'return JSON.parse(await m.yahooFinance.getExpandedInstitutionalOwnership({json.dumps(ticker)}, {json.dumps(allow_fallback)}, {max_holders}));'
+
+    def view(v):
+        data = v.get("data") if isinstance(v.get("data"), dict) else v
+        err = v.get("error")
+        if isinstance(err, dict):
+            return {"error": True, "code": err.get("code"), "message": err.get("message")}
+        return {"status": data.get("status"), "action": data.get("recommendedNextAction"),
+                "attempts": [(a.get("provider"), a.get("status"), a.get("attempted"), a.get("reasonCode")) for a in data.get("providerAttempts", [])]}
+
+    return Case(name=name, ids=ids, py=py, ts={"js": js, "isolate": True}, select=view, **kw)
+
+
+NOT_ELIGIBLE = {"status": "NOT_ELIGIBLE", "action": "USE_YAHOO_OR_OFFICIAL_FILINGS",
+                "attempts": [["finnhub", "NOT_ELIGIBLE", False, "MARKET_NOT_ENABLED_BY_DEPLOYED_ENTITLEMENT"]]}
+CASES += [
+    # Card BR-PRV-002: an ineligible suffix (.L) is not sent to Finnhub, no Alpha call, NOT_ELIGIBLE.
+    _ownership_case("prv.eligibility.ineligible_suffix_is_not_attempted", ["BR-PRV-002", "BR-PRV-003"], "VOD.L", expect=NOT_ELIGIBLE),
+    _ownership_case("prv.eligibility.suffix_match_is_case_insensitive", ["BR-PRV-003"], "vod.l", expect=NOT_ELIGIBLE),
+    _ownership_case("prv.eligibility.listed_ineligible_ticker", ["BR-PRV-003"], "FOCI", expect=NOT_ELIGIBLE),
+    _ownership_case("prv.eligibility.ineligible_ticker_stays_ineligible_with_scarce_fallback_off_and_no_alpha_call", ["BR-PRV-002"], "ABB.ST",
+                    allow_fallback=False, expect=NOT_ELIGIBLE),
+    _ownership_case("prv.eligibility.max_holders_above_100_is_rejected", ["BR-PRV-002"], "AAPL", max_holders=101,
+                    expect={"error": True, "code": "INPUT_VALIDATION_ERROR", "message": "max_holders must be an integer from 1 through 100."}),
+    _ownership_case("prv.eligibility.eligible_ticker_is_attempted", ["BR-PRV-002", "BR-PRV-003"], "AAPL",
+                    expect={"status": "SOURCE_UNCONFIGURED", "action": "CONFIGURE_PROVIDER",
+                            "attempts": [["finnhub", "SOURCE_UNCONFIGURED", False, None]]}),
+    # Q3i: Python reads the policy file at call time and fails open on any read error, so every ticker, including
+    # the ineligible VOD.L, is sent to Finnhub. The Worker's policy is compiled in and cannot be unreadable.
+    _ownership_case("prv.eligibility.q3i_unreadable_policy_fails_open_in_python", ["BR-PRV-002", "BR-PRV-003"], "VOD.L",
+                    policy_missing=True, mode="pinned", decision="Q3i",
+                    expect_py={"status": "SOURCE_UNCONFIGURED", "action": "CONFIGURE_PROVIDER",
+                               "attempts": [["finnhub", "SOURCE_UNCONFIGURED", False, None]]},
+                    expect_ts=NOT_ELIGIBLE),
+]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+# BR-SHR-016: Form 4 insider transaction value (get_sec_recent_events for Form 4)
+# A Form 4 filing in the SEC submissions feed has its primary document parsed into item.insiderTransaction.
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+FORM4_TEMPLATE = """<?xml version="1.0"?><ownershipDocument><reportingOwner><reportingOwnerId><rptOwnerName>Doe Jane</rptOwnerName></reportingOwnerId>
+<reportingOwnerRelationship><isOfficer>1</isOfficer><officerTitle>Chief Financial Officer</officerTitle></reportingOwnerRelationship></reportingOwner>
+<nonDerivativeTable>{rows}</nonDerivativeTable></ownershipDocument>"""
+
+
+def _f4_row(code: str, shares: str, price: str | None, date: str = "2026-10-01") -> str:
+    price_xml = f"<transactionPricePerShare><value>{price}</value></transactionPricePerShare>" if price is not None else ""
+    return (f"<nonDerivativeTransaction><transactionDate><value>{date}</value></transactionDate>"
+            f"<transactionCoding><transactionCode>{code}</transactionCode></transactionCoding>"
+            f"<transactionAmounts><transactionShares><value>{shares}</value></transactionShares>{price_xml}</transactionAmounts>"
+            f"<ownershipNature><directOrIndirectOwnership><value>D</value></directOrIndirectOwnership></ownershipNature></nonDerivativeTransaction>")
+
+
+def _form4_case(name: str, ids: list[str], ticker: str, cik: int, rows: str, expect=None, **kw) -> Case:
+    accession = f"0001{cik:06d}-26-000001"
+    nodash = accession.replace("-", "")
+    doc_url = f"https://www.sec.gov/Archives/edgar/data/{cik}/{nodash}/form4.xml"
+    routes = {
+        "https://www.sec.gov/files/company_tickers.json": {"json": {"0": {"cik_str": cik, "ticker": ticker, "title": "Form Four Co"}}},
+        f"https://data.sec.gov/submissions/CIK{cik:010d}.json": {"json": {"name": "Form Four Co", "filings": {"recent": {
+            "form": ["4"], "filingDate": ["2026-10-01"], "acceptanceDateTime": ["2026-10-01T16:00:00.000Z"],
+            "accessionNumber": [accession], "primaryDocument": ["form4.xml"]}}}},
+        doc_url: {"body": FORM4_TEMPLATE.format(rows=rows)},
+        "https://query1.finance.yahoo.com/*": {"status": 404, "body": "{}"},
+    }
+
+    def py():
+        saved = (edgar._EDGAR_TICKERS, edgar._EDGAR_TICKERS_LOADED_AT)
+        edgar._EDGAR_TICKERS, edgar._EDGAR_TICKERS_LOADED_AT = None, 0.0
+        try:
+            with patch.object(edgar.yf, "Ticker", side_effect=RuntimeError("yahoo unavailable")):
+                return asyncio.run(server.get_sec_recent_events(ticker, ["4"], 36500, 10))
+        finally:
+            edgar._EDGAR_TICKERS, edgar._EDGAR_TICKERS_LOADED_AT = saved
+
+    def tx(v):
+        for item in v.get("items") or []:
+            if item.get("insiderTransaction"):
+                t = item["insiderTransaction"]
+                return {k: t.get(k) for k in ("owner", "role", "transactionCode", "transactionLabel", "shares", "price", "value", "transactionDate")}
+        return {"items": len(v.get("items") or []), "warnings": [w.get("code") for w in v.get("warnings") or []]}
+
+    return Case(
+        name=name, ids=ids, py=py,
+        ts={"js": _ts_with_clock(CREDIT_NOW, f'return JSON.parse(await m.yahooFinance.getSecRecentEvents({json.dumps(ticker)}, ["4"], 36500, 10));'),
+            "isolate": True},
+        routes=routes, select=tx, **({"expect": expect} if expect is not None else {}), **kw)
+
+
+SALE_ROW = _f4_row("S", "10000", "25.50")
+CASES += [
+    # Card: non-derivative row, code S, 10,000 shares at $25.50 -> Sale, value 255,000.00.
+    _form4_case("shr.form4.sale_value_is_shares_times_price", ["BR-SHR-016"], "FRA", 910001, SALE_ROW,
+                {"owner": "Doe Jane", "role": "Chief Financial Officer", "transactionCode": "S", "transactionLabel": "Sale",
+                 "shares": 10000, "price": 25.5, "value": 255000, "transactionDate": "2026-10-01"}),
+    _form4_case("shr.form4.no_price_gives_no_value", ["BR-SHR-016"], "FRB", 910002, _f4_row("A", "500", None),
+                {"owner": "Doe Jane", "role": "Chief Financial Officer", "transactionCode": "A", "transactionLabel": "Grant/Award",
+                 "shares": 500, "price": None, "value": None, "transactionDate": "2026-10-01"}),
+    _form4_case("shr.form4.unknown_code_is_other_unclassified", ["BR-SHR-016"], "FRC", 910003, _f4_row("X", "100", "10.00"),
+                {"owner": "Doe Jane", "role": "Chief Financial Officer", "transactionCode": "X", "transactionLabel": "Other/Unclassified",
+                 "shares": 100, "price": 10, "value": 1000, "transactionDate": "2026-10-01"}),
+    # Q3i: only the first transaction row is read. An option exercise (M, 10,000 at $5.00) followed by the sale of
+    # those shares (S, 10,000 at $25.50) reports the exercise alone.
+    _form4_case("shr.form4.q3i_multi_line_filing_reports_only_the_first_transaction", ["BR-SHR-016"], "FRD", 910004,
+                _f4_row("M", "10000", "5.00") + _f4_row("S", "10000", "25.50"),
+                mode="pinned", decision="Q3i",
+                expect={"owner": "Doe Jane", "role": "Chief Financial Officer", "transactionCode": "M",
+                        "transactionLabel": "Option exercise/conversion", "shares": 10000, "price": 5, "value": 50000,
+                        "transactionDate": "2026-10-01"}),
+]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+# BR-EVD-005 (card example): the day's consensus observation is written once; a second call the same day reports
+# ALREADY_STORED and leaves the stored file unchanged. Calls are six hours apart, so an overwrite would change observedAt.
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+OBS_T1, OBS_T2 = "2026-10-14T09:00:00.000Z", "2026-10-14T15:00:00.000Z"
+OBS_TREND = [{"period": "0y", "endDate": "2026-12-31",
+              "earningsEstimate": {"avg": 5.2, "high": 5.6, "low": 4.8, "numberOfAnalysts": 10},
+              "revenueEstimate": {"avg": 1e9, "high": 1.1e9, "low": 9e8, "numberOfAnalysts": 10}}]
+
+
+def _observation_py():
+    store = es.MemoryStore()
+    times = iter([OBS_T1, OBS_T2])
+    yahoo = ev.yahoo_consensus_input(OBS_TREND, retrieved_at=OBS_T1, financial_currency="USD")
+    providers = AsyncMock(return_value=([yahoo], {"price": None}, {"status": "NO_DATA", "splits": []}))
+    with patch.object(server, "_consensus_providers", providers), \
+            patch.object(server, "_consensus_naming", AsyncMock(return_value=server.fiscal_year_naming(None))), \
+            patch.object(server, "_now_iso", lambda: next(times)), _python_store(store):
+        first = json.loads(asyncio.run(server.get_consensus_forecast_curve("TST")))["storage"]["consensusObservation"]
+        key = first["key"]
+        body = store.objects[key]
+        second = json.loads(asyncio.run(server.get_consensus_forecast_curve("TST")))["storage"]["consensusObservation"]
+        return {"first": first, "second": second, "unchanged": store.objects[key] == body,
+                "observedAt": json.loads(store.objects[key])["observedAt"]}
+
+
+OBSERVATION_JS = """
+let cur = Date.UTC(2026, 9, 14, 9, 0, 0);
+const RealDate = Date;
+globalThis.Date = class extends RealDate {
+  constructor(...a) { if (a.length === 0) super(cur); else super(...a); }
+  static now() { return cur; }
+};
+try {
+  const store = m.evidenceStore.memoryEvidenceStore();
+  m.evidenceStore.setEvidenceStoreForTests(store);
+  const one = JSON.parse(await m.evidencePack.getConsensusForecastCurve("TST")).storage.consensusObservation;
+  const body = store.objects.get(one.key);
+  cur += 6 * 3600 * 1000;
+  const two = JSON.parse(await m.evidencePack.getConsensusForecastCurve("TST")).storage.consensusObservation;
+  return { first: one, second: two, unchanged: store.objects.get(one.key) === body, observedAt: JSON.parse(store.objects.get(one.key)).observedAt };
+} finally { globalThis.Date = RealDate; }
+"""
+
+CASES += [
+    Case(name="evd.store.consensus_observation_first_call_wins_the_day", ids=["BR-EVD-005", "BR-EVD-027"],
+         py=_observation_py, ts={"js": OBSERVATION_JS, "isolate": True},
+         routes={**YAHOO_AUTH_ROUTES, "https://query1.finance.yahoo.com/v10/finance/quoteSummary/TST?*": {"json": {"quoteSummary": {"result": [{
+             "price": {"currency": "USD"}, "financialData": {"financialCurrency": "USD"},
+             "earningsTrend": {"trend": OBS_TREND}}], "error": None}}}},
+         expect={"first": {"status": "STORED", "key": "consensus-history/TST/2026-10-14.json"},
+                 "second": {"status": "ALREADY_STORED", "key": "consensus-history/TST/2026-10-14.json"},
+                 "unchanged": True, "observedAt": OBS_T1}),
+]
+
+
+# BR-EVD-005: build_valuation_evidence_pack storage status per mode (persist true / false / no store). Every
+# SEC and provider component fails visibly in both runtimes; only the evidenceCut storage fields are compared.
+_HEX64 = re.compile(r"[0-9a-f]{64}")
+_PACK_FAIL = json.dumps({"ticker": "TST", "status": "FILING_TEXT_NOT_AVAILABLE", "code": "FILING_TEXT_NOT_AVAILABLE", "message": "stub"})
+
+
+def _pack_py(persist: bool, with_store: bool):
+    store = es.MemoryStore() if with_store else None
+    failing = AsyncMock(return_value=_PACK_FAIL)
+    providers = AsyncMock(return_value=([ev.yahoo_consensus_input([], retrieved_at=OBS_T1, status="NO_DATA")],
+                                        {"price": None, "currency": None, "priceTime": None, "status": "NO_DATA", "message": "stub"},
+                                        {"status": "NO_DATA", "splits": []}))
+    with patch.object(server, "_consensus_providers", providers), \
+            patch.object(server, "_consensus_naming", AsyncMock(return_value=server.fiscal_year_naming(None))), \
+            patch.object(server, "_sec_filing_rows", AsyncMock(return_value=(None, "TICKER_NOT_FOUND"))), \
+            patch.object(server, "_warm_sec_submissions", AsyncMock(return_value=None)), \
+            patch.object(server, "extract_capital_structure", failing), patch.object(server, "extract_guidance", failing), \
+            patch.object(server, "list_sec_material_filings", failing), \
+            patch.object(server, "_now_iso", lambda: OBS_T1), _python_store(store):
+        pack = json.loads(asyncio.run(server.build_valuation_evidence_pack("TST", 5, persist)))
+        return {"cut": pack["evidenceCut"], "keys": sorted(store.objects) if store else None}
+
+
+def _pack_case(name: str, ids: list[str], persist: bool, with_store: bool, expect) -> Case:
+    js = f"""
+const RealDate = Date;
+const fixed = Date.UTC(2026, 9, 14, 9, 0, 0);
+globalThis.Date = class extends RealDate {{
+  constructor(...a) {{ if (a.length === 0) super(fixed); else super(...a); }}
+  static now() {{ return fixed; }}
+}};
+try {{
+  const store = {'m.evidenceStore.memoryEvidenceStore()' if with_store else 'null'};
+  m.evidenceStore.setEvidenceStoreForTests(store);
+  const pack = JSON.parse(await m.evidencePack.buildValuationEvidencePack("TST", 5, {json.dumps(persist)}));
+  return {{ cut: pack.evidenceCut, keys: store ? [...store.objects.keys()].sort() : null }};
+}} finally {{ globalThis.Date = RealDate; }}
+"""
+
+    def view(v):
+        cut = v["cut"]
+        mask = lambda s: None if s is None else _HEX64.sub("<sha256>", s)  # noqa: E731 - the two runtimes hash different receipts
+        return {"storageStatus": cut["storageStatus"], "storageKey": mask(cut["storageKey"]),
+                "consensusObservation": cut["consensusObservation"],
+                "keys": None if v["keys"] is None else [mask(k) for k in v["keys"]]}
+
+    return Case(name=name, ids=ids, py=lambda: _pack_py(persist, with_store), ts={"js": js, "isolate": True},
+                routes=YAHOO_AUTH_ROUTES, select=view, expect=expect)
+
+
+CUT_KEY_MASKED = "evidence-cuts/TST/20261014T090000Z/<sha256>.json"
+CASES += [
+    _pack_case("evd.store.pack_persisted_stores_cut_and_observation", ["BR-EVD-005"], True, True,
+               {"storageStatus": "STORED", "storageKey": CUT_KEY_MASKED,
+                "consensusObservation": {"status": "STORED", "key": "consensus-history/TST/2026-10-14.json"},
+                "keys": ["consensus-history/TST/2026-10-14.json", CUT_KEY_MASKED]}),
+    _pack_case("evd.store.pack_persist_false_is_skipped_and_writes_nothing", ["BR-EVD-005"], False, True,
+               {"storageStatus": "SKIPPED", "storageKey": None, "consensusObservation": {"status": "SKIPPED", "key": None}, "keys": []}),
+    _pack_case("evd.store.pack_without_store_is_unavailable_but_returns_the_cut", ["BR-EVD-005"], True, False,
+               {"storageStatus": "UNAVAILABLE", "storageKey": None, "consensusObservation": {"status": "UNAVAILABLE", "key": None}, "keys": None}),
 ]
