@@ -8,17 +8,25 @@ The owner confirmed the account is on the **Free plan**. An earlier draft of thi
 
 ## 2. Cloudflare limits that apply
 
-Source: developers.cloudflare.com/workers/platform/limits, read 2026-10-15.
+Verified 2026-10-15 against the **raw text** of `developers.cloudflare.com/workers/platform/limits/index.md` and `/workers/wrangler/configuration/index.md` (an earlier draft relied on a summarised fetch).
 
-| Limit | Free | Paid |
-|---|---|---|
-| Subrequests per invocation | 50 | **10,000 (default), configurable up to 10M** via the Wrangler `limits` configuration |
-| What counts | every `fetch()`, **each redirect hop**, calls to R2/KV/D1, and **Cache API `match()` / `put()` / `delete()` (same quota)** | same |
-| Simultaneous connections waiting for headers | 6 | 6 (excess requests queue; they don't fail) |
-| CPU per HTTP request | 10 ms | 30 s default, 5 min max |
-| Wall-clock duration for HTTP requests | no limit | no limit |
+| Limit | Workers Free | Workers Paid | Source wording |
+|---|---|---|---|
+| **Daily requests** | **100,000/day**, resets midnight UTC; over the limit returns **Error 1027** (route fail-open or fail-closed is configurable) | No limit | "Accounts on the Workers Free plan have a daily request limit of 100,000 requests" |
+| Subrequests per invocation | **50, the maximum; cannot be raised** | 10,000 default, up to 10M | Wrangler `limits.subrequests`: "defaults to 50 for free accounts … The free account maximum is 50" |
+| Subrequests to internal services | 1,000 | matches the configured limit | — |
+| Cache API calls per request | 50 (**same quota as subrequests**) | 1,000 | "This shares the same quota as subrequests (`fetch()`)" |
+| Redirects | each hop counts | each hop counts | "Each subrequest in a redirect chain counts against this limit" |
+| CPU per HTTP request | **10 ms** | 30 s default, 5 min max | Network waits do not count. "Each isolate has some built-in flexibility … if your Worker starts hitting the limit consistently, its execution will be terminated." Error 1102 |
+| Memory per isolate | 128 MB | 128 MB | — |
+| Simultaneous connections waiting for headers | 6 | 6 | — |
+| Wall-clock duration (HTTP) | none | none | — |
 
-**The code comment at `worker/src/yahoo-finance.ts:58–64` is out of date.** It says "1000 on paid" and "1–3 subrequests per ticker". Paid now defaults to 10,000. As measured below, per-ticker cost runs from 1 to about 39, because Cache API calls and redirect hops also count.
+**Consequences for this system:**
+- **The 50 cannot be raised on Free.** A `limits` block in `wrangler.toml` can only lower it. The earlier suggestion to set `limits` explicitly matters only on Paid.
+- **The CPU "built-in flexibility" explains why the SEC-parsing tools mostly work on Free today.** It is tolerance for occasional overruns, not a budget. Consistent overruns get terminated with 1102.
+- **The 100,000 requests/day cap turns S-02 (unauthenticated `/mcp`) into an availability risk on Free.** Anyone can spend the account's daily quota, and the whole MCP endpoint then returns 1027 until midnight UTC. Phase 1 auth closes this.
+- **The code comment at `worker/src/yahoo-finance.ts:58–64` is out of date.** It says "1000 on paid" (now 10,000) and "1–3 subrequests per ticker" (measured 1 to about 45, because Cache API calls and redirect hops count).
 
 ## 3. Method
 
@@ -97,3 +105,4 @@ So the Free plan's 50-subrequest limit is **already starving later tickers in pr
     - JSON-RPC batch: 1 tool call.
   - **Either way: add a per-invocation subrequest budget guard.** Count `fetch` and Cache API calls in the request scope, stop starting new upstream work before the limit, and mark the affected sources `PROVIDER_BUDGET_EXHAUSTED` (the Q11 name) instead of `PROVIDER_ERROR`. The R3 news repair (BR-NWS-007 honest coverage) should include this, because the production evidence above is a news case.
 - **Fix the stale comment** in `yahoo-finance.ts:58–64` when Q3c lands.
+- **On Free, explicit `limits` in `wrangler.toml` cannot add headroom** (50 is the maximum), so the budget guard is the only protection short of upgrading.

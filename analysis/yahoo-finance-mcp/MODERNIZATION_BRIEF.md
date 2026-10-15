@@ -468,10 +468,14 @@ These are the **84 P0 rules** in `BUSINESS_RULES.md` §2 (data integrity of publ
 - **V1 (gates Phase 1).** A required static bearer token breaks any client that can't send a fixed `Authorization` header. Verify the claude.ai connector, Claude Desktop, the deploy canaries and the live verifier before enforcement.
 - **V2 (acknowledge before Phase 1).** `worker/src/company-ir-page-registry.json` has **0 `approved` entries** (2 `candidate`). Under Q2a, company-IR URL fetches are refused until entries are approved; `raw_text` is the only route meanwhile.
 - **V3 (gates the Q3c cap in R4): measured 2026-10-15; see `v3/V3_SUBREQUESTS.md`. Plan = Workers FREE (owner-confirmed).**
-  - **Limits:** 50 subrequests per invocation; Cache API calls and redirect hops count. CPU is limited to 10 ms per request.
+  - **Limits, checked against the raw Cloudflare docs:**
+    - 50 subrequests per invocation. **50 is the Free maximum and cannot be raised.** Cache API calls share the quota, and redirect hops count.
+    - CPU is 10 ms per request, with "built-in flexibility" for occasional overruns; consistent overruns end in Error 1102.
+    - **100,000 requests per day**, after which every request gets Error 1027 until midnight UTC.
   - **Measured on reachable batch tools:** `analyze_credit_health` about 62 at n=10; `get_company_news` (defaults) about 61; `analyze_financial_ratios` about 42. Others stay at or under about 32.
   - **Already broken in production at today's cap of 5:** a live 2-ticker `get_company_news` call with company-IR and newswire sources returned 11 × "Too many subrequests". MSFT came back with 0 items, its sources mislabelled `PROVIDER_ERROR` / `DISCOVERY_BUDGET_EXHAUSTED`, under a top-level `ok: true`.
   - **Verdict:** **a cap of 10 is not safe on Free.** The decision moves to Q12.
+  - **Daily-cap risk:** on Free, the unauthenticated `/mcp` (S-02) also lets anyone exhaust the 100,000/day quota and take the whole endpoint down until midnight UTC. That raises Phase 1 auth from a quota problem to an availability problem.
   - **Stale comment:** `yahoo-finance.ts:58–64` ("1000 on paid", "1–3 per ticker") is out of date; fix it with Q3c.
 - **V4 (informs R5-extractors).** Q3f changes the published `inTheMoney` flag for options and warrants at exactly the strike (`capital_structure.py:604, 610, 1069`). Incremental shares stay 0. Q3d similarly moves boundary cases between brackets, because today's thresholds compare the rounded value (`server.py:7945–7954`).
 - **V5 (informs R5-pricing).** Exchange-session freshness needs holiday data in both runtimes. The Worker has no calendar library, so this needs a shared calendar file in the data dir and a maintenance owner.
@@ -503,7 +507,7 @@ These are the **84 P0 rules** in `BUSINESS_RULES.md` §2 (data integrity of publ
   Every name lands as a deliberate frozen-contract change: `public_tool_contract.py`, canaries and docs are updated in the release that introduces it, with a minor version bump.
 - [ ] **Doctrine refinement.** Refine the Sniper Doctrine MCP contract against these decisions; then re-tag R2's operative set and regenerate this brief.
 - [ ] **Q12 (gates Phase 1 batch caps and the Q3c cap in R4). Cloudflare plan strategy, decided by measurement (V3).** Q3c set 10 "unless a measured production constraint justifies another value", and V3 is that constraint.
-  - **(A) Upgrade to Workers Paid.** 10,000 subrequests per invocation (configurable) and 30 s CPU. Keeps Q3c's single advertised cap of 10 and removes the Free CPU risk.
+  - **(A) Upgrade to Workers Paid.** 10,000 subrequests per invocation (configurable), 30 s CPU and no daily request cap. Keeps Q3c's single advertised cap of 10 and removes the Free CPU and daily-cap risks.
   - **(B) Stay on Free.** Replace the single cap with **cost-aware per-tool caps**, all at or under 40 of the 50:
     - quote, profile, fund, MA, volume, price performance, rating changes, earnings momentum: 10;
     - `analyze_financial_ratios`: 5;
