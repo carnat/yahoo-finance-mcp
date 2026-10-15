@@ -2623,6 +2623,32 @@ F-024, F-026, F-029). Both runtimes change alike.
 - **Timeline and verification defaults:** Python `get_public_event_timeline` and `verify_company_event` with
   `sources` omitted now report `sourceStatus` over the same 7-source default the Worker uses.
 
+## Neutral Field Names And Deprecations (2.8.0)
+
+- **Why:** the server is a universal information outlet. Strategy-specific labels are replaced by neutral measures and
+  caller-chosen thresholds (owner decision Q14). Release type: minor, additive. No field is removed.
+- **Mapping:**
+
+  | Old field | Replacement | Note |
+  | --- | --- | --- |
+  | `doctrineUse` | `reliabilityClass` | `ALLOWED` is `RELIABLE`, `VERIFY_ONLY` is `VERIFY_BEFORE_USE`, `DIAGNOSTICS_ONLY` is `DIAGNOSTIC`, `BLOCKED` is `UNRELIABLE`. Python now emits `reliabilityClass` and never `doctrineUse`. |
+  | `g2`, `opportunity`, `action`, `priceTarget`, `scenarioWeights`, `selectedMethod`, `selectedMultiple` | `decisionUse=EVIDENCE_ONLY` | These fields are always null. |
+  | `bracket`, `inferredTag`, `tag`, `tagNote` | `priceAtOrAboveTarget`, `referenceTargetPct` | `priceAtOrAboveTarget` is the raw `currentPrice >= referenceTargetPrice`. |
+  | `gatePass`, `gateThresholdUsd` | `meetsMinimum` | New optional input `min_adv_usd`; the response echoes it as `minAdvUsd`. |
+  | `get_market_snapshot` `volume.liquidityGatePass` | `volume.meetsMinimum` | Also takes `min_adv_usd`; echoed as `volume.minAdvUsd`. |
+  | `t1_inputs`, `t2_inputs`, `t4_inputs`, `t5_inputs` | `analystInputs`, `pricePositionInputs`, `earningsInputs`, `technicalInputs` | Identical contents. |
+
+- **`DEPRECATED_FIELD` notice:** appears in the envelope's `meta.warnings` only, never in `data`, so evidence payloads
+  and `evidenceCutId` are unchanged. Key order is `code`, `message`, `severity`, `fields`, `replacement`. It is not
+  emitted in the legacy envelope (`MCP_ENVELOPE_V2=false`).
+- **`min_adv_usd` validation:** it must be a positive number. Otherwise the tool returns `INPUT_VALIDATION_ERROR` with
+  "min_adv_usd must be a positive number when supplied." Grouped mode rejects non-numeric values in its param-type
+  check first.
+- **Worker fix:** the output schemas for `calculate_price_target_distance` and `analyze_position_signals` are now
+  attached to their public names (visible in the legacy envelope).
+- **Window and removal:** old fields keep identical values for at least one minor version. Removal is planned for a
+  later major version (modernization Phase 6). Consumers should move to the replacements now.
+
 ## Non-US Primary Filings
 
 - `get_uk_company_filings` reads Companies House, the UK statutory registry:
