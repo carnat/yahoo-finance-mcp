@@ -2598,6 +2598,31 @@ F-024, F-026, F-029). Both runtimes change alike.
 - **Privacy:** only the boolean is recorded. The header value is never stored, logged or returned.
 - **Not changed:** `/mcp` behaviour is otherwise the same. This release does not reject or authenticate any request.
 
+## News Source Selection And Honest Coverage (2.7.0)
+
+- **Scope:** `get_company_news`, `search_company_news`, `get_company_press_releases`, `get_public_event_timeline` and
+  `verify_company_event`, in both runtimes. Release type: minor (additive fields and a documented behaviour repair).
+  No field is removed.
+- **News coverage (BR-NWS-007):** Python's coverage state now reads `PARTIAL` when a source reports
+  `WEBSITE_NOT_AVAILABLE`, `DISCOVERY_NOT_FOUND`, `DISCOVERY_BUDGET_EXHAUSTED`, `FEED_NOT_FOUND` or `PARSE_ERROR`, as
+  the Worker already did. It no longer reports `FULL` beside a failed source.
+- **`sources` semantics (Q3h):**
+  - Omitted or `null`: the tool's advertised default set applies.
+  - An explicit list is used as given.
+  - `[]`, or a list of only unsupported names, attempts no source and makes no request.
+  - Before: Python replaced `[]` with the defaults, and the Worker queried every default source while reporting an
+    empty `sourceStatus`.
+- **New response fields on those five tools:**
+  - `requestedSources`: the list as passed, `null` when omitted.
+  - `defaultSourcesApplied`: `true` when `sources` was omitted or `null`.
+  - `attemptedSources`: rows of `{sourceType, status}` for each source actually tried. It excludes `NOT_ELIGIBLE`,
+    `NOT_NEEDED`, `UNCONFIGURED` and `attempted: false` rows.
+- **A request that selects no source:** returns status `SOURCE_LIMITED_NOT_FOUND`, with `sourceCoverage` and
+  `coverage.state` `PARTIAL`, and `coverage.recommendedNextAction` `CHECK_OFFICIAL_RELEASES`. This is neither a
+  provider failure nor confirmed absence.
+- **Timeline and verification defaults:** Python `get_public_event_timeline` and `verify_company_event` with
+  `sources` omitted now report `sourceStatus` over the same 7-source default the Worker uses.
+
 ## Non-US Primary Filings
 
 - `get_uk_company_filings` reads Companies House, the UK statutory registry:
