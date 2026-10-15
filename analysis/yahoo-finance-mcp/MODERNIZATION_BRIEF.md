@@ -113,7 +113,7 @@ C4Container
 | `server.py#news` + `yahoo-finance.ts#news` | `yfmcp/news.py` + `worker/src/news.ts` (**pilot**) | Phase 3 |
 | Worker ignores `accession_number` | Honoured with Python-equivalent fail-closed semantics (Q3a) | R4 |
 | Ticker/accession validation scattered (Worker mostly unvalidated) | One validation module per runtime applied to every relevant action (Q3b) | R4 |
-| Worker batch truncation at 5; Python unlimited | One advertised cap in both runtimes (10, pending §7 V3), oversize rejected explicitly (Q3c) | R4 |
+| Worker batch truncation at 5; Python unlimited | Advertised cap(s) in both runtimes per Q12 (10 on Paid, per-tool on Free), oversize rejected explicitly (Q3c) | R4 |
 | `SMOKE_TICKER_CIK_FALLBACKS` in the production lookup (`yahoo-finance.ts:535`, `edgar.py:56`) | Test-only injected fixture (Q4, resolution R1) | R4 |
 | No production telemetry | Privacy-minimised Worker telemetry export (Q10) | R4 |
 | `mcp[cli]>=1.6.0,<3` with private-internals use | Pinned to `>=2.2,<3`, public APIs only (Q8) | R4 |
@@ -176,12 +176,14 @@ Every PR follows `CLAUDE.md`: the TS change first, then the `python-mirror` port
 - **Scope:**
   - **Q2a:** strict HTTPS allow-list. SEC Archives and approved SEC endpoints, the exact Yahoo hosts needed by the transcript and news workflows, and the exact hosts of IR-registry entries with status `approved`. Every redirect hop is re-validated. Private, loopback, link-local and IP-literal destinations are rejected. No wildcards. `raw_text` is caller content only and never auto-fetches. This also covers the earnings-release URL policy (BR-ERN-017).
   - **Q2b:** `/mcp` requires a static bearer token behind a replaceable auth abstraction. Rate limits and provider budgets are keyed by credential, not IP. An unauthenticated `/health` may exist only if it makes no provider calls. Paid providers need auth **and** explicit caller opt-in, and default waterfalls never force them. Budget exhaustion returns a typed non-evidence state, never `NOT_FOUND`.
-  - **S-03:** JSON-RPC batch cap and body cap.
+  - **S-03:** JSON-RPC batch cap and body cap (the batch cap value follows Q12).
+  - **Per-invocation subrequest budget guard (V3, required on any plan):** count `fetch()` and Cache API calls in the request scope against the plan limit, stop starting new upstream work before the limit, and mark the affected sources `PROVIDER_BUDGET_EXHAUSTED`, never `PROVIDER_ERROR` or clean absence. Production already exceeds Free's 50 (V3).
   - **S-05:** evidence-store `list()` guard.
   - **S-07/S-09:** workflow permissions, `--ignore-scripts`, actions pinned to SHAs.
   - **S-10/S-11:** dependency upgrades, `uv sync --frozen`, audit gates.
   - **S-13:** restrict CORS once auth exists.
 - **Entry criteria:**
+  - [ ] §7 Q12 is decided (plan strategy and batch-cap values).
   - [ ] §7 V1 is verified: every client in use (the claude.ai connector, Claude Desktop, deploy canaries, the live verifier) can send a static `Authorization` header, or a fallback is recorded here.
   - [x] §7 Q11 names confirmed (2026-10-15): `AUTH_REQUIRED`, `BATCH_LIMIT_EXCEEDED`, `PROVIDER_BUDGET_EXHAUSTED`, `PROVIDER_OPT_IN_REQUIRED`.
   - [ ] The owner acknowledges §7 V2: with **0 approved IR entries** today, company-IR URL fetches are refused until entries are approved.
@@ -221,12 +223,13 @@ Each R-release is a set of **separately released** behaviour changes that must b
 
 - **R3 (before Phase 3):**
   - BR-NWS-007: news coverage must not report `FULL` while required sources have failed (Q3i).
+  - V3 news follow-through: sources starved by the subrequest budget are reported `PROVIDER_BUDGET_EXHAUSTED` and coverage states the budget cause. This is today's live MSFT 0-item case.
   - Q3h: `sources` omitted or null means the defaults; `sources=[]` means attempt none; requested, attempted, skipped and defaulted metadata kept separate; `sourceStatus` describes what actually happened.
   - **Q7:** targeted rule extraction for News (`/modernize-extract-rules` with a news `modulePattern`), with the new rules folded into Phase 2's harness.
 - **R4 (before Phase 4):**
   - Q3a: the Worker honours exact `accession_number` with fail-closed semantics.
   - Q3b: central ticker and accession validation in both runtimes, on every relevant action, including the Python paths that skip it.
-  - Q3c: one advertised batch cap with explicit oversize rejection. The value is 10, pending V3.
+  - Q3c: advertised batch cap(s) with explicit oversize rejection: one cap of 10 if Q12 = Paid, the per-tool caps if Q12 = Free.
   - Q4: smoke-ticker table out of the production lookup.
   - Q8: pin `mcp>=2.2,<3` and replace private-internals use (`_tool_manager._tools`, the `FastMCP.tool` monkey-patch) with public APIs, failing loudly.
   - Q10: privacy-minimised telemetry export capturing a **baseline window before any Phase 4 merge**.
@@ -464,15 +467,12 @@ These are the **84 P0 rules** in `BUSINESS_RULES.md` §2 (data integrity of publ
 
 - **V1 (gates Phase 1).** A required static bearer token breaks any client that can't send a fixed `Authorization` header. Verify the claude.ai connector, Claude Desktop, the deploy canaries and the live verifier before enforcement.
 - **V2 (acknowledge before Phase 1).** `worker/src/company-ir-page-registry.json` has **0 `approved` entries** (2 `candidate`). Under Q2a, company-IR URL fetches are refused until entries are approved; `raw_text` is the only route meanwhile.
-- **V3 (gates the Q3c cap in R4): measured 2026-10-15; see `v3/V3_SUBREQUESTS.md`.**
-  - **Plan tier:** not readable from here (no Cloudflare access); it must be confirmed in the dashboard. It is very likely **Workers Paid**: Free allows 10 ms of CPU per request, which the SEC-parsing tools cannot fit in.
-  - **Current limits:** Paid defaults to **10,000 subrequests per invocation** (configurable); Free allows 50. Cache API `match`/`put` calls and redirect hops count too. The code comment at `yahoo-finance.ts:58–64` ("1000 on paid", "1–3 per ticker") is out of date.
-  - **Measured per extra ticker:** 1–4 for most batch tools; `getCreditHealth` 6; `getPositionScoreInputs` 11; `getCompanyNews` about 6 with default sources and about 45 with all sources including company IR. The worst 10-ticker call is about 440 subrequests.
-  - **Verdict:** on Paid, a cap of 10 is safe. On Free, three tools already exceed 50 at today's cap of 5.
-  - **Follow-ups:**
-    - [ ] Owner confirms the plan tier in the Cloudflare dashboard (Workers & Pages → Plans).
-    - [ ] Phase 1: set the JSON-RPC batch cap to 5, or add a per-invocation subrequest budget guard returning `PROVIDER_BUDGET_EXHAUSTED`. Ten 10-ticker all-sources calls would come to about 4,400 subrequests in one invocation.
-    - [ ] R4: set `limits` explicitly in `wrangler.toml` and correct the stale comment with the Q3c change.
+- **V3 (gates the Q3c cap in R4): measured 2026-10-15; see `v3/V3_SUBREQUESTS.md`. Plan = Workers FREE (owner-confirmed).**
+  - **Limits:** 50 subrequests per invocation; Cache API calls and redirect hops count. CPU is limited to 10 ms per request.
+  - **Measured on reachable batch tools:** `analyze_credit_health` about 62 at n=10; `get_company_news` (defaults) about 61; `analyze_financial_ratios` about 42. Others stay at or under about 32.
+  - **Already broken in production at today's cap of 5:** a live 2-ticker `get_company_news` call with company-IR and newswire sources returned 11 × "Too many subrequests". MSFT came back with 0 items, its sources mislabelled `PROVIDER_ERROR` / `DISCOVERY_BUDGET_EXHAUSTED`, under a top-level `ok: true`.
+  - **Verdict:** **a cap of 10 is not safe on Free.** The decision moves to Q12.
+  - **Stale comment:** `yahoo-finance.ts:58–64` ("1000 on paid", "1–3 per ticker") is out of date; fix it with Q3c.
 - **V4 (informs R5-extractors).** Q3f changes the published `inTheMoney` flag for options and warrants at exactly the strike (`capital_structure.py:604, 610, 1069`). Incremental shares stay 0. Q3d similarly moves boundary cases between brackets, because today's thresholds compare the rounded value (`server.py:7945–7954`).
 - **V5 (informs R5-pricing).** Exchange-session freshness needs holiday data in both runtimes. The Worker has no calendar library, so this needs a shared calendar file in the data dir and a maintenance owner.
 - **V6 (informs Phase 4).** Q3g needs Python to read Yahoo quoteSummary directly; yfinance `.info` does not expose the raw response.
@@ -502,7 +502,19 @@ These are the **84 P0 rules** in `BUSINESS_RULES.md` §2 (data integrity of publ
 
   Every name lands as a deliberate frozen-contract change: `public_tool_contract.py`, canaries and docs are updated in the release that introduces it, with a minor version bump.
 - [ ] **Doctrine refinement.** Refine the Sniper Doctrine MCP contract against these decisions; then re-tag R2's operative set and regenerate this brief.
-- [ ] **V1:** answer before Phase 1. **V3:** measured; only the plan-tier confirmation and the two follow-ups above remain.
+- [ ] **Q12 (gates Phase 1 batch caps and the Q3c cap in R4). Cloudflare plan strategy, decided by measurement (V3).** Q3c set 10 "unless a measured production constraint justifies another value", and V3 is that constraint.
+  - **(A) Upgrade to Workers Paid.** 10,000 subrequests per invocation (configurable) and 30 s CPU. Keeps Q3c's single advertised cap of 10 and removes the Free CPU risk.
+  - **(B) Stay on Free.** Replace the single cap with **cost-aware per-tool caps**, all at or under 40 of the 50:
+    - quote, profile, fund, MA, volume, price performance, rating changes, earnings momentum: 10;
+    - `analyze_financial_ratios`: 5;
+    - `analyze_credit_health`: 5;
+    - `get_company_news` with default sources: 5;
+    - news with any of `company_ir`, `company_ir_page` or `newswire`: 1;
+    - JSON-RPC batches: 1 tool call.
+
+    Each cap is advertised in the schema and an oversize request is rejected with `BATCH_LIMIT_EXCEEDED`.
+  - **Under either option:** the per-invocation subrequest budget guard (Phase 1) is required.
+- [ ] **V1:** answer before Phase 1.
 
 ## 8. Approval Block
 

@@ -2,16 +2,9 @@
 
 Measured 2026-10-15 against release 2.5.33. This answers brief §7 V3: is it safe to raise the batch cap from 5 to 10 (Q3c)?
 
-## 1. Plan tier: not verifiable from here
+## 1. Plan tier: Workers Free (confirmed by the owner, 2026-10-15)
 
-The repository and this environment hold no Cloudflare account access (no API token; the deploy secrets live in GitHub Actions). The plan has to be read from the Cloudflare dashboard: **Workers & Pages → Plans**, for the account that owns `yahoo-finance-mcp.artinatw.workers.dev`.
-
-**Strong inference: Workers Paid.**
-- The Free plan allows **10 ms of CPU per HTTP request**. Paid defaults to **30 s** and allows up to 5 min.
-- The deployed Worker parses multi-megabyte SEC filings (`search_filing_text`, `extract_*`, capital structure, transcript parsing). That work cannot fit in 10 ms of CPU.
-- The production smoke suite in `deploy-worker.yml` runs these tools against production and gates promotion on them.
-
-Treat this as an inference until the dashboard is checked.
+The owner confirmed the account is on the **Free plan**. An earlier draft of this note inferred Paid from the 10 ms Free CPU limit; **that inference was wrong**. The CPU budget for the heavy SEC tools is a separate open risk (§6).
 
 ## 2. Cloudflare limits that apply
 
@@ -61,9 +54,46 @@ Every tool returned success for all 5 tickers.
 
 **Concurrency.** `getPositionScoreInputs` had up to 15 requests in flight in Node. On Workers, anything past 6 queues, so it gets slower but doesn't fail. The all-sources news call took about 54–66 s for 5 tickers. There is no wall-clock limit, but the MCP client's timeout may be the real ceiling.
 
-## 5. Conclusion for V3
+## 5. Which batch paths MCP callers can actually reach
 
-- **If production is on Paid (likely):** a cap of 10 is safe for every batch tool. The worst single call is all-sources news at about 440 subrequests, 4.4% of the 10,000 default.
-- **The Phase 1 JSON-RPC batch cap multiplies that.** 10 entries per POST, each a 10-ticker all-sources news call, is about 4,400 subrequests in one invocation. That's still under 10,000 but leaves little margin once paid providers and cold redirect chains are added. **Recommendation:** keep the Q3c ticker cap at 10, and either set the JSON-RPC batch cap to 5 or add a per-invocation subrequest budget guard that returns a typed failure (`PROVIDER_BUDGET_EXHAUSTED`) before Cloudflare's hard error. Set `limits` explicitly in `wrangler.toml` so the budget is visible in config.
-- **If production were on Free:** three tools already exceed 50 subrequests at today's cap of 5 (`getPositionScoreInputs`, all-sources news, and default news close behind at 32). A cap of 10 would break two more. The same Free plan's 10 ms CPU limit makes the SEC tools impossible regardless, which is why Free is implausible.
-- **Fix the stale comment** in `yahoo-finance.ts:58–64` when Q3c lands in R4.
+The public input schemas (`worker/src/tools.ts`) accept a ticker array, `maxItems: 5`, on only **12 tools**: `get_market_quote`, `analyze_price_performance`, `analyze_moving_average_position`, `analyze_volume_ratio`, `get_company_profile`, `get_fund_profile`, `analyze_financial_ratios`, `analyze_credit_health`, `get_analyst_rating_changes`, `analyze_earnings_momentum`, `get_company_news` and `get_market_snapshot`.
+
+Five of the measured functions are **not reachable as batches** from MCP, because their public schema takes a single string: `getPositionScoreInputs` (57 at n=5), `getTechnicalIndicators`, `getPriceSlope`, `getShortMomentum` and `getAnalystConsensus`. `get_market_snapshot` was not measured.
+
+## 6. Live evidence from production (2026-10-15)
+
+One read-only call to `https://yahoo-finance-mcp.artinatw.workers.dev/mcp`:
+- **Call:** `news_events` / `get_company_news`, tickers `["AAPL","MSFT"]`, sources `yahoo_finance_news, yahoo_finance_press_releases, sec, newswire, company_ir, company_ir_page`. Finnhub and Marketaux were left out to spend no paid quota.
+- **Errors:** the response contains **11 × "Too many subrequests by single Worker invocation"**, all inside GlobeNewswire feed errors.
+- **AAPL:** 5 items, coverage `PARTIAL`.
+- **MSFT:** **0 items**. `yahoo_finance_news` and `yahoo_finance_press_releases` were reported as `PROVIDER_ERROR`, `company_ir` as `DISCOVERY_BUDGET_EXHAUSTED`, and newswire as `PROVIDER_ERROR`.
+- **Envelope:** top-level `ok: true`.
+
+So the Free plan's 50-subrequest limit is **already starving later tickers in production at today's cap of 5**, and the cause surfaces as provider errors, not as a budget state. Coverage does say `PARTIAL`, so this is not a clean false `FULL`, but the reason is wrong. This is a present-day data-integrity defect, independent of the modernization.
+
+**Free-plan CPU (10 ms per request).** The live calls above succeeded, but it has not been verified whether the heavy SEC-parsing tools hit Cloudflare's CPU-exceeded error under load. The Q10 telemetry baseline should record the invocation outcome (`exceededCpu` / `exceededResources`) per action.
+
+## 7. Conclusion for V3 (Free plan)
+
+- **A cap of 10 is not safe on Free** for the reachable tools that matter:
+
+  | Tool | n=5 | Est. n=10 |
+  |---|---:|---:|
+  | `analyze_credit_health` | 32 | ~62 |
+  | `get_company_news` (default sources) | 32 | ~61, more with paid keys |
+  | `get_company_news` (company-IR / newswire sources) | already over 50 at **n=2** in production | — |
+  | `analyze_financial_ratios` | 22 | ~42, little headroom |
+
+  Quote, profile, fund, moving-average, volume, price-performance, rating-changes and earnings-momentum tools stay at or under about 32 at n=10.
+- **The budget is per invocation, not per tool.** A JSON-RPC batch (Phase 1, S-03) shares the same 50. On Free, JSON-RPC batching of tool calls is effectively unusable beyond one or two cheap calls.
+- **Options (owner decision, brief §7 Q12):**
+  - **(A) Upgrade to Workers Paid.** This gives 10,000 subrequests (configurable) and 30 s CPU, keeps Q3c's single cap of 10, and removes the CPU risk.
+  - **(B) Stay on Free.** Replace Q3c's "one cap of 10" with **cost-aware per-tool caps**, all at or under 40 to leave headroom for paid providers and redirects. For example:
+    - quote, profile, fund, MA, volume, price performance, rating changes, earnings momentum: 10;
+    - financial ratios: 5;
+    - credit health: 5;
+    - news with default sources: 5;
+    - news with any of `company_ir`, `company_ir_page` or `newswire`: 1;
+    - JSON-RPC batch: 1 tool call.
+  - **Either way: add a per-invocation subrequest budget guard.** Count `fetch` and Cache API calls in the request scope, stop starting new upstream work before the limit, and mark the affected sources `PROVIDER_BUDGET_EXHAUSTED` (the Q11 name) instead of `PROVIDER_ERROR`. The R3 news repair (BR-NWS-007 honest coverage) should include this, because the production evidence above is a news case.
+- **Fix the stale comment** in `yahoo-finance.ts:58–64` when Q3c lands.
