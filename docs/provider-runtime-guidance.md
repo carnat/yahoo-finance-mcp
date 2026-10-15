@@ -2580,6 +2580,24 @@ F-024, F-026, F-029). Both runtimes change alike.
   - A release that Yahoo's search feed does not carry, such as one older than its 20 most recent items, is not
     found this way.
 
+## Authorization Header Presence In health_check (2.6.0)
+
+- **Added:** `health_check` returns one new field, `authorizationHeaderPresent` (boolean or `null`). It lets an
+  operator confirm, through an MCP client such as a claude.ai custom connector, whether that client sends an
+  `Authorization` header. This is the input to modernization brief section 7 V1 (static bearer auth for `/mcp`,
+  Phase 1).
+- **Worker:**
+  - `true` when the inbound `/mcp` HTTP request carried a non-empty `Authorization` header.
+  - `false` when the header is absent or blank.
+  - `null` outside an `/mcp` request, such as the internal audit path.
+  - Implemented with a per-request `AsyncLocalStorage` (`withRequestFacts` / `currentRequestFacts` in
+    `worker/src/request-context.ts`). `worker/src/index.ts` sets it around `handleMcp`; `health_check` in
+    `worker/src/tools.ts` reads it. The output schema lists the field.
+- **Python (local stdio server):** always `null`, because stdio has no HTTP request. The output schema and tool
+  description match the Worker.
+- **Privacy:** only the boolean is recorded. The header value is never stored, logged or returned.
+- **Not changed:** `/mcp` behaviour is otherwise the same. This release does not reject or authenticate any request.
+
 ## Non-US Primary Filings
 
 - `get_uk_company_filings` reads Companies House, the UK statutory registry:

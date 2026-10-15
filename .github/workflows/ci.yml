@@ -108,6 +108,9 @@ jobs:
       - name: Worker transport contract tests
         run: python scripts/test_worker_transport_contract.py
 
+      - name: Worker health_check Authorization-header presence tests
+        run: python scripts/test_worker_health_auth_header.py -v
+
       - name: Worker doctrine safety tests
         run: python scripts/test_worker_doctrine_safety.py
 
