@@ -162,6 +162,9 @@ jobs:
           python scripts/test_guidance_and_drivers.py -v
           python scripts/test_valuation_history_and_reconcile.py -v
 
+      - name: Behaviour-contract parity harness (Python ↔ Worker)
+        run: python scripts/test_parity_harness.py -v
+
       - name: Historical prices contract tests (Worker and local)
         run: python scripts/test_historical_prices_contract.py -v
 
