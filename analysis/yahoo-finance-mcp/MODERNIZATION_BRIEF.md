@@ -494,6 +494,12 @@ These are the **84 P0 rules** in `BUSINESS_RULES.md` §2 (data integrity of publ
   | Deploy canaries, smoke and audit scripts | Yes, with a small code change | 9 scripts post to `MCP_URL`. Four go through `scripts/live_smoke_utils.rpc`; `test_deployed_extractors`, `test_geographic_revenue_schema`, `test_triangulation`, `test_universal_aliases` post directly. Add an `MCP_TOKEN` GitHub secret and header in Phase 1 |
   | Messages API MCP connector | Yes | `authorization_token` |
 
+  **Session evidence (2026-10-15):**
+  - Through this session's `Yahoo Finance MCP` connector, `system/health_check` returned production release 2.5.33, build `f122d0e`, Worker version `d095b8d3…`.
+  - `ListConnectors` reports the connector as connected, with `isAuthless: false` and no custom OAuth client.
+  - The Worker has no OAuth endpoints and `/mcp` ignores credentials, so either a request header is already configured (the beta is available, so V1 passes) or the flag is registration metadata. This is not decidable from inside a session.
+  - Confirm either in claude.ai (connector settings show a Request header) or in Cloudflare Workers logs (Claude's requests carry `Authorization`).
+
   **Result: V1 PASSES only if the owner's claude.ai account shows Request headers.** If it doesn't, a static bearer locks out every claude.ai-based client (connector, Desktop/mobile remote use, the live verifier), and Q13 applies.
 - **V2 (acknowledge before Phase 1).** `worker/src/company-ir-page-registry.json` has **0 `approved` entries** (2 `candidate`). Under Q2a, company-IR URL fetches are refused until entries are approved; `raw_text` is the only route meanwhile.
 - **V3 (gates the Q3c cap in R4): measured 2026-10-15; see `v3/V3_SUBREQUESTS.md`. Plan = Workers FREE (owner-confirmed).**
