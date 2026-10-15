@@ -1,0 +1,4552 @@
+[
+ {
+  "id": "BR-ENV-001",
+  "name": "Default fact confidence and decision-grade tagging",
+  "priority": "P1",
+  "category": "Policy",
+  "domain": "envelope",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/envelope.py:208-358",
+  "repair": null,
+  "confidence": "Medium"
+ },
+ {
+  "id": "BR-ENV-002",
+  "name": "Input validation for ticker, accession number and SEC URL",
+  "priority": "P1",
+  "category": "Validation",
+  "domain": "envelope",
+  "source": "yfmcp/validation.py:12-35",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-ENV-003",
+  "name": "Option chain data quality grade",
+  "priority": "P1",
+  "category": "Validation",
+  "domain": "envelope",
+  "source": "yfmcp/util.py:61,64-170",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-ENV-004",
+  "name": "Options chain data-quality grade",
+  "priority": "P1",
+  "category": "Validation",
+  "domain": "envelope",
+  "source": "yfmcp/util.py:61-170",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-ENV-005",
+  "name": "SEC accession number format check",
+  "priority": "P1",
+  "category": "Validation",
+  "domain": "envelope",
+  "source": "yfmcp/validation.py:13,24-28",
+  "repair": "Q3b",
+  "confidence": "High"
+ },
+ {
+  "id": "BR-ENV-006",
+  "name": "SEC document URLs restricted to the EDGAR Archives",
+  "priority": "P1",
+  "category": "Policy",
+  "domain": "envelope",
+  "source": "yfmcp/validation.py:31-35",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-ENV-007",
+  "name": "Ticker symbol format check",
+  "priority": "P1",
+  "category": "Validation",
+  "domain": "envelope",
+  "source": "yfmcp/validation.py:12-21",
+  "repair": "Q3b",
+  "confidence": "High"
+ },
+ {
+  "id": "BR-ENV-008",
+  "name": "Data cache freshness tiers",
+  "priority": "P2",
+  "category": "Policy",
+  "domain": "envelope",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/cache.py:13-80",
+  "repair": null,
+  "confidence": "Medium"
+ },
+ {
+  "id": "BR-ENV-009",
+  "name": "Error message classification for retry",
+  "priority": "P2",
+  "category": "Policy",
+  "domain": "envelope",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/envelope.py:436-462",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-ENV-010",
+  "name": "Option contract relevance ordering",
+  "priority": "P2",
+  "category": "Policy",
+  "domain": "envelope",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/util.py:173-221",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-ENV-011",
+  "name": "Ticker, accession and SEC URL format validation",
+  "priority": "P2",
+  "category": "Validation",
+  "domain": "envelope",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/validation.py:12-35",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-PRC-001",
+  "name": "Completed-session bar rule (exclude today's unfinished bar)",
+  "priority": "P0",
+  "category": "Lifecycle",
+  "domain": "pricing",
+  "source": "yfmcp/tools/pricing.py:772-822",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-PRC-002",
+  "name": "Daily price freshness classification (CURRENT / STALE / UNKNOWN)",
+  "priority": "P0",
+  "category": "Validation",
+  "domain": "pricing",
+  "source": "yfmcp/tools/pricing.py:830-864",
+  "repair": "Q1 BR-PRC-002",
+  "confidence": "High"
+ },
+ {
+  "id": "BR-PRC-003",
+  "name": "Listing currency to USD conversion with minor units",
+  "priority": "P0",
+  "category": "Calculation",
+  "domain": "pricing",
+  "source": "yfmcp/tools/pricing.py:1449-1489",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-PRC-004",
+  "name": "30-day annualized volatility",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "pricing",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/tools/pricing.py:581-592,449-451",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-PRC-005",
+  "name": "Adjusted vs unadjusted close series selection",
+  "priority": "P1",
+  "category": "Policy",
+  "domain": "pricing",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/tools/pricing.py:890-909",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-PRC-006",
+  "name": "ATM IV placed in 1-year realized-volatility range",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "pricing",
+  "source": "server.py:7728-7810",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-PRC-007",
+  "name": "Completed daily bar freshness",
+  "priority": "P1",
+  "category": "Lifecycle",
+  "domain": "pricing",
+  "source": "yfmcp/tools/pricing.py:772-875",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-PRC-008",
+  "name": "Completed daily bar freshness",
+  "priority": "P1",
+  "category": "Validation",
+  "domain": "pricing",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/tools/pricing.py:772-875,944-992",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-PRC-009",
+  "name": "Hedge screen status and budget feasibility",
+  "priority": "P1",
+  "category": "Lifecycle",
+  "domain": "pricing",
+  "source": "server.py:7293-7323",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-PRC-010",
+  "name": "Historical price period and interval allow-lists",
+  "priority": "P1",
+  "category": "Validation",
+  "domain": "pricing",
+  "source": "yfmcp/tools/pricing.py:47-58,81-96",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-PRC-011",
+  "name": "Liquidity gate: $10M 20-day average traded value",
+  "priority": "P1",
+  "category": "Policy",
+  "domain": "pricing",
+  "source": "yfmcp/tools/pricing.py:1441-1462,1589-1633",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-PRC-012",
+  "name": "Liquidity gate: $10M average daily traded value",
+  "priority": "P1",
+  "category": "Policy",
+  "domain": "pricing",
+  "source": "yfmcp/tools/pricing.py:1439-1441,1458-1462,1589-1633",
+  "repair": null,
+  "confidence": "Medium"
+ },
+ {
+  "id": "BR-PRC-013",
+  "name": "MACD(12,26,9)",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "pricing",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/tools/pricing.py:562-578,707-710",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-PRC-014",
+  "name": "N-day price slope and direction",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "pricing",
+  "source": "yfmcp/tools/pricing.py:1015-1130",
+  "repair": "Q3b",
+  "confidence": "High"
+ },
+ {
+  "id": "BR-PRC-015",
+  "name": "Options flow advisory bracket",
+  "priority": "P1",
+  "category": "Policy",
+  "domain": "pricing",
+  "source": "server.py:7851-7859",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-PRC-016",
+  "name": "Options flow put/call ratio and max-pain strike",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "pricing",
+  "source": "server.py:7698-7726",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-PRC-017",
+  "name": "Options flow scan: IV vs realized range, put volume proxy, trend and bracket",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "pricing",
+  "source": "server.py:7760-7859",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-PRC-018",
+  "name": "Position score inputs completeness",
+  "priority": "P1",
+  "category": "Lifecycle",
+  "domain": "pricing",
+  "source": "server.py:8050-8061,8105-8125",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-PRC-019",
+  "name": "Price CAGR over 1, 3 and 5 years",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "pricing",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/tools/pricing.py:453-470",
+  "repair": "Q3i",
+  "confidence": "High"
+ },
+ {
+  "id": "BR-PRC-020",
+  "name": "Price slope direction",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "pricing",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/tools/pricing.py:727-736,1021-1023,1091-1102",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-PRC-021",
+  "name": "Price stats: percent distances and CAGR",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "pricing",
+  "source": "yfmcp/tools/pricing.py:393-470",
+  "repair": "Q3i",
+  "confidence": "Medium"
+ },
+ {
+  "id": "BR-PRC-022",
+  "name": "Price target bracket and tag",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "pricing",
+  "source": "server.py:7945-7966",
+  "repair": "Q3d",
+  "confidence": "Medium"
+ },
+ {
+  "id": "BR-PRC-023",
+  "name": "Put hedge contract eligibility and ask-based cost",
+  "priority": "P1",
+  "category": "Validation",
+  "domain": "pricing",
+  "source": "server.py:7238-7251",
+  "repair": null,
+  "confidence": "Medium"
+ },
+ {
+  "id": "BR-PRC-024",
+  "name": "Put hedge expiry selection (skip expiries under 7 days)",
+  "priority": "P1",
+  "category": "Policy",
+  "domain": "pricing",
+  "source": "server.py:7198-7211",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-PRC-025",
+  "name": "Put hedge screen input validation",
+  "priority": "P1",
+  "category": "Validation",
+  "domain": "pricing",
+  "source": "server.py:7170-7183",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-PRC-026",
+  "name": "Put hedge strike window and OTM percent",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "pricing",
+  "source": "server.py:7213-7214,7230,7262",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-PRC-027",
+  "name": "Put volume proxy and window trend",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "pricing",
+  "source": "server.py:7812-7849,7916",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-PRC-028",
+  "name": "Put/call ratios and next-expiry selection",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "pricing",
+  "source": "server.py:3837-3841,3896-3902",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-PRC-029",
+  "name": "Short interest momentum and squeeze risk",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "pricing",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/tools/pricing.py:1362-1399",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-PRC-030",
+  "name": "Stale or incomplete daily data is retried once",
+  "priority": "P1",
+  "category": "Policy",
+  "domain": "pricing",
+  "source": "yfmcp/tools/pricing.py:944-992",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-PRC-031",
+  "name": "Volume gate stale or incomplete bar outcomes",
+  "priority": "P1",
+  "category": "Lifecycle",
+  "domain": "pricing",
+  "source": "yfmcp/tools/pricing.py:1514-1588",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-PRC-032",
+  "name": "Volume ratio and flag",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "pricing",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/tools/pricing.py:1207-1232",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-PRC-033",
+  "name": "Volume ratio and volume flag",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "pricing",
+  "source": "yfmcp/tools/pricing.py:1207-1232",
+  "repair": "Q3c",
+  "confidence": "High"
+ },
+ {
+  "id": "BR-PRC-034",
+  "name": "Wilder RSI(14)",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "pricing",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/tools/pricing.py:539-559,705-706",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-PRC-035",
+  "name": "Wilder RSI(14), MACD(12,26,9) and annualised volatility",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "pricing",
+  "source": "yfmcp/tools/pricing.py:531-592,683-714",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-PRC-036",
+  "name": "Hedge IV percentile within chain and high-IV flag",
+  "priority": "P2",
+  "category": "Calculation",
+  "domain": "pricing",
+  "source": "server.py:7255-7261",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-PRC-037",
+  "name": "Historical price period and interval allow-list",
+  "priority": "P2",
+  "category": "Validation",
+  "domain": "pricing",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/tools/pricing.py:45-58",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-PRC-038",
+  "name": "Indicator history widening and minimum bars",
+  "priority": "P2",
+  "category": "Policy",
+  "domain": "pricing",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/tools/pricing.py:531-536,653-687",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-PRC-039",
+  "name": "Live quote freshness class",
+  "priority": "P2",
+  "category": "Calculation",
+  "domain": "pricing",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/tools/pricing.py:1669-1709",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-PRC-040",
+  "name": "Market snapshot batch cap and status",
+  "priority": "P2",
+  "category": "Policy",
+  "domain": "pricing",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/tools/pricing.py:1719-1736,1809-1818,1890-1899",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-PRC-041",
+  "name": "Moving average trend regime",
+  "priority": "P2",
+  "category": "Calculation",
+  "domain": "pricing",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/tools/pricing.py:1275-1288",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-PRC-042",
+  "name": "Moving-average regime and trend",
+  "priority": "P2",
+  "category": "Calculation",
+  "domain": "pricing",
+  "source": "yfmcp/tools/pricing.py:1275-1288",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-PRC-043",
+  "name": "Next option expiry excludes same-day expiry",
+  "priority": "P2",
+  "category": "Policy",
+  "domain": "pricing",
+  "source": "server.py:3837-3841",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-PRC-044",
+  "name": "Price change percentages versus references",
+  "priority": "P2",
+  "category": "Calculation",
+  "domain": "pricing",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/tools/pricing.py:393-416",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-PRC-045",
+  "name": "Quote freshness classification",
+  "priority": "P2",
+  "category": "Lifecycle",
+  "domain": "pricing",
+  "source": "yfmcp/tools/pricing.py:1669-1709",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-PRC-046",
+  "name": "Stock screener count cap and name allow-list",
+  "priority": "P2",
+  "category": "Validation",
+  "domain": "pricing",
+  "source": "legacy/yahoo-finance-mcp/server.py:5056-5081,5113-5123",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-FND-001",
+  "name": "Analyst consensus: upside, dominant rating and target-lag signal",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "fundamentals",
+  "source": "server.py:4461-4465,4513-4549",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-FND-002",
+  "name": "Consensus dominant rating, upside and target-lag signal",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "fundamentals",
+  "source": "server.py:4461-4465,4513-4554",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-FND-003",
+  "name": "Credit health data warnings",
+  "priority": "P1",
+  "category": "Validation",
+  "domain": "fundamentals",
+  "source": "server.py:6741-6743,6810-6853",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-FND-004",
+  "name": "Credit health operational EBITDA, net debt and coverage",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "fundamentals",
+  "source": "server.py:6686-6747",
+  "repair": "Q3i",
+  "confidence": "Medium"
+ },
+ {
+  "id": "BR-FND-005",
+  "name": "Credit health warnings: interest anomaly and EBITDA divergence",
+  "priority": "P1",
+  "category": "Validation",
+  "domain": "fundamentals",
+  "source": "server.py:6816-6853",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-FND-006",
+  "name": "Credit health: net debt, operational EBITDA and leverage ratios",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "fundamentals",
+  "source": "server.py:6633-6748",
+  "repair": "Q3i",
+  "confidence": "Medium"
+ },
+ {
+  "id": "BR-FND-007",
+  "name": "Credit stress flag and debt tier",
+  "priority": "P1",
+  "category": "Policy",
+  "domain": "fundamentals",
+  "source": "server.py:6750-6764",
+  "repair": "Q3i",
+  "confidence": "High"
+ },
+ {
+  "id": "BR-FND-008",
+  "name": "Free-cash-flow yield and currency-mismatch withholding of multiples",
+  "priority": "P1",
+  "category": "Validation",
+  "domain": "fundamentals",
+  "source": "server.py:4709-4734",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-FND-009",
+  "name": "Share count trend change",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "fundamentals",
+  "source": "server.py:4822-4879",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-FND-010",
+  "name": "Calendar and date-range input guards",
+  "priority": "P2",
+  "category": "Validation",
+  "domain": "fundamentals",
+  "source": "server.py:4652-4663,4817-4828,4883-4888,4977-5000",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-FND-011",
+  "name": "Corporate actions retention",
+  "priority": "P2",
+  "category": "Policy",
+  "domain": "fundamentals",
+  "source": "server.py:3441-3451",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-PRV-001",
+  "name": "Expanded institutional ownership fallback lifecycle",
+  "priority": "P1",
+  "category": "Lifecycle",
+  "domain": "providers",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/tools/provider_gaps.py:291-429",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-PRV-002",
+  "name": "Expanded ownership provider eligibility and scarce fallback opt-in",
+  "priority": "P1",
+  "category": "Policy",
+  "domain": "providers",
+  "source": "yfmcp/tools/provider_gaps.py:217-226,297-363",
+  "repair": "Q3i",
+  "confidence": "High"
+ },
+ {
+  "id": "BR-PRV-003",
+  "name": "Finnhub market eligibility (fails open)",
+  "priority": "P1",
+  "category": "Policy",
+  "domain": "providers",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/tools/provider_gaps.py:27,217-226,309-324",
+  "repair": "Q3i",
+  "confidence": "Medium"
+ },
+ {
+  "id": "BR-PRV-004",
+  "name": "Historical put/call ratio request and response validation",
+  "priority": "P1",
+  "category": "Validation",
+  "domain": "providers",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/tools/provider_gaps.py:23,96-105,119-214",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-PRV-005",
+  "name": "Provider failure status mapping",
+  "priority": "P1",
+  "category": "Lifecycle",
+  "domain": "providers",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/clients/market_providers.py:88-109,150-169,189-191,251-253",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-PRV-006",
+  "name": "Provider response identity check",
+  "priority": "P1",
+  "category": "Validation",
+  "domain": "providers",
+  "source": "yfmcp/tools/provider_gaps.py:154-166,326-340,350-363",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-PRV-007",
+  "name": "Recommended next action per provider status",
+  "priority": "P1",
+  "category": "Policy",
+  "domain": "providers",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/tools/provider_gaps.py:57-72",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-PRV-008",
+  "name": "Companies House company number format",
+  "priority": "P2",
+  "category": "Validation",
+  "domain": "providers",
+  "source": "server.py:10935-10957",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-PRV-009",
+  "name": "Expanded ownership truncation and freshness",
+  "priority": "P2",
+  "category": "Calculation",
+  "domain": "providers",
+  "source": "yfmcp/tools/provider_gaps.py:268-276,383-421",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-PRV-010",
+  "name": "Historical put/call ratio date window",
+  "priority": "P2",
+  "category": "Validation",
+  "domain": "providers",
+  "source": "yfmcp/tools/provider_gaps.py:96-105,154-166",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-PRV-011",
+  "name": "Provider failure recovery action mapping",
+  "priority": "P2",
+  "category": "Policy",
+  "domain": "providers",
+  "source": "yfmcp/tools/provider_gaps.py:57-72,366-381",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-SEC-001",
+  "name": "Company fiscal-year naming offset",
+  "priority": "P0",
+  "category": "Policy",
+  "domain": "sec",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/fiscal_calendar.py:101-146",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-SEC-002",
+  "name": "Equivalent SEC concept selection by newest filing",
+  "priority": "P0",
+  "category": "Policy",
+  "domain": "sec",
+  "source": "yfmcp/sec_facts.py:18-67",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-SEC-003",
+  "name": "Equivalent-concept fact selection by newest filing",
+  "priority": "P0",
+  "category": "Policy",
+  "domain": "sec",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/sec_facts.py:18-67",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-SEC-004",
+  "name": "Filing period must be 'latest' or a fiscal year",
+  "priority": "P0",
+  "category": "Validation",
+  "domain": "sec",
+  "source": "yfmcp/sec_facts.py:116-128",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-SEC-005",
+  "name": "Fiscal year of a period end (52/53-week drift)",
+  "priority": "P0",
+  "category": "Calculation",
+  "domain": "sec",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/fiscal_calendar.py:22-57",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-SEC-006",
+  "name": "Fiscal year of a period end (one-week drift rule)",
+  "priority": "P0",
+  "category": "Calculation",
+  "domain": "sec",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/fiscal_calendar.py:22-57",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-SEC-007",
+  "name": "Fiscal-year assignment for SEC facts (52/53-week years)",
+  "priority": "P0",
+  "category": "Calculation",
+  "domain": "sec",
+  "source": "yfmcp/sec_facts.py:131-205",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-SEC-008",
+  "name": "52/53-week fiscal year from period end (7-day drift)",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "sec",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/fiscal_calendar.py:22-57",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-SEC-009",
+  "name": "A filing's own fact value: latest end, shortest period",
+  "priority": "P1",
+  "category": "Policy",
+  "domain": "sec",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/sec_facts.py:70-107",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-SEC-010",
+  "name": "Company fiscal-year naming offset",
+  "priority": "P1",
+  "category": "Policy",
+  "domain": "sec",
+  "source": "yfmcp/fiscal_calendar.py:101-146,258-269",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-SEC-011",
+  "name": "Company fiscal-year naming offset from recent 10-Ks",
+  "priority": "P1",
+  "category": "Policy",
+  "domain": "sec",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/fiscal_calendar.py:101-146",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-SEC-012",
+  "name": "Filing fiscal-year label from DocumentFiscalYearFocus with mistag guard",
+  "priority": "P1",
+  "category": "Validation",
+  "domain": "sec",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/fiscal_calendar.py:247-269",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-SEC-013",
+  "name": "Filing fiscal-year label prefers the filing's own tag within one year",
+  "priority": "P1",
+  "category": "Validation",
+  "domain": "sec",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/fiscal_calendar.py:247-269",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-SEC-014",
+  "name": "Filing fiscal-year label with mistag guard",
+  "priority": "P1",
+  "category": "Validation",
+  "domain": "sec",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/fiscal_calendar.py:247-269",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-SEC-015",
+  "name": "Filing's own fact: latest period end, shortest period",
+  "priority": "P1",
+  "category": "Policy",
+  "domain": "sec",
+  "source": "yfmcp/sec_facts.py:70-107",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-SEC-016",
+  "name": "Fiscal calendar pattern detection and projection",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "sec",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/fiscal_calendar.py:175-244",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-SEC-017",
+  "name": "Fiscal calendar pattern detection and settling",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "sec",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/fiscal_calendar.py:175-232",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-SEC-018",
+  "name": "Fiscal calendar pattern inference and year-end projection",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "sec",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/fiscal_calendar.py:157-244",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-SEC-019",
+  "name": "Fiscal quarter from distance to year end",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "sec",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/fiscal_calendar.py:77-90",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-SEC-020",
+  "name": "Fiscal quarter of a period end",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "sec",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/fiscal_calendar.py:77-90",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-SEC-021",
+  "name": "Fiscal quarter of a period within a fiscal year",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "sec",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/fiscal_calendar.py:77-90",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-SEC-022",
+  "name": "Fiscal year of a 52/53-week period end",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "sec",
+  "source": "yfmcp/fiscal_calendar.py:22-57",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-SEC-023",
+  "name": "Latest annual report missing from SEC companyfacts",
+  "priority": "P1",
+  "category": "Validation",
+  "domain": "sec",
+  "source": "yfmcp/companyfacts_coverage.py:42-129",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-SEC-024",
+  "name": "Latest annual report missing from SEC companyfacts warning",
+  "priority": "P1",
+  "category": "Validation",
+  "domain": "sec",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/companyfacts_coverage.py:13-129",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-SEC-025",
+  "name": "Named fiscal-year period parsing and issuer fiscal-year matching",
+  "priority": "P1",
+  "category": "Validation",
+  "domain": "sec",
+  "source": "yfmcp/sec_facts.py:116-143,179-205",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-SEC-026",
+  "name": "Named fiscal-year period parsing and row selection",
+  "priority": "P1",
+  "category": "Validation",
+  "domain": "sec",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/sec_facts.py:116-205",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-SEC-027",
+  "name": "Projecting the company's fiscal year end from a provider date",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "sec",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/fiscal_calendar.py:235-244",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-SEC-028",
+  "name": "Table monetary scale precedence (assume millions last)",
+  "priority": "P1",
+  "category": "Policy",
+  "domain": "sec",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/parsing/html.py:83-148",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-SEC-029",
+  "name": "Filing search match relevance score and ordering",
+  "priority": "P2",
+  "category": "Calculation",
+  "domain": "sec",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/filing_search.py:802-818,906-940,979-995",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-SEC-030",
+  "name": "Filing search relevance score",
+  "priority": "P2",
+  "category": "Calculation",
+  "domain": "sec",
+  "source": "yfmcp/filing_search.py:802-813,911-940,989",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-SEC-031",
+  "name": "Filing search relevance score and round-robin ordering",
+  "priority": "P2",
+  "category": "Calculation",
+  "domain": "sec",
+  "source": "yfmcp/filing_search.py:802-813,911-940,979-990",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-SEC-032",
+  "name": "Fiscal calendar rule detection and projection",
+  "priority": "P2",
+  "category": "Calculation",
+  "domain": "sec",
+  "source": "yfmcp/fiscal_calendar.py:157-244",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-SEC-033",
+  "name": "Fiscal quarter from distance to year end",
+  "priority": "P2",
+  "category": "Calculation",
+  "domain": "sec",
+  "source": "yfmcp/fiscal_calendar.py:77-90",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-SEC-034",
+  "name": "Table-of-contents hits excluded",
+  "priority": "P2",
+  "category": "Validation",
+  "domain": "sec",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/filing_search.py:288-301",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-001",
+  "name": "Conversion ratio unit normalisation (per $1,000 vs per $1)",
+  "priority": "P0",
+  "category": "Validation",
+  "domain": "extractors",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/capital_structure.py:1197-1226",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-002",
+  "name": "Conversion ratio unit normalization",
+  "priority": "P0",
+  "category": "Validation",
+  "domain": "extractors",
+  "source": "yfmcp/capital_structure.py:1197-1226",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-003",
+  "name": "Convertible note if-converted shares and principal basis",
+  "priority": "P0",
+  "category": "Calculation",
+  "domain": "extractors",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/capital_structure.py:1187-1209,1419-1492",
+  "repair": "Q3f",
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-004",
+  "name": "Convertible preferred if-converted and liquidation preference",
+  "priority": "P0",
+  "category": "Calculation",
+  "domain": "extractors",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/capital_structure.py:1544-1675",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-005",
+  "name": "Convertible scenario treatments and net share settlement",
+  "priority": "P0",
+  "category": "Calculation",
+  "domain": "extractors",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/share_scenarios.py:188-217",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-006",
+  "name": "Debt instrument period-end status",
+  "priority": "P0",
+  "category": "Lifecycle",
+  "domain": "extractors",
+  "source": "yfmcp/capital_structure.py:2585-2592",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-007",
+  "name": "Dilution bridge status and diluted share formula",
+  "priority": "P0",
+  "category": "Lifecycle",
+  "domain": "extractors",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/capital_structure.py:2090-2100,2276-2325",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-008",
+  "name": "Dilution bridge totals, dilution percentages and status",
+  "priority": "P0",
+  "category": "Calculation",
+  "domain": "extractors",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/capital_structure.py:2276-2325",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-009",
+  "name": "Geographic revenue table selection and share check",
+  "priority": "P0",
+  "category": "Calculation",
+  "domain": "extractors",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/parsing/extractors.py:146-151,207-233,241-326",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-010",
+  "name": "Guidance basis (GAAP / non-GAAP) classification",
+  "priority": "P0",
+  "category": "Validation",
+  "domain": "extractors",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/extraction_rules.py:333-367,405-415",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-011",
+  "name": "If-converted shares for convertible notes",
+  "priority": "P0",
+  "category": "Calculation",
+  "domain": "extractors",
+  "source": "yfmcp/capital_structure.py:1436-1491",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-012",
+  "name": "Instrument-to-total-debt reconciliation",
+  "priority": "P0",
+  "category": "Validation",
+  "domain": "extractors",
+  "source": "yfmcp/capital_structure.py:2947-2993",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-013",
+  "name": "Net-share settlement when principal is stated as cash-settled",
+  "priority": "P0",
+  "category": "Calculation",
+  "domain": "extractors",
+  "source": "yfmcp/capital_structure.py:1250-1284,1493-1506; yfmcp/share_scenarios.py:207-214",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-014",
+  "name": "Outlook table scale for unscaled amounts",
+  "priority": "P0",
+  "category": "Calculation",
+  "domain": "extractors",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/extraction_rules.py:249-269,396-403",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-015",
+  "name": "Release figure scale and loss sign",
+  "priority": "P0",
+  "category": "Calculation",
+  "domain": "extractors",
+  "source": "yfmcp/extraction_rules.py:590-613",
+  "repair": "Q1 BR-EXT-015 / Q3i",
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-016",
+  "name": "Reported release metric acceptance rules",
+  "priority": "P0",
+  "category": "Validation",
+  "domain": "extractors",
+  "source": "yfmcp/extraction_rules.py:541-616",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-017",
+  "name": "Reported release metric eligibility",
+  "priority": "P0",
+  "category": "Validation",
+  "domain": "extractors",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/extraction_rules.py:456-616",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-018",
+  "name": "Scenario instrument line inclusion and treasury-stock increment",
+  "priority": "P0",
+  "category": "Calculation",
+  "domain": "extractors",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/share_scenarios.py:107-142",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-019",
+  "name": "Scenario resulting shares, dilution and completeness",
+  "priority": "P0",
+  "category": "Calculation",
+  "domain": "extractors",
+  "source": "yfmcp/share_scenarios.py:249-297",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-020",
+  "name": "Scenario totals, dilution % and completeness",
+  "priority": "P0",
+  "category": "Lifecycle",
+  "domain": "extractors",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/share_scenarios.py:249-297",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-021",
+  "name": "Scenario treasury-stock dilution for options and warrants",
+  "priority": "P0",
+  "category": "Calculation",
+  "domain": "extractors",
+  "source": "yfmcp/share_scenarios.py:43-45,127-142,155-186",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-022",
+  "name": "Short-term investments and cash aggregate cross-check",
+  "priority": "P0",
+  "category": "Validation",
+  "domain": "extractors",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/capital_structure.py:2345-2414,2837-2844",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-023",
+  "name": "Total debt concept hierarchy and finance-lease removal",
+  "priority": "P0",
+  "category": "Calculation",
+  "domain": "extractors",
+  "source": "yfmcp/capital_structure.py:2417-2534",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-024",
+  "name": "Treasury-stock and if-converted dilution mechanics",
+  "priority": "P0",
+  "category": "Calculation",
+  "domain": "extractors",
+  "source": "yfmcp/share_scenarios.py:127-142,188-217; yfmcp/capital_structure.py:501-502",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-025",
+  "name": "Unvested RSU/PSU awards counted gross",
+  "priority": "P0",
+  "category": "Calculation",
+  "domain": "extractors",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/capital_structure.py:620-723",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-026",
+  "name": "Warrant class retirement by filing text",
+  "priority": "P0",
+  "category": "Lifecycle",
+  "domain": "extractors",
+  "source": "yfmcp/capital_structure.py:851-948",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-027",
+  "name": "Warrant exercisable count and treasury-stock dilution",
+  "priority": "P0",
+  "category": "Calculation",
+  "domain": "extractors",
+  "source": "yfmcp/capital_structure.py:1029-1086",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-028",
+  "name": "Aggregate debt row detection (subset-sum within 0.5%)",
+  "priority": "P1",
+  "category": "Validation",
+  "domain": "extractors",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/capital_structure.py:2744-2780,2859-2860",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-029",
+  "name": "Antidilutive table reconciliation and claim promotion",
+  "priority": "P1",
+  "category": "Lifecycle",
+  "domain": "extractors",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/capital_structure.py:2001-2067",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-030",
+  "name": "Antidilutive-securities table reconciliation and warrant gap warning",
+  "priority": "P1",
+  "category": "Validation",
+  "domain": "extractors",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/capital_structure.py:1917-1954,1975-2062,2214-2223",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-031",
+  "name": "ATM program full-capacity shares",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "extractors",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/share_scenarios.py:236-245",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-032",
+  "name": "ATM program potential shares",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "extractors",
+  "source": "yfmcp/capital_structure.py:1712-1770",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-033",
+  "name": "ATM program potential shares",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "extractors",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/capital_structure.py:1692-1770",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-034",
+  "name": "ATM program shares under full-remaining-capacity treatment",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "extractors",
+  "source": "yfmcp/share_scenarios.py:236-245",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-035",
+  "name": "Automatic 20-F fallback for geographic and segment revenue",
+  "priority": "P1",
+  "category": "Policy",
+  "domain": "extractors",
+  "source": "legacy/yahoo-finance-mcp/server.py:9505-9510,9606-9654,9686-9700",
+  "repair": null,
+  "confidence": "Medium"
+ },
+ {
+  "id": "BR-EXT-036",
+  "name": "Balance-sheet fact exclusion (rounded or overlapping cash)",
+  "priority": "P1",
+  "category": "Validation",
+  "domain": "extractors",
+  "source": "yfmcp/capital_structure.py:2437-2464",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-037",
+  "name": "Capital structure summary status",
+  "priority": "P1",
+  "category": "Lifecycle",
+  "domain": "extractors",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/capital_structure.py:3030-3038",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-038",
+  "name": "Capped call economic offset",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "extractors",
+  "source": "yfmcp/capital_structure.py:1379-1416; yfmcp/share_scenarios.py:219-234",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-039",
+  "name": "Capped call economic offset",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "extractors",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/capital_structure.py:1287-1416",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-040",
+  "name": "Capped call economic offset in scenarios",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "extractors",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/share_scenarios.py:219-234",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-041",
+  "name": "Capped call economic offset in scenarios",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "extractors",
+  "source": "yfmcp/share_scenarios.py:219-234",
+  "repair": null,
+  "confidence": "Medium"
+ },
+ {
+  "id": "BR-EXT-042",
+  "name": "Capped call offset shares",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "extractors",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/capital_structure.py:1371-1416",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-043",
+  "name": "Company-specific driver concept exclusion",
+  "priority": "P1",
+  "category": "Validation",
+  "domain": "extractors",
+  "source": "yfmcp/driver_ledger.py:114-193",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-044",
+  "name": "Contractual obligation schedule buckets",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "extractors",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/funding_schedule.py:40-90,96-97,258-350",
+  "repair": "Q3i",
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-045",
+  "name": "Contractual obligation schedule buckets and schedule status",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "extractors",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/funding_schedule.py:40-97,258-350",
+  "repair": "Q3i",
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-046",
+  "name": "Contractual obligation schedule by due bucket",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "extractors",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/funding_schedule.py:40-102,258-307",
+  "repair": null,
+  "confidence": "Medium"
+ },
+ {
+  "id": "BR-EXT-047",
+  "name": "Conversion ratio unit normalisation",
+  "priority": "P1",
+  "category": "Validation",
+  "domain": "extractors",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/capital_structure.py:1212-1226",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-048",
+  "name": "Convertible note principal basis and if-converted shares",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "extractors",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/capital_structure.py:1184-1199,1436-1491",
+  "repair": null,
+  "confidence": "Medium"
+ },
+ {
+  "id": "BR-EXT-049",
+  "name": "Convertible preferred if-converted and liquidation preference",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "extractors",
+  "source": "yfmcp/capital_structure.py:1588-1675",
+  "repair": null,
+  "confidence": "Medium"
+ },
+ {
+  "id": "BR-EXT-050",
+  "name": "Convertible preferred if-converted shares",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "extractors",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/capital_structure.py:1588-1675",
+  "repair": null,
+  "confidence": "Medium"
+ },
+ {
+  "id": "BR-EXT-051",
+  "name": "Convertible rows vs balance-sheet convertible line",
+  "priority": "P1",
+  "category": "Validation",
+  "domain": "extractors",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/capital_structure.py:2382-2392,2994-3020",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-052",
+  "name": "Customer concentration latest-year, table-precedence and dedupe",
+  "priority": "P1",
+  "category": "Policy",
+  "domain": "extractors",
+  "source": "yfmcp/extraction_rules.py:82-95,158-185",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-053",
+  "name": "Customer revenue concentration extraction",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "extractors",
+  "source": "yfmcp/extraction_rules.py:98-185",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-054",
+  "name": "Customer revenue concentration extraction",
+  "priority": "P1",
+  "category": "Validation",
+  "domain": "extractors",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/extraction_rules.py:31-185",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-055",
+  "name": "Debt maturity year ladder and coverage of total debt",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "extractors",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/capital_structure.py:2685-2697,2804-2812,2878-2946,3021-3028",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-056",
+  "name": "Diluted share count and dilution percentage at price",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "extractors",
+  "source": "yfmcp/capital_structure.py:2280-2325",
+  "repair": null,
+  "confidence": "Medium"
+ },
+ {
+  "id": "BR-EXT-057",
+  "name": "Dilution bridge requires a caller price",
+  "priority": "P1",
+  "category": "Validation",
+  "domain": "extractors",
+  "source": "server.py:10225-10239",
+  "repair": null,
+  "confidence": "Medium"
+ },
+ {
+  "id": "BR-EXT-058",
+  "name": "Dilution bridge status",
+  "priority": "P1",
+  "category": "Lifecycle",
+  "domain": "extractors",
+  "source": "yfmcp/capital_structure.py:2095-2100,2276-2325",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-059",
+  "name": "Funding amount range, qualifier and missing-scale rule",
+  "priority": "P1",
+  "category": "Validation",
+  "domain": "extractors",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/funding_schedule.py:125-157",
+  "repair": "Q3i",
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-060",
+  "name": "Funding amount reading: range, qualifier and scale-not-stated",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "extractors",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/funding_schedule.py:128-157",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-061",
+  "name": "Funding schedule status, liquidity sources and warnings",
+  "priority": "P1",
+  "category": "Lifecycle",
+  "domain": "extractors",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/funding_schedule.py:310-333",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-062",
+  "name": "Funding text amount parsing and range rule",
+  "priority": "P1",
+  "category": "Validation",
+  "domain": "extractors",
+  "source": "yfmcp/funding_schedule.py:107,122-157",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-063",
+  "name": "Funding text item amount status and forced UNRESOLVED",
+  "priority": "P1",
+  "category": "Validation",
+  "domain": "extractors",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/funding_schedule.py:128-157,212-253",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-064",
+  "name": "Funding text item eligibility and unresolved reason",
+  "priority": "P1",
+  "category": "Validation",
+  "domain": "extractors",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/funding_schedule.py:212-253,309",
+  "repair": "Q3i",
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-065",
+  "name": "Funding/capex sentence classification precedence",
+  "priority": "P1",
+  "category": "Policy",
+  "domain": "extractors",
+  "source": "yfmcp/funding_schedule.py:189-253",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-066",
+  "name": "Funding/capex sentence classification precedence",
+  "priority": "P1",
+  "category": "Policy",
+  "domain": "extractors",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/funding_schedule.py:107-209",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-067",
+  "name": "Geographic revenue share from filing tables",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "extractors",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/parsing/extractors.py:143-326",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-068",
+  "name": "Guidance basis (GAAP / non-GAAP) and alternates",
+  "priority": "P1",
+  "category": "Validation",
+  "domain": "extractors",
+  "source": "yfmcp/extraction_rules.py:343-367,436-445",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-069",
+  "name": "Guidance pattern precedence and GAAP basis",
+  "priority": "P1",
+  "category": "Policy",
+  "domain": "extractors",
+  "source": "yfmcp/extraction_rules.py:343-367,370-453",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-070",
+  "name": "Guidance range pattern precedence and alternates",
+  "priority": "P1",
+  "category": "Policy",
+  "domain": "extractors",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/extraction_rules.py:194-260,370-453",
+  "repair": null,
+  "confidence": "Medium"
+ },
+ {
+  "id": "BR-EXT-071",
+  "name": "Guidance range reading precedence and midpoint-plus-minus bounds",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "extractors",
+  "source": "yfmcp/extraction_rules.py:281-330,370-453",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-072",
+  "name": "Half-up rounding convention",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "extractors",
+  "source": "yfmcp/capital_structure.py:451-453; yfmcp/share_scenarios.py:43-45",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-073",
+  "name": "Midpoint plus/minus tolerance bounds",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "extractors",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/extraction_rules.py:281-330",
+  "repair": null,
+  "confidence": "Medium"
+ },
+ {
+  "id": "BR-EXT-074",
+  "name": "Midpoint \u00b1 tolerance guidance bounds",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "extractors",
+  "source": "yfmcp/extraction_rules.py:281-330",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-075",
+  "name": "Net cash formula",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "extractors",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/capital_structure.py:3029-3054",
+  "repair": null,
+  "confidence": "Medium"
+ },
+ {
+  "id": "BR-EXT-076",
+  "name": "Net share settlement when principal is stated as cash-settled",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "extractors",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/capital_structure.py:1236-1284,1493-1506,1526-1528",
+  "repair": null,
+  "confidence": "Medium"
+ },
+ {
+  "id": "BR-EXT-077",
+  "name": "Net-share settlement when convertible principal must be paid in cash",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "extractors",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/capital_structure.py:1229-1284,1493-1528",
+  "repair": null,
+  "confidence": "Medium"
+ },
+ {
+  "id": "BR-EXT-078",
+  "name": "Operating statement basis: actual vs target",
+  "priority": "P1",
+  "category": "Validation",
+  "domain": "extractors",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/driver_ledger.py:262-281",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-079",
+  "name": "Price input validation for bridge and snapshot",
+  "priority": "P1",
+  "category": "Validation",
+  "domain": "extractors",
+  "source": "server.py:10234-10239,11054-11060,11068-11086",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-080",
+  "name": "Reporting period type from period length",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "extractors",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/driver_ledger.py:52-62",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-081",
+  "name": "Scenario capped-call offset and ATM capacity shares",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "extractors",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/share_scenarios.py:219-245",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-082",
+  "name": "Scenario convertible treatment and in-the-money test",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "extractors",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/share_scenarios.py:188-217",
+  "repair": "Q3f",
+  "confidence": "Medium"
+ },
+ {
+  "id": "BR-EXT-083",
+  "name": "Scenario convertible treatment including net-share settlement",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "extractors",
+  "source": "yfmcp/share_scenarios.py:188-217",
+  "repair": "Q3f",
+  "confidence": "Medium"
+ },
+ {
+  "id": "BR-EXT-084",
+  "name": "Scenario warrant vesting basis",
+  "priority": "P1",
+  "category": "Policy",
+  "domain": "extractors",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/share_scenarios.py:179-186",
+  "repair": null,
+  "confidence": "Medium"
+ },
+ {
+  "id": "BR-EXT-085",
+  "name": "Share claim status lifecycle",
+  "priority": "P1",
+  "category": "Lifecycle",
+  "domain": "extractors",
+  "source": "yfmcp/capital_structure.py:1856-1902",
+  "repair": null,
+  "confidence": "Medium"
+ },
+ {
+  "id": "BR-EXT-086",
+  "name": "Share count scenario completeness",
+  "priority": "P1",
+  "category": "Validation",
+  "domain": "extractors",
+  "source": "yfmcp/share_scenarios.py:284-297",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-087",
+  "name": "Share scenario completeness and overall status",
+  "priority": "P1",
+  "category": "Lifecycle",
+  "domain": "extractors",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/share_scenarios.py:253-297",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-088",
+  "name": "Share scenario input validation",
+  "priority": "P1",
+  "category": "Validation",
+  "domain": "extractors",
+  "source": "yfmcp/share_scenarios.py:19-40,61-104",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-089",
+  "name": "Share scenario totals, completeness and status",
+  "priority": "P1",
+  "category": "Lifecycle",
+  "domain": "extractors",
+  "source": "yfmcp/share_scenarios.py:249-297",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-090",
+  "name": "Share-count scenario input validation",
+  "priority": "P1",
+  "category": "Validation",
+  "domain": "extractors",
+  "source": "yfmcp/share_scenarios.py:19-104",
+  "repair": null,
+  "confidence": "Medium"
+ },
+ {
+  "id": "BR-EXT-091",
+  "name": "Share-count scenario input validation",
+  "priority": "P1",
+  "category": "Validation",
+  "domain": "extractors",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/share_scenarios.py:19-104",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-092",
+  "name": "Share-count scenario input validation and defaults",
+  "priority": "P1",
+  "category": "Validation",
+  "domain": "extractors",
+  "source": "yfmcp/share_scenarios.py:19-104",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-093",
+  "name": "Standard driver series status (read vs not reported)",
+  "priority": "P1",
+  "category": "Lifecycle",
+  "domain": "extractors",
+  "source": "yfmcp/driver_ledger.py:32-45,65-111",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-094",
+  "name": "Standard driver series status (REPORTED / NOT_REPORTED / NOT_READ)",
+  "priority": "P1",
+  "category": "Lifecycle",
+  "domain": "extractors",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/driver_ledger.py:65-111,333-366",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-095",
+  "name": "Stock option dilution by treasury-stock method (tranches before weighted-average strike)",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "extractors",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/capital_structure.py:518-617",
+  "repair": null,
+  "confidence": "Medium"
+ },
+ {
+  "id": "BR-EXT-096",
+  "name": "Text operating driver selection and actual-vs-plan basis",
+  "priority": "P1",
+  "category": "Validation",
+  "domain": "extractors",
+  "source": "yfmcp/driver_ledger.py:196-330",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-097",
+  "name": "Treasury-stock incremental shares for options and warrants",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "extractors",
+  "source": "yfmcp/capital_structure.py:501-502,555-617 (mirrored in yfmcp/share_scenarios.py:127-142)",
+  "repair": null,
+  "confidence": "Medium"
+ },
+ {
+  "id": "BR-EXT-098",
+  "name": "Treasury-stock method for options and warrants in scenarios",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "extractors",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/share_scenarios.py:127-142,155-186",
+  "repair": null,
+  "confidence": "Medium"
+ },
+ {
+  "id": "BR-EXT-099",
+  "name": "Warrant count vs company-reported antidilutive table",
+  "priority": "P1",
+  "category": "Validation",
+  "domain": "extractors",
+  "source": "yfmcp/capital_structure.py:2214-2223",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-100",
+  "name": "Warrant count vs reported antidilutive count gap warning",
+  "priority": "P1",
+  "category": "Validation",
+  "domain": "extractors",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/capital_structure.py:2214-2223",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-101",
+  "name": "Warrant vesting treatment uses exercisable count",
+  "priority": "P1",
+  "category": "Policy",
+  "domain": "extractors",
+  "source": "yfmcp/share_scenarios.py:179-186",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-102",
+  "name": "Warrants tagged after the period end are quoted, not counted",
+  "priority": "P1",
+  "category": "Lifecycle",
+  "domain": "extractors",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/capital_structure.py:1092-1125",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-103",
+  "name": "Analyst price-target parsing from news text",
+  "priority": "P2",
+  "category": "Calculation",
+  "domain": "extractors",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/capital_structure.py:3085-3123,3209-3231",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-104",
+  "name": "Analyst valuation method extraction and subject attribution",
+  "priority": "P2",
+  "category": "Policy",
+  "domain": "extractors",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/capital_structure.py:3094-3098,3128-3206,3255-3406",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-105",
+  "name": "Analyst valuation method extraction status and subject attribution",
+  "priority": "P2",
+  "category": "Lifecycle",
+  "domain": "extractors",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/capital_structure.py:3265-3406",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-106",
+  "name": "Companies House company match prefers active companies",
+  "priority": "P2",
+  "category": "Policy",
+  "domain": "extractors",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/capital_structure.py:3457-3471",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-107",
+  "name": "Companies House issuer match",
+  "priority": "P2",
+  "category": "Validation",
+  "domain": "extractors",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/capital_structure.py:3457-3471",
+  "repair": null,
+  "confidence": "Medium"
+ },
+ {
+  "id": "BR-EXT-108",
+  "name": "Company-specific operating series exclusions",
+  "priority": "P2",
+  "category": "Policy",
+  "domain": "extractors",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/driver_ledger.py:114-193,337,352",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-109",
+  "name": "Company-specific XBRL driver exclusion",
+  "priority": "P2",
+  "category": "Policy",
+  "domain": "extractors",
+  "source": "yfmcp/driver_ledger.py:114-193",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-110",
+  "name": "Contractual obligation bucket dates",
+  "priority": "P2",
+  "category": "Calculation",
+  "domain": "extractors",
+  "source": "yfmcp/funding_schedule.py:40-97,258-307",
+  "repair": "Q3i",
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-111",
+  "name": "Event evidence ranking and word stemming",
+  "priority": "P2",
+  "category": "Policy",
+  "domain": "extractors",
+  "source": "yfmcp/extraction_rules.py:621-653",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-112",
+  "name": "Evidence ranking order",
+  "priority": "P2",
+  "category": "Policy",
+  "domain": "extractors",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/extraction_rules.py:642-668",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-113",
+  "name": "Funding statement categories",
+  "priority": "P2",
+  "category": "Policy",
+  "domain": "extractors",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/capital_structure.py:2622-2662",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-114",
+  "name": "Funding statement timing extraction precedence",
+  "priority": "P2",
+  "category": "Validation",
+  "domain": "extractors",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/funding_schedule.py:163-186",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-115",
+  "name": "Funding text timing horizon precedence",
+  "priority": "P2",
+  "category": "Calculation",
+  "domain": "extractors",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/funding_schedule.py:163-186",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-116",
+  "name": "Funding timing horizon from text",
+  "priority": "P2",
+  "category": "Calculation",
+  "domain": "extractors",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/funding_schedule.py:160-186",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-117",
+  "name": "Instrument maturity from text, then name",
+  "priority": "P2",
+  "category": "Policy",
+  "domain": "extractors",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/capital_structure.py:2665-2682,2700-2742,2783-2801",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-118",
+  "name": "Operating driver ledger status",
+  "priority": "P2",
+  "category": "Lifecycle",
+  "domain": "extractors",
+  "source": "legacy/yahoo-finance-mcp/server.py:10486-10499",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-119",
+  "name": "Operating driver period classification and text-driver basis",
+  "priority": "P2",
+  "category": "Calculation",
+  "domain": "extractors",
+  "source": "yfmcp/driver_ledger.py:52-62,274-281",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-120",
+  "name": "Operating driver period type",
+  "priority": "P2",
+  "category": "Calculation",
+  "domain": "extractors",
+  "source": "yfmcp/driver_ledger.py:52-62",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EXT-121",
+  "name": "Operating text driver eligibility and figure detection",
+  "priority": "P2",
+  "category": "Validation",
+  "domain": "extractors",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/driver_ledger.py:196-259,284-330",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-VAL-001",
+  "name": "ADR ordinary-shares-per-quoted-share ratio",
+  "priority": "P0",
+  "category": "Calculation",
+  "domain": "valuation",
+  "source": "yfmcp/valuation.py:29-49,280-302",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-VAL-002",
+  "name": "ADR ratio applied only for foreign filers when share counts are a whole multiple apart",
+  "priority": "P0",
+  "category": "Calculation",
+  "domain": "valuation",
+  "source": "yfmcp/valuation.py:29-49,280-298",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-VAL-003",
+  "name": "ADR ratio between SEC ordinary shares and Yahoo quoted shares",
+  "priority": "P0",
+  "category": "Calculation",
+  "domain": "valuation",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/valuation.py:29-49,280-302",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-VAL-004",
+  "name": "ADR ratio detection and share-basis mismatch",
+  "priority": "P0",
+  "category": "Validation",
+  "domain": "valuation",
+  "source": "yfmcp/valuation.py:29-49,280-302",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-VAL-005",
+  "name": "Filing balances vs Yahoo balances selection (currency and staleness)",
+  "priority": "P0",
+  "category": "Policy",
+  "domain": "valuation",
+  "source": "yfmcp/valuation.py:25-26,305-339",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-VAL-006",
+  "name": "Historical balances read at the cash date; no-borrowings means zero debt",
+  "priority": "P0",
+  "category": "Calculation",
+  "domain": "valuation",
+  "source": "yfmcp/valuation_history.py:418-455,666-699",
+  "repair": "Q1 BR-VAL-006",
+  "confidence": "High"
+ },
+ {
+  "id": "BR-VAL-007",
+  "name": "Historical enterprise value and multiples",
+  "priority": "P0",
+  "category": "Calculation",
+  "domain": "valuation",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/valuation_history.py:474-493,648-733",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-VAL-008",
+  "name": "Historical EV status precedence and no-borrowings rule",
+  "priority": "P0",
+  "category": "Lifecycle",
+  "domain": "valuation",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/valuation_history.py:418-455,666-702",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-VAL-009",
+  "name": "Historical market cap status precedence",
+  "priority": "P0",
+  "category": "Lifecycle",
+  "domain": "valuation",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/valuation_history.py:587-646",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-VAL-010",
+  "name": "Historical market cap, EV and multiples",
+  "priority": "P0",
+  "category": "Calculation",
+  "domain": "valuation",
+  "source": "yfmcp/valuation_history.py:474-493,600-733",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-VAL-011",
+  "name": "Historical point-in-time share count selection",
+  "priority": "P0",
+  "category": "Policy",
+  "domain": "valuation",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/valuation_history.py:234-295,600-646",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-VAL-012",
+  "name": "Historical price on or before date with later splits undone",
+  "priority": "P0",
+  "category": "Calculation",
+  "domain": "valuation",
+  "source": "yfmcp/valuation_history.py:219-224,587-598",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-VAL-013",
+  "name": "Historical price: close within 7 days with later splits undone",
+  "priority": "P0",
+  "category": "Calculation",
+  "domain": "valuation",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/valuation_history.py:219-224,587-598",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-VAL-014",
+  "name": "LTM = LFY + YTD - prior YTD",
+  "priority": "P0",
+  "category": "Calculation",
+  "domain": "valuation",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/valuation_history.py:172-216",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-VAL-015",
+  "name": "LTM and LFY flow figures",
+  "priority": "P0",
+  "category": "Calculation",
+  "domain": "valuation",
+  "source": "yfmcp/valuation_history.py:176-216",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-VAL-016",
+  "name": "LTM flow derivation",
+  "priority": "P0",
+  "category": "Calculation",
+  "domain": "valuation",
+  "source": "yfmcp/valuation_history.py:176-216",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-VAL-017",
+  "name": "LTM flow metric = last fiscal year + YTD - prior YTD",
+  "priority": "P0",
+  "category": "Calculation",
+  "domain": "valuation",
+  "source": "yfmcp/valuation_history.py:172-216",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-VAL-018",
+  "name": "LTM flow metric = LFY + YTD - prior YTD",
+  "priority": "P0",
+  "category": "Calculation",
+  "domain": "valuation",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/valuation_history.py:172-216",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-VAL-019",
+  "name": "Metric reconciliation agreement status",
+  "priority": "P0",
+  "category": "Validation",
+  "domain": "valuation",
+  "source": "yfmcp/metric_reconciliation.py:518-555; server.py:10744-10755",
+  "repair": "Q3e",
+  "confidence": "High"
+ },
+ {
+  "id": "BR-VAL-020",
+  "name": "Metric reconciliation status",
+  "priority": "P0",
+  "category": "Lifecycle",
+  "domain": "valuation",
+  "source": "yfmcp/metric_reconciliation.py:553-555,570-591",
+  "repair": "Q3e",
+  "confidence": "High"
+ },
+ {
+  "id": "BR-VAL-021",
+  "name": "Metric reconciliation tolerance and match",
+  "priority": "P0",
+  "category": "Calculation",
+  "domain": "valuation",
+  "source": "yfmcp/metric_reconciliation.py:45,479-486,518-555; server.py:10744-10753",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-VAL-022",
+  "name": "Metric source reconciliation status",
+  "priority": "P0",
+  "category": "Calculation",
+  "domain": "valuation",
+  "source": "yfmcp/metric_reconciliation.py:518-555",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-VAL-023",
+  "name": "Minor-unit quote conversion and currency comparability",
+  "priority": "P0",
+  "category": "Calculation",
+  "domain": "valuation",
+  "source": "yfmcp/valuation.py:170-177,261-264",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-VAL-024",
+  "name": "Minor-unit quote conversion and currency comparability for multiples",
+  "priority": "P0",
+  "category": "Calculation",
+  "domain": "valuation",
+  "source": "yfmcp/valuation.py:170-216,261-264",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-VAL-025",
+  "name": "Parent net income derived from ProfitLoss less NCI",
+  "priority": "P0",
+  "category": "Calculation",
+  "domain": "valuation",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/metric_reconciliation.py:223-295",
+  "repair": "Q1 BR-VAL-025",
+  "confidence": "High"
+ },
+ {
+  "id": "BR-VAL-026",
+  "name": "Point-in-time fact selection and concept precedence",
+  "priority": "P0",
+  "category": "Policy",
+  "domain": "valuation",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/valuation_history.py:143-164",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-VAL-027",
+  "name": "Point-in-time fact selection: concept priority beats newer filing",
+  "priority": "P0",
+  "category": "Policy",
+  "domain": "valuation",
+  "source": "yfmcp/valuation_history.py:69,143-164",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-VAL-028",
+  "name": "Point-in-time price with later splits undone",
+  "priority": "P0",
+  "category": "Calculation",
+  "domain": "valuation",
+  "source": "yfmcp/valuation_history.py:219-224,587-598",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-VAL-029",
+  "name": "Point-in-time SEC fact precedence",
+  "priority": "P0",
+  "category": "Policy",
+  "domain": "valuation",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/valuation_history.py:69,143-164",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-VAL-030",
+  "name": "Point-in-time share count precedence for historical market cap",
+  "priority": "P0",
+  "category": "Policy",
+  "domain": "valuation",
+  "source": "yfmcp/valuation_history.py:234-295,600-646",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-VAL-031",
+  "name": "Quote vs financial currency comparability",
+  "priority": "P0",
+  "category": "Validation",
+  "domain": "valuation",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/valuation.py:170-177,261-264,393-403",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-VAL-032",
+  "name": "SEC balance usage guards (currency, staleness, cash cross-checks)",
+  "priority": "P0",
+  "category": "Validation",
+  "domain": "valuation",
+  "source": "yfmcp/valuation.py:305-368",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-VAL-033",
+  "name": "SEC balances replaced by Yahoo when stale or in another currency",
+  "priority": "P0",
+  "category": "Policy",
+  "domain": "valuation",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/valuation.py:305-340",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-VAL-034",
+  "name": "SEC vs Yahoo balance-sheet source selection and staleness",
+  "priority": "P0",
+  "category": "Policy",
+  "domain": "valuation",
+  "source": "yfmcp/valuation.py:305-339",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-VAL-035",
+  "name": "Share basis mismatch falls back to Yahoo count",
+  "priority": "P0",
+  "category": "Validation",
+  "domain": "valuation",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/valuation.py:33,288-302",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-VAL-036",
+  "name": "Share basis mismatch falls back to Yahoo share count",
+  "priority": "P0",
+  "category": "Validation",
+  "domain": "valuation",
+  "source": "yfmcp/valuation.py:33,288-302",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-VAL-037",
+  "name": "ADR ratio detection and share-basis mismatch",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "valuation",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/valuation.py:29-49,280-302",
+  "repair": null,
+  "confidence": "Medium"
+ },
+ {
+  "id": "BR-VAL-038",
+  "name": "Cash cross-check warnings (mismatch and shortfall)",
+  "priority": "P1",
+  "category": "Validation",
+  "domain": "valuation",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/valuation.py:20-28,341-368",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-VAL-039",
+  "name": "Cash vs Yahoo total-cash mismatch and shortfall checks",
+  "priority": "P1",
+  "category": "Validation",
+  "domain": "valuation",
+  "source": "yfmcp/valuation.py:20-24,28,341-368",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-VAL-040",
+  "name": "Computed EBITDA and D&A source precedence",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "valuation",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/valuation_history.py:496-554,707-711",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-VAL-041",
+  "name": "Computed EBITDA requires aligned periods; depreciation-only fallback",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "valuation",
+  "source": "yfmcp/valuation_history.py:496-554,708-711",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-VAL-042",
+  "name": "Cover page share count parsing",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "valuation",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/valuation_history.py:321-405",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-VAL-043",
+  "name": "Cover-page share count parsing statuses",
+  "priority": "P1",
+  "category": "Validation",
+  "domain": "valuation",
+  "source": "yfmcp/valuation_history.py:337-405",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-VAL-044",
+  "name": "Cover-page share count read status",
+  "priority": "P1",
+  "category": "Validation",
+  "domain": "valuation",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/valuation_history.py:337-405",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-VAL-045",
+  "name": "Enterprise value formula",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "valuation",
+  "source": "yfmcp/valuation.py:370-403",
+  "repair": null,
+  "confidence": "Medium"
+ },
+ {
+  "id": "BR-VAL-046",
+  "name": "Enterprise value in valuation snapshot",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "valuation",
+  "source": "yfmcp/valuation.py:370-401,452-453",
+  "repair": "Q3i",
+  "confidence": "Medium"
+ },
+ {
+  "id": "BR-VAL-047",
+  "name": "Historical balances and zero debt when no borrowings tagged",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "valuation",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/valuation_history.py:34-67,418-455",
+  "repair": null,
+  "confidence": "Medium"
+ },
+ {
+  "id": "BR-VAL-048",
+  "name": "Historical multiple status and EBITDA construction",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "valuation",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/valuation_history.py:474-554,708-711",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-VAL-049",
+  "name": "Historical multiple status ladder",
+  "priority": "P1",
+  "category": "Validation",
+  "domain": "valuation",
+  "source": "yfmcp/valuation_history.py:474-493,749-758",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-VAL-050",
+  "name": "Historical staleness limits by filer cadence",
+  "priority": "P1",
+  "category": "Policy",
+  "domain": "valuation",
+  "source": "yfmcp/valuation_history.py:557-571,628-636,685-715",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-VAL-051",
+  "name": "Historical valuation point and run status",
+  "priority": "P1",
+  "category": "Lifecycle",
+  "domain": "valuation",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/valuation_history.py:749-758,826-850",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-VAL-052",
+  "name": "Historical valuation point-in-time limits",
+  "priority": "P1",
+  "category": "Validation",
+  "domain": "valuation",
+  "source": "yfmcp/valuation_history.py:557-597,801-823,219-224; server.py:10682-10690",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-VAL-053",
+  "name": "Historical valuation staleness limits by SEC filing cadence",
+  "priority": "P1",
+  "category": "Policy",
+  "domain": "valuation",
+  "source": "yfmcp/valuation_history.py:557-571,628-646,685-702,713-726,739-745",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-VAL-054",
+  "name": "Historical valuation status and default dates",
+  "priority": "P1",
+  "category": "Lifecycle",
+  "domain": "valuation",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/valuation_history.py:70,749-758,801-823,826-850",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-VAL-055",
+  "name": "Multiples suppressed for currency mismatch or non-positive denominators",
+  "priority": "P1",
+  "category": "Validation",
+  "domain": "valuation",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/valuation.py:170-216,261-264",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-VAL-056",
+  "name": "Parent net income derived from ProfitLoss",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "valuation",
+  "source": "yfmcp/metric_reconciliation.py:223-287",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-VAL-057",
+  "name": "Peer median and subject premium",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "valuation",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/valuation.py:473-552",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-VAL-058",
+  "name": "Peer medians and subject premium",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "valuation",
+  "source": "yfmcp/valuation.py:473-552; server.py:11090-11111",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-VAL-059",
+  "name": "Peer medians exclude the subject; premiums not computed for percentage metrics",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "valuation",
+  "source": "yfmcp/valuation.py:473-478,512-538",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-VAL-060",
+  "name": "Point-in-time share count source order",
+  "priority": "P1",
+  "category": "Policy",
+  "domain": "valuation",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/valuation_history.py:234-318",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-VAL-061",
+  "name": "Reconciliation period resolution",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "valuation",
+  "source": "yfmcp/metric_reconciliation.py:96-216",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-VAL-062",
+  "name": "Reconciliation release-sentence scoping and scale",
+  "priority": "P1",
+  "category": "Validation",
+  "domain": "valuation",
+  "source": "yfmcp/metric_reconciliation.py:398-487",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-VAL-063",
+  "name": "Reconciliation tolerance input clamp",
+  "priority": "P1",
+  "category": "Validation",
+  "domain": "valuation",
+  "source": "server.py:10748-10753",
+  "repair": "Q3e",
+  "confidence": "High"
+ },
+ {
+  "id": "BR-VAL-064",
+  "name": "Release figure selection when multiple releases are read",
+  "priority": "P1",
+  "category": "Policy",
+  "domain": "valuation",
+  "source": "yfmcp/metric_reconciliation.py:490-499 (worker/src/metric-reconciliation.ts:445-450)",
+  "repair": null,
+  "confidence": "Medium"
+ },
+ {
+  "id": "BR-VAL-065",
+  "name": "Reporting currency and taxonomy determination",
+  "priority": "P1",
+  "category": "Policy",
+  "domain": "valuation",
+  "source": "yfmcp/valuation_history.py:81-130,772-784",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-VAL-066",
+  "name": "Reporting currency and taxonomy per date",
+  "priority": "P1",
+  "category": "Policy",
+  "domain": "valuation",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/valuation_history.py:81-130",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-VAL-067",
+  "name": "Reporting taxonomy and currency per date",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "valuation",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/valuation_history.py:81-140",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-VAL-068",
+  "name": "Reporting unit and period windows for metric reconciliation",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "valuation",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/metric_reconciliation.py:58-121,127-216",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-VAL-069",
+  "name": "Reporting unit choice for a metric",
+  "priority": "P1",
+  "category": "Policy",
+  "domain": "valuation",
+  "source": "yfmcp/metric_reconciliation.py:85-92; yfmcp/valuation_history.py:81-130",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-VAL-070",
+  "name": "SEC balances older than 45 days give way to Yahoo",
+  "priority": "P1",
+  "category": "Policy",
+  "domain": "valuation",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/valuation.py:25-26,305-321,338-339",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-VAL-071",
+  "name": "SEC filings read only for USD listings",
+  "priority": "P1",
+  "category": "Policy",
+  "domain": "valuation",
+  "source": "server.py:11068-11086",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-VAL-072",
+  "name": "SEC vs Yahoo cash mismatch and shortfall warnings",
+  "priority": "P1",
+  "category": "Validation",
+  "domain": "valuation",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/valuation.py:20-28,341-368",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-VAL-073",
+  "name": "SEC/Yahoo cash mismatch and shortfall checks",
+  "priority": "P1",
+  "category": "Validation",
+  "domain": "valuation",
+  "source": "yfmcp/valuation.py:20-28,341-368",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-VAL-074",
+  "name": "Snapshot enterprise value formula with convertible and preferred adjustments",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "valuation",
+  "source": "yfmcp/valuation.py:370-403,415",
+  "repair": "Q3i",
+  "confidence": "Medium"
+ },
+ {
+  "id": "BR-VAL-075",
+  "name": "Snapshot multiples and non-positive denominators",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "valuation",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/valuation.py:184-216",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-VAL-076",
+  "name": "Staleness limits by SEC companyfacts cadence",
+  "priority": "P1",
+  "category": "Policy",
+  "domain": "valuation",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/valuation_history.py:557-571,628-636,685-702,713-726,772-784",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-VAL-077",
+  "name": "Staleness limits by SEC filing cadence",
+  "priority": "P1",
+  "category": "Policy",
+  "domain": "valuation",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/valuation_history.py:557-571,628-636,685-702,713-726",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-VAL-078",
+  "name": "Valuation multiple status",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "valuation",
+  "source": "yfmcp/valuation_history.py:474-493",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-VAL-079",
+  "name": "Valuation multiples and denominators",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "valuation",
+  "source": "yfmcp/valuation.py:184-216",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-VAL-080",
+  "name": "Valuation multiples only on positive denominators and matching currency",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "valuation",
+  "source": "yfmcp/valuation.py:184-229",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-VAL-081",
+  "name": "Valuation snapshot balance source and status",
+  "priority": "P1",
+  "category": "Policy",
+  "domain": "valuation",
+  "source": "yfmcp/valuation.py:305-339",
+  "repair": null,
+  "confidence": "Medium"
+ },
+ {
+  "id": "BR-VAL-082",
+  "name": "Valuation snapshot enterprise value and status",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "valuation",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/valuation.py:370-415",
+  "repair": "Q3i",
+  "confidence": "Medium"
+ },
+ {
+  "id": "BR-VAL-083",
+  "name": "Valuation snapshot enterprise value formula",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "valuation",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/valuation.py:300-303,334-337,370-401,450-453",
+  "repair": null,
+  "confidence": "Medium"
+ },
+ {
+  "id": "BR-VAL-084",
+  "name": "Valuation snapshot requires a price",
+  "priority": "P1",
+  "category": "Validation",
+  "domain": "valuation",
+  "source": "yfmcp/valuation.py:267-273",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-VAL-085",
+  "name": "Valuation: supplied price must be positive",
+  "priority": "P1",
+  "category": "Validation",
+  "domain": "valuation",
+  "source": "server.py:11054-11060",
+  "repair": null,
+  "confidence": "Medium"
+ },
+ {
+  "id": "BR-VAL-086",
+  "name": "Yahoo implied all-class share count replaces listed count when 2% larger",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "valuation",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/valuation.py:232-244",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-VAL-087",
+  "name": "Yahoo implied all-class share count replaces listed count when materially larger",
+  "priority": "P1",
+  "category": "Policy",
+  "domain": "valuation",
+  "source": "yfmcp/valuation.py:232-244",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-VAL-088",
+  "name": "Yahoo implied all-class share count substitution",
+  "priority": "P1",
+  "category": "Policy",
+  "domain": "valuation",
+  "source": "yfmcp/valuation.py:232-244",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-VAL-089",
+  "name": "Yahoo implied all-class shares preferred when materially larger",
+  "priority": "P1",
+  "category": "Policy",
+  "domain": "valuation",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/valuation.py:232-244",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-VAL-090",
+  "name": "Consensus revenue growth percentages",
+  "priority": "P2",
+  "category": "Calculation",
+  "domain": "valuation",
+  "source": "yfmcp/valuation.py:219-229",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-VAL-091",
+  "name": "Consensus revenue growth percentages",
+  "priority": "P2",
+  "category": "Calculation",
+  "domain": "valuation",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/valuation.py:219-229",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-VAL-092",
+  "name": "Default historical valuation dates",
+  "priority": "P2",
+  "category": "Validation",
+  "domain": "valuation",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/valuation_history.py:70,797-823",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-VAL-093",
+  "name": "Historical peer medians",
+  "priority": "P2",
+  "category": "Calculation",
+  "domain": "valuation",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/valuation_history.py:868-895",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-VAL-094",
+  "name": "Historical valuation date request rules",
+  "priority": "P2",
+  "category": "Validation",
+  "domain": "valuation",
+  "source": "yfmcp/valuation_history.py:70,797-823",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-VAL-095",
+  "name": "Historical valuation dates and peers",
+  "priority": "P2",
+  "category": "Validation",
+  "domain": "valuation",
+  "source": "yfmcp/valuation_history.py:70,797-823,868-895; server.py:10682-10699",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-VAL-096",
+  "name": "Peer median comparison excludes the subject",
+  "priority": "P2",
+  "category": "Calculation",
+  "domain": "valuation",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/valuation.py:473-538",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-VAL-097",
+  "name": "Peer median of historical multiples",
+  "priority": "P2",
+  "category": "Calculation",
+  "domain": "valuation",
+  "source": "yfmcp/valuation_history.py:868-895",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-ERN-001",
+  "name": "Earnings actual vs estimate period alignment and surprise",
+  "priority": "P0",
+  "category": "Calculation",
+  "domain": "earnings",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/tools/earnings.py:654-840",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-ERN-002",
+  "name": "Guidance amount scaling",
+  "priority": "P0",
+  "category": "Calculation",
+  "domain": "earnings",
+  "source": "yfmcp/guidance_history.py:28-46; yfmcp/tools/earnings.py:548-551",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-ERN-003",
+  "name": "Guidance amount scaling",
+  "priority": "P0",
+  "category": "Calculation",
+  "domain": "earnings",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/guidance_history.py:28-46,214-231",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-ERN-004",
+  "name": "Guidance extraction status (FOUND / NOT_DISCLOSED / NOT_READ)",
+  "priority": "P0",
+  "category": "Lifecycle",
+  "domain": "earnings",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/tools/earnings.py:487-606",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-ERN-005",
+  "name": "Reported actuals period labelling for guidance outcomes",
+  "priority": "P0",
+  "category": "Calculation",
+  "domain": "earnings",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/guidance_history.py:343-413",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-ERN-006",
+  "name": "Alpha Vantage transcript needs a stated fiscal quarter",
+  "priority": "P1",
+  "category": "Validation",
+  "domain": "earnings",
+  "source": "yfmcp/tools/earnings.py:1483-1535",
+  "repair": null,
+  "confidence": "Medium"
+ },
+ {
+  "id": "BR-ERN-007",
+  "name": "Company fiscal-year naming applied to end-date-named guidance",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "earnings",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/guidance_history.py:462-468",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-ERN-008",
+  "name": "Earnings actual-vs-estimate period alignment",
+  "priority": "P1",
+  "category": "Validation",
+  "domain": "earnings",
+  "source": "yfmcp/tools/earnings.py:710-734",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-ERN-009",
+  "name": "Earnings call transcript source waterfall",
+  "priority": "P1",
+  "category": "Lifecycle",
+  "domain": "earnings",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/tools/earnings.py:1458-1480,1858-1934",
+  "repair": "Q3i",
+  "confidence": "Medium"
+ },
+ {
+  "id": "BR-ERN-010",
+  "name": "Earnings metrics extraction confidence",
+  "priority": "P1",
+  "category": "Policy",
+  "domain": "earnings",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/tools/earnings.py:380-486",
+  "repair": null,
+  "confidence": "Medium"
+ },
+ {
+  "id": "BR-ERN-011",
+  "name": "Earnings period alignment between release and Yahoo estimate row",
+  "priority": "P1",
+  "category": "Validation",
+  "domain": "earnings",
+  "source": "yfmcp/tools/earnings.py:710-734",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-ERN-012",
+  "name": "Earnings release fiscal period extraction",
+  "priority": "P1",
+  "category": "Validation",
+  "domain": "earnings",
+  "source": "yfmcp/earnings_period.py:22-67",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-ERN-013",
+  "name": "Earnings release fiscal period from a single joined phrase",
+  "priority": "P1",
+  "category": "Validation",
+  "domain": "earnings",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/earnings_period.py:16-67",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-ERN-014",
+  "name": "Earnings release fiscal period from the release's own text",
+  "priority": "P1",
+  "category": "Validation",
+  "domain": "earnings",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/earnings_period.py:21-67",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-ERN-015",
+  "name": "Earnings release source selection",
+  "priority": "P1",
+  "category": "Policy",
+  "domain": "earnings",
+  "source": "yfmcp/tools/earnings.py:191-286",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-ERN-016",
+  "name": "Earnings release source selection (Item 2.02 first, EX-99.1)",
+  "priority": "P1",
+  "category": "Policy",
+  "domain": "earnings",
+  "source": "yfmcp/tools/earnings.py:191-286",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-ERN-017",
+  "name": "Earnings release source URL policy (paywall block)",
+  "priority": "P1",
+  "category": "Policy",
+  "domain": "earnings",
+  "source": "yfmcp/tools/earnings.py:103-126",
+  "repair": "Q2a",
+  "confidence": "Medium"
+ },
+ {
+  "id": "BR-ERN-018",
+  "name": "Earnings surprise percentages and near-zero EPS guard",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "earnings",
+  "source": "yfmcp/tools/earnings.py:807-839",
+  "repair": "Q3i",
+  "confidence": "High"
+ },
+ {
+  "id": "BR-ERN-019",
+  "name": "Guidance amount parsing with shared unit",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "earnings",
+  "source": "yfmcp/guidance_history.py:33-46; yfmcp/tools/earnings.py:548-551",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-ERN-020",
+  "name": "Guidance not read vs not disclosed",
+  "priority": "P1",
+  "category": "Lifecycle",
+  "domain": "earnings",
+  "source": "yfmcp/tools/earnings.py:503-520,598-606",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-ERN-021",
+  "name": "Guidance outcome evaluation status",
+  "priority": "P1",
+  "category": "Validation",
+  "domain": "earnings",
+  "source": "yfmcp/guidance_history.py:416-459",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-ERN-022",
+  "name": "Guidance period scope fallback order",
+  "priority": "P1",
+  "category": "Policy",
+  "domain": "earnings",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/guidance_history.py:144-180",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-ERN-023",
+  "name": "Guidance revision classification",
+  "priority": "P1",
+  "category": "Lifecycle",
+  "domain": "earnings",
+  "source": "yfmcp/guidance_history.py:254-298",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-ERN-024",
+  "name": "Guidance target period from text",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "earnings",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/guidance_history.py:50-136",
+  "repair": null,
+  "confidence": "Medium"
+ },
+ {
+  "id": "BR-ERN-025",
+  "name": "Guidance target period resolution",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "earnings",
+  "source": "yfmcp/guidance_history.py:69-136,155-180",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-ERN-026",
+  "name": "Guidance withdrawal and reaffirmation detection",
+  "priority": "P1",
+  "category": "Lifecycle",
+  "domain": "earnings",
+  "source": "yfmcp/guidance_history.py:183-251",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-ERN-027",
+  "name": "Guidance withdrawal and reaffirmation detection",
+  "priority": "P1",
+  "category": "Lifecycle",
+  "domain": "earnings",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/guidance_history.py:183-251,471-491",
+  "repair": null,
+  "confidence": "Medium"
+ },
+ {
+  "id": "BR-ERN-028",
+  "name": "Latest earnings release source resolution and confidence",
+  "priority": "P1",
+  "category": "Lifecycle",
+  "domain": "earnings",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/tools/earnings.py:234-304",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-ERN-029",
+  "name": "Reported actuals labelled by period for guidance outcomes",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "earnings",
+  "source": "yfmcp/guidance_history.py:305-413",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-ERN-030",
+  "name": "Reported-actual period labels for guidance outcomes",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "earnings",
+  "source": "yfmcp/guidance_history.py:305-413",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-ERN-031",
+  "name": "Revenue and EPS surprise calculation",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "earnings",
+  "source": "yfmcp/tools/earnings.py:797-839",
+  "repair": "Q3i",
+  "confidence": "High"
+ },
+ {
+  "id": "BR-ERN-032",
+  "name": "SEC 8-K transcript exhibit validation",
+  "priority": "P1",
+  "category": "Validation",
+  "domain": "earnings",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/tools/earnings.py:1109-1155,1758-1856",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-ERN-033",
+  "name": "SEC exhibit transcript certification",
+  "priority": "P1",
+  "category": "Validation",
+  "domain": "earnings",
+  "source": "yfmcp/tools/earnings.py:1109-1153",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-ERN-034",
+  "name": "Text-extracted release metrics are low confidence",
+  "priority": "P1",
+  "category": "Policy",
+  "domain": "earnings",
+  "source": "yfmcp/tools/earnings.py:434-473",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-ERN-035",
+  "name": "Transcript exhibit certification",
+  "priority": "P1",
+  "category": "Validation",
+  "domain": "earnings",
+  "source": "yfmcp/tools/earnings.py:1124-1153",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-ERN-036",
+  "name": "Transcript fiscal quarter resolution for Alpha Vantage",
+  "priority": "P1",
+  "category": "Policy",
+  "domain": "earnings",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/tools/earnings.py:1483-1537",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-ERN-037",
+  "name": "Yahoo transcript completeness classification",
+  "priority": "P1",
+  "category": "Validation",
+  "domain": "earnings",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/clients/yahoo_transcripts.py:33-35,181-252; legacy/yahoo-finance-mcp/yfmcp/tools/earnings.py:1419-1437",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-ERN-038",
+  "name": "Yahoo transcript identity check",
+  "priority": "P1",
+  "category": "Validation",
+  "domain": "earnings",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/clients/yahoo_transcripts.py:143-178; legacy/yahoo-finance-mcp/yfmcp/tools/earnings.py:1401-1418",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-ERN-039",
+  "name": "Management commentary confidence by source",
+  "priority": "P2",
+  "category": "Policy",
+  "domain": "earnings",
+  "source": "yfmcp/tools/earnings.py:626-650",
+  "repair": null,
+  "confidence": "Medium"
+ },
+ {
+  "id": "BR-ERN-040",
+  "name": "Management commentary topic status",
+  "priority": "P2",
+  "category": "Policy",
+  "domain": "earnings",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/tools/earnings.py:614-651",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-ERN-041",
+  "name": "Transcript request input validation",
+  "priority": "P2",
+  "category": "Validation",
+  "domain": "earnings",
+  "source": "yfmcp/tools/earnings.py:1664-1721",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-ERN-042",
+  "name": "Transcript source fallback order",
+  "priority": "P2",
+  "category": "Policy",
+  "domain": "earnings",
+  "source": "yfmcp/tools/earnings.py:1458-1515",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-ERN-043",
+  "name": "Yahoo transcript HTTP status mapping differs from market providers",
+  "priority": "P2",
+  "category": "Lifecycle",
+  "domain": "earnings",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/clients/yahoo_transcripts.py:289-296",
+  "repair": null,
+  "confidence": "Medium"
+ },
+ {
+  "id": "BR-NWS-001",
+  "name": "Approved company IR page URL and revalidation",
+  "priority": "P1",
+  "category": "Validation",
+  "domain": "news",
+  "source": "legacy/yahoo-finance-mcp/server.py:931-1008",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-NWS-002",
+  "name": "Event verification query term threshold",
+  "priority": "P1",
+  "category": "Validation",
+  "domain": "news",
+  "source": "legacy/yahoo-finance-mcp/server.py:3181-3235",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-NWS-003",
+  "name": "Event verification status lifecycle",
+  "priority": "P1",
+  "category": "Lifecycle",
+  "domain": "news",
+  "source": "legacy/yahoo-finance-mcp/server.py:3237-3277,3371-3394",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-NWS-004",
+  "name": "Marketaux wire fallback eligibility",
+  "priority": "P1",
+  "category": "Policy",
+  "domain": "news",
+  "source": "legacy/yahoo-finance-mcp/server.py:2024-2086,437-438",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-NWS-005",
+  "name": "News collection status when results are empty or limited",
+  "priority": "P1",
+  "category": "Lifecycle",
+  "domain": "news",
+  "source": "legacy/yahoo-finance-mcp/server.py:2130-2147",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-NWS-006",
+  "name": "News item evidence class, ticker match and decision use",
+  "priority": "P1",
+  "category": "Policy",
+  "domain": "news",
+  "source": "legacy/yahoo-finance-mcp/server.py:269-311,427-430",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-NWS-007",
+  "name": "News source coverage state and recommended next action",
+  "priority": "P1",
+  "category": "Policy",
+  "domain": "news",
+  "source": "legacy/yahoo-finance-mcp/server.py:314-353,2398-2408",
+  "repair": "Q3i",
+  "confidence": "High"
+ },
+ {
+  "id": "BR-NWS-008",
+  "name": "Ticker mention compatible with listing exchange",
+  "priority": "P1",
+  "category": "Validation",
+  "domain": "news",
+  "source": "legacy/yahoo-finance-mcp/server.py:1340-1389,414-424",
+  "repair": null,
+  "confidence": "Medium"
+ },
+ {
+  "id": "BR-NWS-009",
+  "name": "Verification coverage failure-mode precedence",
+  "priority": "P1",
+  "category": "Policy",
+  "domain": "news",
+  "source": "legacy/yahoo-finance-mcp/server.py:2411-2439",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-NWS-010",
+  "name": "Event type from keywords (first matching category wins)",
+  "priority": "P2",
+  "category": "Validation",
+  "domain": "news",
+  "source": "legacy/yahoo-finance-mcp/server.py:591-641",
+  "repair": null,
+  "confidence": "Medium"
+ },
+ {
+  "id": "BR-EVD-001",
+  "name": "Consensus provider agreement",
+  "priority": "P0",
+  "category": "Calculation",
+  "domain": "evidence",
+  "source": "yfmcp/evidence.py:518-572",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EVD-002",
+  "name": "Consensus provider agreement classification",
+  "priority": "P0",
+  "category": "Validation",
+  "domain": "evidence",
+  "source": "yfmcp/evidence.py:470-572,699-708",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EVD-003",
+  "name": "Cross-provider consensus agreement status",
+  "priority": "P0",
+  "category": "Calculation",
+  "domain": "evidence",
+  "source": "yfmcp/evidence.py:518-572",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EVD-004",
+  "name": "Evidence cut integrity verification",
+  "priority": "P0",
+  "category": "Validation",
+  "domain": "evidence",
+  "source": "server.py:12327-12352",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EVD-005",
+  "name": "Evidence storage write-once lifecycle",
+  "priority": "P0",
+  "category": "Lifecycle",
+  "domain": "evidence",
+  "source": "yfmcp/evidence_store.py:93-104",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EVD-006",
+  "name": "Consensus cross-check status and metric coverage",
+  "priority": "P1",
+  "category": "Lifecycle",
+  "domain": "evidence",
+  "source": "yfmcp/evidence.py:630-680,699-708",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EVD-007",
+  "name": "Consensus cross-check summary status",
+  "priority": "P1",
+  "category": "Lifecycle",
+  "domain": "evidence",
+  "source": "yfmcp/evidence.py:630-680",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EVD-008",
+  "name": "Consensus metric coverage and cross-check status",
+  "priority": "P1",
+  "category": "Lifecycle",
+  "domain": "evidence",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/evidence.py:630-680,699-708",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EVD-009",
+  "name": "Consensus provider cell state",
+  "priority": "P1",
+  "category": "Validation",
+  "domain": "evidence",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/evidence.py:267-284,425,470-515",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EVD-010",
+  "name": "Consensus provider row coverage state",
+  "priority": "P1",
+  "category": "Validation",
+  "domain": "evidence",
+  "source": "yfmcp/evidence.py:487-497",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EVD-011",
+  "name": "Consensus provider row state (analyst count and range consistency)",
+  "priority": "P1",
+  "category": "Validation",
+  "domain": "evidence",
+  "source": "yfmcp/evidence.py:425,470-515",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EVD-012",
+  "name": "EPS gap explained by a recent stock split",
+  "priority": "P1",
+  "category": "Validation",
+  "domain": "evidence",
+  "source": "yfmcp/evidence.py:428-431,448-467,575-597",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EVD-013",
+  "name": "EPS gap explained by an unadjusted split",
+  "priority": "P1",
+  "category": "Validation",
+  "domain": "evidence",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/evidence.py:428-431,448-467,557-597",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EVD-014",
+  "name": "EPS gap explained by an unadjusted stock split",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "evidence",
+  "source": "yfmcp/evidence.py:428-431,575-597",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EVD-015",
+  "name": "EPS revision window state",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "evidence",
+  "source": "yfmcp/evidence.py:855-913",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EVD-016",
+  "name": "EPS revision window state",
+  "priority": "P1",
+  "category": "Lifecycle",
+  "domain": "evidence",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/evidence.py:855-936",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EVD-017",
+  "name": "EPS revision window states",
+  "priority": "P1",
+  "category": "Validation",
+  "domain": "evidence",
+  "source": "yfmcp/evidence.py:855-913",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EVD-018",
+  "name": "EPS revision windows",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "evidence",
+  "source": "yfmcp/evidence.py:855-957",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EVD-019",
+  "name": "Evidence cut component status and coverage state",
+  "priority": "P1",
+  "category": "Lifecycle",
+  "domain": "evidence",
+  "source": "yfmcp/evidence.py:1123-1158",
+  "repair": null,
+  "confidence": "Medium"
+ },
+ {
+  "id": "BR-EVD-020",
+  "name": "Evidence cut component status and receipt coverage",
+  "priority": "P1",
+  "category": "Lifecycle",
+  "domain": "evidence",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/evidence.py:1123-1158,1178-1216",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EVD-021",
+  "name": "Evidence family readiness states and blockers",
+  "priority": "P1",
+  "category": "Lifecycle",
+  "domain": "evidence",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/evidence.py:960-1101",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EVD-022",
+  "name": "Evidence quality freshness thresholds",
+  "priority": "P1",
+  "category": "Policy",
+  "domain": "evidence",
+  "source": "yfmcp/evidence.py:962-1101",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EVD-023",
+  "name": "Evidence quality preflight freshness thresholds",
+  "priority": "P1",
+  "category": "Policy",
+  "domain": "evidence",
+  "source": "yfmcp/evidence.py:966-1101",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EVD-024",
+  "name": "Evidence quality: guidance and consensus readiness",
+  "priority": "P1",
+  "category": "Lifecycle",
+  "domain": "evidence",
+  "source": "yfmcp/evidence.py:1040-1101",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EVD-025",
+  "name": "Evidence quality: quote freshness state",
+  "priority": "P1",
+  "category": "Lifecycle",
+  "domain": "evidence",
+  "source": "yfmcp/evidence.py:986-1001",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EVD-026",
+  "name": "Evidence quality: SEC periodic filing staleness by cadence",
+  "priority": "P1",
+  "category": "Policy",
+  "domain": "evidence",
+  "source": "yfmcp/evidence.py:966-1038",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EVD-027",
+  "name": "Evidence write-once storage lifecycle",
+  "priority": "P1",
+  "category": "Lifecycle",
+  "domain": "evidence",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/evidence_store.py:17,86-104",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EVD-028",
+  "name": "Evidence-family readiness and staleness thresholds",
+  "priority": "P1",
+  "category": "Validation",
+  "domain": "evidence",
+  "source": "yfmcp/evidence.py:966-1101",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EVD-029",
+  "name": "FY0 resolution and fiscal-year offset",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "evidence",
+  "source": "yfmcp/evidence.py:407-420; server.py:11977-11982",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EVD-030",
+  "name": "FY0 resolution and fiscal-year offset",
+  "priority": "P1",
+  "category": "Policy",
+  "domain": "evidence",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/evidence.py:403-420",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EVD-031",
+  "name": "FY0 resolution and fiscal-year offset for consensus periods",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "evidence",
+  "source": "yfmcp/evidence.py:407-420,760-789",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EVD-032",
+  "name": "Metric coverage derived from agreement",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "evidence",
+  "source": "yfmcp/evidence.py:699-708",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EVD-033",
+  "name": "Provider agreement classification",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "evidence",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/evidence.py:425,518-572,604-627",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EVD-034",
+  "name": "Provider agreement test for consensus cells",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "evidence",
+  "source": "yfmcp/evidence.py:425,518-572,604-624",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EVD-035",
+  "name": "Provider row consistency and coverage state",
+  "priority": "P1",
+  "category": "Validation",
+  "domain": "evidence",
+  "source": "yfmcp/evidence.py:470-515,699-708",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EVD-036",
+  "name": "Stale provider snapshot fallback",
+  "priority": "P1",
+  "category": "Policy",
+  "domain": "evidence",
+  "source": "yfmcp/evidence.py:163-219; server.py:11934-11935,12037-12059",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EVD-037",
+  "name": "Stale provider snapshot fallback",
+  "priority": "P1",
+  "category": "Policy",
+  "domain": "evidence",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/evidence.py:158-219",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EVD-038",
+  "name": "Stale provider snapshot fallback eligibility",
+  "priority": "P1",
+  "category": "Policy",
+  "domain": "evidence",
+  "source": "yfmcp/evidence.py:158-219",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EVD-039",
+  "name": "Stale provider snapshot fallback window",
+  "priority": "P1",
+  "category": "Policy",
+  "domain": "evidence",
+  "source": "yfmcp/evidence.py:158-219",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EVD-040",
+  "name": "Valuation evidence pack composition guards",
+  "priority": "P1",
+  "category": "Policy",
+  "domain": "evidence",
+  "source": "legacy/yahoo-finance-mcp/server.py:12250-12298; legacy/yahoo-finance-mcp/worker/src/evidence-pack.ts:326-374",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-EVD-041",
+  "name": "Evidence cut listing order",
+  "priority": "P2",
+  "category": "Policy",
+  "domain": "evidence",
+  "source": "server.py:12360-12376",
+  "repair": null,
+  "confidence": "Medium"
+ },
+ {
+  "id": "BR-THA-001",
+  "name": "Thai explicit-project NAV identity status",
+  "priority": "P1",
+  "category": "Lifecycle",
+  "domain": "thai",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/tools/thai_funds.py:522-644",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-THA-002",
+  "name": "Thai fund NAV request bounds",
+  "priority": "P1",
+  "category": "Validation",
+  "domain": "thai",
+  "source": "yfmcp/tools/thai_funds.py:33-39,661-689,740-742",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-THA-003",
+  "name": "Thai fund share-class resolution and NAV selection",
+  "priority": "P1",
+  "category": "Validation",
+  "domain": "thai",
+  "source": "yfmcp/tools/thai_funds.py:293-344,512-566,591-644",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-THA-004",
+  "name": "Thai NAV batch completeness",
+  "priority": "P1",
+  "category": "Lifecycle",
+  "domain": "thai",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/tools/thai_funds.py:738-870",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-THA-005",
+  "name": "Thai SEC fund share-class resolution",
+  "priority": "P1",
+  "category": "Lifecycle",
+  "domain": "thai",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/tools/thai_funds.py:293-365",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-THA-006",
+  "name": "Thai factsheet section status",
+  "priority": "P2",
+  "category": "Lifecycle",
+  "domain": "thai",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/tools/thai_funds.py:873-1023",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-THA-007",
+  "name": "Thai fund catalogue search",
+  "priority": "P2",
+  "category": "Validation",
+  "domain": "thai",
+  "source": "legacy/yahoo-finance-mcp/yfmcp/tools/thai_funds.py:421-509",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-SHR-001",
+  "name": "Decision-grade SEC XBRL fact",
+  "priority": "P0",
+  "category": "Validation",
+  "domain": "shared",
+  "source": "legacy/yahoo-finance-mcp/server.py:8533-8547",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-SHR-002",
+  "name": "Analyst change classification (upgrade/downgrade/initiation)",
+  "priority": "P1",
+  "category": "Policy",
+  "domain": "shared",
+  "source": "server.py:4364-4391",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-SHR-003",
+  "name": "Analyst price-target direction, mixed signal and strength flag",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "shared",
+  "source": "server.py:7351-7379,7443-7470",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-SHR-004",
+  "name": "Analyst radar: price-target direction, mixed signal and net sentiment",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "shared",
+  "source": "server.py:7351-7379,7443-7470",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-SHR-005",
+  "name": "Analyst rating change classification",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "shared",
+  "source": "server.py:4364-4391",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-SHR-006",
+  "name": "Batch ticker cap of 5 (Worker only)",
+  "priority": "P1",
+  "category": "Policy",
+  "domain": "shared",
+  "source": "worker/src/yahoo-finance.ts:65,555-579",
+  "repair": "Q3c",
+  "confidence": "High"
+ },
+ {
+  "id": "BR-SHR-007",
+  "name": "Consensus curve policy inputs",
+  "priority": "P1",
+  "category": "Validation",
+  "domain": "shared",
+  "source": "server.py:12082-12095; yfmcp/evidence.py:425",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-SHR-008",
+  "name": "Consensus forecast policy bounds",
+  "priority": "P1",
+  "category": "Validation",
+  "domain": "shared",
+  "source": "server.py:12082-12095",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-SHR-009",
+  "name": "Consensus policy input validation",
+  "priority": "P1",
+  "category": "Validation",
+  "domain": "shared",
+  "source": "server.py:12082-12095",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-SHR-010",
+  "name": "Current beat streak counted in provider row order",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "shared",
+  "source": "server.py:7010-7018",
+  "repair": "Q3i",
+  "confidence": "Medium"
+ },
+ {
+  "id": "BR-SHR-011",
+  "name": "Earnings beat rate, average surprise and historical surprise signal",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "shared",
+  "source": "server.py:6985-7042",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-SHR-012",
+  "name": "Earnings beat rate, beat streak and pre-revenue rule",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "shared",
+  "source": "server.py:6985-7031; worker/src/yahoo-finance.ts:4585-4619",
+  "repair": "Q3i",
+  "confidence": "Medium"
+ },
+ {
+  "id": "BR-SHR-013",
+  "name": "Earnings momentum: EPS revision percentages and flags",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "shared",
+  "source": "server.py:6927-6983",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-SHR-014",
+  "name": "EPS estimate revision percentages and momentum flags",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "shared",
+  "source": "server.py:6950-6983",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-SHR-015",
+  "name": "Event deduplication: same title stem, day and issuer, official source preferred",
+  "priority": "P1",
+  "category": "Policy",
+  "domain": "shared",
+  "source": "legacy/yahoo-finance-mcp/server.py:228,238-251,616-628,651-664,2089-2127",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-SHR-016",
+  "name": "Form 4 insider transaction value",
+  "priority": "P1",
+  "category": "Calculation",
+  "domain": "shared",
+  "source": "server.py:679-704,797-854",
+  "repair": "Q3i",
+  "confidence": "High"
+ },
+ {
+  "id": "BR-SHR-017",
+  "name": "Forward revision signal and composite momentum",
+  "priority": "P1",
+  "category": "Policy",
+  "domain": "shared",
+  "source": "server.py:7044-7108",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-SHR-018",
+  "name": "Forward revision signal precedence",
+  "priority": "P1",
+  "category": "Policy",
+  "domain": "shared",
+  "source": "server.py:7044-7094",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-SHR-019",
+  "name": "Guidance history run status and retryability",
+  "priority": "P1",
+  "category": "Lifecycle",
+  "domain": "shared",
+  "source": "legacy/yahoo-finance-mcp/server.py:10394-10414,10508-10543",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-SHR-020",
+  "name": "Historical surprise signal from beat rate",
+  "priority": "P1",
+  "category": "Policy",
+  "domain": "shared",
+  "source": "server.py:7033-7042",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-SHR-021",
+  "name": "Material SEC filings filter and limit cap",
+  "priority": "P1",
+  "category": "Validation",
+  "domain": "shared",
+  "source": "legacy/yahoo-finance-mcp/server.py:8960-9070",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-SHR-022",
+  "name": "Peer valuation set size and median premium",
+  "priority": "P1",
+  "category": "Validation",
+  "domain": "shared",
+  "source": "server.py:11090-11111; yfmcp/valuation.py:515-538",
+  "repair": null,
+  "confidence": "High"
+ },
+ {
+  "id": "BR-SHR-023",
+  "name": "Event request input clamps and source allow-list",
+  "priority": "P2",
+  "category": "Validation",
+  "domain": "shared",
+  "source": "legacy/yahoo-finance-mcp/server.py:230-236,560-588",
+  "repair": null,
+  "confidence": "High"
+ }
+]
