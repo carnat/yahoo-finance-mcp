@@ -234,9 +234,16 @@ class TestNormalizeEventSources(unittest.TestCase):
         sources, warnings = srv._normalize_event_sources(None, ["yahoo_finance"])
         self.assertEqual(sources, ["yahoo_finance"])
 
-    def test_empty_list_uses_default(self):
+    def test_empty_list_selects_no_source(self):
+        # Q3h: an explicit list is used as given; [] attempts no source.
         sources, warnings = srv._normalize_event_sources([], ["yahoo_finance", "finnhub"])
-        self.assertIn("yahoo_finance", sources)
+        self.assertEqual(sources, [])
+        self.assertEqual(warnings, [])
+
+    def test_only_unsupported_sources_select_no_source(self):
+        sources, warnings = srv._normalize_event_sources(["bogus"], ["yahoo_finance", "finnhub"])
+        self.assertEqual(sources, [])
+        self.assertEqual([w["code"] for w in warnings], ["SOURCE_UNSUPPORTED"])
 
     def test_unsupported_source_emits_warning(self):
         sources, warnings = srv._normalize_event_sources(["unknown_source"], ["yahoo_finance"])
