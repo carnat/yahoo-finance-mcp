@@ -442,6 +442,15 @@ def _curve_case(name: str, ids: list[str], inputs: list[dict], metric: str, expe
         select=_fy0_cell(metric, fields), expect=expect, **kw)
 
 
+def _default_policy_curve_case(name: str, ids: list[str], inputs: list[dict], status: str) -> Case:
+    """buildConsensusCurve with no policy argument, so each runtime applies its own DEFAULT_CONSENSUS_POLICY."""
+    return Case(
+        name=name, ids=ids,
+        py=lambda: ev.build_consensus_curve("TST", json.loads(json.dumps(inputs)), CURVE_AS_OF),
+        ts={"js": "return m.evidence.buildConsensusCurve('TST', args[0], args[1]);", "args": [inputs, CURVE_AS_OF]},
+        select=lambda v: _fy0_cell("eps", ("agreement",))(v)["agreement"]["status"], expect=status)
+
+
 _AGREE_IDS = ["BR-EVD-001", "BR-EVD-003"]
 
 CASES += [
@@ -485,6 +494,16 @@ CASES += [
             "status": "CONFLICT", "providersCompared": ["yahoo_finance", "alpha_vantage"], "relativeDiffPct": 0.57,
             "absoluteDiff": 0.03, "currencyIdentity": "VERIFIED", "independence": "UNVERIFIED"}},
         policy={**DEFAULT_POLICY, "conflictTolerancePct": 0.1}),
+    # The code's own default policy (what the tools use, not DEFAULT_POLICY above): 0.10 vs 0.12 is 16.7% apart, so only
+    # the $0.02 band makes it AGREED; 0.10 vs 0.13 is outside the band and conflicts.
+    _default_policy_curve_case(
+        "evd.agreement.code_default_policy_two_cent_band_agreed", ["BR-EVD-002", "BR-EVD-003"],
+        [_provider("yahoo_finance", eps=_estimate(0.10, None, None, 10)), _provider("alpha_vantage", eps=_estimate(0.12, None, None, 12))],
+        "AGREED"),
+    _default_policy_curve_case(
+        "evd.agreement.code_default_policy_three_cent_gap_conflicts", ["BR-EVD-002", "BR-EVD-003"],
+        [_provider("yahoo_finance", eps=_estimate(0.10, None, None, 10)), _provider("alpha_vantage", eps=_estimate(0.13, None, None, 12))],
+        "CONFLICT"),
     # The $0.02 band is EPS only: a revenue gap of 0.01 on the same tight tolerance conflicts.
     _curve_case(
         "evd.agreement.revenue_has_no_absolute_band", ["BR-EVD-003"],

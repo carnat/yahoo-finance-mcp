@@ -22,7 +22,10 @@ Modes:
 
 The Worker side is one esbuild bundle of every `worker/src` module, keyed by
 camelCase file name (``capital-structure.ts`` -> ``capitalStructure``), run by
-`runner.mjs` in a single Node process. ``routes`` serve canned HTTP responses to
+`runner.mjs` in a single Node process. Instead of ``module``/``fn``, ``ts`` may give
+``js`` (an async function body receiving ``m``, ``args``, ``fx``) for setups a plain call
+can't express, and ``"isolate": True`` loads a fresh bundle copy so module-level caches
+start empty. ``routes`` serve canned HTTP responses to
 both runtimes (Worker `fetch`, Python `urllib.request.urlopen`); any other
 request fails with UNSTUBBED_FETCH, so the harness never touches the network.
 """
@@ -39,6 +42,7 @@ import json
 import math
 import os
 import shutil
+import socket
 import subprocess
 import tempfile
 import urllib.error
@@ -68,6 +72,7 @@ class Case:
     select: Callable[[Any], Any] | None = None
     routes: dict | None = None
     note: str = ""
+    source: str = ""  # the cases_*.py module, set by load_cases()
 
     def __post_init__(self) -> None:
         if self.mode not in ("equal", "pinned"):
@@ -185,9 +190,16 @@ def _route_body(route: dict) -> bytes:
 
 @contextlib.contextmanager
 def stub_urlopen(routes: dict | None):
-    """Serve `routes` to every `urllib.request.urlopen` call; anything else raises UNSTUBBED_FETCH."""
+    """Serve `routes` to every urllib request; anything else raises UNSTUBBED_FETCH.
+
+    Covers `urllib.request.urlopen` and openers from `build_opener` (`OpenerDirector.open`),
+    and refuses any other outbound socket connection, so a Python case never reaches the network.
+    """
     routes = routes or {}
-    original = urllib.request.urlopen
+    original_urlopen = urllib.request.urlopen
+    original_open = urllib.request.OpenerDirector.open
+    original_connect = socket.socket.connect
+    original_create = socket.create_connection
 
     def fake(req, *args, **kwargs):
         url = req if isinstance(req, str) else req.full_url
@@ -200,11 +212,23 @@ def stub_urlopen(routes: dict | None):
             raise urllib.error.HTTPError(url, status, "stubbed", Message(), io.BytesIO(body))
         return _FakeResponse(url, status, body, route.get("headers") or {})
 
+    def fake_open(self, req, *args, **kwargs):
+        return fake(req)
+
+    def refuse(*args, **kwargs):
+        raise RuntimeError(f"UNSTUBBED_FETCH socket connection {args[1:] or args}")
+
     urllib.request.urlopen = fake
+    urllib.request.OpenerDirector.open = fake_open
+    socket.socket.connect = refuse
+    socket.create_connection = refuse
     try:
         yield
     finally:
-        urllib.request.urlopen = original
+        urllib.request.urlopen = original_urlopen
+        urllib.request.OpenerDirector.open = original_open
+        socket.socket.connect = original_connect
+        socket.create_connection = original_create
 
 
 # ----------------------------------------------------------------- Worker side
@@ -306,7 +330,7 @@ def load_cases() -> list[Case]:
     for path in sorted(Path(__file__).parent.glob("cases_*.py")):
         module = importlib.import_module(f"scripts.parity.{path.stem}")
         for case in getattr(module, "CASES", []):
-            case.note = case.note or path.stem
+            case.source = path.stem
             cases.append(case)
     names = [c.name for c in cases]
     dupes = {n for n in names if names.count(n) > 1}

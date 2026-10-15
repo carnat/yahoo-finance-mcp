@@ -75,6 +75,11 @@ class TestParityHarnessSelf(unittest.TestCase):
                 self.assertEqual(json.loads(r.read()), {"x": 1})
             with self.assertRaises(RuntimeError):
                 urllib.request.urlopen("https://example.invalid/other")
+            with self.assertRaises(RuntimeError):
+                urllib.request.build_opener().open("https://example.invalid/other")
+            import socket
+            with self.assertRaises(RuntimeError):
+                socket.create_connection(("example.invalid", 443))
 
 
 class TestParityCases(unittest.TestCase):
@@ -112,7 +117,7 @@ def write_report(path: str) -> None:
     for c in cases:
         problems = harness.evaluate(c, python[c.name], worker[c.name])
         rows.append({"name": c.name, "ids": c.ids, "mode": c.mode, "decision": c.decision,
-                     "file": c.note, "passed": not problems, "problems": problems})
+                     "file": c.source, "note": c.note, "passed": not problems, "problems": problems})
     report = {"cases": rows, "coverage": harness.coverage(cases),
               "summary": {"cases": len(rows), "passed": sum(r["passed"] for r in rows),
                           "pinned": sum(r["mode"] == "pinned" for r in rows),
