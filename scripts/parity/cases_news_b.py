@@ -17,6 +17,16 @@ Determinism
   side patches `server._yahoo_search_news` (the news search feed) and `server.yf.Ticker` (company info).
 
 Credential-shaped values below (provider keys, tokens) are clearly fake placeholders, not copied from any source.
+
+Techniques worth knowing when reading or extending this file
+- `_scenario` / `_multi_scenario` run one or several tool calls under the shared stubs; `_collector_case` calls the Yahoo collector
+  directly with a literal identity (Python `_collect_yahoo_events`, Worker `collectYahooEvents`).
+- Approved company IR pages: the shipped registry only holds candidates. Python reads a temporary registry file
+  (`server._COMPANY_IR_PAGE_REGISTRY_PATH`); the Worker's registry is a bundled constant, so the case body briefly wraps
+  `Array.prototype.find` to upgrade the IQE.L entry in place (isolated bundle copy, restored in `finally`).
+- Python-only helpers with no reachable Worker counterpart (BR-NWS-235, BR-NWS-250) are pinned with a placeholder Worker side
+  (`return null`), marked FINDING in `decision`.
+- A redirect to an off-list host (BR-NWS-208) cannot be driven: both harness stubs answer with the requested URL.
 """
 
 from __future__ import annotations
@@ -430,7 +440,8 @@ def _collected(items, *, raw, rejections, identity="RESOLVED", used=True, warnin
 _ZETA = {"status": "RESOLVED", "companyName": "Zeta Holdings Corp", "aliases": ["zeta holdings"], "acronyms": [], "exchange": "NMS"}
 _PREFIX_FEED = [_yn(t, when=_days_ago(1)) for t in [
     "Shares of ABC (TSX: ABC) rose", "Nasdaq: ABC climbs", "ABC wins contract", "ABC (OTC: ABC) quoted",
-    "Acme (TSXV: ABC) announces results", "Listing on NYSE: ABC planned", "Rally in ASX: ABC shares", "Zeta (CVE: ABC) update", "LSE: ABC dips"]]
+    "Acme (TSXV: ABC) announces results", "Listing on NYSE: ABC planned", "Rally in ASX: ABC shares", "Zeta (CVE: ABC) update", "LSE: ABC dips",
+    "Rally (TSX: ABC) continues"]]
 
 CASES += [
     # A NASDAQ (NMS) company: a bare mention, 'Nasdaq:' and an unknown prefix ('OTC:') match; TSXV / NYSE / ASX / CVE / LSE
@@ -439,12 +450,12 @@ CASES += [
         "news.yahoo.exchange_prefix_incompatible_for_nasdaq_company", ["BR-NWS-217", "BR-NWS-218", "BR-NWS-243"], "ABC", _PREFIX_FEED, _ZETA,
         view=_collector_view,
         expect=_collected([_kept("Shares of ABC (TSX: ABC) rose"), _kept("Nasdaq: ABC climbs"), _kept("ABC wins contract"),
-                           _kept("ABC (OTC: ABC) quoted")], raw=9, rejections={"IDENTITY_MISMATCH": 5})),
+                           _kept("ABC (OTC: ABC) quoted")], raw=10, rejections={"IDENTITY_MISMATCH": 6})),
     # Unknown company exchange: any word-boundary token match counts, whatever the prefix.
     _collector_case(
         "news.yahoo.exchange_prefix_ignored_when_company_exchange_unknown", ["BR-NWS-217", "BR-NWS-218"], "ABC", _PREFIX_FEED,
         {**_ZETA, "exchange": None}, view=_collector_view,
-        expect=_collected([_kept(t["title"]) for t in _PREFIX_FEED], raw=9, rejections={})),
+        expect=_collected([_kept(t["title"]) for t in _PREFIX_FEED], raw=10, rejections={})),
     # Finding (Q7, for triage): a company whose exchange reads 'NYSE American' normalises to NYSE (NYSE is tested before
     # NYSE American), so an 'AMEX:' mention is rejected and 'NYSE:' accepted; 'NYSE American:' is accepted only because its
     # prefix token 'American' is unknown. Both runtimes agree.
@@ -703,7 +714,8 @@ CASES += [
                             "hasMoreAccepted": True},
                 "truncatedSources": [{"source": "finnhub", "acceptedCount": 25, "returnedCount": 10, "truncatedCount": 15}],
                 "action": "RETRY_TRUNCATED_SOURCE", "state": "FULL", "status": None}),
-    # Card 192 order of precedence: a failed source outranks truncation, and a retryable failure outranks both.
+    # Card 192: a retryable failure (RATE_LIMITED / TIMEOUT) sets the next action to RETRY_RETRYABLE_SOURCES, ahead of CHECK_OFFICIAL_RELEASES and
+    # RETRY_TRUNCATED_SOURCE.
     _scenario(
         "news.finnhub.rate_limit_outranks_other_next_actions", ["BR-NWS-192", "BR-NWS-197"],
         lambda: server.get_company_news("AAPL", 10, 14, ["finnhub"]),
@@ -1331,8 +1343,8 @@ CASES += [
                                 ["COMPANY_WEBSITE_NOT_AVAILABLE", "No company website was available from public profile data."]],
                    "next": "CHECK_OFFICIAL_RELEASES", "best": 0}),
     # Card 242 (Finding Q7, for triage): every collected item carries tickers=[ticker], so the relevance score is HIGH at its first
-    # test and the low-relevance downgrade can never fire: a CONFIRMED result stays CONFIRMED even though the evidence text names
-    # neither the ticker (ZZTP) nor, as written, anything but the company.
+    # test and the low-relevance downgrade can never fire: the evidence text (a Business Wire release headline) does not contain the
+    # ticker ZZTP, yet the result stays CONFIRMED with relevance HIGH and no LOW_RELEVANCE_EVIDENCE warning.
     _scenario(
         "news.verify.low_relevance_downgrade_never_fires", ["BR-NWS-242"],
         lambda: server.verify_company_event("ZZTP", "acquisition", "", "", ["yahoo_finance_press_releases"]),
@@ -1797,7 +1809,7 @@ def _gnw_row(title, categories, ident):
     return [title, "HIGH", "HIGH", categories, "2026-10-14T12:58:00Z", ident]
 
 
-def _gnw_failed(messages, *, count=10):
+def _gnw_failed(messages):
     return {"items": [], "newswire": {"status": "PROVIDER_ERROR", "rawCount": 0, "filteredCount": 0}, "warnings": messages, "sourcesUsed": [],
             "status": "SOURCE_LIMITED_NOT_FOUND"}
 
@@ -2374,4 +2386,301 @@ return {{declared: out, runtimeStatus: payload.status ?? null}};"""), "isolate":
          decision="FINDING: the declared output schema allows status OK/PARTIAL in Python only; both runtimes emit NOT_FOUND (and other values) at runtime",
          expect_py={"declared": {t: ["OK", "PARTIAL"] for t in _NEWS_TOOL_NAMES}, "runtimeStatus": "NOT_FOUND"},
          expect_ts={"declared": {t: None for t in _NEWS_TOOL_NAMES}, "runtimeStatus": "NOT_FOUND"}),
+]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+# Classification, labels, text limits, ordering, timeline, timestamps (P2 rules)
+# BR-NWS-253 / 254 / 256 / 257 / 260 / 262 / 263 / 266 / 268 / 275 / 276 / 278
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+def _finnhub_rows(titles, *, summary="", url_prefix="https://e.com/"):
+    return [{"headline": t, "summary": summary, "source": "W", "url": f"{url_prefix}{i}", "datetime": _epoch(_days_ago(1, hour=i % 24))}
+            for i, t in enumerate(titles)]
+
+
+def _event_types(v):
+    return sorted([i["title"], i["eventType"]] for i in v["items"])
+
+
+_EVENT_TITLES_SHARED = [
+    "Acme raises outlook after quarterly beat", "Acme eps tops estimates", "Acme steps up hiring", "Acme guidance cut", "Acme signs supply contract",
+    "Acme dealer network grows", "Acme prices debt offering", "Acme issues notes", "Acme will denote changes", "Acme launches new product",
+    "Acme introduces chip", "Analyst upgrades Acme", "Acme price target lifted", "Fed rates decision and CPI", "Acme corporates surge",
+    "Acme wins court ruling", "Acme settlement reached", "Acme director buys shares", "Acme files form 4", "Acme sector rotation",
+    "Acme 8-K filing posted", "Acme regulatory approval", "Acme 10-Q posted", "Acme quiet day", "Acme forecast revised",
+]
+_EVENT_TYPES_SHARED = {
+    "Acme raises outlook after quarterly beat": "earnings", "Acme eps tops estimates": "earnings", "Acme steps up hiring": "earnings",
+    "Acme guidance cut": "guidance", "Acme signs supply contract": "contract", "Acme dealer network grows": "contract",
+    "Acme prices debt offering": "financing", "Acme issues notes": "financing", "Acme will denote changes": "financing",
+    "Acme launches new product": "product", "Acme introduces chip": "product", "Analyst upgrades Acme": "analyst",
+    "Acme price target lifted": "analyst", "Fed rates decision and CPI": "macro", "Acme corporates surge": "macro",
+    "Acme wins court ruling": "litigation", "Acme settlement reached": "litigation", "Acme director buys shares": "insider",
+    "Acme files form 4": "insider", "Acme sector rotation": "regulatory", "Acme 8-K filing posted": "regulatory",
+    "Acme regulatory approval": "regulatory", "Acme 10-Q posted": "earnings", "Acme quiet day": "other", "Acme forecast revised": "guidance",
+}
+
+CASES += [
+    # Card 253: keyword classification (first matching group wins: 'quarterly' beats 'raises'/'outlook'). Substring matching causes
+    # false hits (Finding Q7, both runtimes): 'steps' -> eps -> earnings, 'dealer' -> deal -> contract, 'denote' -> note -> financing,
+    # 'corporates' -> rates -> macro, 'sector' -> sec -> regulatory.
+    _scenario(
+        "news.classification.keyword_groups_and_substring_false_hits_agree", ["BR-NWS-253"],
+        lambda: server.get_company_news("ACME", 100, 14, ["finnhub"]), 'm.yahooFinance.getCompanyNews("ACME", 100, 14, ["finnhub"])',
+        env=FINNHUB_ENV, routes=_finnhub(_finnhub_rows(_EVENT_TITLES_SHARED)), select=_event_types,
+        expect=sorted([t, e] for t, e in _EVENT_TYPES_SHARED.items())),
+    # Card 253: the keyword lists differ ('announces new', 'annual report' and 'credit facility' are Python-only keywords; in the Worker
+    # 'secures' contains 'sec').
+    _scenario(
+        "news.classification.python_only_keywords", ["BR-NWS-253"],
+        lambda: server.get_company_news("ACME", 100, 14, ["finnhub"]), 'm.yahooFinance.getCompanyNews("ACME", 100, 14, ["finnhub"])',
+        env=FINNHUB_ENV, routes=_finnhub(_finnhub_rows(["Acme announces new unit", "Acme posts annual report", "Acme secures credit facility"])),
+        select=_event_types, mode="pinned",
+        decision="FINDING: the event-type keyword lists differ ('announces new', 'annual report', 'credit facility' only in Python), so the same headline is typed differently",
+        expect_py=[["Acme announces new unit", "product"], ["Acme posts annual report", "earnings"], ["Acme secures credit facility", "financing"]],
+        expect_ts=[["Acme announces new unit", "other"], ["Acme posts annual report", "other"], ["Acme secures credit facility", "regulatory"]]),
+]
+
+_LABEL_ROWS = [
+    {"headline": "AAPL news one", "summary": "s", "source": "W", "url": "https://finnhub.io/api/news?id=1", "datetime": _epoch(_days_ago(1, hour=1))},
+    {"headline": "Sector headline", "summary": "s", "source": "W", "url": "https://finnhub.io/api/news?id=2", "datetime": _epoch(_days_ago(1, hour=2))},
+    {"headline": "Sector two", "summary": "s", "source": "W", "url": "https://www.reuters.com/z", "datetime": _epoch(_days_ago(1, hour=3))},
+    {"headline": "Sector three", "summary": "s", "source": "W", "url": "https://finance.yahoo.com/y", "datetime": _epoch(_days_ago(1, hour=4))},
+    {"headline": "Sector four", "summary": "s", "source": "W", "url": "not a url", "datetime": _epoch(_days_ago(1, hour=5))},
+    {"headline": "Sector five", "summary": "s", "source": "W", "url": "", "datetime": _epoch(_days_ago(1, hour=6))},
+]
+
+
+def _labels(v):
+    return sorted([i["title"], i["evidenceClass"], i["tickerMatch"], i["urlProvenance"], i["decisionUse"]] for i in v["items"])
+
+
+_LABELS_SHARED = [
+    ["AAPL news one", "CONTEXTUAL_NEWS", "EXPLICIT", "PROVIDER", "CONTEXT_ONLY"],
+    ["Sector five", "CONTEXTUAL_NEWS", "SOURCE_SCOPED", "UNKNOWN", "CHECK_OFFICIAL_RELEASES"],
+    ["Sector headline", "CONTEXTUAL_NEWS", "SOURCE_SCOPED", "PROVIDER", "CHECK_OFFICIAL_RELEASES"],
+    ["Sector three", "CONTEXTUAL_NEWS", "SOURCE_SCOPED", "PROVIDER", "CHECK_OFFICIAL_RELEASES"],
+    ["Sector two", "CONTEXTUAL_NEWS", "SOURCE_SCOPED", "PUBLISHER", "CHECK_OFFICIAL_RELEASES"],
+]
+
+CASES += [
+    # Card 254: a Finnhub item is CONTEXTUAL_NEWS; its ticker match is EXPLICIT when the text holds the ticker, else SOURCE_SCOPED; a
+    # finnhub.io or finance.yahoo.com host is PROVIDER, another host PUBLISHER, no URL UNKNOWN. ('Sector ...' headlines contain 'sec', so they
+    # are typed regulatory and carry CHECK_OFFICIAL_RELEASES, BR-NWS-253.) A URL that does not parse is UNKNOWN in the Worker and PUBLISHER in Python.
+    _scenario(
+        "news.labels.evidence_class_ticker_match_and_url_provenance", ["BR-NWS-254"],
+        lambda: server.get_company_news("AAPL", 20, 14, ["finnhub"]), 'm.yahooFinance.getCompanyNews("AAPL", 20, 14, ["finnhub"])',
+        env=FINNHUB_ENV, routes=_finnhub([r for r in _LABEL_ROWS if r["headline"] != "Sector four"]), select=_labels, expect=_LABELS_SHARED),
+    _scenario(
+        "news.labels.unparseable_url_provenance_differs", ["BR-NWS-254"],
+        lambda: server.get_company_news("AAPL", 20, 14, ["finnhub"]), 'm.yahooFinance.getCompanyNews("AAPL", 20, 14, ["finnhub"])',
+        env=FINNHUB_ENV, routes=_finnhub([r for r in _LABEL_ROWS if r["headline"] == "Sector four"]), select=_labels, mode="pinned",
+        decision="FINDING: an unparseable URL has urlProvenance UNKNOWN in the Worker and PUBLISHER in Python",
+        expect_py=[["Sector four", "CONTEXTUAL_NEWS", "SOURCE_SCOPED", "PUBLISHER", "CHECK_OFFICIAL_RELEASES"]],
+        expect_ts=[["Sector four", "CONTEXTUAL_NEWS", "SOURCE_SCOPED", "UNKNOWN", "CHECK_OFFICIAL_RELEASES"]]),
+]
+
+_LONG_TEXT = ("Sentence number one  with   extra   spaces. " * 20).strip()
+CASES += [
+    # Card 256: summary keeps the first 240 characters and evidenceText the first 180 of the whitespace-collapsed text, cut hard; a
+    # blank summary falls back to the title.
+    _scenario(
+        "news.text.summary_240_evidence_180_after_whitespace_collapse", ["BR-NWS-256"],
+        lambda: server.get_company_news("AAPL", 20, 14, ["finnhub"]), 'm.yahooFinance.getCompanyNews("AAPL", 20, 14, ["finnhub"])',
+        env=FINNHUB_ENV,
+        routes=_finnhub([{"headline": "AAPL long summary", "summary": _LONG_TEXT, "source": "W", "url": "https://e.com/1", "datetime": _epoch(_days_ago(1, hour=1))},
+                         {"headline": "AAPL whitespace only", "summary": "   \n\t ", "source": "W", "url": "https://e.com/2", "datetime": _epoch(_days_ago(1, hour=2))}]),
+        select=lambda v: sorted([i["title"], len(i["summary"] or ""), len(i["evidenceText"] or ""), (i["summary"] or "")[:60], (i["evidenceText"] or "")[-20:]]
+                                for i in v["items"]),
+        expect=[["AAPL long summary", 240, 180, "Sentence number one with extra spaces. Sentence number one w", "ence number one with"],
+                ["AAPL whitespace only", 20, 20, "AAPL whitespace only", "AAPL whitespace only"]]),
+    # Card 256 edge: Python slices by code points, the Worker by UTF-16 units: an emoji straddling the cut is kept whole in Python and
+    # split into a lone surrogate in the Worker.
+    _scenario(
+        "news.text.cut_position_counts_code_points_in_python_and_utf16_units_in_the_worker", ["BR-NWS-256"],
+        lambda: server.get_company_news("AAPL", 20, 14, ["finnhub"]), 'm.yahooFinance.getCompanyNews("AAPL", 20, 14, ["finnhub"])',
+        env=FINNHUB_ENV,
+        routes=_finnhub([{"headline": "AAPL astral", "summary": "x" * 239 + "\U0001F600" + "tail", "source": "W", "url": "https://e.com/1",
+                          "datetime": _epoch(_days_ago(1, hour=1))}]),
+        select=lambda v: [[len(i["summary"]), ascii(i["summary"][-3:]), len(i["evidenceText"])] for i in v["items"]], mode="pinned",
+        decision="FINDING: summary is cut at 240 code points in Python and 240 UTF-16 units in the Worker, which can leave a lone surrogate",
+        expect_py=[[240, "'xx\\U0001f600'", 180]], expect_ts=[[240, "'xx\\ud83d'", 180]]),
+]
+
+CASES += [
+    # Card 257 (Finding Q7, both runtimes): with the legacy yahoo_finance source the news and press-release passes read the same 20 stories,
+    # so rawCount and retrievedCount are 40, and the press-release pass rejects all 20 as NOT_ISSUER_WIRE_RELEASE.
+    _scenario(
+        "news.yahoo.legacy_aggregate_counts_the_same_feed_twice", ["BR-NWS-257"],
+        lambda: server.get_company_news("AMD", 100, 14, ["yahoo_finance"]), 'm.yahooFinance.getCompanyNews("AMD", 100, 14, ["yahoo_finance"])',
+        news=[_yn(f"AMD story {i}", when=_days_ago(1 + i % 10)) for i in range(20)], info=AMD_INFO,
+        select=lambda v: {"returned": len(v["items"]), **{k: v["sourceStatus"]["yahoo_finance"][k] for k in
+                                                         ("status", "rawCount", "retrievedCount", "filteredCount", "acceptedCount", "returnedCount",
+                                                          "rejectedCount", "rejectionCounts", "identityStatus", "attempted")}},
+        expect={"returned": 20, "status": "OK", "rawCount": 40, "retrievedCount": 40, "filteredCount": 20, "acceptedCount": 20, "returnedCount": 20,
+                "rejectedCount": 20, "rejectionCounts": {"NOT_ISSUER_WIRE_RELEASE": 20}, "identityStatus": "RESOLVED", "attempted": True}),
+]
+
+_RANK_ROWS = [{"headline": f"AAPL item {i}" if i in (3, 12, 25, 33, 38) else f"Sector item {i}", "summary": "s", "source": "W", "url": f"https://e.com/{i}",
+               "datetime": _epoch(_days_ago(1 + (i % 7), hour=(i * 5) % 24))} for i in range(40)]
+
+CASES += [
+    # Cards 260 / 266: max_results 10 -> a pool of the first 30 accepted rows in provider order (rows 33 and 38 are outside it); the 10
+    # returned are the HIGH-relevance items first (newest first), then the LOW ones (newest first).
+    _scenario(
+        "news.ranking.pool_of_three_times_max_results_then_high_relevance_first", ["BR-NWS-260", "BR-NWS-266", "BR-NWS-275"],
+        lambda: server.get_company_news("AAPL", 10, 14, ["finnhub"]), 'm.yahooFinance.getCompanyNews("AAPL", 10, 14, ["finnhub"])',
+        env=FINNHUB_ENV, routes=_finnhub(_RANK_ROWS),
+        select=lambda v: [[i["title"], i["tickerRelevance"], _norm_ts(i["publishedAt"])] for i in v["items"]],
+        expect=[["AAPL item 3", "HIGH", "2026-10-11T15:00:00Z"], ["AAPL item 25", "HIGH", "2026-10-10T05:00:00Z"], ["AAPL item 12", "HIGH", "2026-10-09T12:00:00Z"],
+                ["Sector item 14", "LOW", "2026-10-14T22:00:00Z"], ["Sector item 28", "LOW", "2026-10-14T20:00:00Z"], ["Sector item 7", "LOW", "2026-10-14T11:00:00Z"],
+                ["Sector item 21", "LOW", "2026-10-14T09:00:00Z"], ["Sector item 0", "LOW", "2026-10-14T00:00:00Z"], ["Sector item 8", "LOW", "2026-10-13T16:00:00Z"],
+                ["Sector item 22", "LOW", "2026-10-13T14:00:00Z"]]),
+    # Card 262: the raw-substring relevance test: the ticker 'A' is found inside 'MARKETS RALLY', so a Finnhub row about nothing in
+    # particular is HIGH and MEDIUM confidence (Finding Q7, both runtimes).
+    _scenario(
+        "news.ranking.single_letter_ticker_is_found_inside_any_word", ["BR-NWS-262"],
+        lambda: server.get_company_news("A", 10, 14, ["finnhub"]), 'm.yahooFinance.getCompanyNews("A", 10, 14, ["finnhub"])',
+        env=FINNHUB_ENV, routes=_finnhub(_finnhub_rows(["Markets rally", "Zzz yyy"], summary="")),
+        select=lambda v: sorted([i["title"], i["tickerRelevance"], i["confidence"]] for i in v["items"]),
+        expect=[["Markets rally", "HIGH", "MEDIUM"], ["Zzz yyy", "LOW", "MEDIUM"]]),
+]
+
+CASES += [
+    # Cards 268 / 276: max_results 200 is clamped to 100 for collection and the timeline; events come back in ascending timestamp order;
+    # an undated provider row is rejected before it can reach the timeline (it counts as DATE_OUTSIDE_WINDOW).
+    _scenario(
+        "news.timeline.ascending_order_cap_and_undated_rows", ["BR-NWS-268", "BR-NWS-276"],
+        lambda: server.get_public_event_timeline("AAPL", "", "", ["finnhub"], 200, False),
+        'm.yahooFinance.getPublicEventTimeline("AAPL", "", "", ["finnhub"], 200, false)',
+        env=FINNHUB_ENV,
+        routes=_finnhub([{"headline": f"AAPL timeline {i}", "summary": "s", "source": "W", "url": f"https://e.com/{i}", "datetime": _epoch(_days_ago(d, hour=9))}
+                         for i, d in enumerate([3, 1, 2])] + [{"headline": "AAPL undated"}]),
+        select=lambda v: {"timeline": [[_norm_ts(e["timestamp"]), e["title"]] for e in v["timeline"]], "status": v.get("status"),
+                          "finnhub": _status_rows(v, "finnhub", keys=("status", "rawCount", "acceptedCount", "rejectedCount", "rejectionCounts"))},
+        expect={"timeline": [["2026-10-12T09:00:00Z", "AAPL timeline 0"], ["2026-10-13T09:00:00Z", "AAPL timeline 2"], ["2026-10-14T09:00:00Z", "AAPL timeline 1"]],
+                "status": None, "finnhub": {"status": "OK", "rawCount": 4, "acceptedCount": 3, "rejectedCount": 1, "rejectionCounts": {"DATE_OUTSIDE_WINDOW": 1}}}),
+    # max_results also bounds the collection: with 2, only the first two provider rows (days 3 and 1 ago) are collected, so the 2-days-ago
+    # row never reaches the timeline.
+    _scenario(
+        "news.timeline.newest_first_reverses_the_order", ["BR-NWS-268"],
+        lambda: server.get_public_event_timeline("AAPL", "", "", ["finnhub"], 2, True),
+        'm.yahooFinance.getPublicEventTimeline("AAPL", "", "", ["finnhub"], 2, true)',
+        env=FINNHUB_ENV,
+        routes=_finnhub([{"headline": f"AAPL timeline {i}", "summary": "s", "source": "W", "url": f"https://e.com/{i}", "datetime": _epoch(_days_ago(d, hour=9))}
+                         for i, d in enumerate([3, 1, 2])]),
+        select=lambda v: [[_norm_ts(e["timestamp"]), e["title"]] for e in v["timeline"]],
+        expect=[["2026-10-14T09:00:00Z", "AAPL timeline 1"], ["2026-10-12T09:00:00Z", "AAPL timeline 0"]]),
+]
+
+_YAHOO_TS = _epoch(_days_ago(1, hour=9))
+CASES += [
+    # Card 278: timestamp format. Python writes 2026-10-14T09:00:00Z, the Worker 2026-10-14T09:00:00.000Z for epoch-second and ISO inputs;
+    # compact YYYYMMDD / YYYYMMDDHHMMSS are alike in both. A Yahoo row with providerPublishTime 0 falls through to content.pubDate in Python
+    # and is dropped in the Worker (whose getNews() keeps no pubDate).
+    _scenario(
+        "news.timestamps.yahoo_epoch_zero_and_millisecond_suffix_differ", ["BR-NWS-278"],
+        lambda: server.get_company_news("AMD", 100, 14, ["yahoo_finance_news"]), 'm.yahooFinance.getCompanyNews("AMD", 100, 14, ["yahoo_finance_news"])',
+        news=[{"title": "AMD tick", "publisher": "R", "link": "https://e.com/a", "providerPublishTime": _YAHOO_TS},
+              {"title": "AMD zero", "publisher": "R", "link": "https://e.com/b", "providerPublishTime": 0, "content": {"pubDate": "2026-10-13T00:00:00Z"}}],
+        info=AMD_INFO, select=lambda v: [[i["title"], i["publishedAt"], v["meta"]["watermark"]] for i in v["items"]], mode="pinned",
+        decision="FINDING: publishedAt carries '.000Z' milliseconds in the Worker and none in Python; an epoch of 0 falls through to content.pubDate in Python only",
+        expect_py=[["AMD tick", "2026-10-14T09:00:00Z", NOW_ISO], ["AMD zero", "2026-10-13T00:00:00Z", NOW_ISO]],
+        expect_ts=[["AMD tick", "2026-10-14T09:00:00.000Z", "2026-10-15T12:00:00.000Z"]]),
+    _scenario(
+        "news.timestamps.provider_date_strings_parse_differently", ["BR-NWS-278"],
+        lambda: server.get_company_news("AAPL", 10, 14, ["finnhub"]), 'm.yahooFinance.getCompanyNews("AAPL", 10, 14, ["finnhub"])',
+        env=FINNHUB_ENV,
+        routes=_finnhub([{"headline": "AAPL rfc date", "summary": "s", "source": "W", "url": "https://e.com/1", "datetime": "Tue, 13 Oct 2026 10:00:00 GMT"},
+                         {"headline": "AAPL iso date", "summary": "s", "source": "W", "url": "https://e.com/2", "datetime": "2026-10-13T10:00:00Z"},
+                         {"headline": "AAPL compact", "summary": "s", "source": "W", "url": "https://e.com/3", "datetime": "20261012"},
+                         {"headline": "AAPL compact14", "summary": "s", "source": "W", "url": "https://e.com/4", "datetime": "20261011101010"}]),
+        select=lambda v: [[i["title"], i["publishedAt"]] for i in v["items"]], mode="pinned",
+        decision="FINDING: an RFC 2822 date string parses in the Worker only (Python gives null and the date window drops the row); ISO output has '.000Z' only in the Worker",
+        expect_py=[["AAPL iso date", "2026-10-13T10:00:00Z"], ["AAPL compact", "2026-10-12T00:00:00Z"], ["AAPL compact14", "2026-10-11T10:10:10Z"]],
+        expect_ts=[["AAPL rfc date", "2026-10-13T10:00:00.000Z"], ["AAPL iso date", "2026-10-13T10:00:00.000Z"], ["AAPL compact", "2026-10-12T00:00:00Z"],
+                   ["AAPL compact14", "2026-10-11T10:10:10Z"]]),
+]
+
+# Card 263: the registry shipped today (version 2026-09-25.1200) holds only candidates: IQE.L is reported as a candidate, never fetched.
+_CANDIDATE_VIEW = lambda v: {  # noqa: E731
+    "status": v["sourceStatus"]["company_ir_page"]["status"], "approval": v["sourceStatus"]["company_ir_page"]["approvalStatus"],
+    "allowedAction": v["sourceStatus"]["company_ir_page"]["allowedAction"], "registryVersion": v["sourceStatus"]["company_ir_page"]["registryVersion"],
+    "candidates": [{k: c[k] for k in ("ticker", "issuerName", "canonicalUrl", "adapter", "decisionGrade")} for c in v["sourceStatus"]["company_ir_page"]["candidates"]],
+    "failed": [[f["source"], f["status"]] for f in v["coverage"]["failedSources"]], "warnings": _warning_codes(v), "collection": v.get("status"),
+    "items": len(v["items"]), "sourceCoverage": v["sourceCoverage"]}
+_CANDIDATE_COMMON = {"status": "CANDIDATE_AVAILABLE", "approval": "candidate", "allowedAction": "review_and_promote", "registryVersion": "2026-09-25.1200",
+                     "candidates": [{"ticker": "IQE.L", "issuerName": "IQE plc", "canonicalUrl": "https://www.iqep.com/investors/regulatory-news/",
+                                     "adapter": "html_article", "decisionGrade": False}],
+                     "failed": [["company_ir_page", "CANDIDATE_AVAILABLE"]], "items": 0, "sourceCoverage": "PARTIAL"}
+CASES += [
+    _scenario(
+        "news.ir_page.shipped_registry_entries_are_candidates_only", ["BR-NWS-263"],
+        lambda: server.get_company_news("IQE.L", 10, 14, ["company_ir_page"]), 'm.yahooFinance.getCompanyNews("IQE.L", 10, 14, ["company_ir_page"])',
+        news=[], info={}, select=_CANDIDATE_VIEW, mode="pinned",
+        decision="FINDING: a candidate-only IR page emits warning COMPANY_IR_PAGE_CANDIDATE_AVAILABLE and collection status SOURCE_LIMITED_NOT_FOUND in Python; the Worker emits no warning and PROVIDER_ERROR",
+        expect_py={**_CANDIDATE_COMMON, "warnings": ["COMPANY_IR_PAGE_CANDIDATE_AVAILABLE"], "collection": "SOURCE_LIMITED_NOT_FOUND"},
+        expect_ts={**_CANDIDATE_COMMON, "warnings": [], "collection": "PROVIDER_ERROR"}),
+]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+# Python-only helpers with no reachable Worker counterpart (BR-NWS-235, BR-NWS-250)
+# The Worker side is a placeholder returning null: the SEC URL checks are inline / unexported there and unreachable through a tool
+# (every SEC URL is built from the CIK and accession), and the audit script is a Python-only CI tool. The cases pin the Python value
+# so the move of the Python news code cannot change it.
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+def _audit_overlap_py():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("audit_arsenal_news", Path(__file__).resolve().parents[1] / "audit_arsenal_news.py")
+    audit = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(audit)
+
+    def response(titles, source, status):
+        return {"ok": True, "data": {"status": None, "items": [{"title": t, "evidenceClass": "CONTEXTUAL_NEWS"} for t in titles],
+                                     "sourceStatus": {source: {"status": status}}, "coverage": {"state": "FULL"}}}
+
+    both = audit.build_ticker_result("AAA", {"yahoo_finance_news": response(["A", "B", "C"], "yahoo_finance_news", "OK"),
+                                             "finnhub": response(["b", "D"], "finnhub", "OK")})
+    none = audit.build_ticker_result("BBB", {"yahoo_finance_news": {"ok": False}, "finnhub": response([], "finnhub", "EMPTY_RESULT")})
+    return {"both": both["comparison"], "none": none["comparison"],
+            "states": [none["providers"]["yahoo_finance_news"]["callState"], none["providers"]["finnhub"]["callState"]]}
+
+
+CASES += [
+    Case(name="news.python_only.safe_sec_url_and_xbrl_document_detection", ids=["BR-NWS-235"],
+         py=lambda: {
+             "safe": [server._safe_sec_url(u) for u in ("http://www.sec.gov/Archives/x.htm", "https://www.sec.gov/Archives/edgar/data/1/a.XML?x=1",
+                                                       "  https://www.sec.gov/Archives/xbrl/a.htm  ", None, "")],
+             "xbrl": [server._is_likely_xbrl_document_url(u) for u in ("https://www.sec.gov/Archives/edgar/data/1/a.XML?x=1",
+                                                                      "https://www.sec.gov/Archives/xbrl/a.htm", "https://www.sec.gov/Archives/edgar/data/1/a.htm")]},
+         ts={"js": "return null;"}, mode="pinned",
+         decision="FINDING: Python-only helpers (the Worker checks the SEC Archives prefix inline and cannot be driven to an unsafe URL); the Worker side is a placeholder",
+         expect_py={"safe": [None, "https://www.sec.gov/Archives/edgar/data/1/a.XML?x=1", "https://www.sec.gov/Archives/xbrl/a.htm", None, None],
+                    "xbrl": [True, True, False]},
+         expect_ts=None),
+    Case(name="news.python_only.audit_title_overlap_ratio_and_call_states", ids=["BR-NWS-250"],
+         py=_audit_overlap_py, ts={"js": "return null;"}, mode="pinned",
+         decision="FINDING: scripts/audit_arsenal_news.py is a Python-only CI audit; the Worker side is a placeholder",
+         expect_py={"both": {"sharedTitleCount": 1, "combinedUniqueTitleCount": 4, "titleOverlapRatio": 0.25},
+                    "none": {"sharedTitleCount": 0, "combinedUniqueTitleCount": 0, "titleOverlapRatio": None},
+                    "states": ["CALL_FAILED", "COMPLETED"]},
+         expect_ts=None),
+]
+
+
+_ENTITY_FEED_ROUTES = {
+    "https://www.acmeinc.com/": {"body": '<html><head><link rel="alternate" type="application/rss+xml" href="https://news.acmeinc.com/feed.xml"></head></html>'},
+    "https://news.acmeinc.com/feed.xml": {"body": '<?xml version="1.0"?><!DOCTYPE rss [<!ENTITY x "y">]><rss version="2.0"><channel><title>Acmeinc News</title></channel></rss>'},
+}
+CASES += [
+    # Cards 207 / 228: a feed containing <!ENTITY is a parse error (COMPANY_IR_RSS_PARSE_ERROR), not an accepted or host-rejected feed.
+    _company_ir_case(
+        "news.company_ir.feed_with_an_entity_declaration_is_a_parse_error", ["BR-NWS-207", "BR-NWS-228"], "https://www.acmeinc.com", _ACMEINC,
+        routes=_ENTITY_FEED_ROUTES, decision=_WORKER_ONLY,
+        expect_ts={"status": "PARSE_ERROR", "website": "https://www.acmeinc.com/", "identityConfidence": "HIGH",
+                   "warnings": [["COMPANY_IR_RSS_PARSE_ERROR", "Company IR RSS/Atom feed parse error: unsupported XML entity declaration in company IR RSS/Atom"]],
+                   "collection": "SOURCE_LIMITED_NOT_FOUND", "items": []}),
 ]
