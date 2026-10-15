@@ -93,3 +93,24 @@ export function currentCacheSummary(): { cacheHit: boolean; cacheSource: CacheSo
     cacheSource: sources.size === 0 ? null : sources.size === 1 ? only : "mixed",
   };
 }
+
+/**
+ * Facts about the inbound HTTP request that tools may report. Only booleans
+ * derived from the request are kept here, never header values.
+ */
+export interface RequestFacts {
+  /** A non-empty Authorization header arrived with this /mcp request. */
+  authorizationHeaderPresent: boolean;
+}
+
+const requestFacts = new AsyncLocalStorage<RequestFacts>();
+
+/** Run fn with the facts of the current inbound request. */
+export function withRequestFacts<T>(facts: RequestFacts, fn: () => Promise<T>): Promise<T> {
+  return requestFacts.run(facts, fn);
+}
+
+/** The current request's facts, or undefined outside an /mcp request. */
+export function currentRequestFacts(): RequestFacts | undefined {
+  return requestFacts.getStore();
+}

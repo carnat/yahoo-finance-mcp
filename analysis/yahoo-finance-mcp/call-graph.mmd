@@ -1,0 +1,59 @@
+%% Domain-level call/dispatch graph (both runtimes). Generated from topology.json.
+%% Edge label = number of module/region-level edges (top 40). Dotted = dispatch only (router, jobs, string-keyed calls).
+graph TD
+  earnings["Earnings intelligence & transcripts"]
+  envelope["Envelope, schemas & cross-cutting"]
+  evidence["Evidence layer"]
+  extractors["SEC extractors & capital structure"]
+  fundamentals["Yahoo fundamentals, analyst & calendar"]
+  news["News & public events"]
+  pricing["Yahoo pricing, technicals, options & screening"]
+  providers["Third-party fallbacks (key-gated)"]
+  sec["SEC EDGAR retrieval"]
+  shared["Shared god-file helpers"]
+  surface["MCP tool surface (entry)"]
+  thai["Thai SEC funds"]
+  transport["Transport & tool registry"]
+  valuation["Valuation & reconciliation"]
+  transport -.->|24| surface
+  surface -.->|12| transport
+  transport -->|11| envelope
+  pricing -->|10| envelope
+  earnings -->|9| sec
+  extractors -->|9| sec
+  shared -->|9| sec
+  valuation -->|9| sec
+  earnings -->|8| envelope
+  sec -->|8| envelope
+  shared -->|8| envelope
+  valuation -->|8| extractors
+  news -->|7| envelope
+  surface -.->|7| pricing
+  extractors -->|6| envelope
+  extractors -->|6| evidence
+  providers -->|6| envelope
+  surface -.->|6| providers
+  valuation -->|6| evidence
+  evidence -->|5| sec
+  fundamentals -->|5| envelope
+  earnings -->|4| extractors
+  surface -.->|4| earnings
+  surface -.->|4| fundamentals
+  surface -.->|4| valuation
+  thai -->|4| envelope
+  evidence -->|3| envelope
+  fundamentals -->|3| evidence
+  fundamentals -->|3| pricing
+  sec -->|3| extractors
+  shared -->|3| pricing
+  shared -->|3| valuation
+  surface -.->|3| evidence
+  transport -->|3| evidence
+  transport -->|3| pricing
+  transport -->|3| sec
+  earnings -->|2| evidence
+  earnings -->|2| fundamentals
+  earnings -->|2| shared
+  evidence -->|2| earnings
+  classDef entry fill:#cc785c,stroke:#8a4a34,color:#fff
+  class surface,transport entry

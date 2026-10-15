@@ -1,0 +1,14 @@
+%% Critical path: An investor checks a company's latest earnings and guidance (Investor using Claude with the hosted connector).
+%% No production telemetry is available (see ASSESSMENT.md) - p50/p99 not annotated.
+flowchart TD
+  S1["1. Request arrives at the public MCP endpoint<br/><small>index.ts<br/>mcp.ts</small>"]
+  S2["2. Router picks the earnings tool<br/><small>tools.ts<br/>earnings_intelligence</small>"]
+  S1 --> S2
+  S3["3. Find the latest earnings press release<br/><small>yahoo-finance.ts · Earnings intelligence & transcripts<br/>yahoo-finance.ts · SEC EDGAR retrieval<br/>SEC EDGAR (incl. full-text search)</small>"]
+  S2 --> S3
+  S4["4. Pin the fiscal period it reports<br/><small>earnings-period.ts<br/>fiscal-calendar.ts</small>"]
+  S3 --> S4
+  S5["5. Extract reported metrics and guidance<br/><small>extraction-rules.ts<br/>guidance-history.ts</small>"]
+  S4 --> S5
+  S6["6. Return the answer with source and warnings<br/><small>response.ts</small>"]
+  S5 --> S6

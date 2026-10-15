@@ -883,6 +883,7 @@ _MANIFEST_DIAGNOSTICS_OUTPUT_SCHEMA = {
         "envelopeSchemaVersion": {"type": "string"},
         "generatedAt": {"type": "string"},
         "privacyScope": {"type": "string"},
+        "authorizationHeaderPresent": {"type": ["boolean", "null"]},
     },
     "additionalProperties": False,
 }

@@ -1,0 +1,76 @@
+%% Domains -> data stores and upstream providers. --> read, ==> write. Generated from topology.json.
+graph LR
+  subgraph Code
+    earnings["Earnings intelligence & transcripts"]
+    envelope["Envelope, schemas & cross-cutting"]
+    evidence["Evidence layer"]
+    extractors["SEC extractors & capital structure"]
+    fundamentals["Yahoo fundamentals, analyst & calendar"]
+    news["News & public events"]
+    ops["Release & batch operations"]
+    pricing["Yahoo pricing, technicals, options & screening"]
+    providers["Third-party fallbacks (key-gated)"]
+    sec["SEC EDGAR retrieval"]
+    shared["Shared god-file helpers"]
+    thai["Thai SEC funds"]
+    transport["Transport & tool registry"]
+    valuation["Valuation & reconciliation"]
+  end
+  subgraph Stores
+    ds_alpha_vantage[("Alpha Vantage")]
+    ds_company_ir_sites[("Company IR sites / caller URLs (open fetch)")]
+    ds_edge_cache[("Cloudflare edge cache (caches.default)")]
+    ds_evidence_r2[("Evidence store (R2 / local dir)")]
+    ds_finnhub[("Finnhub")]
+    ds_ir_registry[("IR-page + news-source registries")]
+    ds_marketaux[("Marketaux")]
+    ds_newswire_rss[("Newswire RSS (GlobeNewswire/Cision)")]
+    ds_sec_edgar[("SEC EDGAR (incl. full-text search)")]
+    ds_thai_sec_open_data[("Thai SEC Open Data")]
+    ds_tool_catalog[("tool_catalog.json")]
+    ds_uk_companies_house[("UK Companies House")]
+    ds_wrangler_vars[("wrangler.toml [vars] build stamp")]
+    ds_yahoo_finance[("Yahoo Finance")]
+  end
+  earnings -->|read| ds_company_ir_sites
+  earnings -->|read| ds_edge_cache
+  earnings -->|read| ds_sec_edgar
+  earnings -->|read| ds_yahoo_finance
+  envelope -->|read| ds_sec_edgar
+  evidence ==>|read/write| ds_evidence_r2
+  evidence -->|read| ds_yahoo_finance
+  extractors -->|read| ds_sec_edgar
+  extractors -->|read| ds_uk_companies_house
+  fundamentals -->|read| ds_evidence_r2
+  fundamentals -->|read| ds_uk_companies_house
+  fundamentals -->|read| ds_yahoo_finance
+  news -->|read| ds_company_ir_sites
+  news -->|read| ds_finnhub
+  news -->|read| ds_ir_registry
+  news -->|read| ds_marketaux
+  news -->|read| ds_newswire_rss
+  news -->|read| ds_sec_edgar
+  news -->|read| ds_yahoo_finance
+  ops ==>|read/write| ds_ir_registry
+  ops -->|read| ds_tool_catalog
+  ops ==>|read/write| ds_wrangler_vars
+  ops -->|read| ds_yahoo_finance
+  pricing -->|read| ds_yahoo_finance
+  providers -->|read| ds_alpha_vantage
+  providers -->|read| ds_finnhub
+  providers -->|read| ds_ir_registry
+  providers -->|read| ds_uk_companies_house
+  sec -->|read| ds_sec_edgar
+  sec -->|read| ds_yahoo_finance
+  shared -->|read| ds_alpha_vantage
+  shared ==>|read/write| ds_edge_cache
+  shared ==>|read/write| ds_evidence_r2
+  shared -->|read| ds_ir_registry
+  shared -->|read| ds_sec_edgar
+  shared -->|read| ds_yahoo_finance
+  thai -->|read| ds_thai_sec_open_data
+  transport -->|read| ds_sec_edgar
+  transport -->|read| ds_tool_catalog
+  transport -->|read| ds_wrangler_vars
+  valuation -->|read| ds_sec_edgar
+  valuation -->|read| ds_yahoo_finance
