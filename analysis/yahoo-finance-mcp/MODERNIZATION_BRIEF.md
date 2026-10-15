@@ -540,7 +540,7 @@ These are the **84 P0 rules** in `BUSINESS_RULES.md` §2 (data integrity of publ
   - **N3:** strategy labels and fixed thresholds become raw measures plus caller-parameterised neutral comparisons.
   - **N4:** the Doctrine no longer gates this plan; it adapts to versioned contract changes like any consumer.
   - **Mechanics:** deprecate in RN (at least one minor version), remove in Phase 6 (major version).
-- [x] **Q15. Universal names: ACCEPTED by the owner 2026-10-15.** Checked against the code: none collides with an existing name. The deprecation notice follows the existing `DEPRECATED_TOOL` code's naming. **One row was corrected after acceptance and needs confirmation (Q15a).**
+- [x] **Q15. Universal names: ACCEPTED by the owner 2026-10-15.** Checked against the code: none collides with an existing name. The deprecation notice follows the existing `DEPRECATED_TOOL` code's naming. One row was corrected after acceptance; the correction was accepted as Q15a.
 
   | Replaces | Proposed | Values / meaning |
   |---|---|---|
@@ -549,7 +549,7 @@ These are the **84 P0 rules** in `BUSINESS_RULES.md` §2 (data integrity of publ
   | fixed $10M liquidity gate fields | optional input `min_adv_usd`; output `meetsMinimum` (null when no minimum is supplied); raw ADV value already exists | caller-defined threshold |
   | ~~`t1_inputs` → `inputs`~~ | *superseded by Q15a* | — |
   | deprecation notice | warning code `DEPRECATED_FIELD` (names the field and its replacement) | — |
-- [ ] **Q15a (gates RN). Correction to the `t1_inputs` row.** `analyze_position_signals` returns four doctrine-numbered tier groups, not one: `t1_inputs`, `t2_inputs`, `t4_inputs` and `t5_inputs` (`server.py:8116–8119`, `worker/src/tools.ts:1180–1183`; there is no t3). Renaming only `t1_inputs` to `inputs` would leave three tier keys and make `inputs` ambiguous. Proposed topic names, keeping content identical:
+- [x] **Q15a. Topic names for the four input groups: ACCEPTED by the owner 2026-10-15** (no collisions in code). Correction to the `t1_inputs` row: `analyze_position_signals` returns four doctrine-numbered tier groups, not one: `t1_inputs`, `t2_inputs`, `t4_inputs` and `t5_inputs` (`server.py:8116–8119`, `worker/src/tools.ts:1180–1183`; there is no t3). Renaming only `t1_inputs` to `inputs` would leave three tier keys and make `inputs` ambiguous. Proposed topic names, keeping content identical:
 
   | Replaces | Proposed | Holds |
   |---|---|---|
@@ -592,4 +592,4 @@ Approved by: ________________  Date: __________
 Approval covers: Phase 1 only | Phases 1–3 (incl. R3, RN) | Full plan
 ```
 
-The Doctrine no longer gates approval (Q14/N4). Before signing, settle **V1** (claude.ai Request headers; otherwise Q13) and **Q15a**. Recommended scope: **Phases 1–3 including R3 and RN**. Phase 3 is the pilot, and the brief will be regenerated for R4 onward.
+The Doctrine no longer gates approval (Q14/N4). Before signing, settle **V1** (claude.ai Request headers; otherwise Q13). All naming decisions (Q11, Q15, Q15a) are closed. Recommended scope: **Phases 1–3 including R3 and RN**. Phase 3 is the pilot, and the brief will be regenerated for R4 onward.
