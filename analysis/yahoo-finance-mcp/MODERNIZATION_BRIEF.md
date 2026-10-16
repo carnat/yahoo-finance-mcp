@@ -236,6 +236,7 @@ Every PR follows `CLAUDE.md`: the TS change first, then the `python-mirror` port
   - **S-03:** JSON-RPC batch cap of **1 tool call per HTTP request** (Q12) and a body cap.
   - **News budget follow-through (moved from R3, Q16):** sources starved by the subrequest budget are reported `PROVIDER_BUDGET_EXHAUSTED` and coverage states the budget cause (today's live MSFT 0-item case).
   - **Per-invocation subrequest budget guard (V3, required on any plan):** count `fetch()` and Cache API calls in the request scope against the **50-per-invocation Free limit** (leave a reserve for the response path), stop starting new upstream work before the limit, and mark the affected sources `PROVIDER_BUDGET_EXHAUSTED`, never `PROVIDER_ERROR` or clean absence. Production already exceeds Free's 50 (V3).
+  - **Paid-provider scope (owner decision 2026-10-16):** Finnhub, Alpha Vantage and Marketaux are quota-limited free tiers, not paid providers, so they stay in the defaults. `PROVIDER_OPT_IN_REQUIRED` is reserved for a provider the owner pays for later. Release 3c carries the budget guard only (`PHASE1_R3C_SPEC.md`).
   - **S-05:** evidence-store `list()` guard.
   - **S-07/S-09:** workflow permissions, `--ignore-scripts`, actions pinned to SHAs.
   - **S-10/S-11:** dependency upgrades, `uv sync --frozen`, audit gates.
