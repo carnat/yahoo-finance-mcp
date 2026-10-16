@@ -71,7 +71,7 @@
       "name": "app.py",
       "kind": "module",
       "language": "python",
-      "loc": 297,
+      "loc": 300,
       "file": "yfmcp/app.py"
      },
      {
@@ -104,6 +104,14 @@
       "language": "typescript",
       "loc": 71,
       "file": "worker/src/cache.ts"
+     },
+     {
+      "id": "worker/src/deprecations.ts",
+      "name": "deprecations.ts",
+      "kind": "module",
+      "language": "typescript",
+      "loc": 152,
+      "file": "worker/src/deprecations.ts"
      },
      {
       "id": "worker/src/request-context.ts",
@@ -144,6 +152,14 @@
       "language": "python",
       "loc": 65,
       "file": "yfmcp/cache.py"
+     },
+     {
+      "id": "yfmcp/deprecations.py",
+      "name": "deprecations.py",
+      "kind": "module",
+      "language": "python",
+      "loc": 129,
+      "file": "yfmcp/deprecations.py"
      },
      {
       "id": "yfmcp/envelope.py",
@@ -267,7 +283,7 @@
       "name": "yahoo-finance.ts \u00b7 Third-party fallbacks",
       "kind": "module",
       "language": "typescript",
-      "loc": 499,
+      "loc": 527,
       "file": "worker/src/yahoo-finance.ts"
      },
      {
@@ -615,7 +631,7 @@
       "name": "yahoo-finance.ts \u00b7 Earnings intelligence & transcripts",
       "kind": "module",
       "language": "typescript",
-      "loc": 2165,
+      "loc": 2195,
       "file": "worker/src/yahoo-finance.ts"
      },
      {
@@ -658,12 +674,12 @@
     "kind": "domain",
     "children": [
      {
-      "id": "worker/src/yahoo-finance.ts#news",
-      "name": "yahoo-finance.ts \u00b7 News & public events",
+      "id": "worker/src/news.ts",
+      "name": "news.ts",
       "kind": "module",
       "language": "typescript",
-      "loc": 3361,
-      "file": "worker/src/yahoo-finance.ts"
+      "loc": 3385,
+      "file": "worker/src/news.ts"
      },
      {
       "id": "yfmcp/tools/news.py",
@@ -767,28 +783,12 @@
       "file": "server.py"
      },
      {
-      "id": "worker/src/deprecations.ts",
-      "name": "deprecations.ts",
-      "kind": "module",
-      "language": "typescript",
-      "loc": 152,
-      "file": "worker/src/deprecations.ts"
-     },
-     {
       "id": "worker/src/yahoo-finance.ts#shared",
       "name": "yahoo-finance.ts \u00b7 Shared god-file helpers",
       "kind": "module",
       "language": "typescript",
-      "loc": 1670,
+      "loc": 1629,
       "file": "worker/src/yahoo-finance.ts"
-     },
-     {
-      "id": "yfmcp/deprecations.py",
-      "name": "deprecations.py",
-      "kind": "module",
-      "language": "python",
-      "loc": 129,
-      "file": "yfmcp/deprecations.py"
      }
     ]
    },
@@ -1740,11 +1740,6 @@
   },
   {
    "source": "tool:news_events",
-   "target": "worker/src/yahoo-finance.ts#news",
-   "kind": "dispatch"
-  },
-  {
-   "source": "tool:news_events",
    "target": "worker/src/yahoo-finance.ts#providers",
    "kind": "dispatch"
   },
@@ -1866,11 +1861,6 @@
   {
    "source": "tool:stock_pricing",
    "target": "server.py#pricing",
-   "kind": "dispatch"
-  },
-  {
-   "source": "tool:stock_pricing",
-   "target": "worker/src/deprecations.ts",
    "kind": "dispatch"
   },
   {
@@ -2174,6 +2164,81 @@
    "kind": "call"
   },
   {
+   "source": "worker/src/news.ts",
+   "target": "ds:company-ir-sites",
+   "kind": "read"
+  },
+  {
+   "source": "worker/src/news.ts",
+   "target": "ds:finnhub",
+   "kind": "read"
+  },
+  {
+   "source": "worker/src/news.ts",
+   "target": "ds:ir_registry",
+   "kind": "read"
+  },
+  {
+   "source": "worker/src/news.ts",
+   "target": "ds:marketaux",
+   "kind": "read"
+  },
+  {
+   "source": "worker/src/news.ts",
+   "target": "ds:newswire-rss",
+   "kind": "read"
+  },
+  {
+   "source": "worker/src/news.ts",
+   "target": "ds:sec-edgar",
+   "kind": "read"
+  },
+  {
+   "source": "worker/src/news.ts",
+   "target": "ds:yahoo-finance",
+   "kind": "read"
+  },
+  {
+   "source": "worker/src/news.ts",
+   "target": "worker/src/cache.ts",
+   "kind": "call"
+  },
+  {
+   "source": "worker/src/news.ts",
+   "target": "worker/src/deprecations.ts",
+   "kind": "call"
+  },
+  {
+   "source": "worker/src/news.ts",
+   "target": "worker/src/extraction-rules.ts",
+   "kind": "call"
+  },
+  {
+   "source": "worker/src/news.ts",
+   "target": "worker/src/request-context.ts",
+   "kind": "call"
+  },
+  {
+   "source": "worker/src/news.ts",
+   "target": "worker/src/response.ts",
+   "kind": "call"
+  },
+  {
+   "source": "worker/src/news.ts",
+   "target": "worker/src/yahoo-finance.ts#earnings",
+   "kind": "call"
+  },
+  {
+   "source": "worker/src/news.ts",
+   "target": "worker/src/yahoo-finance.ts#providers",
+   "kind": "call"
+  },
+  {
+   "source": "worker/src/news.ts",
+   "target": "worker/src/yahoo-finance.ts#shared",
+   "kind": "call"
+  },
+  {
    "source": "worker/src/sec-thailand.ts",
    "target": "ds:thai-sec-open-data",
    "kind": "read"
@@ -2321,11 +2386,6 @@
   {
    "source": "worker/src/tools.ts",
    "target": "worker/src/yahoo-finance.ts#fundamentals",
-   "kind": "call"
-  },
-  {
-   "source": "worker/src/tools.ts",
-   "target": "worker/src/yahoo-finance.ts#news",
    "kind": "call"
   },
   {
@@ -2515,6 +2575,11 @@
   },
   {
    "source": "worker/src/yahoo-finance.ts#fundamentals",
+   "target": "worker/src/news.ts",
+   "kind": "call"
+  },
+  {
+   "source": "worker/src/yahoo-finance.ts#fundamentals",
    "target": "worker/src/request-context.ts",
    "kind": "call"
   },
@@ -2530,76 +2595,6 @@
   },
   {
    "source": "worker/src/yahoo-finance.ts#fundamentals",
-   "target": "worker/src/yahoo-finance.ts#news",
-   "kind": "call"
-  },
-  {
-   "source": "worker/src/yahoo-finance.ts#fundamentals",
-   "target": "worker/src/yahoo-finance.ts#shared",
-   "kind": "call"
-  },
-  {
-   "source": "worker/src/yahoo-finance.ts#news",
-   "target": "ds:company-ir-sites",
-   "kind": "read"
-  },
-  {
-   "source": "worker/src/yahoo-finance.ts#news",
-   "target": "ds:finnhub",
-   "kind": "read"
-  },
-  {
-   "source": "worker/src/yahoo-finance.ts#news",
-   "target": "ds:ir_registry",
-   "kind": "read"
-  },
-  {
-   "source": "worker/src/yahoo-finance.ts#news",
-   "target": "ds:marketaux",
-   "kind": "read"
-  },
-  {
-   "source": "worker/src/yahoo-finance.ts#news",
-   "target": "ds:newswire-rss",
-   "kind": "read"
-  },
-  {
-   "source": "worker/src/yahoo-finance.ts#news",
-   "target": "ds:sec-edgar",
-   "kind": "read"
-  },
-  {
-   "source": "worker/src/yahoo-finance.ts#news",
-   "target": "ds:yahoo-finance",
-   "kind": "read"
-  },
-  {
-   "source": "worker/src/yahoo-finance.ts#news",
-   "target": "worker/src/cache.ts",
-   "kind": "call"
-  },
-  {
-   "source": "worker/src/yahoo-finance.ts#news",
-   "target": "worker/src/deprecations.ts",
-   "kind": "call"
-  },
-  {
-   "source": "worker/src/yahoo-finance.ts#news",
-   "target": "worker/src/extraction-rules.ts",
-   "kind": "call"
-  },
-  {
-   "source": "worker/src/yahoo-finance.ts#news",
-   "target": "worker/src/request-context.ts",
-   "kind": "call"
-  },
-  {
-   "source": "worker/src/yahoo-finance.ts#news",
-   "target": "worker/src/response.ts",
-   "kind": "call"
-  },
-  {
-   "source": "worker/src/yahoo-finance.ts#news",
    "target": "worker/src/yahoo-finance.ts#shared",
    "kind": "call"
   },
@@ -2636,6 +2631,11 @@
   {
    "source": "worker/src/yahoo-finance.ts#providers",
    "target": "ds:finnhub",
+   "kind": "read"
+  },
+  {
+   "source": "worker/src/yahoo-finance.ts#providers",
+   "target": "ds:news_capabilities",
    "kind": "read"
   },
   {
@@ -2740,11 +2740,6 @@
   },
   {
    "source": "worker/src/yahoo-finance.ts#shared",
-   "target": "ds:news_capabilities",
-   "kind": "read"
-  },
-  {
-   "source": "worker/src/yahoo-finance.ts#shared",
    "target": "ds:sec-edgar",
    "kind": "read"
   },
@@ -2756,6 +2751,11 @@
   {
    "source": "worker/src/yahoo-finance.ts#shared",
    "target": "worker/src/cache.ts",
+   "kind": "call"
+  },
+  {
+   "source": "worker/src/yahoo-finance.ts#shared",
+   "target": "worker/src/news.ts",
    "kind": "call"
   },
   {
@@ -2781,11 +2781,6 @@
   {
    "source": "worker/src/yahoo-finance.ts#shared",
    "target": "worker/src/yahoo-finance.ts#earnings",
-   "kind": "call"
-  },
-  {
-   "source": "worker/src/yahoo-finance.ts#shared",
-   "target": "worker/src/yahoo-finance.ts#news",
    "kind": "call"
   },
   {
@@ -3392,13 +3387,12 @@
  ],
  "deadEnds": [],
  "observations": [
-  "Both god files are hubs, not layers: their 'shared' regions (server.py 1929 NLOC, yahoo-finance.ts 1670 NLOC) are helpers reached from 2+ domains (Yahoo client, EDGAR fetch, HTML/table parsing). Extract these first \u2014 every domain module split out later will otherwise import back into the god file.",
+  "Both god files are hubs, not layers: their 'shared' regions (server.py 1929 NLOC, yahoo-finance.ts 1629 NLOC) are helpers reached from 2+ domains (Yahoo client, EDGAR fetch, HTML/table parsing). Extract these first \u2014 every domain module split out later will otherwise import back into the god file.",
   "SEC EDGAR is read from 14 separate nodes across both runtimes (direct URL use, not through one client). It is the single most important upstream and a single point of failure; consolidating behind yfmcp/clients/edgar.py and one TS edgar module would make fair-access/User-Agent policy enforceable in one place.",
-  "Open-fetch surface: 3 nodes fetch caller- or registry-supplied URLs (worker/src/yahoo-finance.ts#earnings, worker/src/yahoo-finance.ts#news, yfmcp/tools/earnings.py). These are the S-01/S-04 SSRF paths from ASSESSMENT.md and should sit behind one allow-listed fetcher per runtime.",
+  "Open-fetch surface: 3 nodes fetch caller- or registry-supplied URLs (worker/src/news.ts, worker/src/yahoo-finance.ts#earnings, yfmcp/tools/earnings.py). These are the S-01/S-04 SSRF paths from ASSESSMENT.md and should sit behind one allow-listed fetcher per runtime.",
   "Circular dependency: yfmcp/tools/earnings.py back-calls server.py through string-keyed _server_attr(...) \u2014 resolved here to server.py#fundamentals, server.py#sec. These edges are invisible to static import analysis and block extracting earnings without first moving those targets out of server.py.",
   "The Python runtime reads the Worker's JSON registries (company-ir-page-registry.json, news-source-capabilities.json) from worker/src at run time, so Python packaging depends on the Worker tree; the IR registry has a second writer (the daily ir-source-discovery job).",
-  "Extraction candidates (cleanest seams): News & public events (one region per god file, ~3.3k lines each, no dedicated module either side) and the Thai SEC funds pair (already isolated in both runtimes, only touched by the router).",
-  "Unresolved during extraction (2): no domain for worker/src/deprecations.ts; no domain for yfmcp/deprecations.py"
+  "Extraction candidates (cleanest seams): News & public events (one region per god file, ~3.3k lines each, no dedicated module either side) and the Thai SEC funds pair (already isolated in both runtimes, only touched by the router)."
  ],
  "flows": [
   {

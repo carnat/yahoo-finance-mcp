@@ -335,7 +335,10 @@ def reseat_tool_registration(server: FastMCP, name: str, after: str) -> None:
     """
     manager = getattr(server, "_tool_manager", None)
     tools = getattr(manager, "_tools", None) if manager is not None else None
-    if not isinstance(tools, dict) or name not in tools or after not in tools:
+    if not isinstance(tools, dict):
+        # Fail loudly (brief Q8): a silent no-op would reorder the published listing.
+        raise RuntimeError("FastMCP tool registry (_tool_manager._tools) not found; cannot keep tool order")
+    if name not in tools or after not in tools:
         return
     moved = tools[name]
     ordered = [(key, tool) for key, tool in tools.items() if key != name]

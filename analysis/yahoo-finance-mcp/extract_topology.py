@@ -115,6 +115,7 @@ FILE_DOMAIN = {
     "worker/src/guidance-history.ts": "earnings", "worker/src/earnings-period.ts": "earnings",
     "worker/src/transcript-contract.ts": "earnings",
     "worker/src/evidence.ts": "evidence", "worker/src/evidence-store.ts": "evidence",
+    "worker/src/news.ts": "news", "worker/src/deprecations.ts": "envelope", "yfmcp/deprecations.py": "envelope",
     "worker/src/evidence-pack.ts": "evidence",
     "worker/src/sec-thailand.ts": "thai",
     # Ops scripts that run in production workflows (tests are excluded)
