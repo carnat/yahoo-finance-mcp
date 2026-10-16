@@ -216,13 +216,15 @@ flowchart LR
   P3 -->|"PLAYBOOK.md + brief v3"| P1
   P1 --> R4
   R4 -.->|"after Q3i triage"| RN2
+  P1B["Phase 1b · CANDIDATE<br/>Multi-user keys (trusted, non-commercial) · S"]
+  P1 -.->|"after enforcement; owner approval"| P1B
   R4 --> P4
   P4 --> R5
   R5 --> P5
   P5 --> P6
 ```
 
-**Execution order (Q16): Phase 2 ✅ → R3 + RN ✅ → Phase 3 (pilot) ✅ → Phase 1 → R4 → Phase 4 → R5 → Phase 5 → Phase 6.** R-news follows the R4 triage and gates nothing. Phase numbers are kept as identifiers. Sizes are relative shares of the production-code COCOMO-II index (≈ 261 over 59.1 KSLOC, from `ASSESSMENT.md`). **They rank phases against each other and are not durations.**
+**Execution order (Q16): Phase 2 ✅ → R3 + RN ✅ → Phase 3 (pilot) ✅ → Phase 1 → R4 → Phase 4 → R5 → Phase 5 → Phase 6.** R-news follows the R4 triage and gates nothing. Phase 1b (candidate) can follow Phase 1's enforcement release and gates nothing either. Phase numbers are kept as identifiers. Sizes are relative shares of the production-code COCOMO-II index (≈ 261 over 59.1 KSLOC, from `ASSESSMENT.md`). **They rank phases against each other and are not durations.**
 
 Every PR follows `CLAUDE.md`: the TS change first, then the `python-mirror` port, then parity tests, then a section in `docs/provider-runtime-guidance.md`, then `release-clerk`, then `live-verifier` after deploy.
 
@@ -258,6 +260,36 @@ Every PR follows `CLAUDE.md`: the TS change first, then the `python-mirror` port
 - **Risk: Medium.**
   - Risk 1: auth locks out a client that can't send headers. *Mitigation:* V1 gate, plus a token-issued grace release before enforcement.
   - Risk 2: the allow-list blocks legitimate URLs (the IR registry is empty). *Mitigation:* `raw_text` escape hatch, plus approving registry entries through the existing bot and review flow.
+
+### Phase 1b — Multi-user access for trusted, non-commercial sharing (CANDIDATE: added 2026-10-16, not yet approved)
+- **Purpose:** the owner wants to share the hosted MCP with a few trusted people, non-commercially. Phase 1's single shared `MCP_TOKEN` can't tell callers apart, can't cut off one person, and puts everyone on one quota.
+- **Command:** `/modernize-harden yahoo-finance-mcp`, as a follow-on release to Phase 1. Worker only: the local Python server is stdio and single-user.
+- **Scope:**
+  - **Per-user keys behind the existing auth abstraction** (`worker/src/auth.ts`, Q2b). The same transports apply: `Authorization: Bearer <key>` or `/mcp/<key>`.
+  - **Key storage:** keys live in a Cloudflare KV namespace (Free plan), stored **hashed** (SHA-256), never in plain text. Each record holds a non-secret label (for example a first name), a created date, a status (active or revoked) and per-key limits.
+  - **The owner's existing `MCP_TOKEN` keeps working** as the owner key.
+  - **Per-key limits:**
+    - a daily request cap and a per-minute rate limit;
+    - paid-provider calls allowed only for keys the owner enables (extends Phase 1's opt-in rule);
+    - the per-request subrequest budget guard applies to every key.
+  - **Revocation:** revoke one key without affecting the others.
+  - **Admin:** a small owner-only script (`scripts/manage_access_keys.py`, using `wrangler kv`) to issue, list (labels only), revoke and set limits. No admin HTTP endpoint, so there is no new attack surface. A newly issued key is shown once, to the owner only.
+  - **Telemetry (Q10):** records a short **key id** (a prefix of the hash), never the key or the label, so usage per person is visible without exposing secrets.
+  - **`health_check`:** may report the calling key's label, or nothing. Decide with the names below.
+- **Not in scope:** commercial use, billing and metering, OAuth sign-in, self-service sign-up. Commercial use additionally needs licensed market data, because Yahoo's terms generally prohibit redistribution and the key-gated providers' free tiers are non-commercial, plus the Workers Paid plan (reopens Q12).
+- **Entry criteria:**
+  - [ ] Phase 1 enforcement release is live and verified.
+  - [ ] The owner approves this phase and the new names (KV namespace, key record fields, the `scripts/manage_access_keys.py` commands, any new `health_check` field and any new error code such as a per-key rate-limit code), per the Q11 process.
+  - [ ] The owner accepts the sharing constraints: about 100,000 requests per day are **shared across all users** on the Free plan (Q12), and the data stays **non-commercial and personal-use only** under the upstream providers' terms. Each person is told this.
+- **Exit criteria:**
+  - [ ] Per-key auth, revocation and limits are tested in the Worker test suite: valid, revoked, unknown, over-limit, owner key.
+  - [ ] No key or label appears in any response, log, error or telemetry. Telemetry shows the key id only.
+  - [ ] Revoking one key leaves the others working (live-verified with two test keys).
+  - [ ] The docs explain how to issue, rotate and revoke keys and what each user must not do (no redistribution).
+- **Relative size: S.**
+- **Risk: Medium.**
+  - Risk 1: one heavy user exhausts the shared Free daily cap for everyone. *Mitigation:* per-key daily caps summing below the plan cap, plus telemetry alerts.
+  - Risk 2: a shared URL with an embedded key leaks. *Mitigation:* per-person keys, revoke-and-reissue, and the path segment redacted everywhere (Phase 1).
 
 ### Phase 2 — Behaviour-contract harness (characterisation)
 - **Command:** `/modernize-transform yahoo-finance-mcp`, characterisation step only.
@@ -671,6 +703,8 @@ All 9 Q7 news P0 rules were confirmed by the extraction's P0 panel and are cover
   - **Not chosen:** OAuth (ruled out in Q2b; heavy on the Free plan). It remains a possible later project behind the same abstraction.
 
 ### Open for v3 approval (2026-10-16)
+
+- [ ] **A4. Phase 1b: multi-user access for trusted, non-commercial sharing (added 2026-10-16 at the owner's request; candidate, not approved).** Approve the phase and its names when Phase 1 enforcement is live. See the Phase 1b section for scope, constraints and the commercial-use exclusions.
 
 - [x] **A1. Approve Phase 1 (security hardening) as scoped above, with no scope change since v2.** *(Approved 2026-10-16. Grace-check field chosen: `health_check.credentialTransport` = `header` | `path` | `none`; it never carries the token.)* Owner actions it needs:
   1. Create the `MCP_TOKEN` secret. The planner gives the exact `wrangler secret put` and GitHub steps; the token value is never written to the repo or chat.
