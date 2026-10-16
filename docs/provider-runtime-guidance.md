@@ -2742,6 +2742,32 @@ F-024, F-026, F-029). Both runtimes change alike.
 - **Known risk:** an off-list redirect from `fc.yahoo.com` fails the Yahoo crumb refresh instead of being followed.
 - **Rollback:** revert the release.
 
+## Subrequest Budget Guard (2.11.0)
+
+- **Why:** Phase 1 release 3c (V3 budget guard, news budget follow-through). Release type: minor. Last Phase 1 release.
+- **Rule:** Workers Free allows 50 subrequests per invocation. The Worker stops starting new upstream work at 45
+  (5 reserved). Every provider fetch counts, each redirect hop included, and so does every edge Cache API call
+  (match, put, delete). Once the budget is spent, cache calls are skipped (a miss or a no-op) and fetches are refused
+  without being sent.
+- **Source reporting:** starved sources report status `PROVIDER_BUDGET_EXHAUSTED`: news and events `sourceStatus`,
+  `attemptedSources` and coverage `failedSources` (with `reasonCode` null), transcript `attemptedSources`, and the
+  consensus provider rows. Sources that ended OK keep their status.
+- **Coverage:** coverage becomes `PARTIAL` and `recommendedNextAction` is `RETRY_RETRYABLE_SOURCES`. `failureMode`
+  stays `WORKER_SUBREQUEST_LIMIT`.
+- **Batch tools:** a starved ticker gets error code `PROVIDER_BUDGET_EXHAUSTED`, retryable, `recoveryAction`
+  `RETRY_LATER`, with the original message kept.
+- **Single tool calls:** a failed call that hit the budget returns `ok:false` with that code ("The per-request
+  subrequest budget (45 of 50) was spent before this request could complete. Retry later.").
+- **Warning:** one `meta.warnings` row with code `PROVIDER_BUDGET_EXHAUSTED` when the guard refused a fetch.
+  Cloudflare's own "Too many subrequests" error maps to the same status.
+- **Python:** mirrors the guard per tool call at its single fetch seam (`yfmcp/url_policy.py`). Documented
+  divergences: Python has no edge cache to count, and yfinance requests (Yahoo quotes, Yahoo news, Yahoo consensus,
+  batch per-ticker work) are not counted, so those paths cannot run out in Python.
+- **Providers:** Finnhub, Alpha Vantage and Marketaux are quota-limited free tiers and stay in the defaults (owner
+  decision 2026-10-16). `PROVIDER_OPT_IN_REQUIRED` is reserved for a provider the owner pays for later and is not
+  emitted.
+- **Rollback:** revert the release.
+
 ## Non-US Primary Filings
 
 - `get_uk_company_filings` reads Companies House, the UK statutory registry:
