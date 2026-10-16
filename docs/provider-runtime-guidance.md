@@ -2718,6 +2718,30 @@ F-024, F-026, F-029). Both runtimes change alike.
   known vulnerability in the locked Python set, or when `npm audit` reports a high or critical advisory. If an
   advisory has no fix, record the exception here with a review date, and use `pip-audit --ignore-vuln <id>` in the job.
 
+## Fetch Allow-list, CORS and Evidence Guard (2.10.0)
+
+- **Why:** Phase 1 release 3b (items Q2a, S-13, S-05). Release type: minor. The behaviour changes below are deliberate.
+- **Allow-list:** both runtimes (`worker/src/url-policy.ts`, `yfmcp/url_policy.py`) fetch only exact hosts: SEC
+  `www.sec.gov`, `data.sec.gov`, `efts.sec.gov`; Yahoo `finance.yahoo.com`, `query1.finance.yahoo.com`,
+  `query2.finance.yahoo.com`, `fc.yahoo.com`; `www.globenewswire.com`, `finnhub.io`, `www.alphavantage.co`,
+  `api.marketaux.com`, `api.sec.or.th`, `api.company-information.service.gov.uk`; and the hosts of `approved` entries in
+  `company-ir-page-registry.json` (0 today). https only, port 443, no credentials, no IP literals, `localhost`,
+  `.local`, `.internal` or `.invalid`. Every redirect hop is re-checked, with a maximum of 5 hops.
+- **Caller URLs:** `parse_public_transcript.url` and `index_earnings_release.source_url` accept only SEC Archives,
+  `finance.yahoo.com` transcript pages and approved company IR pages. Anything else returns `INPUT_VALIDATION_ERROR`
+  with "... is not on the fetch allow-list (<reason>)". `raw_text` is the escape hatch and never fetches.
+- **`company_ir` source (Worker):** no more open-web discovery. It reads the approved registry only. Without an
+  approved entry the row is `NOT_REGISTERED` (listed in `failedSources`), and the identity and discovery diagnostics
+  are replaced by the registry keys `company_ir_page` already uses. Only `approved` registry entries are ever fetched,
+  in both runtimes.
+- **Adding a company IR site:** add or promote a registry entry to status `approved` with exact `allowedHosts` and
+  `allowedPathPrefixes`, then release.
+- **CORS:** `/mcp*` answers only `Origin: https://claude.ai` (reflected, `Vary: Origin`, `Authorization` allowed).
+  `/` and `/health` keep `*`. Server-side clients (the connector, scripts) are unaffected.
+- **Evidence:** tickers are validated before evidence listing, and list prefixes are validated in both stores.
+- **Known risk:** an off-list redirect from `fc.yahoo.com` fails the Yahoo crumb refresh instead of being followed.
+- **Rollback:** revert the release.
+
 ## Non-US Primary Filings
 
 - `get_uk_company_filings` reads Companies House, the UK statutory registry:
