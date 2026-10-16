@@ -1,0 +1,1805 @@
+{
+  "captured_at_utc": "2026-10-16T02:02:03Z",
+  "health_check": {
+    "buildVersion": "2.8.0+git.13119f9",
+    "serverVersion": "2.8.0",
+    "buildSha": "13119f9016614542c9825045d292ee5dfd61bd74",
+    "deployedAt": "2026-10-16T01:54:18Z",
+    "workerVersionId": "fe80e520-e738-45b4-91d3-76848df51c50"
+  },
+  "capture_notes": [
+    "No item contents recorded; keys, statuses, counts and codes only.",
+    "Shape recorded from tool responses, key sets typed by reading each response, not computed by a script over raw payloads.",
+    "Params used: get_company_news {ticker}; search_company_news {ticker, query:'earnings'}; get_company_press_releases {ticker}; get_public_event_timeline {ticker}; verify_company_event {ticker, event_query:'dividend'}; get_sec_recent_events {ticker}.",
+    "data_keys = sorted top-level keys of the response data object. envelope_meta_keys = sorted keys of the top-level meta object. data_meta_keys = sorted keys of data.meta.",
+    "status = data.status (null when the field is absent).",
+    "Live feeds change between calls; counts and some statuses (company_ir for NVDA, finnhub counts) can legitimately differ in a later run."
+  ],
+  "errors": [
+    {
+      "tool": "verify_company_event",
+      "ticker": "MSFT",
+      "first_attempt": "MCP tool call timed out after 60s",
+      "retry": "succeeded on one retry; the retry result is the one recorded"
+    }
+  ],
+  "get_company_news": {
+    "AAPL": {
+      "data_keys": [
+        "attemptedSources",
+        "coverage",
+        "defaultSourcesApplied",
+        "items",
+        "meta",
+        "requestedSources",
+        "sourceCoverage",
+        "sourceStatus",
+        "ticker",
+        "warnings"
+      ],
+      "envelope_meta_keys": [
+        "cacheHit",
+        "cacheSource",
+        "dataDate",
+        "serverVersion",
+        "source",
+        "tool",
+        "warnings",
+        "workerVersionId"
+      ],
+      "data_meta_keys": [
+        "deduped",
+        "sourcesUsed",
+        "watermark"
+      ],
+      "status": null,
+      "sourceCoverage": "FULL",
+      "coverage": {
+        "state": "FULL",
+        "recommendedNextAction": "RETRY_TRUNCATED_SOURCE",
+        "failedSources": [],
+        "skippedSources": [
+          "marketaux"
+        ],
+        "truncatedSources": [
+          "finnhub"
+        ]
+      },
+      "sourceStatus": {
+        "yahoo_finance_news": "OK",
+        "yahoo_finance_press_releases": "EMPTY_RESULT",
+        "finnhub": "OK",
+        "marketaux": "NOT_NEEDED"
+      },
+      "requestedSources": null,
+      "defaultSourcesApplied": true,
+      "attemptedSources": [
+        {
+          "sourceType": "yahoo_finance_news",
+          "status": "OK"
+        },
+        {
+          "sourceType": "yahoo_finance_press_releases",
+          "status": "EMPTY_RESULT"
+        },
+        {
+          "sourceType": "finnhub",
+          "status": "OK"
+        }
+      ],
+      "item_count": {
+        "items": 10
+      },
+      "item_keys": [
+        "confidence",
+        "decisionUse",
+        "duplicateGroupId",
+        "eventType",
+        "evidenceClass",
+        "evidenceText",
+        "issuer",
+        "matchBasis",
+        "mentionedCompany",
+        "originalSource",
+        "publishedAt",
+        "retrievedAt",
+        "source",
+        "sourceRefs",
+        "sourceTickerMatch",
+        "sourceType",
+        "summary",
+        "tickerMatch",
+        "tickerRelevance",
+        "tickers",
+        "title",
+        "url",
+        "urlProvenance"
+      ],
+      "data_warning_codes": [],
+      "envelope_meta_warning_codes": [],
+      "notes": "item_keys is the union over items; sourceRefs only on some items, matchBasis/mentionedCompany/sourceTickerMatch only on yahoo_finance_news items"
+    },
+    "MSFT": {
+      "data_keys": [
+        "attemptedSources",
+        "coverage",
+        "defaultSourcesApplied",
+        "items",
+        "meta",
+        "requestedSources",
+        "sourceCoverage",
+        "sourceStatus",
+        "ticker",
+        "warnings"
+      ],
+      "envelope_meta_keys": [
+        "cacheHit",
+        "cacheSource",
+        "dataDate",
+        "serverVersion",
+        "source",
+        "tool",
+        "warnings",
+        "workerVersionId"
+      ],
+      "data_meta_keys": [
+        "deduped",
+        "sourcesUsed",
+        "watermark"
+      ],
+      "status": null,
+      "sourceCoverage": "FULL",
+      "coverage": {
+        "state": "FULL",
+        "recommendedNextAction": "RETRY_TRUNCATED_SOURCE",
+        "failedSources": [],
+        "skippedSources": [
+          "marketaux"
+        ],
+        "truncatedSources": [
+          "finnhub"
+        ]
+      },
+      "sourceStatus": {
+        "yahoo_finance_news": "OK",
+        "yahoo_finance_press_releases": "EMPTY_RESULT",
+        "finnhub": "OK",
+        "marketaux": "NOT_NEEDED"
+      },
+      "requestedSources": null,
+      "defaultSourcesApplied": true,
+      "attemptedSources": [
+        {
+          "sourceType": "yahoo_finance_news",
+          "status": "OK"
+        },
+        {
+          "sourceType": "yahoo_finance_press_releases",
+          "status": "EMPTY_RESULT"
+        },
+        {
+          "sourceType": "finnhub",
+          "status": "OK"
+        }
+      ],
+      "item_count": {
+        "items": 10
+      },
+      "item_keys": [
+        "confidence",
+        "decisionUse",
+        "duplicateGroupId",
+        "eventType",
+        "evidenceClass",
+        "evidenceText",
+        "issuer",
+        "matchBasis",
+        "mentionedCompany",
+        "originalSource",
+        "publishedAt",
+        "retrievedAt",
+        "source",
+        "sourceRefs",
+        "sourceTickerMatch",
+        "sourceType",
+        "summary",
+        "tickerMatch",
+        "tickerRelevance",
+        "tickers",
+        "title",
+        "url",
+        "urlProvenance"
+      ],
+      "data_warning_codes": [],
+      "envelope_meta_warning_codes": []
+    },
+    "NVDA": {
+      "data_keys": [
+        "attemptedSources",
+        "coverage",
+        "defaultSourcesApplied",
+        "items",
+        "meta",
+        "requestedSources",
+        "sourceCoverage",
+        "sourceStatus",
+        "ticker",
+        "warnings"
+      ],
+      "envelope_meta_keys": [
+        "cacheHit",
+        "cacheSource",
+        "dataDate",
+        "serverVersion",
+        "source",
+        "tool",
+        "warnings",
+        "workerVersionId"
+      ],
+      "data_meta_keys": [
+        "deduped",
+        "sourcesUsed",
+        "watermark"
+      ],
+      "status": null,
+      "sourceCoverage": "FULL",
+      "coverage": {
+        "state": "FULL",
+        "recommendedNextAction": "RETRY_TRUNCATED_SOURCE",
+        "failedSources": [],
+        "skippedSources": [
+          "marketaux"
+        ],
+        "truncatedSources": [
+          "finnhub"
+        ]
+      },
+      "sourceStatus": {
+        "yahoo_finance_news": "OK",
+        "yahoo_finance_press_releases": "EMPTY_RESULT",
+        "finnhub": "OK",
+        "marketaux": "NOT_NEEDED"
+      },
+      "requestedSources": null,
+      "defaultSourcesApplied": true,
+      "attemptedSources": [
+        {
+          "sourceType": "yahoo_finance_news",
+          "status": "OK"
+        },
+        {
+          "sourceType": "yahoo_finance_press_releases",
+          "status": "EMPTY_RESULT"
+        },
+        {
+          "sourceType": "finnhub",
+          "status": "OK"
+        }
+      ],
+      "item_count": {
+        "items": 10
+      },
+      "item_keys": [
+        "confidence",
+        "decisionUse",
+        "duplicateGroupId",
+        "eventType",
+        "evidenceClass",
+        "evidenceText",
+        "issuer",
+        "matchBasis",
+        "mentionedCompany",
+        "originalSource",
+        "publishedAt",
+        "retrievedAt",
+        "source",
+        "sourceRefs",
+        "sourceTickerMatch",
+        "sourceType",
+        "summary",
+        "tickerMatch",
+        "tickerRelevance",
+        "tickers",
+        "title",
+        "url",
+        "urlProvenance"
+      ],
+      "data_warning_codes": [],
+      "envelope_meta_warning_codes": []
+    }
+  },
+  "search_company_news": {
+    "AAPL": {
+      "data_keys": [
+        "attemptedSources",
+        "coverage",
+        "defaultSourcesApplied",
+        "items",
+        "matchCount",
+        "meta",
+        "query",
+        "requestedSources",
+        "sourceCoverage",
+        "sourceStatus",
+        "ticker",
+        "warnings"
+      ],
+      "envelope_meta_keys": [
+        "cacheHit",
+        "cacheSource",
+        "dataDate",
+        "serverVersion",
+        "source",
+        "tool",
+        "warnings",
+        "workerVersionId"
+      ],
+      "data_meta_keys": [
+        "deduped",
+        "sourcesUsed",
+        "watermark"
+      ],
+      "status": null,
+      "sourceCoverage": "FULL",
+      "coverage": {
+        "state": "FULL",
+        "recommendedNextAction": "RETRY_TRUNCATED_SOURCE",
+        "failedSources": [],
+        "skippedSources": [
+          "marketaux"
+        ],
+        "truncatedSources": [
+          "finnhub"
+        ]
+      },
+      "sourceStatus": {
+        "yahoo_finance_news": "OK",
+        "yahoo_finance_press_releases": "EMPTY_RESULT",
+        "finnhub": "OK",
+        "marketaux": "NOT_NEEDED"
+      },
+      "requestedSources": null,
+      "defaultSourcesApplied": true,
+      "attemptedSources": [
+        {
+          "sourceType": "yahoo_finance_news",
+          "status": "OK"
+        },
+        {
+          "sourceType": "yahoo_finance_press_releases",
+          "status": "EMPTY_RESULT"
+        },
+        {
+          "sourceType": "finnhub",
+          "status": "OK"
+        }
+      ],
+      "item_count": {
+        "items": 6
+      },
+      "item_keys": [
+        "confidence",
+        "decisionUse",
+        "duplicateGroupId",
+        "eventType",
+        "evidenceClass",
+        "evidenceText",
+        "issuer",
+        "originalSource",
+        "publishedAt",
+        "retrievedAt",
+        "source",
+        "sourceType",
+        "summary",
+        "tickerMatch",
+        "tickerRelevance",
+        "tickers",
+        "title",
+        "url",
+        "urlProvenance"
+      ],
+      "data_warning_codes": [],
+      "envelope_meta_warning_codes": []
+    },
+    "MSFT": {
+      "data_keys": [
+        "attemptedSources",
+        "coverage",
+        "defaultSourcesApplied",
+        "items",
+        "matchCount",
+        "meta",
+        "query",
+        "requestedSources",
+        "sourceCoverage",
+        "sourceStatus",
+        "ticker",
+        "warnings"
+      ],
+      "envelope_meta_keys": [
+        "cacheHit",
+        "cacheSource",
+        "dataDate",
+        "serverVersion",
+        "source",
+        "tool",
+        "warnings",
+        "workerVersionId"
+      ],
+      "data_meta_keys": [
+        "deduped",
+        "sourcesUsed",
+        "watermark"
+      ],
+      "status": null,
+      "sourceCoverage": "FULL",
+      "coverage": {
+        "state": "FULL",
+        "recommendedNextAction": "RETRY_TRUNCATED_SOURCE",
+        "failedSources": [],
+        "skippedSources": [
+          "marketaux"
+        ],
+        "truncatedSources": [
+          "finnhub"
+        ]
+      },
+      "sourceStatus": {
+        "yahoo_finance_news": "OK",
+        "yahoo_finance_press_releases": "EMPTY_RESULT",
+        "finnhub": "OK",
+        "marketaux": "NOT_NEEDED"
+      },
+      "requestedSources": null,
+      "defaultSourcesApplied": true,
+      "attemptedSources": [
+        {
+          "sourceType": "yahoo_finance_news",
+          "status": "OK"
+        },
+        {
+          "sourceType": "yahoo_finance_press_releases",
+          "status": "EMPTY_RESULT"
+        },
+        {
+          "sourceType": "finnhub",
+          "status": "OK"
+        }
+      ],
+      "item_count": {
+        "items": 10
+      },
+      "item_keys": [
+        "confidence",
+        "decisionUse",
+        "duplicateGroupId",
+        "eventType",
+        "evidenceClass",
+        "evidenceText",
+        "issuer",
+        "matchBasis",
+        "mentionedCompany",
+        "originalSource",
+        "publishedAt",
+        "retrievedAt",
+        "source",
+        "sourceTickerMatch",
+        "sourceType",
+        "summary",
+        "tickerMatch",
+        "tickerRelevance",
+        "tickers",
+        "title",
+        "url",
+        "urlProvenance"
+      ],
+      "data_warning_codes": [],
+      "envelope_meta_warning_codes": []
+    },
+    "NVDA": {
+      "data_keys": [
+        "attemptedSources",
+        "coverage",
+        "defaultSourcesApplied",
+        "items",
+        "matchCount",
+        "meta",
+        "query",
+        "requestedSources",
+        "sourceCoverage",
+        "sourceStatus",
+        "ticker",
+        "warnings"
+      ],
+      "envelope_meta_keys": [
+        "cacheHit",
+        "cacheSource",
+        "dataDate",
+        "serverVersion",
+        "source",
+        "tool",
+        "warnings",
+        "workerVersionId"
+      ],
+      "data_meta_keys": [
+        "deduped",
+        "sourcesUsed",
+        "watermark"
+      ],
+      "status": null,
+      "sourceCoverage": "FULL",
+      "coverage": {
+        "state": "FULL",
+        "recommendedNextAction": "RETRY_TRUNCATED_SOURCE",
+        "failedSources": [],
+        "skippedSources": [
+          "marketaux"
+        ],
+        "truncatedSources": [
+          "finnhub"
+        ]
+      },
+      "sourceStatus": {
+        "yahoo_finance_news": "OK",
+        "yahoo_finance_press_releases": "EMPTY_RESULT",
+        "finnhub": "OK",
+        "marketaux": "NOT_NEEDED"
+      },
+      "requestedSources": null,
+      "defaultSourcesApplied": true,
+      "attemptedSources": [
+        {
+          "sourceType": "yahoo_finance_news",
+          "status": "OK"
+        },
+        {
+          "sourceType": "yahoo_finance_press_releases",
+          "status": "EMPTY_RESULT"
+        },
+        {
+          "sourceType": "finnhub",
+          "status": "OK"
+        }
+      ],
+      "item_count": {
+        "items": 6
+      },
+      "item_keys": [
+        "confidence",
+        "decisionUse",
+        "duplicateGroupId",
+        "eventType",
+        "evidenceClass",
+        "evidenceText",
+        "issuer",
+        "originalSource",
+        "publishedAt",
+        "retrievedAt",
+        "source",
+        "sourceType",
+        "summary",
+        "tickerMatch",
+        "tickerRelevance",
+        "tickers",
+        "title",
+        "url",
+        "urlProvenance"
+      ],
+      "data_warning_codes": [],
+      "envelope_meta_warning_codes": []
+    }
+  },
+  "get_company_press_releases": {
+    "AAPL": {
+      "data_keys": [
+        "attemptedSources",
+        "capabilityStatus",
+        "coverage",
+        "coverageStatus",
+        "decisionGrade",
+        "decisionGradeBasis",
+        "defaultSourcesApplied",
+        "doctrineUse",
+        "failureMode",
+        "items",
+        "meta",
+        "reliabilityClass",
+        "requestedSources",
+        "secEvidence",
+        "sourceCoverage",
+        "sourceStatus",
+        "status",
+        "ticker",
+        "warnings"
+      ],
+      "envelope_meta_keys": [
+        "cacheHit",
+        "cacheSource",
+        "capabilityStatus",
+        "dataDate",
+        "decisionGrade",
+        "doctrineUse",
+        "evidenceRequired",
+        "failureMode",
+        "limitationStatuses",
+        "note",
+        "reliabilityClass",
+        "serverVersion",
+        "source",
+        "sourceType",
+        "successCriteria",
+        "tool",
+        "warnings",
+        "workerVersionId"
+      ],
+      "data_meta_keys": [
+        "deduped",
+        "sourcesUsed",
+        "watermark"
+      ],
+      "status": "SEC_EX99_FOUND",
+      "sourceCoverage": "PARTIAL",
+      "coverage": {
+        "state": "PARTIAL",
+        "recommendedNextAction": "USE_OFFICIAL_EVIDENCE",
+        "failedSources": [
+          "company_ir_page"
+        ],
+        "skippedSources": [],
+        "truncatedSources": []
+      },
+      "sourceStatus": {
+        "sec": "OK",
+        "yahoo_finance_press_releases": "EMPTY_RESULT",
+        "company_ir_page": "NOT_REGISTERED"
+      },
+      "requestedSources": null,
+      "defaultSourcesApplied": true,
+      "attemptedSources": [
+        {
+          "sourceType": "sec",
+          "status": "OK"
+        },
+        {
+          "sourceType": "yahoo_finance_press_releases",
+          "status": "EMPTY_RESULT"
+        },
+        {
+          "sourceType": "company_ir_page",
+          "status": "NOT_REGISTERED"
+        }
+      ],
+      "item_count": {
+        "items": 1
+      },
+      "item_keys": [
+        "acceptedAt",
+        "accessionNumber",
+        "cikInt",
+        "confidence",
+        "decisionUse",
+        "duplicateGroupId",
+        "eventType",
+        "evidenceClass",
+        "evidenceText",
+        "filingDate",
+        "filingType",
+        "issuer",
+        "publishedAt",
+        "retrievedAt",
+        "source",
+        "sourceType",
+        "summary",
+        "tickerMatch",
+        "tickerRelevance",
+        "tickers",
+        "title",
+        "url",
+        "urlProvenance"
+      ],
+      "data_warning_codes": [],
+      "envelope_meta_warning_codes": [
+        "DEPRECATED_FIELD"
+      ]
+    },
+    "MSFT": {
+      "data_keys": [
+        "attemptedSources",
+        "capabilityStatus",
+        "coverage",
+        "coverageStatus",
+        "decisionGrade",
+        "decisionGradeBasis",
+        "defaultSourcesApplied",
+        "doctrineUse",
+        "failureMode",
+        "items",
+        "meta",
+        "reliabilityClass",
+        "requestedSources",
+        "secEvidence",
+        "sourceCoverage",
+        "sourceStatus",
+        "status",
+        "ticker",
+        "warnings"
+      ],
+      "envelope_meta_keys": [
+        "cacheHit",
+        "cacheSource",
+        "capabilityStatus",
+        "dataDate",
+        "decisionGrade",
+        "doctrineUse",
+        "evidenceRequired",
+        "failureMode",
+        "limitationStatuses",
+        "note",
+        "reliabilityClass",
+        "serverVersion",
+        "source",
+        "sourceType",
+        "successCriteria",
+        "tool",
+        "warnings",
+        "workerVersionId"
+      ],
+      "data_meta_keys": [
+        "deduped",
+        "sourcesUsed",
+        "watermark"
+      ],
+      "status": "SEC_EX99_FOUND",
+      "sourceCoverage": "PARTIAL",
+      "coverage": {
+        "state": "PARTIAL",
+        "recommendedNextAction": "USE_OFFICIAL_EVIDENCE",
+        "failedSources": [
+          "company_ir_page"
+        ],
+        "skippedSources": [],
+        "truncatedSources": []
+      },
+      "sourceStatus": {
+        "sec": "OK",
+        "yahoo_finance_press_releases": "EMPTY_RESULT",
+        "company_ir_page": "NOT_REGISTERED"
+      },
+      "requestedSources": null,
+      "defaultSourcesApplied": true,
+      "attemptedSources": [
+        {
+          "sourceType": "sec",
+          "status": "OK"
+        },
+        {
+          "sourceType": "yahoo_finance_press_releases",
+          "status": "EMPTY_RESULT"
+        },
+        {
+          "sourceType": "company_ir_page",
+          "status": "NOT_REGISTERED"
+        }
+      ],
+      "item_count": {
+        "items": 2
+      },
+      "item_keys": [
+        "acceptedAt",
+        "accessionNumber",
+        "cikInt",
+        "confidence",
+        "decisionUse",
+        "duplicateGroupId",
+        "eventType",
+        "evidenceClass",
+        "evidenceText",
+        "filingDate",
+        "filingType",
+        "issuer",
+        "publishedAt",
+        "retrievedAt",
+        "source",
+        "sourceType",
+        "summary",
+        "tickerMatch",
+        "tickerRelevance",
+        "tickers",
+        "title",
+        "url",
+        "urlProvenance"
+      ],
+      "data_warning_codes": [],
+      "envelope_meta_warning_codes": [
+        "DEPRECATED_FIELD"
+      ]
+    },
+    "NVDA": {
+      "data_keys": [
+        "attemptedSources",
+        "capabilityStatus",
+        "coverage",
+        "coverageStatus",
+        "decisionGrade",
+        "decisionGradeBasis",
+        "defaultSourcesApplied",
+        "doctrineUse",
+        "failureMode",
+        "items",
+        "meta",
+        "reliabilityClass",
+        "requestedSources",
+        "secEvidence",
+        "sourceCoverage",
+        "sourceStatus",
+        "status",
+        "ticker",
+        "warnings"
+      ],
+      "envelope_meta_keys": [
+        "cacheHit",
+        "cacheSource",
+        "capabilityStatus",
+        "dataDate",
+        "decisionGrade",
+        "doctrineUse",
+        "evidenceRequired",
+        "failureMode",
+        "limitationStatuses",
+        "note",
+        "reliabilityClass",
+        "serverVersion",
+        "source",
+        "sourceType",
+        "successCriteria",
+        "tool",
+        "warnings",
+        "workerVersionId"
+      ],
+      "data_meta_keys": [
+        "deduped",
+        "sourcesUsed",
+        "watermark"
+      ],
+      "status": "SEC_EX99_FOUND",
+      "sourceCoverage": "PARTIAL",
+      "coverage": {
+        "state": "PARTIAL",
+        "recommendedNextAction": "USE_OFFICIAL_EVIDENCE",
+        "failedSources": [
+          "company_ir_page"
+        ],
+        "skippedSources": [],
+        "truncatedSources": []
+      },
+      "sourceStatus": {
+        "sec": "OK",
+        "yahoo_finance_press_releases": "EMPTY_RESULT",
+        "company_ir_page": "NOT_REGISTERED"
+      },
+      "requestedSources": null,
+      "defaultSourcesApplied": true,
+      "attemptedSources": [
+        {
+          "sourceType": "sec",
+          "status": "OK"
+        },
+        {
+          "sourceType": "yahoo_finance_press_releases",
+          "status": "EMPTY_RESULT"
+        },
+        {
+          "sourceType": "company_ir_page",
+          "status": "NOT_REGISTERED"
+        }
+      ],
+      "item_count": {
+        "items": 3
+      },
+      "item_keys": [
+        "acceptedAt",
+        "accessionNumber",
+        "cikInt",
+        "confidence",
+        "decisionUse",
+        "duplicateGroupId",
+        "eventType",
+        "evidenceClass",
+        "evidenceText",
+        "filingDate",
+        "filingType",
+        "issuer",
+        "publishedAt",
+        "retrievedAt",
+        "source",
+        "sourceType",
+        "summary",
+        "tickerMatch",
+        "tickerRelevance",
+        "tickers",
+        "title",
+        "url",
+        "urlProvenance"
+      ],
+      "data_warning_codes": [],
+      "envelope_meta_warning_codes": [
+        "DEPRECATED_FIELD"
+      ]
+    }
+  },
+  "get_public_event_timeline": {
+    "AAPL": {
+      "data_keys": [
+        "attemptedSources",
+        "coverage",
+        "defaultSourcesApplied",
+        "meta",
+        "requestedSources",
+        "sourceCoverage",
+        "sourceStatus",
+        "ticker",
+        "timeline",
+        "warnings"
+      ],
+      "envelope_meta_keys": [
+        "cacheHit",
+        "cacheSource",
+        "dataDate",
+        "serverVersion",
+        "source",
+        "tool",
+        "warnings",
+        "workerVersionId"
+      ],
+      "data_meta_keys": [
+        "deduped",
+        "sourcesUsed",
+        "watermark"
+      ],
+      "status": null,
+      "sourceCoverage": "PARTIAL",
+      "coverage": {
+        "state": "PARTIAL",
+        "recommendedNextAction": "CHECK_OFFICIAL_RELEASES",
+        "failedSources": [
+          "company_ir_page"
+        ],
+        "skippedSources": [
+          "marketaux"
+        ],
+        "truncatedSources": [
+          "finnhub"
+        ]
+      },
+      "sourceStatus": {
+        "sec": "EMPTY_RESULT",
+        "yahoo_finance_news": "OK",
+        "yahoo_finance_press_releases": "EMPTY_RESULT",
+        "finnhub": "OK",
+        "marketaux": "NOT_NEEDED",
+        "company_ir": "OK",
+        "company_ir_page": "NOT_REGISTERED"
+      },
+      "requestedSources": null,
+      "defaultSourcesApplied": true,
+      "attemptedSources": [
+        {
+          "sourceType": "sec",
+          "status": "EMPTY_RESULT"
+        },
+        {
+          "sourceType": "yahoo_finance_news",
+          "status": "OK"
+        },
+        {
+          "sourceType": "yahoo_finance_press_releases",
+          "status": "EMPTY_RESULT"
+        },
+        {
+          "sourceType": "finnhub",
+          "status": "OK"
+        },
+        {
+          "sourceType": "company_ir",
+          "status": "OK"
+        },
+        {
+          "sourceType": "company_ir_page",
+          "status": "NOT_REGISTERED"
+        }
+      ],
+      "item_count": {
+        "timeline": 50
+      },
+      "item_keys": [
+        "confidence",
+        "decisionUse",
+        "duplicateGroupId",
+        "eventType",
+        "evidenceClass",
+        "matchBasis",
+        "source",
+        "sourceRefs",
+        "sourceType",
+        "tickerMatch",
+        "timestamp",
+        "title",
+        "url",
+        "urlProvenance"
+      ],
+      "data_warning_codes": [
+        "TIMESTAMP_VARIANCE"
+      ],
+      "envelope_meta_warning_codes": [],
+      "notes": {
+        "count_basis": "sum of sourceStatus returnedCount (finnhub + yahoo_finance_news) plus company_ir items; not counted element by element"
+      }
+    },
+    "MSFT": {
+      "data_keys": [
+        "attemptedSources",
+        "coverage",
+        "defaultSourcesApplied",
+        "meta",
+        "requestedSources",
+        "sourceCoverage",
+        "sourceStatus",
+        "ticker",
+        "timeline",
+        "warnings"
+      ],
+      "envelope_meta_keys": [
+        "cacheHit",
+        "cacheSource",
+        "dataDate",
+        "serverVersion",
+        "source",
+        "tool",
+        "warnings",
+        "workerVersionId"
+      ],
+      "data_meta_keys": [
+        "deduped",
+        "sourcesUsed",
+        "watermark"
+      ],
+      "status": null,
+      "sourceCoverage": "PARTIAL",
+      "coverage": {
+        "state": "PARTIAL",
+        "recommendedNextAction": "CHECK_OFFICIAL_RELEASES",
+        "failedSources": [
+          "company_ir_page"
+        ],
+        "skippedSources": [
+          "marketaux"
+        ],
+        "truncatedSources": [
+          "finnhub"
+        ]
+      },
+      "sourceStatus": {
+        "sec": "EMPTY_RESULT",
+        "yahoo_finance_news": "OK",
+        "yahoo_finance_press_releases": "EMPTY_RESULT",
+        "finnhub": "OK",
+        "marketaux": "NOT_NEEDED",
+        "company_ir": "OK",
+        "company_ir_page": "NOT_REGISTERED"
+      },
+      "requestedSources": null,
+      "defaultSourcesApplied": true,
+      "attemptedSources": [
+        {
+          "sourceType": "sec",
+          "status": "EMPTY_RESULT"
+        },
+        {
+          "sourceType": "yahoo_finance_news",
+          "status": "OK"
+        },
+        {
+          "sourceType": "yahoo_finance_press_releases",
+          "status": "EMPTY_RESULT"
+        },
+        {
+          "sourceType": "finnhub",
+          "status": "OK"
+        },
+        {
+          "sourceType": "company_ir",
+          "status": "OK"
+        },
+        {
+          "sourceType": "company_ir_page",
+          "status": "NOT_REGISTERED"
+        }
+      ],
+      "item_count": {
+        "timeline": 50
+      },
+      "item_keys": [
+        "confidence",
+        "decisionUse",
+        "duplicateGroupId",
+        "eventType",
+        "evidenceClass",
+        "matchBasis",
+        "source",
+        "sourceRefs",
+        "sourceType",
+        "tickerMatch",
+        "timestamp",
+        "title",
+        "url",
+        "urlProvenance"
+      ],
+      "data_warning_codes": [],
+      "envelope_meta_warning_codes": [],
+      "notes": {
+        "count_basis": "sum of sourceStatus returnedCount (finnhub + yahoo_finance_news) plus company_ir items; not counted element by element"
+      }
+    },
+    "NVDA": {
+      "data_keys": [
+        "attemptedSources",
+        "coverage",
+        "defaultSourcesApplied",
+        "meta",
+        "requestedSources",
+        "sourceCoverage",
+        "sourceStatus",
+        "ticker",
+        "timeline",
+        "warnings"
+      ],
+      "envelope_meta_keys": [
+        "cacheHit",
+        "cacheSource",
+        "dataDate",
+        "serverVersion",
+        "source",
+        "tool",
+        "warnings",
+        "workerVersionId"
+      ],
+      "data_meta_keys": [
+        "deduped",
+        "sourcesUsed",
+        "watermark"
+      ],
+      "status": null,
+      "sourceCoverage": "PARTIAL",
+      "coverage": {
+        "state": "PARTIAL",
+        "recommendedNextAction": "CHECK_OFFICIAL_RELEASES",
+        "failedSources": [
+          "company_ir_page"
+        ],
+        "skippedSources": [
+          "marketaux"
+        ],
+        "truncatedSources": [
+          "finnhub"
+        ]
+      },
+      "sourceStatus": {
+        "sec": "EMPTY_RESULT",
+        "yahoo_finance_news": "OK",
+        "yahoo_finance_press_releases": "EMPTY_RESULT",
+        "finnhub": "OK",
+        "marketaux": "NOT_NEEDED",
+        "company_ir": "EMPTY_RESULT",
+        "company_ir_page": "NOT_REGISTERED"
+      },
+      "requestedSources": null,
+      "defaultSourcesApplied": true,
+      "attemptedSources": [
+        {
+          "sourceType": "sec",
+          "status": "EMPTY_RESULT"
+        },
+        {
+          "sourceType": "yahoo_finance_news",
+          "status": "OK"
+        },
+        {
+          "sourceType": "yahoo_finance_press_releases",
+          "status": "EMPTY_RESULT"
+        },
+        {
+          "sourceType": "finnhub",
+          "status": "OK"
+        },
+        {
+          "sourceType": "company_ir",
+          "status": "EMPTY_RESULT"
+        },
+        {
+          "sourceType": "company_ir_page",
+          "status": "NOT_REGISTERED"
+        }
+      ],
+      "item_count": {
+        "timeline": 50
+      },
+      "item_keys": [
+        "confidence",
+        "decisionUse",
+        "duplicateGroupId",
+        "eventType",
+        "evidenceClass",
+        "matchBasis",
+        "source",
+        "sourceRefs",
+        "sourceType",
+        "tickerMatch",
+        "timestamp",
+        "title",
+        "url",
+        "urlProvenance"
+      ],
+      "data_warning_codes": [
+        "COMPANY_IR_DISCOVERY_BUDGET_EXHAUSTED",
+        "COMPANY_IR_RSS_PARSE_ERROR"
+      ],
+      "envelope_meta_warning_codes": [],
+      "notes": {
+        "count_basis": "sum of sourceStatus returnedCount: finnhub 49 + yahoo_finance_news 1 + company_ir 0 = 50; not counted element by element"
+      }
+    }
+  },
+  "verify_company_event": {
+    "AAPL": {
+      "data_keys": [
+        "attemptedSources",
+        "bestEvidence",
+        "conflicts",
+        "coverage",
+        "defaultSourcesApplied",
+        "failureMode",
+        "meta",
+        "query",
+        "queryPolicy",
+        "recommendedAction",
+        "requestedSources",
+        "retryable",
+        "sourceCoverage",
+        "sourceStatus",
+        "status",
+        "ticker",
+        "warnings"
+      ],
+      "envelope_meta_keys": [
+        "cacheHit",
+        "cacheSource",
+        "dataDate",
+        "serverVersion",
+        "source",
+        "tool",
+        "warnings",
+        "workerVersionId"
+      ],
+      "data_meta_keys": [
+        "sourcesChecked",
+        "watermark"
+      ],
+      "status": "PARTIAL",
+      "sourceCoverage": "PARTIAL",
+      "coverage": {
+        "state": "PARTIAL",
+        "recommendedNextAction": "CHECK_OFFICIAL_RELEASES",
+        "failedSources": [
+          "company_ir_page"
+        ],
+        "skippedSources": [
+          "marketaux"
+        ],
+        "truncatedSources": [
+          "finnhub"
+        ]
+      },
+      "sourceStatus": {
+        "sec": "OK",
+        "yahoo_finance_news": "OK",
+        "yahoo_finance_press_releases": "EMPTY_RESULT",
+        "finnhub": "OK",
+        "marketaux": "NOT_NEEDED",
+        "company_ir": "OK",
+        "company_ir_page": "NOT_REGISTERED"
+      },
+      "requestedSources": null,
+      "defaultSourcesApplied": true,
+      "attemptedSources": [
+        {
+          "sourceType": "sec",
+          "status": "OK"
+        },
+        {
+          "sourceType": "yahoo_finance_news",
+          "status": "OK"
+        },
+        {
+          "sourceType": "yahoo_finance_press_releases",
+          "status": "EMPTY_RESULT"
+        },
+        {
+          "sourceType": "finnhub",
+          "status": "OK"
+        },
+        {
+          "sourceType": "company_ir",
+          "status": "OK"
+        },
+        {
+          "sourceType": "company_ir_page",
+          "status": "NOT_REGISTERED"
+        }
+      ],
+      "item_count": {
+        "bestEvidence": 1
+      },
+      "item_keys": [
+        "confidence",
+        "entityRelevance",
+        "evidenceText",
+        "publishedAt",
+        "queryMatch",
+        "relevance",
+        "retrievedAt",
+        "source",
+        "sourceType",
+        "url"
+      ],
+      "data_warning_codes": [
+        "TIMESTAMP_VARIANCE"
+      ],
+      "envelope_meta_warning_codes": []
+    },
+    "MSFT": {
+      "data_keys": [
+        "attemptedSources",
+        "bestEvidence",
+        "conflicts",
+        "coverage",
+        "defaultSourcesApplied",
+        "failureMode",
+        "meta",
+        "query",
+        "queryPolicy",
+        "recommendedAction",
+        "requestedSources",
+        "retryable",
+        "sourceCoverage",
+        "sourceStatus",
+        "status",
+        "ticker",
+        "warnings"
+      ],
+      "envelope_meta_keys": [
+        "cacheHit",
+        "cacheSource",
+        "dataDate",
+        "serverVersion",
+        "source",
+        "tool",
+        "warnings",
+        "workerVersionId"
+      ],
+      "data_meta_keys": [
+        "sourcesChecked",
+        "watermark"
+      ],
+      "status": "PARTIAL",
+      "sourceCoverage": "PARTIAL",
+      "coverage": {
+        "state": "PARTIAL",
+        "recommendedNextAction": "CHECK_OFFICIAL_RELEASES",
+        "failedSources": [
+          "company_ir_page"
+        ],
+        "skippedSources": [
+          "marketaux"
+        ],
+        "truncatedSources": [
+          "finnhub"
+        ]
+      },
+      "sourceStatus": {
+        "sec": "OK",
+        "yahoo_finance_news": "OK",
+        "yahoo_finance_press_releases": "EMPTY_RESULT",
+        "finnhub": "OK",
+        "marketaux": "NOT_NEEDED",
+        "company_ir": "OK",
+        "company_ir_page": "NOT_REGISTERED"
+      },
+      "requestedSources": null,
+      "defaultSourcesApplied": true,
+      "attemptedSources": [
+        {
+          "sourceType": "sec",
+          "status": "OK"
+        },
+        {
+          "sourceType": "yahoo_finance_news",
+          "status": "OK"
+        },
+        {
+          "sourceType": "yahoo_finance_press_releases",
+          "status": "EMPTY_RESULT"
+        },
+        {
+          "sourceType": "finnhub",
+          "status": "OK"
+        },
+        {
+          "sourceType": "company_ir",
+          "status": "OK"
+        },
+        {
+          "sourceType": "company_ir_page",
+          "status": "NOT_REGISTERED"
+        }
+      ],
+      "item_count": {
+        "bestEvidence": 2
+      },
+      "item_keys": [
+        "confidence",
+        "entityRelevance",
+        "evidenceText",
+        "publishedAt",
+        "queryMatch",
+        "relevance",
+        "retrievedAt",
+        "source",
+        "sourceType",
+        "url"
+      ],
+      "data_warning_codes": [],
+      "envelope_meta_warning_codes": []
+    },
+    "NVDA": {
+      "data_keys": [
+        "attemptedSources",
+        "bestEvidence",
+        "conflicts",
+        "coverage",
+        "defaultSourcesApplied",
+        "failureMode",
+        "meta",
+        "query",
+        "queryPolicy",
+        "recommendedAction",
+        "requestedSources",
+        "retryable",
+        "sourceCoverage",
+        "sourceStatus",
+        "status",
+        "ticker",
+        "warnings"
+      ],
+      "envelope_meta_keys": [
+        "cacheHit",
+        "cacheSource",
+        "dataDate",
+        "serverVersion",
+        "source",
+        "tool",
+        "warnings",
+        "workerVersionId"
+      ],
+      "data_meta_keys": [
+        "sourcesChecked",
+        "watermark"
+      ],
+      "status": "PARTIAL",
+      "sourceCoverage": "PARTIAL",
+      "coverage": {
+        "state": "PARTIAL",
+        "recommendedNextAction": "CHECK_OFFICIAL_RELEASES",
+        "failedSources": [
+          "company_ir",
+          "company_ir_page"
+        ],
+        "skippedSources": [
+          "marketaux"
+        ],
+        "truncatedSources": [
+          "finnhub"
+        ]
+      },
+      "sourceStatus": {
+        "sec": "OK",
+        "yahoo_finance_news": "OK",
+        "yahoo_finance_press_releases": "EMPTY_RESULT",
+        "finnhub": "OK",
+        "marketaux": "NOT_NEEDED",
+        "company_ir": "DISCOVERY_BUDGET_EXHAUSTED",
+        "company_ir_page": "NOT_REGISTERED"
+      },
+      "requestedSources": null,
+      "defaultSourcesApplied": true,
+      "attemptedSources": [
+        {
+          "sourceType": "sec",
+          "status": "OK"
+        },
+        {
+          "sourceType": "yahoo_finance_news",
+          "status": "OK"
+        },
+        {
+          "sourceType": "yahoo_finance_press_releases",
+          "status": "EMPTY_RESULT"
+        },
+        {
+          "sourceType": "finnhub",
+          "status": "OK"
+        },
+        {
+          "sourceType": "company_ir",
+          "status": "DISCOVERY_BUDGET_EXHAUSTED"
+        },
+        {
+          "sourceType": "company_ir_page",
+          "status": "NOT_REGISTERED"
+        }
+      ],
+      "item_count": {
+        "bestEvidence": 3
+      },
+      "item_keys": [
+        "confidence",
+        "entityRelevance",
+        "evidenceText",
+        "publishedAt",
+        "queryMatch",
+        "relevance",
+        "retrievedAt",
+        "source",
+        "sourceType",
+        "url"
+      ],
+      "data_warning_codes": [
+        "COMPANY_IR_DISCOVERY_BUDGET_EXHAUSTED",
+        "COMPANY_IR_FEED_NOT_FOUND"
+      ],
+      "envelope_meta_warning_codes": []
+    }
+  },
+  "get_sec_recent_events": {
+    "AAPL": {
+      "data_keys": [
+        "coverage",
+        "items",
+        "meta",
+        "sourceCoverage",
+        "sourceStatus",
+        "ticker",
+        "warnings"
+      ],
+      "envelope_meta_keys": [
+        "cacheHit",
+        "cacheSource",
+        "dataDate",
+        "serverVersion",
+        "source",
+        "tool",
+        "warnings",
+        "workerVersionId"
+      ],
+      "data_meta_keys": [
+        "sourcesUsed",
+        "watermark"
+      ],
+      "status": null,
+      "sourceCoverage": "FULL",
+      "coverage": {
+        "state": "FULL",
+        "recommendedNextAction": "USE_RETURNED_CONTEXT",
+        "failedSources": [],
+        "skippedSources": [],
+        "truncatedSources": []
+      },
+      "sourceStatus": {
+        "sec": "OK"
+      },
+      "requestedSources": null,
+      "defaultSourcesApplied": null,
+      "attemptedSources": null,
+      "item_count": {
+        "items": 2
+      },
+      "item_keys": [
+        "acceptedAt",
+        "accessionNumber",
+        "cikInt",
+        "confidence",
+        "decisionUse",
+        "duplicateGroupId",
+        "eventType",
+        "evidenceClass",
+        "evidenceText",
+        "filingDate",
+        "filingType",
+        "issuer",
+        "publishedAt",
+        "retrievedAt",
+        "source",
+        "sourceType",
+        "summary",
+        "tickerMatch",
+        "tickerRelevance",
+        "tickers",
+        "title",
+        "url",
+        "urlProvenance"
+      ],
+      "data_warning_codes": [],
+      "envelope_meta_warning_codes": [],
+      "notes": {
+        "absent_top_level_fields": [
+          "requestedSources",
+          "defaultSourcesApplied",
+          "attemptedSources"
+        ]
+      }
+    },
+    "MSFT": {
+      "data_keys": [
+        "coverage",
+        "items",
+        "meta",
+        "sourceCoverage",
+        "sourceStatus",
+        "ticker",
+        "warnings"
+      ],
+      "envelope_meta_keys": [
+        "cacheHit",
+        "cacheSource",
+        "dataDate",
+        "serverVersion",
+        "source",
+        "tool",
+        "warnings",
+        "workerVersionId"
+      ],
+      "data_meta_keys": [
+        "sourcesUsed",
+        "watermark"
+      ],
+      "status": null,
+      "sourceCoverage": "FULL",
+      "coverage": {
+        "state": "FULL",
+        "recommendedNextAction": "USE_RETURNED_CONTEXT",
+        "failedSources": [],
+        "skippedSources": [],
+        "truncatedSources": []
+      },
+      "sourceStatus": {
+        "sec": "OK"
+      },
+      "requestedSources": null,
+      "defaultSourcesApplied": null,
+      "attemptedSources": null,
+      "item_count": {
+        "items": 3
+      },
+      "item_keys": [
+        "acceptedAt",
+        "accessionNumber",
+        "cikInt",
+        "confidence",
+        "decisionUse",
+        "duplicateGroupId",
+        "eventType",
+        "evidenceClass",
+        "evidenceText",
+        "filingDate",
+        "filingType",
+        "issuer",
+        "publishedAt",
+        "retrievedAt",
+        "source",
+        "sourceType",
+        "summary",
+        "tickerMatch",
+        "tickerRelevance",
+        "tickers",
+        "title",
+        "url",
+        "urlProvenance"
+      ],
+      "data_warning_codes": [],
+      "envelope_meta_warning_codes": [],
+      "notes": {
+        "absent_top_level_fields": [
+          "requestedSources",
+          "defaultSourcesApplied",
+          "attemptedSources"
+        ]
+      }
+    },
+    "NVDA": {
+      "data_keys": [
+        "coverage",
+        "items",
+        "meta",
+        "sourceCoverage",
+        "sourceStatus",
+        "ticker",
+        "warnings"
+      ],
+      "envelope_meta_keys": [
+        "cacheHit",
+        "cacheSource",
+        "dataDate",
+        "serverVersion",
+        "source",
+        "tool",
+        "warnings",
+        "workerVersionId"
+      ],
+      "data_meta_keys": [
+        "sourcesUsed",
+        "watermark"
+      ],
+      "status": null,
+      "sourceCoverage": "FULL",
+      "coverage": {
+        "state": "FULL",
+        "recommendedNextAction": "USE_RETURNED_CONTEXT",
+        "failedSources": [],
+        "skippedSources": [],
+        "truncatedSources": []
+      },
+      "sourceStatus": {
+        "sec": "OK"
+      },
+      "requestedSources": null,
+      "defaultSourcesApplied": null,
+      "attemptedSources": null,
+      "item_count": {
+        "items": 4
+      },
+      "item_keys": [
+        "acceptedAt",
+        "accessionNumber",
+        "cikInt",
+        "confidence",
+        "decisionUse",
+        "duplicateGroupId",
+        "eventType",
+        "evidenceClass",
+        "evidenceText",
+        "filingDate",
+        "filingType",
+        "issuer",
+        "publishedAt",
+        "retrievedAt",
+        "source",
+        "sourceType",
+        "summary",
+        "tickerMatch",
+        "tickerRelevance",
+        "tickers",
+        "title",
+        "url",
+        "urlProvenance"
+      ],
+      "data_warning_codes": [],
+      "envelope_meta_warning_codes": [],
+      "notes": {
+        "absent_top_level_fields": [
+          "requestedSources",
+          "defaultSourcesApplied",
+          "attemptedSources"
+        ]
+      }
+    }
+  }
+}
