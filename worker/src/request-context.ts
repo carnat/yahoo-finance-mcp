@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import { checkFetchUrl, UrlPolicyError } from "./url-policy.js";
 
 /**
  * Per-request and per-tool-call cache attribution.
@@ -45,10 +46,57 @@ function countUpstreamRequest(): void {
   for (let scope = scopes.getStore(); scope; scope = scope.parent) scope.upstreamRequests++;
 }
 
-/** fetch() for provider requests; the request counts against the current scopes. */
-export function providerFetch(input: string | URL | Request, init?: RequestInit): Promise<Response> {
-  countUpstreamRequest();
-  return fetch(input, init);
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+/** Most redirects providerFetch follows for one request. */
+export const MAX_REDIRECT_HOPS = 5;
+
+function checkedUrl(url: string): URL {
+  const check = checkFetchUrl(url);
+  if (!check.ok) throw new UrlPolicyError(check.reason);
+  return check.url;
+}
+
+/**
+ * fetch() for provider requests, and the single choke point for outbound URLs.
+ *
+ * The first URL and every redirect target must pass checkFetchUrl, or a
+ * UrlPolicyError is thrown. Redirects are followed here (`redirect: "manual"`),
+ * at most MAX_REDIRECT_HOPS of them; a 303 continues as GET. Each request,
+ * redirect hops included, counts against the current scopes.
+ */
+export async function providerFetch(input: string | URL, init: RequestInit = {}): Promise<Response> {
+  // The first request goes out exactly as the caller spelled it; hops use the resolved target.
+  let href = String(input);
+  let current = checkedUrl(href);
+  let requestInit: RequestInit = { ...init, redirect: "manual" };
+  for (let hops = 0; ; hops++) {
+    countUpstreamRequest();
+    const response = await fetch(href, requestInit);
+    const location = REDIRECT_STATUSES.has(response.status) ? response.headers.get("Location") : null;
+    if (location === null) return response;
+    await response.body?.cancel();
+    if (hops >= MAX_REDIRECT_HOPS) throw new UrlPolicyError("too many redirects");
+    let target: string;
+    try {
+      target = new URL(location, current).toString();
+    } catch {
+      throw new UrlPolicyError("invalid URL");
+    }
+    const next = checkedUrl(target);
+    const method = (requestInit.method ?? "GET").toUpperCase();
+    if (response.status === 303 && method !== "GET" && method !== "HEAD") {
+      const { body: _body, ...rest } = requestInit;
+      requestInit = { ...rest, method: "GET" };
+    }
+    if (next.origin !== current.origin && requestInit.headers) {
+      // As fetch's own redirect handling does: a credential header stays with its origin.
+      const headers = new Headers(requestInit.headers);
+      headers.delete("Authorization");
+      requestInit = { ...requestInit, headers };
+    }
+    current = next;
+    href = target;
+  }
 }
 
 /** Run fn in a new scope nested in the current one, and return that scope's events. */

@@ -20,6 +20,7 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 
+from yfmcp import url_policy as _url_policy
 from yfmcp.cache import _tool_cache
 
 
@@ -305,7 +306,7 @@ def _response_bytes(opener: urllib.request.OpenerDirector, url: str, timeout: in
         },
     )
     try:
-        with opener.open(request, timeout=timeout) as response:  # noqa: S310
+        with _url_policy.open_checked(opener, request, timeout) as response:  # noqa: S310
             content_length = response.headers.get("Content-Length")
             if content_length and int(content_length) > _MAX_RESPONSE_BYTES:
                 raise _YahooHttpError(None, "Yahoo response exceeded the configured size limit.")
@@ -362,7 +363,7 @@ def _blocking_fetch(
             _discard_cached_payload(ticker_u, resolved_event_id)
 
     cookie_jar = http.cookiejar.CookieJar()
-    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cookie_jar))
+    opener = _url_policy.build_opener(urllib.request.HTTPCookieProcessor(cookie_jar))
     try:
         # Yahoo commonly responds non-2xx at this bootstrap host while still
         # setting the session cookie.  The cookie jar processes that response.

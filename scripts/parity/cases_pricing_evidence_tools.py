@@ -994,9 +994,10 @@ return r.coverage;
     # Q3i: the PARTIAL status set is the same in both runtimes, so a failed source never sits beside FULL.
     Case(name="tool.nws.coverage_website_not_available_failed_source", ids=["BR-NWS-007"],
          py=lambda: server._build_coverage({"company_ir": {"status": "WEBSITE_NOT_AVAILABLE"}}),
+         # Both runtimes build the coverage from the same fixed input: since 2.10.0 the Worker's company_ir can no longer produce
+         # WEBSITE_NOT_AVAILABLE, so the status cannot be reached through getCompanyNews; the builder is called directly.
          ts={"js": """
-const r = JSON.parse(await m.yahooFinance.getCompanyNews("TEST", 5, 14, ["company_ir"]));
-return r.coverage;
+return m.news.buildCoverage({ company_ir: { status: "WEBSITE_NOT_AVAILABLE" } });
 """, "isolate": True},
          routes=NEWS_ROUTES, select=_coverage_view,
          expect={"state": "PARTIAL", "failed": [["company_ir", "WEBSITE_NOT_AVAILABLE"]], "skipped": [], "action": "CHECK_OFFICIAL_RELEASES"}),

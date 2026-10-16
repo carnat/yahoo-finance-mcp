@@ -119,7 +119,7 @@ def _python_cik(ticker_feed: str) -> tuple[str | None, list[str]]:
     edgar._FILING_CIK_CACHE.clear()
     with patch.object(edgar.yf, "Ticker", return_value=failing), \
             patch.object(edgar, "_load_edgar_tickers", new=AsyncMock(side_effect=RuntimeError("busy"))), \
-            patch.object(edgar._urlreq, "urlopen", new=urlopen):
+            patch.object(edgar._url_policy, "urlopen", new=urlopen):
         cik = asyncio.run(edgar._resolve_cik_for_ticker("BE"))
     edgar._FILING_CIK_CACHE.clear()
     return cik, requested

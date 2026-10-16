@@ -19,6 +19,7 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any
 
+from yfmcp import url_policy as _url_policy
 from yfmcp.cache import _tool_cache
 
 
@@ -125,7 +126,7 @@ async def _request_json(
     def _fetch() -> tuple[object | None, int | None, str | None, str | None]:
         request = urllib.request.Request(url, headers=headers)
         try:
-            with urllib.request.urlopen(request, timeout=timeout_seconds) as response:  # noqa: S310
+            with _url_policy.urlopen(request, timeout=timeout_seconds) as response:  # noqa: S310
                 raw = response.read(5_000_000)
             return json.loads(raw.decode("utf-8", errors="replace")), None, None, None
         except urllib.error.HTTPError as error:

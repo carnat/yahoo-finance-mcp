@@ -367,11 +367,9 @@ class TestUnauthorizedResponse(WorkerAuthCase):
         headers = res["headers"]
         self.assertEqual(headers["www-authenticate"], 'Bearer realm="yahoo-finance-mcp"')
         self.assertEqual(headers["content-type"], "application/json")
-        self.assertEqual(headers["access-control-allow-origin"], "*")
-        self.assertEqual(headers["access-control-allow-methods"], "GET, POST, OPTIONS")
-        self.assertEqual(headers["access-control-allow-headers"], "Content-Type, Mcp-Session-Id")
-        self.assertEqual(headers["access-control-max-age"], "86400")
-        self.assertEqual(headers["access-control-expose-headers"], "X-Yahoo-Cache, X-Sec-Cache")
+        # 2.10.0 (S-13): /mcp sends CORS headers only to Origin https://claude.ai; this request has no Origin
+        # (scripts/test_url_policy.py covers the claude.ai and other-origin cases).
+        self.assertFalse([h for h in headers if h.startswith("access-control-")])
 
     def test_body_parses_to_the_specified_error(self) -> None:
         self.assertEqual(self.r["enforceAbsent"]["json"], {
@@ -424,8 +422,8 @@ class TestUnchangedRoutes(WorkerAuthCase):
         for name in ("optionsMcp", "optionsMcpPath", "optionsMcpPathUnset"):
             res = self.r[name]
             self.assertEqual(res["status"], 204, name)
-            self.assertEqual(res["headers"]["access-control-allow-origin"], "*", name)
-            self.assertEqual(res["headers"]["access-control-allow-methods"], "GET, POST, OPTIONS", name)
+            # 2.10.0 (S-13): no Origin, so no CORS headers (scripts/test_url_policy.py covers Origin https://claude.ai).
+            self.assertNotIn("access-control-allow-origin", res["headers"], name)
         self.assertEqual(self.r["optionsMcp"]["headers"], self.r["optionsMcpPath"]["headers"])
 
     def test_audit_keeps_its_own_token(self) -> None:
@@ -452,7 +450,7 @@ class TestBodyCap(WorkerAuthCase):
                 "error": {"code": -32600, "message": f"PAYLOAD_TOO_LARGE: request body exceeds {MAX_BODY} bytes.",
                           "data": {"code": "PAYLOAD_TOO_LARGE"}},
             }, name)
-            self.assertEqual(res["headers"]["access-control-allow-origin"], "*", name)
+            self.assertNotIn("access-control-allow-origin", res["headers"], name)   # 2.10.0: no Origin, no CORS
 
     def test_declared_length_alone_is_enough_to_reject(self) -> None:
         self.assertEqual(self.error_code("bodySmallOverstatedLength"), "PAYLOAD_TOO_LARGE")

@@ -118,6 +118,9 @@ jobs:
       - name: Worker credential (grace and enforce) and request-limit tests
         run: python scripts/test_worker_auth.py -v
 
+      - name: Fetch allow-list, redirect, CORS and evidence-guard tests
+        run: python scripts/test_url_policy.py -v
+
       - name: Worker doctrine safety tests
         run: python scripts/test_worker_doctrine_safety.py
 

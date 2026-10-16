@@ -10,6 +10,7 @@ import { getWorkerVar } from "./response.js";
 import { rankEvidence, stemWord } from "./extraction-rules.js";
 import { reliabilityClassFor } from "./deprecations.js";
 import registryManifest from "./company-ir-page-registry.json";
+import { companyIrPageUrlAllowed } from "./url-policy.js";
 import {
   UA,
   type ProviderJsonResult,
@@ -18,7 +19,6 @@ import {
   setProviderCache,
   providerHttpStatus,
   fetchProviderWithTimeout,
-  COMPANY_IR_DISCOVERY_TTL_MS,
   yGet,
   enc,
   iso,
@@ -147,27 +147,6 @@ const GLOBENEWSWIRE_ISIN_CATEGORY_DOMAIN = "https://www.globenewswire.com/rss/IS
 const GLOBENEWSWIRE_CACHE_MAX = 40;
 const globenewswireCache = new Map<string, { value: string; storedAt: number }>();
 const COMPANY_IR_HTML_MAX_BYTES = 750 * 1024;
-const COMPANY_IR_FEED_MAX_BYTES = 2 * 1024 * 1024;
-const COMPANY_IR_FEED_TTL_MS = 15 * 60 * 1000;
-// This leaves enough Worker subrequests for SEC, Yahoo, newswire, and Finnhub
-// when the full event-verification source set is selected.
-const COMPANY_IR_DISCOVERY_MAX_PAGE_PROBES = 24;
-const COMPANY_IR_DISCOVERY_PATHS = [
-  "/",
-  "/rss.cfm",
-  "/rss-news-feeds",
-  "/rss-feeds",
-  "/feed/press-releases.xml",
-  "/feed/news.xml",
-  "/feed",
-  "/rss",
-  "/investor-relations",
-  "/investors",
-  "/investor",
-  "/newsroom",
-  "/news",
-  "/press-releases",
-];
 const COMPANY_IR_BLOCKED_WEBSITE_HOSTS = [
   "bloomberg.com",
   "facebook.com",
@@ -186,13 +165,6 @@ const COMPANY_IR_BLOCKED_WEBSITE_HOSTS = [
   "youtube.com",
 ];
 
-const COMPANY_IR_DISCOVERY_CACHE_MAX = 200;
-const companyIrDiscoveryCache = new Map<string, {
-  value: { feeds: DiscoveredCompanyIrFeed[]; pageProbeCount: number; probeBudgetExhausted: boolean };
-  storedAt: number;
-}>();
-const COMPANY_IR_TEXT_CACHE_MAX = 20;
-const companyIrTextCache = new Map<string, { value: string; storedAt: number }>();
 const YAHOO_ALLOWED_CONTENT_TYPES = new Set(["STORY", "ARTICLE", "PRESS_RELEASE"]);
 
 export async function getNews(ticker: string): Promise<string> {
@@ -321,12 +293,6 @@ function markNoSourceSelected(payload: Record<string, unknown>, requestedSources
   }
   return payload;
 }
-type DiscoveredCompanyIrFeed = {
-  feedUrl: string;
-  pageUrl: string;
-  discoveryMethod: string;
-  hostRelationship: "same_domain" | "linked_external";
-};
 type CompanyEventCollectionResult = {
   items: Record<string, unknown>[];
   sourcesUsed: string[];
@@ -384,7 +350,7 @@ function enrichNewsItemForLlm(item: Record<string, unknown>): Record<string, unk
     decisionUse,
   };
 }
-function buildCoverage(sourceStatus: Record<string, unknown>, resolvedAction: string | null = null): Record<string, unknown> {
+export function buildCoverage(sourceStatus: Record<string, unknown>, resolvedAction: string | null = null): Record<string, unknown> {
   const failedStatuses = new Set(["UNCONFIGURED", "PROVIDER_ERROR", "AUTH_ERROR", "RATE_LIMITED", "TIMEOUT", "PROVIDER_CHANGED", "IDENTITY_UNAVAILABLE", "WEBSITE_NOT_AVAILABLE", "DISCOVERY_NOT_FOUND", "DISCOVERY_BUDGET_EXHAUSTED", "FEED_NOT_FOUND", "PARSE_ERROR", "CANDIDATE_AVAILABLE", "NOT_REGISTERED", "DISABLED", "REVALIDATION_DUE", "SOURCE_VALIDATION_FAILED"]);
   const failedSources: Record<string, unknown>[] = [];
   const skippedSources: Record<string, unknown>[] = [];
@@ -439,18 +405,6 @@ function companyIrPageEntry(ticker: string): CompanyIrPageSource | null {
   const tickerU = ticker.toUpperCase();
   return companyIrPageRegistry.sources.find(entry => entry.ticker.toUpperCase() === tickerU) ?? null;
 }
-function companyIrPageUrlAllowed(entry: CompanyIrPageSource, rawUrl: string): boolean {
-  try {
-    const url = new URL(rawUrl);
-    if (url.protocol !== "https:") return false;
-    const host = hostWithoutWww(url.hostname);
-    const allowedHost = entry.allowedHosts.some(candidate => host === hostWithoutWww(candidate));
-    const allowedPath = entry.allowedPathPrefixes.some(prefix => url.pathname.startsWith(prefix));
-    return allowedHost && allowedPath;
-  } catch {
-    return false;
-  }
-}
 function registryFresh(entry: CompanyIrPageSource): boolean {
   if (!entry.revalidateAfter) return true;
   const deadline = Date.parse(entry.revalidateAfter);
@@ -462,73 +416,9 @@ function arrayRecords(value: unknown): Record<string, unknown>[] {
 export function hostWithoutWww(host: string): string {
   return host.toLowerCase().replace(/^www\./, "");
 }
-function sameCompanyDomain(candidateHost: string, companyHost: string | null, companyRoot: string | null): boolean {
-  const candidate = hostWithoutWww(candidateHost);
-  const host = companyHost ? hostWithoutWww(companyHost) : "";
-  const root = companyRoot ? hostWithoutWww(companyRoot) : "";
-  return !!(
-    (host && (candidate === host || candidate.endsWith(`.${host}`))) ||
-    (root && (candidate === root || candidate.endsWith(`.${root}`)))
-  );
-}
-function companyIrCandidateHosts(identity: NewsCompanyIdentity): string[] {
-  const hosts: string[] = [];
-  const seen = new Set<string>();
-  const add = (host: string | null) => {
-    if (!host) return;
-    const clean = host.trim().toLowerCase();
-    if (!clean) return;
-    const key = hostWithoutWww(clean);
-    if (seen.has(key)) return;
-    seen.add(key);
-    hosts.push(clean);
-  };
-  try {
-    if (identity.website) add(new URL(identity.website).hostname);
-  } catch {
-    // Fall back to the normalized host below.
-  }
-  add(identity.websiteHost);
-  if (identity.websiteRoot) {
-    add(`investor.${identity.websiteRoot}`);
-    add(`investors.${identity.websiteRoot}`);
-    add(`ir.${identity.websiteRoot}`);
-  }
-  return hosts.slice(0, 5);
-}
 export function blockedCompanyWebsiteHost(host: string): boolean {
   const h = hostWithoutWww(host);
   return COMPANY_IR_BLOCKED_WEBSITE_HOSTS.some(blocked => h === blocked || h.endsWith(`.${blocked}`));
-}
-function rejectedCompanyIrFeedCandidate(url: string): boolean {
-  try {
-    const u = new URL(url);
-    const host = hostWithoutWww(u.hostname);
-    const path = u.pathname.toLowerCase();
-    const query = u.search.toLowerCase();
-    if (blockedCompanyWebsiteHost(host)) return true;
-    if (path.includes("/wp-json/") || path.includes("oembed") || query.includes("oembed")) return true;
-    if (path.endsWith(".json") || query.includes("format=json")) return true;
-    return false;
-  } catch {
-    return true;
-  }
-}
-function nameTokensForIdentity(identity: NewsCompanyIdentity): string[] {
-  const stop = new Set(["corp", "corporation", "inc", "ltd", "limited", "llc", "plc", "co", "company", "group", "holdings", "technology", "technologies"]);
-  const names = [identity.companyName, identity.shortName, identity.longName].filter(Boolean).join(" ");
-  return names
-    .toLowerCase()
-    .replace(/[^a-z0-9]/g, " ")
-    .split(/\s+/)
-    .filter(word => word.length >= 4 && !stop.has(word));
-}
-function identityMatchesText(identity: NewsCompanyIdentity, text: string): boolean {
-  const hay = text.toLowerCase();
-  const ticker = identity.ticker.toLowerCase();
-  if (new RegExp(`\\b${ticker.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(text)) return true;
-  const tokens = nameTokensForIdentity(identity);
-  return tokens.some(token => new RegExp(`\\b${token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`).test(hay));
 }
 const YAHOO_NEWS_LEGAL_SUFFIXES = new Set([
   "inc", "incorporated", "corp", "corporation", "ltd", "limited", "llc", "plc",
@@ -941,25 +831,6 @@ function globenewswireStockCategoryMatches(ticker: string, stockCategories: stri
 function globenewswirePlainText(value: string): string {
   return stripHtmlTags(decodeXmlText(value));
 }
-async function fetchCompanyIrText(url: string, maxBytes: number, ttlMs: number): Promise<string> {
-  const cached = companyIrTextCache.get(url);
-  if (cached && Date.now() - cached.storedAt < ttlMs) return cached.value;
-  const resp = await providerFetch(url, { headers: { "User-Agent": UA } });
-  if (!resp.ok) {
-    await resp.body?.cancel();
-    throw new Error(`HTTP ${resp.status}`);
-  }
-  const declaredLen = Number(resp.headers.get("content-length") || "0");
-  if (declaredLen > maxBytes) {
-    await resp.body?.cancel();
-    throw new Error("response exceeded size limit");
-  }
-  const buf = await resp.arrayBuffer();
-  if (buf.byteLength > maxBytes) throw new Error("response exceeded size limit");
-  const text = new TextDecoder("utf-8").decode(buf);
-  setBounded(companyIrTextCache, url, { value: text, storedAt: Date.now() }, COMPANY_IR_TEXT_CACHE_MAX);
-  return text;
-}
 async function fetchApprovedCompanyIrPage(entry: CompanyIrPageSource): Promise<{ text: string; finalUrl: string; contentType: string }> {
   if (!companyIrPageUrlAllowed(entry, entry.canonicalUrl)) {
     throw new Error("registry canonical URL is outside its allow-list");
@@ -1232,151 +1103,6 @@ async function collectCompanyIrPageEvents(
     return { items: [], warnings, used: false, diagnostics: { ...diagnostics, status: "SOURCE_VALIDATION_FAILED", allowedAction: "review_registry_entry" } };
   }
 }
-function candidateCompanyIrPageUrlGroups(identity: NewsCompanyIdentity): string[][] {
-  const urls: string[] = [];
-  const groups: string[][] = [];
-  const protocol = identity.website?.startsWith("http://") ? "http:" : "https:";
-  for (const host of companyIrCandidateHosts(identity)) {
-    urls.length = 0;
-    const base = `${protocol}//${host}/`;
-    for (const path of COMPANY_IR_DISCOVERY_PATHS) {
-      const u = new URL(base);
-      u.pathname = path;
-      u.search = "";
-      u.hash = "";
-      urls.push(u.toString());
-    }
-    groups.push([...new Set(urls)].slice(0, COMPANY_IR_DISCOVERY_PATHS.length));
-  }
-  return groups;
-}
-function extractCompanyIrFeedLinks(pageHtml: string, pageUrl: string): Array<{ url: string; method: string }> {
-  const links: Array<{ url: string; method: string }> = [];
-  const seen = new Set<string>();
-  const push = (raw: string, method: string) => {
-    const url = normalizeLinkedUrl(raw, pageUrl);
-    if (!url || seen.has(url)) return;
-    if (rejectedCompanyIrFeedCandidate(url)) return;
-    seen.add(url);
-    links.push({ url, method });
-  };
-
-  const linkRe = /<link\b([^>]*)>/gi;
-  let linkM: RegExpExecArray | null;
-  while ((linkM = linkRe.exec(pageHtml)) !== null) {
-    const attrs = linkM[1];
-    const rel = htmlAttr(attrs, "rel").toLowerCase();
-    const type = htmlAttr(attrs, "type").toLowerCase();
-    const href = htmlAttr(attrs, "href");
-    if (!href) continue;
-    if (rel.includes("alternate") && /(rss|atom|xml)/.test(type)) push(href, "html_alternate_link");
-  }
-
-  const anchorRe = /<a\b([^>]*)>([\s\S]*?)<\/a>/gi;
-  let anchorM: RegExpExecArray | null;
-  while ((anchorM = anchorRe.exec(pageHtml)) !== null) {
-    const attrs = anchorM[1];
-    const href = htmlAttr(attrs, "href");
-    const label = stripHtmlTags(anchorM[2]).toLowerCase();
-    if (!href) continue;
-    if (/(rss|atom|feed)/i.test(href) || /\b(rss|atom|feed)\b/.test(label)) push(href, "html_feed_anchor");
-  }
-  return links.slice(0, 12);
-}
-async function discoverCompanyIrFeeds(
-  identity: NewsCompanyIdentity,
-  warnings: Record<string, unknown>[]
-): Promise<{ feeds: DiscoveredCompanyIrFeed[]; pageProbeCount: number; probeBudgetExhausted: boolean }> {
-  if (!identity.website || !identity.websiteHost) {
-    return { feeds: [], pageProbeCount: 0, probeBudgetExhausted: false };
-  }
-  const cacheKey = `${identity.ticker}:${identity.website}`;
-  const cached = companyIrDiscoveryCache.get(cacheKey);
-  if (cached && Date.now() - cached.storedAt < COMPANY_IR_DISCOVERY_TTL_MS) {
-    if (cached.value.feeds.length === 0) {
-      warnings.push({
-        code: "COMPANY_IR_FEED_NOT_FOUND",
-        message: "No RSS/Atom feed was discovered from the verified company website or common IR/news paths.",
-        severity: "warning",
-      });
-    }
-    if (cached.value.probeBudgetExhausted) {
-      warnings.push({
-        code: "COMPANY_IR_DISCOVERY_BUDGET_EXHAUSTED",
-        message: `RSS/Atom discovery reached its ${COMPANY_IR_DISCOVERY_MAX_PAGE_PROBES}-page Worker probe budget before all bounded company/IR paths were checked.`,
-        severity: "warning",
-        pageProbeCount: cached.value.pageProbeCount,
-        probeBudget: COMPANY_IR_DISCOVERY_MAX_PAGE_PROBES,
-      });
-    }
-    return cached.value;
-  }
-
-  const feeds: DiscoveredCompanyIrFeed[] = [];
-  const seenFeeds = new Set<string>();
-  let pageProbeCount = 0;
-  let probeBudgetExhausted = false;
-  discoveryLoop: for (const pageUrls of candidateCompanyIrPageUrlGroups(identity)) {
-    for (const pageUrl of pageUrls) {
-      if (pageProbeCount >= COMPANY_IR_DISCOVERY_MAX_PAGE_PROBES) {
-        probeBudgetExhausted = true;
-        break discoveryLoop;
-      }
-      pageProbeCount += 1;
-      let text = "";
-      try {
-        text = await fetchCompanyIrText(pageUrl, COMPANY_IR_HTML_MAX_BYTES, COMPANY_IR_DISCOVERY_TTL_MS);
-      } catch {
-        continue;
-      }
-
-      if (looksLikeFeed(text)) {
-        const pageHost = new URL(pageUrl).hostname;
-        if (sameCompanyDomain(pageHost, identity.websiteHost, identity.websiteRoot)) {
-          feeds.push({ feedUrl: pageUrl, pageUrl, discoveryMethod: "direct_feed_path", hostRelationship: "same_domain" });
-          seenFeeds.add(pageUrl);
-        }
-        continue;
-      }
-
-      for (const candidate of extractCompanyIrFeedLinks(text, pageUrl)) {
-        if (seenFeeds.has(candidate.url)) continue;
-        let relationship: DiscoveredCompanyIrFeed["hostRelationship"] = "linked_external";
-        try {
-          const candidateHost = new URL(candidate.url).hostname;
-          if (sameCompanyDomain(candidateHost, identity.websiteHost, identity.websiteRoot)) relationship = "same_domain";
-        } catch {
-          continue;
-        }
-        seenFeeds.add(candidate.url);
-        feeds.push({ feedUrl: candidate.url, pageUrl, discoveryMethod: candidate.method, hostRelationship: relationship });
-        if (feeds.length >= 8) break;
-      }
-      if (feeds.length >= 8) break;
-    }
-      if (feeds.length > 0) break;
-  }
-
-  if (probeBudgetExhausted) {
-    warnings.push({
-      code: "COMPANY_IR_DISCOVERY_BUDGET_EXHAUSTED",
-      message: `RSS/Atom discovery reached its ${COMPANY_IR_DISCOVERY_MAX_PAGE_PROBES}-page Worker probe budget before all bounded company/IR paths were checked.`,
-      severity: "warning",
-      pageProbeCount,
-      probeBudget: COMPANY_IR_DISCOVERY_MAX_PAGE_PROBES,
-    });
-  }
-  if (feeds.length === 0) {
-    warnings.push({
-      code: "COMPANY_IR_FEED_NOT_FOUND",
-      message: "No RSS/Atom feed was discovered from the verified company website or common IR/news paths.",
-      severity: "warning",
-    });
-  }
-  const result = { feeds, pageProbeCount, probeBudgetExhausted };
-  setBounded(companyIrDiscoveryCache, cacheKey, { value: result, storedAt: Date.now() }, COMPANY_IR_DISCOVERY_CACHE_MAX);
-  return result;
-}
 function parseCompanyIrFeedItems(xml: string): { feedTitle: string | null; itemXmls: Array<{ kind: "rss" | "atom"; xml: string }> } {
   if (/<!entity/i.test(xml)) throw new Error("unsupported XML entity declaration in company IR RSS/Atom");
   if (!looksLikeFeed(xml)) throw new Error("invalid company IR RSS/Atom XML");
@@ -1400,58 +1126,14 @@ function atomEntryLink(entryXml: string): string {
   }
   return extractXmlTag(entryXml, "link");
 }
-function companyIrFeedItem(
-  ticker: string,
-  identity: NewsCompanyIdentity,
-  feed: DiscoveredCompanyIrFeed,
-  feedTitle: string | null,
-  itemXml: string,
-  kind: "rss" | "atom",
-  retrievedAt: string,
-): Record<string, unknown> | null {
-  const title = extractXmlTag(itemXml, "title");
-  const summaryRaw = kind === "atom"
-    ? (extractXmlTag(itemXml, "summary") || extractXmlTag(itemXml, "content"))
-    : (extractXmlTag(itemXml, "description") || extractXmlTag(itemXml, "content:encoded"));
-  const summary = stripHtmlTags(summaryRaw);
-  const rawLink = kind === "atom" ? atomEntryLink(itemXml) : (extractXmlTag(itemXml, "link") || extractXmlTag(itemXml, "guid"));
-  const url = rawLink ? normalizeLinkedUrl(rawLink, feed.feedUrl) : null;
-  const publishedAt = normalizeIso(
-    kind === "atom"
-      ? (extractXmlTag(itemXml, "published") || extractXmlTag(itemXml, "updated"))
-      : extractXmlTag(itemXml, "pubDate")
-  );
-  const matchText = `${feedTitle ?? ""} ${title} ${summary} ${url ?? ""}`;
-  const sameDomain = feed.hostRelationship === "same_domain";
-  const matchedIdentity = identityMatchesText(identity, matchText);
-  if (!sameDomain && !matchedIdentity) return null;
-  const duplicateGroupId = makeDupGroupId(ticker, title, publishedAt, identity.companyName);
-  return {
-    title,
-    source: "company_ir",
-    originalSource: feedTitle || identity.companyName || "Company IR RSS",
-    sourceType: "company_ir",
-    provider: "company_ir_rss",
-    discoveredVia: "company_website_rss_autodiscovery",
-    discoveryMethod: feed.discoveryMethod,
-    feedUrl: feed.feedUrl,
-    feedTitle,
-    companyWebsite: identity.website,
-    publishedAt,
-    retrievedAt,
-    url,
-    issuer: identity.companyName,
-    tickers: [ticker.toUpperCase()],
-    eventType: eventTypeFromKeywords(title, summary),
-    summary: shortText(summary || title, 240),
-    evidenceText: shortText(summary || title, 180),
-    confidence: sameDomain && url ? "HIGH" : (url ? "MEDIUM" : "LOW"),
-    tickerRelevance: sameDomain || matchedIdentity ? "HIGH" : "LOW",
-    decisionUse: sourceDecisionUse("company_ir"),
-    duplicateGroupId,
-  };
-}
-async function collectCompanyIrRssEvents(
+/**
+ * The company_ir source (2.10.0): approved company IR registry entries only.
+ * Open-web discovery (probing the profile website and its investor/ir hosts,
+ * then fetching linked feeds on any host) was removed with the fetch
+ * allow-list. Without an approved entry the source is NOT_REGISTERED, the
+ * same status an unregistered company_ir_page source reports.
+ */
+async function collectCompanyIrEvents(
   ticker: string,
   maxResults: number,
   retrievedAt: string,
@@ -1459,84 +1141,22 @@ async function collectCompanyIrRssEvents(
   endDate = "",
   lookbackDays?: number
 ): Promise<{ items: Record<string, unknown>[]; warnings: Record<string, unknown>[]; used: boolean; diagnostics: Record<string, unknown> }> {
-  const warnings: Record<string, unknown>[] = [];
-  const items: Record<string, unknown>[] = [];
-  const identity = await resolveNewsCompanyIdentity(ticker);
-  warnings.push(...identity.warnings);
-  const diagnostics: Record<string, unknown> = {
-    companyName: identity.companyName,
-    companyWebsite: identity.website,
-    identitySources: identity.sources,
-    identityConfidence: identity.confidence,
-    cik: identity.cik,
-    exchange: identity.exchange,
-    rssDiscovery: "not_attempted",
-  };
-
-  if (!identity.website) {
-    diagnostics.rssDiscovery = "website_not_available";
-    return { items, warnings, used: false, diagnostics };
+  const entry = companyIrPageEntry(ticker);
+  if (!entry || entry.status !== "approved") {
+    return {
+      items: [],
+      warnings: [],
+      used: false,
+      diagnostics: {
+        registryVersion: companyIrPageRegistry.registryVersion,
+        registrySchemaVersion: companyIrPageRegistry.schemaVersion,
+        status: "NOT_REGISTERED",
+        approvalStatus: "not_registered",
+        allowedAction: "registry_review_required",
+      },
+    };
   }
-
-  const discovery = await discoverCompanyIrFeeds(identity, warnings);
-  const feeds = discovery.feeds;
-  diagnostics.discoveredFeedCount = feeds.length;
-  diagnostics.discoveryPageProbeCount = discovery.pageProbeCount;
-  diagnostics.discoveryProbeBudget = COMPANY_IR_DISCOVERY_MAX_PAGE_PROBES;
-  diagnostics.discoveryProbeBudgetExhausted = discovery.probeBudgetExhausted;
-  diagnostics.rssDiscovery = feeds.length > 0 ? "feeds_discovered" : "feed_not_found";
-  const acceptedFeeds: string[] = [];
-
-  for (const feed of feeds) {
-    let xml = "";
-    try {
-      xml = await fetchCompanyIrText(feed.feedUrl, COMPANY_IR_FEED_MAX_BYTES, COMPANY_IR_FEED_TTL_MS);
-    } catch (e) {
-      warnings.push({
-        code: "COMPANY_IR_RSS_UNAVAILABLE",
-        message: `Company IR RSS/Atom feed unavailable: ${e instanceof Error ? e.message : String(e)}`,
-        severity: "warning",
-        feedUrl: feed.feedUrl,
-      });
-      continue;
-    }
-
-    try {
-      const { feedTitle, itemXmls } = parseCompanyIrFeedItems(xml);
-      const sameDomain = feed.hostRelationship === "same_domain";
-      if (!sameDomain && !identityMatchesText(identity, `${feedTitle ?? ""} ${xml.slice(0, 2000)}`)) {
-        warnings.push({
-          code: "COMPANY_IR_RSS_HOST_REJECTED",
-          message: "Linked external RSS/Atom feed did not match the company identity.",
-          severity: "warning",
-          feedUrl: feed.feedUrl,
-        });
-        continue;
-      }
-      acceptedFeeds.push(feed.feedUrl);
-      for (const entry of itemXmls) {
-        const item = companyIrFeedItem(ticker, identity, feed, feedTitle, entry.xml, entry.kind, retrievedAt);
-        if (!item) continue;
-        if (!withinDateWindow(_str(item.publishedAt) || null, startDate, endDate, lookbackDays)) continue;
-        items.push(item);
-        if (items.length >= maxResults) break;
-      }
-    } catch (e) {
-      warnings.push({
-        code: "COMPANY_IR_RSS_PARSE_ERROR",
-        message: `Company IR RSS/Atom feed parse error: ${e instanceof Error ? e.message : String(e)}`,
-        severity: "warning",
-        feedUrl: feed.feedUrl,
-      });
-    }
-    if (items.length >= maxResults) break;
-  }
-
-  diagnostics.acceptedFeedCount = acceptedFeeds.length;
-  diagnostics.acceptedFeeds = acceptedFeeds.slice(0, 5);
-  diagnostics.rssDiscovery = acceptedFeeds.length > 0 ? "feeds_accepted" : diagnostics.rssDiscovery;
-  if (feeds.length > 0 && acceptedFeeds.length === 0) diagnostics.rssDiscovery = "feed_not_accepted";
-  return { items, warnings, used: acceptedFeeds.length > 0, diagnostics };
+  return collectCompanyIrPageEvents(ticker, maxResults, retrievedAt, startDate, endDate, lookbackDays);
 }
 function buildYfEventItem(
   ticker: string,
@@ -2687,7 +2307,7 @@ async function collectCompanyEvents(
   }
 
   if (selected.includes("company_ir")) {
-    const ir = await collectCompanyIrRssEvents(ticker, safeMax, watermark, startDate, endDate, safeLookback);
+    const ir = await collectCompanyIrEvents(ticker, safeMax, watermark, startDate, endDate, safeLookback);
     sourceDiagnostics.company_ir = ir.diagnostics;
     if (ir.used) sourcesUsed.push("company_ir");
     items.push(...ir.items);
@@ -2703,8 +2323,8 @@ async function collectCompanyEvents(
   }
 
   // Yahoo Finance news tab (explicit or via legacy yahoo_finance).
-  // company_ir is served by official RSS/Atom discovery above; Yahoo sources
-  // remain selectable separately as yahoo_finance_news / _press_releases.
+  // company_ir is served by the approved company IR registry above; Yahoo
+  // sources remain selectable separately as yahoo_finance_news / _press_releases.
   const needYfNews = selected.includes("yahoo_finance_news")
     || selected.includes("yahoo_finance");
   const needYfPr = selected.includes("yahoo_finance_press_releases") || selected.includes("yahoo_finance");

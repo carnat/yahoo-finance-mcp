@@ -19,6 +19,24 @@ export interface EvidenceStore {
 
 export type StorageStatus = "STORED" | "ALREADY_STORED" | "UNAVAILABLE" | "FAILED" | "SKIPPED";
 
+/**
+ * A list() prefix must name one directory: non-empty, ending in "/", and free
+ * of "..", "//" and backslashes, so a caller value can never widen a listing
+ * beyond its own prefix (2.10.0, S-05). Both stores enforce it.
+ */
+export function assertListPrefix(prefix: string): void {
+  if (
+    typeof prefix !== "string" ||
+    prefix === "" ||
+    !prefix.endsWith("/") ||
+    prefix.includes("..") ||
+    prefix.includes("//") ||
+    prefix.includes("\\")
+  ) {
+    throw new Error("invalid evidence list prefix");
+  }
+}
+
 let injected: EvidenceStore | null | undefined;
 let bucket: R2Bucket | null = null;
 
@@ -46,6 +64,7 @@ function r2Store(b: R2Bucket): EvidenceStore {
       await b.put(key, body, { httpMetadata: { contentType: "application/json" }, customMetadata: metadata });
     },
     async list(prefix, limit) {
+      assertListPrefix(prefix);
       const keys: string[] = [];
       let cursor: string | undefined;
       do {
@@ -78,6 +97,7 @@ export function memoryEvidenceStore(): EvidenceStore & { objects: Map<string, st
       objects.set(key, body);
     },
     async list(prefix, limit) {
+      assertListPrefix(prefix);
       return [...objects.keys()].filter((k) => k.startsWith(prefix)).sort().slice(0, limit);
     },
   };

@@ -259,20 +259,20 @@ def company_ir_source_status(payload: dict[str, Any], _canary: dict[str, Any]) -
     company_ir = source_status.get("company_ir") or {}
     if not isinstance(company_ir, dict):
         raise AssertionError(f"sourceStatus.company_ir must be an object: {data}")
+    # 2.10.0: company_ir reads approved company IR registry entries only (open-web RSS discovery was removed with
+    # the fetch allow-list). Without an approved entry it is NOT_REGISTERED with registry diagnostics; with one it
+    # reports the approved-page statuses.
     allowed = {
-        "OK",
-        "WEBSITE_NOT_AVAILABLE",
-        "FEED_NOT_FOUND",
-        "DISCOVERY_NOT_FOUND",
-        "DISCOVERY_BUDGET_EXHAUSTED",
-        "PROVIDER_ERROR",
-        "PARSE_ERROR",
+        "NOT_REGISTERED",
+        "APPROVED_SOURCE_OK",
         "EMPTY_RESULT",
+        "REVALIDATION_DUE",
+        "SOURCE_VALIDATION_FAILED",
     }
     if company_ir.get("status") not in allowed:
         raise AssertionError(f"unexpected company_ir source status: {data}")
-    if "companyName" not in company_ir or "identityConfidence" not in company_ir:
-        raise AssertionError(f"company_ir source status missing identity diagnostics: {data}")
+    if "registryVersion" not in company_ir or "allowedAction" not in company_ir:
+        raise AssertionError(f"company_ir source status missing registry diagnostics: {data}")
     if data.get("sourceCoverage") not in {"FULL", "PARTIAL"}:
         raise AssertionError(f"company_ir news call missing sourceCoverage: {data}")
 

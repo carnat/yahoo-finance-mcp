@@ -20,6 +20,7 @@ from urllib import parse as _urlparse
 from urllib import request as _urlrequest
 from zoneinfo import ZoneInfo
 
+from yfmcp import url_policy as _url_policy
 from yfmcp.app import yfinance_server
 from yfmcp.envelope import ErrorCode, _mcp_failure, _mcp_success
 from yfmcp.schemas import _TOOL_OUTPUT_SCHEMAS
@@ -230,7 +231,7 @@ def _request_json_sync(path: str, params: dict[str, object]) -> dict[str, Any]:
     response_status: int | None = None
     content_type: str | None = None
     try:
-        with _urlrequest.urlopen(request, timeout=_REQUEST_TIMEOUT_SECONDS) as response:
+        with _url_policy.urlopen(request, timeout=_REQUEST_TIMEOUT_SECONDS) as response:
             response_status = getattr(response, "status", None)
             headers = getattr(response, "headers", None)
             content_type = headers.get("Content-Type") if headers is not None else None

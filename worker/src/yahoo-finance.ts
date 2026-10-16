@@ -2,6 +2,7 @@ import { BoundedTtlCache, setBounded } from "./cache.js";
 import { countCacheEvent, emptyCacheUsage, providerFetch, type CacheEvent, type CacheUsage } from "./request-context.js";
 import { classifyErrorMessage, ErrorCode, getWorkerVar, mcpFailure } from "./response.js";
 import { yahooTranscriptContentSha256 } from "./transcript-contract.js";
+import { allowedHostKind, approvedRegistryUrlAllowed, checkFetchUrl } from "./url-policy.js";
 import {
   filingTableSpans, hitsBySection, matchContext, matchPayload, orderMatches, parseSearchQuery, projectFilingText,
   searchDocument, sectionHintScope, termLabel, termsFromList,
@@ -702,7 +703,6 @@ async function refreshCrumb(): Promise<{ value: string; cookie: string }> {
   // fc.yahoo.com sets the consent cookie used by Yahoo Finance APIs
   const init = await fetchProviderWithTimeout("https://fc.yahoo.com", {
     headers: { "User-Agent": UA },
-    redirect: "follow",
   }, YAHOO_FETCH_TIMEOUT_MS);
 
   // Collect all Set-Cookie headers (Workers Headers.entries() exposes them)
@@ -2990,7 +2990,7 @@ async function fetchTickerEarningsHistory(
   // receiving updates. Keep the Worker on the same source and pagination model.
   const size = limit <= 25 ? 25 : limit <= 50 ? 50 : 100;
   const url = `https://finance.yahoo.com/calendar/earnings?symbol=${enc(ticker)}&offset=${offset}&size=${size}`;
-  const response = await providerFetch(url, { headers: { "User-Agent": UA }, redirect: "follow" });
+  const response = await providerFetch(url, { headers: { "User-Agent": UA } });
   if (!response.ok) {
     await response.body?.cancel();
     throw new Error(`Yahoo Finance calendar error ${response.status} for: ${ticker}`);
@@ -9807,16 +9807,44 @@ export async function getSecFilingExhibitContent(
   });
 }
 
+/** The ticker of a Yahoo earnings-call transcript URL that the transcript parser accepts, else null. */
+function yahooTranscriptUrlTicker(url: string): string | null {
+  const m = url.match(/^https:\/\/finance\.yahoo\.com\/quote\/([^/?#]+)\/earnings\//i);
+  if (!m) return null;
+  let ticker: string;
+  try {
+    ticker = decodeURIComponent(m[1]).toUpperCase();
+  } catch {
+    return null;
+  }
+  return parseYahooTranscriptSourceUrl(ticker, url).identity ? ticker : null;
+}
+
+/**
+ * Allow-list check for a caller-supplied URL (2.10.0): checkFetchUrl plus the
+ * caller path rule. SEC URLs must be under /Archives/, Yahoo URLs must be
+ * transcript pages the parser accepts, and registry hosts must sit inside an
+ * approved entry's path prefixes. Other allow-listed hosts (provider APIs)
+ * are never fetched for a caller URL.
+ */
+function callerUrlRefusal(url: string): string | null {
+  const check = checkFetchUrl(url);
+  if (!check.ok) return check.reason;
+  const kind = allowedHostKind(check.url);
+  if (kind === "sec" && url.startsWith("https://www.sec.gov/Archives/")) return null;
+  if (kind === "yahoo" && yahooTranscriptUrlTicker(url) !== null) return null;
+  if (kind === "registry" && approvedRegistryUrlAllowed(url)) return null;
+  return "URL path not allowed";
+}
+
 /**
  * Full text of a finance.yahoo.com earnings-call transcript URL, one
  * "Speaker: text" paragraph per line, read page by page from the structured
  * transcript. Null for other URLs or when the transcript is unavailable.
  */
 async function yahooTranscriptTextForUrl(url: string): Promise<string | null> {
-  const m = url.match(/^https:\/\/finance\.yahoo\.com\/quote\/([^/?#]+)\/earnings\//i);
-  if (!m) return null;
-  const ticker = decodeURIComponent(m[1]).toUpperCase();
-  if (!parseYahooTranscriptSourceUrl(ticker, url).identity) return null;
+  const ticker = yahooTranscriptUrlTicker(url);
+  if (ticker === null) return null;
   const paragraphs: string[] = [];
   let cursor = 0;
   for (let page = 0; page < 20; page++) {
@@ -9842,6 +9870,13 @@ export async function parsePublicTranscript(
   const hasRawText = typeof rawText === "string" && rawText.trim() !== "";
   if (!hasRawText && !url.startsWith("https://")) {
     return JSON.stringify({ ok: false, error: { code: "INPUT_VALIDATION_ERROR", message: "A valid https:// URL or raw_text is required." } });
+  }
+
+  if (!hasRawText) {
+    const refusal = callerUrlRefusal(url);
+    if (refusal !== null) {
+      return JSON.stringify({ ok: false, error: { code: "INPUT_VALIDATION_ERROR", message: `url is not on the fetch allow-list (${refusal}). Allowed: SEC Archives, finance.yahoo.com transcript pages, and approved company IR pages. Paste the text as raw_text instead.` } });
+    }
   }
 
   let cleanText: string;
@@ -13369,8 +13404,12 @@ function classifyEarningsSourceUrl(url: string): { sourceType: "sec_8k" | "compa
   }
   if (u.protocol !== "https:") return { sourceType: null, error: "source_url must use https" };
   if (isPaywalledUrl(u.toString())) return { sourceType: null, error: "source_url appears paywalled and is not allowed" };
-  if (u.toString().startsWith("https://www.sec.gov/Archives/")) return { sourceType: "sec_8k", error: null };
-  return { sourceType: "company_ir", error: null };
+  const check = checkFetchUrl(url.trim());
+  if (!check.ok) return { sourceType: null, error: `source_url is not on the fetch allow-list (${check.reason})` };
+  const kind = allowedHostKind(check.url);
+  if (kind === "sec" && u.toString().startsWith("https://www.sec.gov/Archives/")) return { sourceType: "sec_8k", error: null };
+  if (kind === "registry" && approvedRegistryUrlAllowed(url.trim())) return { sourceType: "company_ir", error: null };
+  return { sourceType: null, error: "source_url is not on the fetch allow-list (URL path not allowed)" };
 }
 
 async function fetchPublicHtml(url: string, maxBytes = 3_000_000): Promise<string | null> {

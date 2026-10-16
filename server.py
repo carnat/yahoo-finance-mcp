@@ -58,6 +58,7 @@ from yfmcp.util import (
 )
 from yfmcp.clients.yahoo import _safe_parse
 from yfmcp.clients.market_providers import _PROVIDER_USER_AGENT
+from yfmcp import url_policy as _url_policy
 from yfmcp import filing_search as _fs
 from yfmcp import capital_structure as _cs
 from yfmcp import valuation as _vl
@@ -836,7 +837,7 @@ async def list_sec_filings(ticker: str, form_type: str = "10-K", max_filings: in
     try:
         tickers_url = "https://www.sec.gov/files/company_tickers.json"
         req = urllib.request.Request(tickers_url, headers={"User-Agent": "yahoo-finance-mcp/1.0 admin@example.com"})
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        with _url_policy.urlopen(req, timeout=10) as resp:
             tickers_data = json.loads(resp.read())
 
         cik = None
@@ -852,7 +853,7 @@ async def list_sec_filings(ticker: str, form_type: str = "10-K", max_filings: in
         cik_padded = str(cik).zfill(10)
         sub_url = f"https://data.sec.gov/submissions/CIK{cik_padded}.json"
         req2 = urllib.request.Request(sub_url, headers={"User-Agent": "yahoo-finance-mcp/1.0 admin@example.com"})
-        with urllib.request.urlopen(req2, timeout=10) as resp2:
+        with _url_policy.urlopen(req2, timeout=10) as resp2:
             sub_data = json.loads(resp2.read())
 
         filings_data = sub_data.get("filings", {}).get("recent", {})
@@ -902,7 +903,7 @@ async def get_filing_outline(ticker: str, accession_number: str | None = None, d
             cik = None
             tickers_url = "https://www.sec.gov/files/company_tickers.json"
             req = urllib.request.Request(tickers_url, headers={"User-Agent": "yahoo-finance-mcp/1.0 admin@example.com"})
-            with urllib.request.urlopen(req, timeout=10) as resp:
+            with _url_policy.urlopen(req, timeout=10) as resp:
                 tickers_data = json.loads(resp.read())
             for _entry in tickers_data.values():
                 if _entry.get("ticker", "").upper() == ticker.upper():
@@ -917,7 +918,7 @@ async def get_filing_outline(ticker: str, accession_number: str | None = None, d
                                 "Either accession_number or document_url is required")
 
         req = urllib.request.Request(document_url, headers={"User-Agent": "yahoo-finance-mcp/1.0 admin@example.com"})
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with _url_policy.urlopen(req, timeout=15) as resp:
             html = resp.read().decode("utf-8", errors="replace")
 
         html = _sanitize_sec_html(html)
@@ -947,7 +948,7 @@ async def get_filing_section(ticker: str, section_name: str, document_url: str, 
     try:
         import urllib.request
         req = urllib.request.Request(document_url, headers={"User-Agent": "yahoo-finance-mcp/1.0 admin@example.com"})
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with _url_policy.urlopen(req, timeout=15) as resp:
             html = resp.read().decode("utf-8", errors="replace")
 
         html = _sanitize_sec_html(html)
@@ -1064,7 +1065,7 @@ async def list_filing_tables(
     try:
         import urllib.request
         req = urllib.request.Request(document_url, headers={"User-Agent": "yahoo-finance-mcp/1.0 admin@example.com"})
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with _url_policy.urlopen(req, timeout=15) as resp:
             html = resp.read().decode("utf-8", errors="replace")
 
         html = _sanitize_sec_html(html)
@@ -1116,7 +1117,7 @@ async def get_filing_table(ticker: str, document_url: str, table_index: int, max
     try:
         import urllib.request
         req = urllib.request.Request(document_url, headers={"User-Agent": "yahoo-finance-mcp/1.0 admin@example.com"})
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with _url_policy.urlopen(req, timeout=15) as resp:
             html = resp.read().decode("utf-8", errors="replace")
 
         html = _sanitize_sec_html(html)
@@ -7654,7 +7655,7 @@ async def _companies_house_get(path: str, key: str) -> tuple[int, dict | None]:
             headers={"Authorization": f"Basic {token}", "Accept": "application/json", "User-Agent": _PROVIDER_USER_AGENT},
         )
         try:
-            with _urlrequest.urlopen(req, timeout=15) as resp:  # noqa: S310
+            with _url_policy.urlopen(req, timeout=15) as resp:  # noqa: S310
                 return resp.status, json.loads(resp.read().decode("utf-8", errors="replace"))
         except _urlerror.HTTPError as exc:
             return exc.code, None
@@ -8894,6 +8895,9 @@ def _write_consensus_observation(ticker: str, curve: dict, observed_at: str) -> 
 
 def _read_consensus_observation(ticker: str, observation_date: str) -> str:
     """A stored daily consensus observation, read back as it was written (2.5.22, F-006). Not found lists the stored dates."""
+    ticker_err = _validate_ticker(ticker)
+    if ticker_err:
+        return _mcp_failure("get_consensus_forecast_curve", ErrorCode.INPUT_VALIDATION_ERROR, ticker_err)
     symbol = ticker.upper()
     if not _re.fullmatch(r"\d{4}-\d{2}-\d{2}", observation_date, _re.ASCII):
         return json.dumps({"error": True, "code": "INPUT_VALIDATION_ERROR", "message": "observation_date must be YYYY-MM-DD."})
@@ -8960,6 +8964,9 @@ async def get_consensus_forecast_curve(
     description="EPS estimate revision windows for FY0 and FY+1 as each provider reports them: the mean now and 7, 30, 60 and 90 days ago with change and percent change, and up/down revision counts over 7 and 30 days. A window spanning a stock split carries no change (SPLIT_IN_WINDOW), nor does a row whose mean falls outside its own range (PROVIDER_INCONSISTENT). Stored figures standing in for a refused provider request (PROVIDER_DATA_STALE) have windows ending at their retrieval time. Revenue revisions and analyst adds/drops are PROVIDER_NOT_COVERED. Lists the dates of stored daily consensus observations. Evidence only.",
 )
 async def get_eps_revisions(ticker: str) -> str:
+    ticker_err = _validate_ticker(ticker)
+    if ticker_err:
+        return _mcp_failure("get_eps_revisions", ErrorCode.INPUT_VALIDATION_ERROR, ticker_err)
     as_of = _now_iso()
     inputs, _, splits = await _consensus_providers(ticker)
     revisions = _ev.build_eps_revisions(ticker, inputs, as_of, splits)
@@ -9145,6 +9152,9 @@ async def get_evidence_cut(evidence_cut_id: str) -> str:
     description="Stored evidence cuts for a ticker, newest first, with their ids and cutoff times.",
 )
 async def list_evidence_cuts(ticker: str, limit: int = 20) -> str:
+    ticker_err = _validate_ticker(ticker)
+    if ticker_err:
+        return _mcp_failure("list_evidence_cuts", ErrorCode.INPUT_VALIDATION_ERROR, ticker_err)
     symbol = ticker.upper()
     store = _es.get_store()
     if store is None:

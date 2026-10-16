@@ -54,6 +54,7 @@ from unittest.mock import patch
 import server
 from scripts.parity.harness import WORKER, Case
 from yfmcp import capital_structure as cs
+from yfmcp import url_policy
 from yfmcp.clients import edgar
 from yfmcp.tools import news as news_tools
 
@@ -141,6 +142,7 @@ def _python_world(scn: dict):
         if scn.get("registry") is not None:
             registry = scn["registry"]
             stack.enter_context(patch.object(news_tools, "_load_company_ir_page_registry", lambda: copy.deepcopy(registry)))
+            stack.enter_context(url_policy.registry_override(registry))     # the fetch allow-list holds approved registry hosts
         yield
 
 
@@ -1539,12 +1541,16 @@ CASES += [
                  lambda v: {"count": len(v["items"]), "has_50": any(it["title"].endswith("item 50") for it in v["items"]),
                             "has_51": any(it["title"].endswith("item 51") for it in v["items"])},
                  expect={"count": 50, "has_50": True, "has_51": False}),
-    # Finding (Q7, for triage; card 101): any status other than disabled/candidate (here 'rejected') is fetched and its items are
-    # stamped approvalStatus 'approved' / decisionUse USE_OFFICIAL_EVIDENCE, in both runtimes.
-    ir_news_case("ir_page.unknown_status_is_fetched_and_stamped_approved", ["BR-NWS-101", "BR-NWS-102"], "IRREJ",
+    # 2.10.0 (Q2a, planner decision): only an approved entry is fetched. An entry with any other status (here 'rejected') is not
+    # fetched in either runtime: no items, and the same COMPANY_IR_PAGE_VALIDATION_FAILED warning (the page host is not on the
+    # fetch allow-list, which holds the hosts of approved entries only). Until then both fetched it and stamped it approved.
+    ir_news_case("ir_page.non_approved_status_is_not_fetched", ["BR-NWS-101", "BR-NWS-102"], "IRREJ",
                  ir_routes("IRREJ", _article("IRREJ reports quarterly earnings", "/investors/news/q3", "2026-10-12")),
-                 lambda v: [(it["title"], it["approvalStatus"], it["decisionUse"]) for it in ir_items(v)],
-                 expect=[("IRREJ reports quarterly earnings", "approved", "USE_OFFICIAL_EVIDENCE")]),
+                 lambda v: {"items": [(it["title"], it["approvalStatus"], it["decisionUse"]) for it in ir_items(v)],
+                            "warnings": [(w["code"], w["message"]) for w in v["warnings"]], "row": ir_row(v, "status", "rawCount")},
+                 expect={"items": [],
+                         "warnings": [("COMPANY_IR_PAGE_VALIDATION_FAILED", "Approved company IR page validation failed: URL host not allowed")],
+                         "row": {"status": "SOURCE_VALIDATION_FAILED", "rawCount": 0}}),
     # Card 171: the revalidation deadline. An absent deadline (IROKH) and a future one (IRFUT) are fresh; so is a deadline equal to
     # now; a past one and an unparseable one are stale and the source is skipped.
     *[ir_news_case(f"ir_page.revalidation_deadline_{label}", ["BR-NWS-171", "BR-NWS-102"], ticker,
@@ -1633,17 +1639,21 @@ CASES += [
 # ═══════════════════════════════════════════════════════════════════════════════════════════════
 # company_ir source: BR-NWS-103, 107 (P0: what "company_ir" means), 145, 165, 167 (status precedence), 170, 183 (discovery)
 # Python serves company_ir from the Yahoo news feed (items keep their yahoo_finance_news type; the source is marked used and,
-# having no company_ir/press_release items, reads EMPTY_RESULT). The Worker discovers the company website's RSS/Atom feed.
+# having no company_ir/press_release items, reads EMPTY_RESULT). Until 2.10.0 the Worker discovered the company website's RSS/Atom
+# feed; since 2.10.0 (fetch allow-list) it reads only approved company IR registry entries, so with none for ACME every scenario
+# below is NOT_REGISTERED and fetches nothing from the company site (the routes stay to show they are no longer used).
 # Every case is pinned: the Python values are what the same request returns there today.
 # ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 ACME_SITE = "https://www.acme.example"
 ACME_WEB_INFO = {**ACME_INFO, "website": ACME_SITE}
-RSS_DECISION = "FINDING: company_ir means Yahoo-feed passthrough in Python and website RSS/Atom autodiscovery in the Worker"
+RSS_DECISION = ("FINDING: company_ir means Yahoo-feed passthrough in Python; in the Worker it is the approved company IR registry only "
+                "(2.10.0: website RSS/Atom autodiscovery removed with the fetch allow-list), so with no approved entry it is NOT_REGISTERED")
 _ROOT_WITH_FEED = '<html><head><link rel="alternate" type="application/rss+xml" href="/rss/news.xml"></head><body>Acme</body></html>'
 _ACME_FEED = rss([{"title": "Acme official RSS release", "link": f"{ACME_SITE}/news/1", "pubDate": "Tue, 13 Oct 2026 10:00:00 GMT",
                    "description": "Acme announces results"}], title="Acme News")
 _PY_EMPTY = {"row": "EMPTY_RESULT", "collection": "NOT_FOUND", "warnings": []}
+_TS_NOT_REGISTERED = {"row": "NOT_REGISTERED", "collection": "PROVIDER_ERROR", "warnings": []}
 
 
 def ir_rss_view(v: dict) -> dict:
@@ -1669,8 +1679,7 @@ CASES += [
               mode="pinned", decision=RSS_DECISION,
               expect_py={"sourcesUsed": ["company_ir"], "row": "EMPTY_RESULT",
                          "items": [("Acme wins big order", "yahoo_finance_news", "CONTEXTUAL_NEWS", "CONTEXT_ONLY")]},
-              expect_ts={"sourcesUsed": ["company_ir"], "row": "OK",
-                         "items": [("Acme official RSS release", "company_ir", "OFFICIAL_RSS_ATOM", "CHECK_OFFICIAL_RELEASES")]}),
+              expect_ts={"sourcesUsed": [], "row": "NOT_REGISTERED", "items": []}),
     # Card 170: probe order, rel=alternate link discovery, same-domain acceptance (HIGH confidence). Diagnostics exist only in the Worker.
     tool_case("company_ir.discovery_finds_alternate_link_feed_on_the_company_domain", ["BR-NWS-170", "BR-NWS-145"], "news",
               ["ACME", 10, 14, ["company_ir"]],
@@ -1684,18 +1693,16 @@ CASES += [
               mode="pinned", decision=RSS_DECISION,
               expect_py={"status": "EMPTY_RESULT", "rssDiscovery": None, "discoveredFeedCount": None, "discoveryPageProbeCount": None,
                          "discoveryProbeBudget": None, "acceptedFeedCount": None, "acceptedFeeds": None, "discoveryProbeBudgetExhausted": None, "item": []},
-              expect_ts={"status": "OK", "rssDiscovery": "feeds_accepted", "discoveredFeedCount": 1, "discoveryPageProbeCount": 14,
-                         "discoveryProbeBudget": 24, "acceptedFeedCount": 1, "acceptedFeeds": [f"{ACME_SITE}/rss/news.xml"],
-                         "discoveryProbeBudgetExhausted": False,
-                         "item": [("html_alternate_link", f"{ACME_SITE}/rss/news.xml", "HIGH", "HIGH", "2026-10-13")]}),
+              expect_ts={"status": "NOT_REGISTERED", "rssDiscovery": None, "discoveredFeedCount": None, "discoveryPageProbeCount": None,
+                         "discoveryProbeBudget": None, "acceptedFeedCount": None, "acceptedFeeds": None,
+                         "discoveryProbeBudgetExhausted": None, "item": []}),
     # Cards 183/165: no feed on any candidate host -> the 24-page probe budget runs out before all paths are tried;
     # FEED_NOT_FOUND is also raised and the status takes the earlier-checked DISCOVERY_BUDGET_EXHAUSTED.
     _ir_rss_case("company_ir.no_feed_anywhere_exhausts_the_probe_budget", ["BR-NWS-183", "BR-NWS-165", "BR-NWS-170"], {},
                  _PY_EMPTY,
-                 {"row": "DISCOVERY_BUDGET_EXHAUSTED", "collection": "SOURCE_LIMITED_NOT_FOUND",
-                  "warnings": ["COMPANY_IR_DISCOVERY_BUDGET_EXHAUSTED", "COMPANY_IR_FEED_NOT_FOUND"]}),
+                 _TS_NOT_REGISTERED),
     _ir_rss_case("company_ir.no_company_website_gives_website_not_available", ["BR-NWS-145", "BR-NWS-165"], {},
-                 _PY_EMPTY, {"row": "WEBSITE_NOT_AVAILABLE", "collection": "SOURCE_LIMITED_NOT_FOUND", "warnings": ["COMPANY_WEBSITE_NOT_AVAILABLE"]},
+                 _PY_EMPTY, _TS_NOT_REGISTERED,
                  info=ACME_INFO),
     # Card 145: two linked external feeds that do not mention the company are rejected -> feed_not_accepted, source not used.
     _ir_rss_case("company_ir.external_feeds_not_matching_the_company_are_rejected", ["BR-NWS-145", "BR-NWS-228", "BR-NWS-165"],
@@ -1703,15 +1710,14 @@ CASES += [
                                              '<a href="https://feeds.example-wire.com/b.xml">More</a></body></html>'},
                   "https://feeds.example-wire.com/a.xml": {"body": rss([{"title": "Other firm", "link": "https://x.example/1", "pubDate": "Tue, 13 Oct 2026 10:00:00 GMT"}], "Business Wire Top Stories")},
                   "https://feeds.example-wire.com/b.xml": {"body": rss([{"title": "Another firm", "link": "https://x.example/2", "pubDate": "Tue, 13 Oct 2026 10:00:00 GMT"}], "Business Wire Top Stories")}},
-                 _PY_EMPTY, {"row": "DISCOVERY_NOT_FOUND", "collection": "SOURCE_LIMITED_NOT_FOUND",
-                             "warnings": ["COMPANY_IR_RSS_HOST_REJECTED"]}),   # two feeds rejected; the identical warnings merge into one
+                 _PY_EMPTY, _TS_NOT_REGISTERED),
     # Card 167: discovery found a feed link but the feed itself could not be downloaded -> PROVIDER_ERROR (RSS unavailable).
     _ir_rss_case("company_ir.feed_that_fails_to_download_is_provider_error", ["BR-NWS-167", "BR-NWS-165"],
                  {f"{ACME_SITE}/": {"body": _ROOT_WITH_FEED}, f"{ACME_SITE}/rss/news.xml": {"status": 503, "body": "down"}},
-                 _PY_EMPTY, {"row": "PROVIDER_ERROR", "collection": "SOURCE_LIMITED_NOT_FOUND", "warnings": ["COMPANY_IR_RSS_UNAVAILABLE"]}),
+                 _PY_EMPTY, _TS_NOT_REGISTERED),
     _ir_rss_case("company_ir.feed_that_is_not_xml_is_parse_error", ["BR-NWS-165", "BR-NWS-167"],
                  {f"{ACME_SITE}/": {"body": _ROOT_WITH_FEED}, f"{ACME_SITE}/rss/news.xml": {"body": "<html>not a feed</html>"}},
-                 _PY_EMPTY, {"row": "PARSE_ERROR", "collection": "SOURCE_LIMITED_NOT_FOUND", "warnings": ["COMPANY_IR_RSS_PARSE_ERROR"]}),
+                 _PY_EMPTY, _TS_NOT_REGISTERED),
 ]
 
 
@@ -1990,7 +1996,7 @@ CASES += [
                                 "items": [(it.get("discoveryMethod"), it.get("feedUrl"), it.get("confidence"), it.get("sourceType")) for it in v["items"]]},
               mode="pinned", decision=RSS_DECISION,
               expect_py={"row": "EMPTY_RESULT", "items": []},
-              expect_ts={"row": "OK", "items": [("direct_feed_path", f"{ACME_SITE}/rss.cfm", "HIGH", "company_ir")]}),
+              expect_ts={"row": "NOT_REGISTERED", "items": []}),
     # Card 182: Python refuses any feed containing a DOCTYPE; the Worker refuses only <!ENTITY and checks the RSS structure instead.
     tool_case("newswire.doctype_in_a_feed_is_refused_only_by_python", ["BR-NWS-182", "BR-NWS-154"], "news",
               ["ACME", 10, 14, ["newswire"]],

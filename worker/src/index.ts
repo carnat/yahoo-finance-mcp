@@ -46,13 +46,46 @@ export interface Env {
 
 setCacheSummaryProvider(currentCacheSummary);
 
-const CORS_HEADERS: Record<string, string> = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, Mcp-Session-Id",
-  "Access-Control-Max-Age": "86400",
-  "Access-Control-Expose-Headers": "X-Yahoo-Cache, X-Sec-Cache",
-};
+/** The one browser origin allowed to read /mcp responses. */
+const MCP_ALLOWED_ORIGIN = "https://claude.ai";
+
+type CorsRoute = "public" | "mcp" | "none";
+
+/**
+ * CORS headers for a response (2.10.0, S-13).
+ *
+ * - `public` (`/`, `/health`): readable from any origin.
+ * - `mcp` (`/mcp`, `/mcp/<token>`): only for `Origin: https://claude.ai`, which
+ *   is reflected with `Vary: Origin`; any other origin, or none, gets no CORS
+ *   headers. Server-side clients send no Origin and are unaffected.
+ * - `none` (`/audit/mcp`, unknown paths): no CORS headers.
+ */
+function corsHeadersFor(request: Request, route: CorsRoute): Record<string, string> {
+  if (route === "public") {
+    return {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type, Mcp-Session-Id",
+      "Access-Control-Max-Age": "86400",
+      "Access-Control-Expose-Headers": "X-Yahoo-Cache, X-Sec-Cache",
+    };
+  }
+  if (route === "mcp" && request.headers.get("Origin") === MCP_ALLOWED_ORIGIN) {
+    return {
+      "Access-Control-Allow-Origin": MCP_ALLOWED_ORIGIN,
+      "Vary": "Origin",
+      "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type, Mcp-Session-Id, Authorization",
+      "Access-Control-Max-Age": "86400",
+      "Access-Control-Expose-Headers": "X-Yahoo-Cache, X-Sec-Cache",
+    };
+  }
+  return {};
+}
+
+function isMcpPath(pathname: string): boolean {
+  return pathname === "/mcp" || pathname.startsWith("/mcp/");
+}
 
 /** Largest accepted request body: 1 MiB. */
 const MAX_BODY_BYTES = 1_048_576;
@@ -69,8 +102,8 @@ const AUTH_REQUIRED_BODY = {
   },
 };
 
-function rpcError(status: number, code: number, message: string, dataCode: string): Response {
-  return json({ jsonrpc: "2.0", id: null, error: { code, message, data: { code: dataCode } } }, status);
+function rpcError(status: number, code: number, message: string, dataCode: string, cors: Record<string, string>): Response {
+  return json({ jsonrpc: "2.0", id: null, error: { code, message, data: { code: dataCode } } }, status, {}, cors);
 }
 
 /** `grace` (the default) serves requests without a credential; anything else enforces. */
@@ -83,10 +116,10 @@ function isToolCall(message: unknown): boolean {
   return typeof message === "object" && message !== null && (message as { method?: unknown }).method === "tools/call";
 }
 
-function json(data: unknown, status = 200, extraHeaders: Record<string, string> = {}): Response {
+function json(data: unknown, status = 200, extraHeaders: Record<string, string> = {}, cors: Record<string, string> = {}): Response {
   return new Response(JSON.stringify(data), {
     status,
-    headers: { "Content-Type": "application/json", ...CORS_HEADERS, ...extraHeaders },
+    headers: { "Content-Type": "application/json", ...cors, ...extraHeaders },
   });
 }
 
@@ -105,7 +138,8 @@ export default {
 
     // CORS preflight
     if (method === "OPTIONS") {
-      return new Response(null, { status: 204, headers: CORS_HEADERS });
+      const route: CorsRoute = pathname === "/" || pathname === "/health" ? "public" : isMcpPath(pathname) ? "mcp" : "none";
+      return new Response(null, { status: 204, headers: corsHeadersFor(request, route) });
     }
 
     // Health check
@@ -121,21 +155,21 @@ export default {
         workerVersionId: env.CF_VERSION_METADATA?.id ?? null,
         yahooCache: yahooCacheStats(),
         secDocumentCache: secDocumentCacheStats(),
-      });
+      }, 200, {}, corsHeadersFor(request, "public"));
     }
 
     // Audit endpoint
     if (pathname === "/audit/mcp") {
       if (method !== "GET") {
-        return new Response("Method Not Allowed", { status: 405, headers: CORS_HEADERS });
+        return new Response("Method Not Allowed", { status: 405 });
       }
       const token = getWorkerVar("AUDIT_TOKEN");
       if (!token) {
-        return new Response("Not Found", { status: 404, headers: CORS_HEADERS });
+        return new Response("Not Found", { status: 404 });
       }
       const authHeader = request.headers.get("Authorization") ?? "";
       if (!timingSafeEqual(authHeader, `Bearer ${token}`)) {
-        return new Response("Unauthorized", { status: 401, headers: CORS_HEADERS });
+        return new Response("Unauthorized", { status: 401 });
       }
       return json(await runAudit());
     }
@@ -143,17 +177,18 @@ export default {
     // MCP endpoint: /mcp, or /mcp/<token> with the credential in the path
     const credential = resolveCredential(request, pathname, env);
     if (credential.route === "mcp") {
+      const cors = corsHeadersFor(request, "mcp");
       // Auth first, so an unauthenticated client learns nothing about limits or methods.
       if (credential.status === "invalid" || (credential.status === "absent" && authEnforced(env))) {
-        return json(AUTH_REQUIRED_BODY, 401, { "WWW-Authenticate": 'Bearer realm="yahoo-finance-mcp"' });
+        return json(AUTH_REQUIRED_BODY, 401, { "WWW-Authenticate": 'Bearer realm="yahoo-finance-mcp"' }, cors);
       }
 
       if (method !== "POST") {
-        return new Response("Method Not Allowed", { status: 405, headers: CORS_HEADERS });
+        return new Response("Method Not Allowed", { status: 405, headers: cors });
       }
 
       const tooLarge = () =>
-        rpcError(413, -32600, `PAYLOAD_TOO_LARGE: request body exceeds ${MAX_BODY_BYTES} bytes.`, "PAYLOAD_TOO_LARGE");
+        rpcError(413, -32600, `PAYLOAD_TOO_LARGE: request body exceeds ${MAX_BODY_BYTES} bytes.`, "PAYLOAD_TOO_LARGE", cors);
       const declaredLength = Number(request.headers.get("Content-Length"));
       if (Number.isFinite(declaredLength) && declaredLength > MAX_BODY_BYTES) return tooLarge();
       const text = await request.text();
@@ -165,19 +200,22 @@ export default {
       } catch {
         return json(
           { jsonrpc: "2.0", id: null, error: { code: -32700, message: "Parse error" } },
-          400
+          400,
+          {},
+          cors,
         );
       }
 
       if (Array.isArray(body)) {
         if (body.length === 0) {
-          return json({ jsonrpc: "2.0", id: null, error: { code: -32600, message: "Invalid Request" } }, 400);
+          return json({ jsonrpc: "2.0", id: null, error: { code: -32600, message: "Invalid Request" } }, 400, {}, cors);
         }
         if (body.filter(isToolCall).length > MAX_TOOL_CALLS_PER_BATCH) {
           return rpcError(
             400, -32600,
             `BATCH_LIMIT_EXCEEDED: at most ${MAX_TOOL_CALLS_PER_BATCH} tools/call per request.`,
             "BATCH_LIMIT_EXCEEDED",
+            cors,
           );
         }
       }
@@ -191,7 +229,7 @@ export default {
 
         // Null means the request was notification-only — no response body needed
         if (result === null) {
-          return new Response(null, { status: 202, headers: CORS_HEADERS });
+          return new Response(null, { status: 202, headers: cors });
         }
 
         // Where this request's Yahoo and SEC data came from: process
@@ -200,12 +238,14 @@ export default {
         return json(result, 200, {
           "X-Yahoo-Cache": formatCacheUsage(scope.caches.yahoo),
           "X-Sec-Cache": formatCacheUsage(scope.caches.sec),
-        });
+        }, cors);
       } catch (e) {
         const message = e instanceof Error ? e.message : "Internal server error";
         return json(
           { jsonrpc: "2.0", id: null, error: { code: -32603, message } },
-          500
+          500,
+          {},
+          cors,
         );
       }
     }

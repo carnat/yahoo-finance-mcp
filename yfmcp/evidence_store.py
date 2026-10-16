@@ -17,6 +17,19 @@ from pathlib import Path
 _KEY_RE = re.compile(r"^(?:evidence-cuts|consensus-history)/[A-Za-z0-9._^=/-]+\.json$")
 
 
+def assert_list_prefix(prefix: str) -> None:
+    """A list() prefix must name one directory: non-empty, ending in "/", free of "..", "//" and backslashes (2.10.0, S-05)."""
+    if (
+        not isinstance(prefix, str)
+        or prefix == ""
+        or not prefix.endswith("/")
+        or ".." in prefix
+        or "//" in prefix
+        or "\\" in prefix
+    ):
+        raise ValueError("invalid evidence list prefix")
+
+
 class LocalDirStore:
     kind = "local_dir"
 
@@ -47,7 +60,10 @@ class LocalDirStore:
         os.replace(tmp, path)
 
     def list(self, prefix: str, limit: int) -> list[str]:
-        base = self.root / prefix
+        assert_list_prefix(prefix)
+        base = (self.root / prefix).resolve()
+        if base != self.root and self.root not in base.parents:
+            raise ValueError("invalid evidence list prefix")
         if not base.exists():
             return []
         keys = sorted(str(p.relative_to(self.root)).replace(os.sep, "/") for p in base.rglob("*.json"))
@@ -70,6 +86,7 @@ class MemoryStore:
         self.objects[key] = body
 
     def list(self, prefix: str, limit: int) -> list[str]:
+        assert_list_prefix(prefix)
         return sorted(k for k in self.objects if k.startswith(prefix))[:limit]
 
 
