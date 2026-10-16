@@ -175,3 +175,16 @@ The prefix checks stay as they are. Redirect re-validation (§3) covers the rest
   - An explicit request (for example `sources` naming the provider) opts in.
   - A provider skipped for lack of opt-in reports `PROVIDER_OPT_IN_REQUIRED` in `skippedSources`.
   - **Open planner question for 3c:** tools with no `sources` parameter, such as the consensus tools (Alpha Vantage estimates) and the transcript waterfall, have no way to opt in. A new input field is a contract change, so 3c will propose one name to the owner rather than choose it during execution.
+
+## 11. Planner decisions taken during execution (2026-10-16)
+
+1. **Fetchable registry entries:** only entries with status `approved` may be fetched, in both runtimes (Q2a). The old behaviour of fetching an entry with any other status as if approved goes away. Parity case `ir_page.unknown_status_is_fetched_and_stamped_approved` changes accordingly.
+2. **Coverage parity case:** `tool.nws.coverage_website_not_available_failed_source` is redesigned so both runtimes call the coverage builder with the same fixed input. The Worker's `company_ir` can no longer produce that status.
+3. **Message strings** (not codes), taken from the Worker:
+   - `URL path not allowed`: the host is allowed but the caller path rule fails;
+   - `too many redirects`: the hop limit;
+   - `invalid evidence list prefix`: a bad `list()` prefix.
+4. **Unregistered `company_ir`:** reported in `failedSources` with `NOT_REGISTERED`, as unregistered `company_ir_page` is today. This corrects §5, which said `skippedSources`. With `company_ir` as the only source, the collection status reads `PROVIDER_ERROR`.
+5. **`sourceStatus.company_ir` keys:** the identity and discovery diagnostics (`companyName`, `identityConfidence`, `rssDiscovery`, probed hosts) are gone, because discovery is gone. The row carries the existing registry keys of `company_ir_page` instead (`registryVersion`, `registrySchemaVersion`, `approvalStatus`, `allowedAction`). The blocking `company-ir-source-status` canary is updated to match.
+6. **§9 live check:** `get_company_news` defaults do not include `company_ir`, so the live check passes `sources` explicitly. Timeline and verify defaults do include it.
+7. **Known risk, accepted:** if `fc.yahoo.com` redirects to a host off the list (for example a regional consent page), the crumb refresh fails instead of following. Today it answers 404 with a cookie. The deploy canaries cover this path.
