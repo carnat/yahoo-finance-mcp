@@ -28,6 +28,13 @@ DEPLOYED_AT = ""
 binding = "EVIDENCE_BUCKET"
 bucket_name = "yfmcp-evidence"
 
+# Privacy-minimised operational telemetry (2.11.1): one data point per /mcp
+# request. The dataset is created on first write; without the binding
+# (tests, local dev) telemetry is a no-op.
+[[analytics_engine_datasets]]
+binding = "TELEMETRY"
+dataset = "yfmcp_telemetry"
+
 # Smart Placement routes Worker execution to the Cloudflare PoP geographically
 # closest to its outbound dependencies (e.g. data.sec.gov in US-East), which
 # reduces latency and improves reliability of EDGAR fetch calls.

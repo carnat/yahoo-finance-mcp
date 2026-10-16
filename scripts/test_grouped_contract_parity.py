@@ -69,7 +69,7 @@ def _worker_grouped_schemas() -> dict[str, dict[str, list[str]]]:
             [node, "--input-type=module", "-e", _LIST_GROUPED_SCHEMAS, bundle.as_uri()],
             check=True, capture_output=True, text=True, timeout=60,
         )
-    return json.loads(result.stdout)
+    return json.loads(result.stdout.strip().splitlines()[-1])  # the Worker logs one dispatch line per /mcp request (2.11.1)
 
 
 def _python_grouped_schemas() -> dict[str, dict[str, list[str]]]:

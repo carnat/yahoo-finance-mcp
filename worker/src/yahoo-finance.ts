@@ -1,5 +1,5 @@
 import { BoundedTtlCache, setBounded } from "./cache.js";
-import { awaitNotingBudget, budgetRefusalCount, consumeSubrequest, countCacheEvent, emptyCacheUsage, isBudgetExhaustedError, providerFetch, withBudgetWatch, type CacheEvent, type CacheUsage } from "./request-context.js";
+import { awaitNotingBudget, budgetRefusalCount, consumeSubrequest, countCacheEvent, countProviderRetry, countProviderTimeout, emptyCacheUsage, isBudgetExhaustedError, providerFetch, withBudgetWatch, type CacheEvent, type CacheUsage } from "./request-context.js";
 import { classifyErrorMessage, ErrorCode, getWorkerVar, mcpFailure } from "./response.js";
 import { yahooTranscriptContentSha256 } from "./transcript-contract.js";
 import { allowedHostKind, approvedRegistryUrlAllowed, checkFetchUrl } from "./url-policy.js";
@@ -247,9 +247,13 @@ export async function fetchProviderWithTimeout(
   timeoutMs: number,
 ): Promise<Response> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let timedOut = false;
+  const timer = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
   try {
     return await providerFetch(url, { ...init, signal: controller.signal });
+  } catch (error) {
+    if (timedOut) countProviderTimeout();
+    throw error;
   } finally {
     clearTimeout(timer);
   }
@@ -724,7 +728,8 @@ async function refreshCrumb(): Promise<{ value: string; cookie: string }> {
   // Like yfinance's two cookie strategies, fall back to the other API host
   // when the first refuses the crumb request.
   let lastStatus = 0;
-  for (const host of YAHOO_API_HOSTS) {
+  for (const [attempt, host] of YAHOO_API_HOSTS.entries()) {
+    if (attempt > 0) countProviderRetry();
     const crumbRes = await fetchProviderWithTimeout(`https://${host}/v1/test/getcrumb`, {
       headers: { "User-Agent": UA, Cookie: cookie },
     }, YAHOO_FETCH_TIMEOUT_MS);
@@ -836,6 +841,7 @@ async function yGetText(url: string, auth: boolean): Promise<string> {
     await res.body?.cancel();
     invalidateCrumb(crumb);
     crumb = await getCrumbIfAvailable();
+    countProviderRetry();
     res = await makeReq(url, crumb);
   }
 
@@ -844,6 +850,7 @@ async function yGetText(url: string, auth: boolean): Promise<string> {
   if (alternate) {
     await res.body?.cancel();
     await pause(YAHOO_RATE_LIMIT_RETRY_DELAY_MS);
+    countProviderRetry();
     res = await makeReq(alternate, crumb);
   }
 
@@ -1050,7 +1057,9 @@ async function yPost(url: string, body: Record<string, unknown>): Promise<unknow
   if (res.status === 401) {
     await res.body?.cancel();
     invalidateCrumb(crumb);
-    res = await makeReq(await getCrumb());
+    const fresh = await getCrumb();
+    countProviderRetry();
+    res = await makeReq(fresh);
   }
   if (!res.ok) {
     await res.body?.cancel();
@@ -10191,7 +10200,9 @@ async function yahooTranscriptResponse(url: string, timeoutMs: number): Promise<
   if (response.status === 401) {
     await response.body?.cancel();
     invalidateCrumb(crumb);
-    response = await makeRequest(await getCrumb());
+    const fresh = await getCrumb();
+    countProviderRetry();
+    response = await makeRequest(fresh);
   }
   return response;
 }
