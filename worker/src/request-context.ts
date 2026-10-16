@@ -40,6 +40,10 @@ export interface CacheScope {
   subrequests?: number;
   /** Root scope only: the budget guard refused at least one fetch in this invocation. */
   budgetExhausted?: boolean;
+  /** Root scope only (telemetry, 2.11.1): provider fetches aborted by their timeout. */
+  providerTimeouts?: number;
+  /** Root scope only (telemetry, 2.11.1): provider requests re-sent after a failed attempt. */
+  providerRetries?: number;
   parent: CacheScope | undefined;
 }
 
@@ -84,6 +88,23 @@ function rootScope(): CacheScope | undefined {
   let scope = scopes.getStore();
   while (scope?.parent) scope = scope.parent;
   return scope;
+}
+
+/** The current invocation's root scope, or undefined outside a request scope. */
+export function currentRootScope(): CacheScope | undefined {
+  return rootScope();
+}
+
+/** Count a provider fetch aborted by its timeout (telemetry only; nothing else changes). */
+export function countProviderTimeout(): void {
+  const root = rootScope();
+  if (root) root.providerTimeouts = (root.providerTimeouts ?? 0) + 1;
+}
+
+/** Count a provider request re-sent after a failed attempt (telemetry only; nothing else changes). */
+export function countProviderRetry(): void {
+  const root = rootScope();
+  if (root) root.providerRetries = (root.providerRetries ?? 0) + 1;
 }
 
 function countBudgetRefusal(): void {
@@ -218,7 +239,7 @@ export async function withCacheScope<T>(fn: () => Promise<T>): Promise<{ result:
   const parent = scopes.getStore();
   const scope: CacheScope = parent
     ? { caches: {}, upstreamRequests: 0, budgetRefusals: 0, parent }
-    : { caches: {}, upstreamRequests: 0, budgetRefusals: 0, subrequests: 0, budgetExhausted: false, parent };
+    : { caches: {}, upstreamRequests: 0, budgetRefusals: 0, subrequests: 0, budgetExhausted: false, providerTimeouts: 0, providerRetries: 0, parent };
   const result = await scopes.run(scope, fn);
   return { result, scope };
 }
@@ -246,6 +267,11 @@ export type CacheSource = "memory" | "edge" | "upstream" | "mixed";
 export function currentCacheSummary(): { cacheHit: boolean; cacheSource: CacheSource | null } {
   const scope = scopes.getStore();
   if (!scope) return { cacheHit: false, cacheSource: null };
+  return summarizeCacheScope(scope);
+}
+
+/** currentCacheSummary for a given scope (the request's root scope, after it has finished). */
+export function summarizeCacheScope(scope: CacheScope): { cacheHit: boolean; cacheSource: CacheSource | null } {
   const sources = new Set<CacheSource>();
   for (const usage of Object.values(scope.caches)) {
     if (usage.memoryHits + usage.sharedInflight > 0) sources.add("memory");

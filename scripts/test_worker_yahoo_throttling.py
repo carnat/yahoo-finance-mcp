@@ -96,7 +96,7 @@ def _run() -> dict:
         finally:
             entry.unlink(missing_ok=True)
         result = subprocess.run([node, str(harness), bundle.as_uri()], check=True, capture_output=True, text=True, timeout=120)
-    return json.loads(result.stdout)
+    return json.loads(result.stdout.strip().splitlines()[-1])  # the Worker logs one dispatch line per /mcp request (2.11.1)
 
 
 class TestWorkerYahooThrottling(unittest.TestCase):

@@ -2768,6 +2768,30 @@ F-024, F-026, F-029). Both runtimes change alike.
   emitted.
 - **Rollback:** revert the release.
 
+## Telemetry (2.11.1)
+
+- **Why:** R4 Q10. A latency and error baseline is needed before Phase 4. Release type: patch. No tool output
+  changes. Worker only: Python is a local stdio server with nothing to export.
+- **Where:** Workers Analytics Engine dataset `yfmcp_telemetry`, binding `TELEMETRY`. One data point is written per
+  `/mcp` request, early rejections included. Retention is 3 months. The Worker also writes one dispatch-start
+  Workers Logs line, `{"t":"yfmcp","v":1,"action","domain","build"}`, so a CPU or resource kill can be attributed
+  to an action.
+- **Recorded:** index = `action`. Blobs: `domain`, `serverVersion`, `buildShaShort`, `outcome`, `errorCode`,
+  `sizeBucket`, `credentialTransport`, `budgetExhausted`, `cacheSource`, `toolMode`, `timeoutClass`. Doubles:
+  `latencyMs`, `responseBytes`, `httpStatus`, `upstreamRequests`, `subrequestsUsed`, `budgetRefusals`,
+  `providerTimeouts`, `edgeCacheHits`, `edgeCacheMisses`, `providerRetries`.
+- **Never recorded:** the token, the `Authorization` header, the request URL or path, request or response bodies,
+  tool arguments, tickers, accession numbers, `raw_text`, provider content, IP or geo fields. `action` and `domain`
+  come only from the server's own registry, never from caller strings.
+- **Export:** `scripts/export_telemetry.py`, run daily at 02:17 UTC by `.github/workflows/telemetry-export.yml`
+  and on manual dispatch. It uploads an aggregates-only JSON artifact, kept 90 days. It needs the GitHub secret
+  `CLOUDFLARE_TELEMETRY_TOKEN` (Account Analytics: Read and Workers Observability: Write) and the existing
+  `CLOUDFLARE_ACCOUNT_ID`. When a secret is absent, the workflow skips with a notice.
+- **Manual query:** `python scripts/export_telemetry.py --end <ISO time>`.
+- **Baseline rule:** at least 7 consecutive daily exports before the first Phase 4 merge.
+- **Note:** `latencyMs` can read 0 for a request with no I/O.
+- **Rollback:** revert the release.
+
 ## Non-US Primary Filings
 
 - `get_uk_company_filings` reads Companies House, the UK statutory registry:

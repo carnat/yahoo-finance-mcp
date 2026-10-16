@@ -1,7 +1,7 @@
 /** Bounded Thai SEC Open Data fund workflows. No cache, crawling, or PDF fetching. */
 
 import { ErrorCode, getWorkerVar, mcpFailure, mcpSuccess } from "./response.js";
-import { providerFetch } from "./request-context.js";
+import { countProviderTimeout, providerFetch } from "./request-context.js";
 
 const SOURCE = "sec_thailand_open_data";
 const EVIDENCE_CLASS = "OFFICIAL_REGULATORY_DATA";
@@ -171,6 +171,7 @@ async function secGet(path: string, params: Record<string, unknown>): Promise<Se
       signal: controller.signal,
     });
   } catch {
+    if (timedOut) countProviderTimeout();
     throw timedOut
       ? providerError("PROVIDER_TIMEOUT", "SEC Open Data did not respond before the request timeout.", "RETRY_LATER")
       : providerError("PROVIDER_ERROR", "SEC Open Data request failed before a response was received.", "RETRY_LATER");

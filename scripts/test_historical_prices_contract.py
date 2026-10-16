@@ -101,7 +101,7 @@ def _run_worker() -> dict:
             [node, str(harness), bundle.as_uri()],
             check=True, capture_output=True, text=True, timeout=60,
         )
-    return json.loads(result.stdout)
+    return json.loads(result.stdout.strip().splitlines()[-1])  # the Worker logs one dispatch line per /mcp request (2.11.1)
 
 
 class TestWorkerHistoricalPrices(unittest.TestCase):

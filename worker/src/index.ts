@@ -21,12 +21,13 @@
  *   Add the URL https://<your-worker>.workers.dev/mcp in Settings → Integrations.
  */
 
-import { resolveCredential, timingSafeEqual } from "./auth.js";
+import { resolveCredential, timingSafeEqual, type CredentialStatus } from "./auth.js";
 import { handleMcp } from "./mcp.js";
 import { setEvidenceBucket } from "./evidence-store.js";
 import { getBuildVersion, getServerVersion, setCacheSummaryProvider, setWorkerEnv, getWorkerVar } from "./response.js";
 import { TOOLS, callTool } from "./tools.js";
-import { currentCacheSummary, formatCacheUsage, withCacheScope, withRequestFacts } from "./request-context.js";
+import { currentCacheSummary, currentRootScope, formatCacheUsage, withCacheScope, withRequestFacts } from "./request-context.js";
+import { classifyBody, classifyResult, logDispatchStart, newRequestRecord, writeRequestDataPoint, type RequestRecord, type TelemetryDataset } from "./telemetry.js";
 import { markYahooCacheActivity, secDocumentCacheStats, yahooCacheStats } from "./yahoo-finance.js";
 
 export interface Env {
@@ -41,6 +42,8 @@ export interface Env {
   BUILD_SHA?: string;
   DEPLOYED_AT?: string;
   CF_VERSION_METADATA?: WorkerVersionMetadata;
+  /** Workers Analytics Engine dataset (2.11.1); absent in tests and local dev, where telemetry is a no-op. */
+  TELEMETRY?: TelemetryDataset;
   [key: string]: unknown;
 }
 
@@ -102,8 +105,8 @@ const AUTH_REQUIRED_BODY = {
   },
 };
 
-function rpcError(status: number, code: number, message: string, dataCode: string, cors: Record<string, string>): Response {
-  return json({ jsonrpc: "2.0", id: null, error: { code, message, data: { code: dataCode } } }, status, {}, cors);
+function rpcError(record: RequestRecord, status: number, code: number, message: string, dataCode: string, cors: Record<string, string>): Response {
+  return recordedJson(record, { jsonrpc: "2.0", id: null, error: { code, message, data: { code: dataCode } } }, status, {}, cors);
 }
 
 /** `grace` (the default) serves requests without a credential; anything else enforces. */
@@ -177,82 +180,145 @@ export default {
     // MCP endpoint: /mcp, or /mcp/<token> with the credential in the path
     const credential = resolveCredential(request, pathname, env);
     if (credential.route === "mcp") {
-      const cors = corsHeadersFor(request, "mcp");
-      // Auth first, so an unauthenticated client learns nothing about limits or methods.
-      if (credential.status === "invalid" || (credential.status === "absent" && authEnforced(env))) {
-        return json(AUTH_REQUIRED_BODY, 401, { "WWW-Authenticate": 'Bearer realm="yahoo-finance-mcp"' }, cors);
-      }
-
-      if (method !== "POST") {
-        return new Response("Method Not Allowed", { status: 405, headers: cors });
-      }
-
-      const tooLarge = () =>
-        rpcError(413, -32600, `PAYLOAD_TOO_LARGE: request body exceeds ${MAX_BODY_BYTES} bytes.`, "PAYLOAD_TOO_LARGE", cors);
-      const declaredLength = Number(request.headers.get("Content-Length"));
-      if (Number.isFinite(declaredLength) && declaredLength > MAX_BODY_BYTES) return tooLarge();
-      const text = await request.text();
-      if (new TextEncoder().encode(text).length > MAX_BODY_BYTES) return tooLarge();
-
-      let body: unknown;
+      // One telemetry data point per /mcp request, rejections included (2.11.1).
+      const startedAt = Date.now();
+      const record = newRequestRecord(credential.transport);
+      let response: Response;
       try {
-        body = JSON.parse(text);
-      } catch {
-        return json(
-          { jsonrpc: "2.0", id: null, error: { code: -32700, message: "Parse error" } },
-          400,
-          {},
-          cors,
-        );
+        response = await serveMcp(request, env, credential.status, record);
+      } catch (error) {
+        record.outcome = "exception";
+        record.httpStatus = 500;
+        record.body = null;
+        writeRequestDataPoint(env.TELEMETRY, record, startedAt);
+        throw error;
       }
-
-      if (Array.isArray(body)) {
-        if (body.length === 0) {
-          return json({ jsonrpc: "2.0", id: null, error: { code: -32600, message: "Invalid Request" } }, 400, {}, cors);
-        }
-        if (body.filter(isToolCall).length > MAX_TOOL_CALLS_PER_BATCH) {
-          return rpcError(
-            400, -32600,
-            `BATCH_LIMIT_EXCEEDED: at most ${MAX_TOOL_CALLS_PER_BATCH} tools/call per request.`,
-            "BATCH_LIMIT_EXCEEDED",
-            cors,
-          );
-        }
-      }
-
-      try {
-        const authorizationHeaderPresent = (request.headers.get("Authorization") ?? "").trim() !== "";
-        const { result, scope } = await withRequestFacts(
-          { authorizationHeaderPresent, credentialTransport: credential.transport },
-          () => withCacheScope(() => handleMcp(body)),
-        );
-
-        // Null means the request was notification-only — no response body needed
-        if (result === null) {
-          return new Response(null, { status: 202, headers: cors });
-        }
-
-        // Where this request's Yahoo and SEC data came from: process
-        // memory, a request already in flight, the edge cache, or the
-        // provider itself.
-        return json(result, 200, {
-          "X-Yahoo-Cache": formatCacheUsage(scope.caches.yahoo),
-          "X-Sec-Cache": formatCacheUsage(scope.caches.sec),
-        }, cors);
-      } catch (e) {
-        const message = e instanceof Error ? e.message : "Internal server error";
-        return json(
-          { jsonrpc: "2.0", id: null, error: { code: -32603, message } },
-          500,
-          {},
-          cors,
-        );
-      }
+      record.httpStatus = response.status;
+      writeRequestDataPoint(env.TELEMETRY, record, startedAt);
+      return response;
     }
 
     return new Response("Not Found", { status: 404 });
   },
 };
+
+/** Like json(), and keeps the body text on the telemetry record (measured only when the binding is present). */
+function recordedJson(
+  record: RequestRecord,
+  data: unknown,
+  status: number,
+  extraHeaders: Record<string, string>,
+  cors: Record<string, string>,
+): Response {
+  record.body = JSON.stringify(data);
+  return new Response(record.body, {
+    status,
+    headers: { "Content-Type": "application/json", ...cors, ...extraHeaders },
+  });
+}
+
+function reject(record: RequestRecord, action: string, errorCode: string): RequestRecord {
+  record.action = action;
+  record.outcome = "rejected";
+  record.errorCode = errorCode;
+  return record;
+}
+
+async function serveMcp(request: Request, env: Env, status: CredentialStatus, record: RequestRecord): Promise<Response> {
+  const { method } = request;
+  const cors = corsHeadersFor(request, "mcp");
+  // Auth first, so an unauthenticated client learns nothing about limits or methods.
+  if (status === "invalid" || (status === "absent" && authEnforced(env))) {
+    return recordedJson(reject(record, "rejected:auth", "AUTH_REQUIRED"), AUTH_REQUIRED_BODY, 401, { "WWW-Authenticate": 'Bearer realm="yahoo-finance-mcp"' }, cors);
+  }
+
+  if (method !== "POST") {
+    reject(record, "rejected:method", "").body = "Method Not Allowed";
+    return new Response("Method Not Allowed", { status: 405, headers: cors });
+  }
+
+  const tooLarge = () => {
+    const code = "PAYLOAD_TOO_LARGE";
+    reject(record, "rejected:body_size", code);
+    return rpcError(record, 413, -32600, `PAYLOAD_TOO_LARGE: request body exceeds ${MAX_BODY_BYTES} bytes.`, code, cors);
+  };
+  const declaredLength = Number(request.headers.get("Content-Length"));
+  if (Number.isFinite(declaredLength) && declaredLength > MAX_BODY_BYTES) return tooLarge();
+  const text = await request.text();
+  if (new TextEncoder().encode(text).length > MAX_BODY_BYTES) return tooLarge();
+
+  let body: unknown;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    return recordedJson(
+      reject(record, "rejected:invalid", "-32700"),
+      { jsonrpc: "2.0", id: null, error: { code: -32700, message: "Parse error" } },
+      400,
+      {},
+      cors,
+    );
+  }
+
+  if (Array.isArray(body)) {
+    if (body.length === 0) {
+      return recordedJson(reject(record, "rejected:invalid", "-32600"), { jsonrpc: "2.0", id: null, error: { code: -32600, message: "Invalid Request" } }, 400, {}, cors);
+    }
+    if (body.filter(isToolCall).length > MAX_TOOL_CALLS_PER_BATCH) {
+      reject(record, "rejected:batch", "BATCH_LIMIT_EXCEEDED");
+      return rpcError(
+        record,
+        400, -32600,
+        `BATCH_LIMIT_EXCEEDED: at most ${MAX_TOOL_CALLS_PER_BATCH} tools/call per request.`,
+        "BATCH_LIMIT_EXCEEDED",
+        cors,
+      );
+    }
+  }
+
+  const { action, domain } = classifyBody(body);
+  record.action = action;
+  record.domain = domain;
+  logDispatchStart(action, domain);
+
+  try {
+    const authorizationHeaderPresent = (request.headers.get("Authorization") ?? "").trim() !== "";
+    const { result, scope } = await withRequestFacts(
+      { authorizationHeaderPresent, credentialTransport: record.credentialTransport },
+      () => withCacheScope(() => {
+        record.scope = currentRootScope();
+        return handleMcp(body);
+      }),
+    );
+
+    // Null means the request was notification-only — no response body needed
+    if (result === null) {
+      return new Response(null, { status: 202, headers: cors });
+    }
+
+    const { outcome, errorCode } = classifyResult(result);
+    record.outcome = outcome;
+    record.errorCode = errorCode;
+    // Where this request's Yahoo and SEC data came from: process
+    // memory, a request already in flight, the edge cache, or the
+    // provider itself.
+    return recordedJson(record, result, 200, {
+      "X-Yahoo-Cache": formatCacheUsage(scope.caches.yahoo),
+      "X-Sec-Cache": formatCacheUsage(scope.caches.sec),
+    }, cors);
+  } catch (e) {
+    const message = e instanceof Error ? e.message : "Internal server error";
+    record.outcome = "exception";
+    record.errorCode = "-32603";
+    return recordedJson(
+      record,
+      { jsonrpc: "2.0", id: null, error: { code: -32603, message } },
+      500,
+      {},
+      cors,
+    );
+  }
+}
 
 async function runAudit(): Promise<Record<string, unknown>> {
   const healthRaw = await callTool("health_check", {});
