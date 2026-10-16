@@ -289,9 +289,9 @@ Each R-release is a set of **separately released** behaviour changes that must b
   - [x] R3 is released and live-verified. *(2.7.0, #277; live verifier 6/6 PASS on build 2.7.0+git.e420803, 2026-10-15.)*
   - [x] The Q7 news rules are in the harness. *(BR-NWS-101..280: 282 cases, 180/180 rules covered; merged in #278.)*
 - **Exit criteria:**
-  - [ ] The topology re-run shows 0 NLOC in both `#news` regions.
-  - [ ] Harness diff = 0; acceptance suite and canaries green; the live verifier compares structure and coverage before and after.
-  - [ ] `PLAYBOOK.md` is written.
+  - [x] The topology re-run shows 0 NLOC in both `#news` regions. *(2.8.1, #279.)*
+  - [x] Harness diff = 0; acceptance suite and canaries green; the live verifier compares structure and coverage before and after. *(1078 OK with no expected value changed; live 18/18 no structure diff, manifest/schema hashes unchanged: `phase3_live_before.json` vs `phase3_live_after.json`.)*
+  - [x] `PLAYBOOK.md` is written.
   - [ ] This brief is regenerated and re-approved for R4 and Phase 4.
 - **Relative size: M** (about 6.1 KSLOC, about 10%).
 - **Risk: Medium.**
