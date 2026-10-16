@@ -2689,6 +2689,16 @@ F-024, F-026, F-029). Both runtimes change alike.
 - **Next:** the enforcement release flips `MCP_AUTH_MODE` to `enforce` after the claude.ai connector is re-added with
   the `/mcp/<token>` URL.
 
+## Credential Enforcement (2.9.1)
+
+- **Why:** Phase 1 security hardening, second release. Release type: patch (config only; no code change).
+- **Enforcement:** `/mcp` now requires the credential (`MCP_AUTH_MODE = "enforce"` in `wrangler.toml`). Requests without
+  one get HTTP 401 `AUTH_REQUIRED`, the same response 2.9.0 documents.
+- **Clients:** the claude.ai connector must use `https://yahoo-finance-mcp.artinatw.workers.dev/mcp/<token>`. Scripts and
+  CI send `Authorization: Bearer $MCP_TOKEN`.
+- **Unchanged:** `/health` stays public and makes no provider calls; the local stdio server is unaffected.
+- **Rollback:** set `MCP_AUTH_MODE = "grace"` (config change plus deploy).
+
 ## Non-US Primary Filings
 
 - `get_uk_company_filings` reads Companies House, the UK statutory registry:
