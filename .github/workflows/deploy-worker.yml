@@ -138,6 +138,7 @@ jobs:
       - name: Verify candidate MCP contract canaries
         run: python scripts/test_deployed_canaries.py
         env:
+          MCP_TOKEN: ${{ secrets.MCP_TOKEN }}
           MCP_URL: ${{ needs.upload_version.outputs.preview_url }}/mcp
           ALLOW_NETWORK_SKIP: "0"
           EXPECTED_TOOL_MODE: ${{ env.DEPLOY_TOOL_MODE }}
@@ -200,6 +201,7 @@ jobs:
         id: contract_canaries
         run: python scripts/test_deployed_canaries.py
         env:
+          MCP_TOKEN: ${{ secrets.MCP_TOKEN }}
           MCP_URL: ${{ env.PRODUCTION_MCP_URL }}
           ALLOW_NETWORK_SKIP: "0"
           EXPECTED_TOOL_MODE: ${{ env.DEPLOY_TOOL_MODE }}
@@ -212,6 +214,7 @@ jobs:
         continue-on-error: true
         run: python scripts/test_deployed_discovery.py
         env:
+          MCP_TOKEN: ${{ secrets.MCP_TOKEN }}
           MCP_URL: ${{ env.PRODUCTION_MCP_URL }}
           ALLOW_NETWORK_SKIP: "0"
           EXPECTED_TOOL_MODE: ${{ env.DEPLOY_TOOL_MODE }}
@@ -222,6 +225,8 @@ jobs:
         if: ${{ always() && env.DEPLOY_TOOL_MODE == 'expanded' }}
         continue-on-error: true
         run: python scripts/test_universal_aliases.py
+        env:
+          MCP_TOKEN: ${{ secrets.MCP_TOKEN }}
 
       - name: Audit geographic revenue schema
         id: geographic_revenue
@@ -229,6 +234,7 @@ jobs:
         continue-on-error: true
         run: python scripts/test_geographic_revenue_schema.py
         env:
+          MCP_TOKEN: ${{ secrets.MCP_TOKEN }}
           GEO_SCHEMA_TARGET: remote
           MCP_URL: ${{ env.PRODUCTION_MCP_URL }}
 
@@ -238,6 +244,7 @@ jobs:
         continue-on-error: true
         run: python scripts/test_deployed_extractors.py
         env:
+          MCP_TOKEN: ${{ secrets.MCP_TOKEN }}
           MCP_URL: ${{ env.PRODUCTION_MCP_URL }}
           ALLOW_NETWORK_SKIP: "0"
           EXPECTED_TOOL_MODE: ${{ env.DEPLOY_TOOL_MODE }}
@@ -247,6 +254,8 @@ jobs:
         if: ${{ always() && env.DEPLOY_TOOL_MODE == 'expanded' }}
         continue-on-error: true
         run: python scripts/test_tools.py --url "$PRODUCTION_MCP_URL"
+        env:
+          MCP_TOKEN: ${{ secrets.MCP_TOKEN }}
 
       - name: Summarize deployed smoke results
         if: ${{ always() }}

@@ -2659,6 +2659,36 @@ F-024, F-026, F-029). Both runtimes change alike.
 - **Compatibility:** `server.py` and `yahoo-finance.ts` re-export the moved names.
 - **Verification:** the 1078-test parity harness passes, and tool listings (expanded and grouped) are byte-identical.
 
+## Credentials (Grace Mode) And Request Limits (2.9.0)
+
+- **Why:** Phase 1 security hardening (owner decisions Q2b, Q13, Q12). This release accepts a credential but does not
+  yet require one. Release type: minor.
+- **Credential:** a static token held as the Worker secret `MCP_TOKEN`. It is presented as
+  `Authorization: Bearer <token>` or in the URL path `/mcp/<token>` (for clients such as the claude.ai connector that
+  cannot send headers). The header wins if both are present. The comparison is constant-time, and the token never
+  appears in responses, logs or errors. Use a URL-safe token (letters, digits, `-`, `_`).
+- **Modes (`MCP_AUTH_MODE`):**
+  - `grace` (default; set in `wrangler.toml`): requests without a credential are served; a wrong credential gets
+    HTTP 401 `AUTH_REQUIRED`.
+  - `enforce` (next release): requests without a credential also get 401.
+  - Unknown values behave as `enforce` (fail closed). An `Authorization` header that is not `Bearer <token>` counts as
+    no credential.
+- **401 response:** HTTP 401 with `WWW-Authenticate: Bearer realm="yahoo-finance-mcp"` and a JSON-RPC error `-32001`
+  with `data.code` `AUTH_REQUIRED`. With `MCP_TOKEN` unset, `/mcp/<anything>` is 404.
+- **health_check:** gains `credentialTransport`: `"header"` | `"path"` | `"none"` for the calling request (`null` over
+  the local stdio server). It never contains the credential.
+- **Request limits:**
+  - A body over 1 MiB gets HTTP 413, JSON-RPC `-32600`, `data.code` `PAYLOAD_TOO_LARGE`.
+  - A JSON-RPC batch with more than one `tools/call` gets HTTP 400, `-32600`, `data.code` `BATCH_LIMIT_EXCEEDED`;
+    nothing is executed.
+  - An empty batch gets HTTP 400 Invalid Request (it was a silent 202).
+- **Unchanged:** `/health` and `/` stay unauthenticated and make no provider calls; `/audit/mcp` keeps `AUDIT_TOKEN`;
+  the local Python server (stdio) is unaffected.
+- **Scripts:** canary, smoke and audit scripts send `Authorization: Bearer $MCP_TOKEN` when the `MCP_TOKEN` environment
+  variable is set (GitHub Actions secret `MCP_TOKEN`).
+- **Next:** the enforcement release flips `MCP_AUTH_MODE` to `enforce` after the claude.ai connector is re-added with
+  the `/mcp/<token>` URL.
+
 ## Non-US Primary Filings
 
 - `get_uk_company_filings` reads Companies House, the UK statutory registry:
