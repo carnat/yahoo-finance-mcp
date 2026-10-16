@@ -232,7 +232,8 @@ class ProviderGapRoutingTests(unittest.TestCase):
 
     def test_worker_contract_contains_equivalent_routing_and_diagnostics(self):
         root = Path(__file__).resolve().parent.parent
-        worker = (root / "worker" / "src" / "yahoo-finance.ts").read_text(encoding="utf-8")
+        # yahoo-finance.ts plus news.ts: the news code moved to news.ts in Phase 3
+        worker = (root / "worker" / "src" / "yahoo-finance.ts").read_text(encoding="utf-8") + "\n" + (root / "worker" / "src" / "news.ts").read_text(encoding="utf-8")
         tools = (root / "worker" / "src" / "tools.ts").read_text(encoding="utf-8")
         for marker in (
             "getHistoricalPutCallRatio",

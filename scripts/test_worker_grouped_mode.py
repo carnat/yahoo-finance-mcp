@@ -21,6 +21,7 @@ TOOLS_TS = ROOT / "worker" / "src" / "tools.ts"
 MCP_TS = ROOT / "worker" / "src" / "mcp.ts"
 CATALOG_TS = ROOT / "worker" / "src" / "tool-catalog.ts"
 YAHOO_TS = ROOT / "worker" / "src" / "yahoo-finance.ts"
+NEWS_TS = ROOT / "worker" / "src" / "news.ts"
 DEPLOY_WORKFLOW = ROOT / ".github" / "workflows" / "deploy-worker.yml"
 CI_WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
 SERVER = ROOT / "server.py"
@@ -33,7 +34,8 @@ class TestWorkerGroupedMode(unittest.TestCase):
         cls.tools_ts = TOOLS_TS.read_text(encoding="utf-8")
         cls.mcp_ts = MCP_TS.read_text(encoding="utf-8")
         cls.catalog_ts = CATALOG_TS.read_text(encoding="utf-8")
-        cls.yahoo_ts = YAHOO_TS.read_text(encoding="utf-8")
+        # yahoo-finance.ts plus news.ts: the news code moved to news.ts in Phase 3
+        cls.yahoo_ts = YAHOO_TS.read_text(encoding="utf-8") + "\n" + NEWS_TS.read_text(encoding="utf-8")
         cls.deploy_workflow = DEPLOY_WORKFLOW.read_text(encoding="utf-8")
         cls.ci_workflow = CI_WORKFLOW.read_text(encoding="utf-8")
         cls.server = SERVER.read_text(encoding="utf-8")
