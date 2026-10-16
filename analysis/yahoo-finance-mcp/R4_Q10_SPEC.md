@@ -111,7 +111,7 @@ The point is written once, in `worker/src/index.ts`, after the response is built
 ## 6. Owner actions (one-time, at release)
 
 1. Create a Cloudflare API token with **Account Analytics: Read** and **Workers Observability: Write**, scoped to this account. The telemetry query endpoint lists Write as its only accepted permission (checked 2026-10-16). Write also allows changing observability settings, so the token is a secret like the deploy token. Store it as the GitHub secret `CLOUDFLARE_TELEMETRY_TOKEN`. `CLOUDFLARE_ACCOUNT_ID` already exists as a secret; the deploy workflow uses it. The planner gives the exact steps; the token value never enters the repo or chat.
-2. Nothing else. The dataset is created on first write.
+2. **Enable Workers Analytics Engine once** in the dashboard (Workers & Pages → Analytics Engine → Enable). Without this, wrangler refuses the upload (code 10089), as the first 2.11.1 deploy (run #264) showed. The dataset itself is created on first write.
 
 ## 7. Docs and live verification
 
