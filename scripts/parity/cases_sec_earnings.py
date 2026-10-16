@@ -27,7 +27,7 @@ import json
 import os
 from unittest.mock import AsyncMock, patch
 
-from scripts.parity.harness import FIXTURES, Case
+from scripts.parity.harness import _UNSET, FIXTURES, Case
 
 from yfmcp import companyfacts_coverage as cfc
 from yfmcp import earnings_period as ep
@@ -701,24 +701,64 @@ def _source_case(name, url, expect, ids=("BR-ERN-017",), routes=None, **kw):
 
 _VALID = lambda msg: {"ok": False, "code": "INPUT_VALIDATION_ERROR", "message": msg}  # noqa: E731
 _NOFETCH = lambda url: {"ok": False, "code": "PROVIDER_ERROR", "message": f"Failed to fetch source: {url}"}  # noqa: E731
+_ALLOW_LIST_REFUSED = _VALID("source_url is not on the fetch allow-list (URL host not allowed)")
 CASES += [
     _source_case("ern.source_url.paywalled_wsj_refused", "https://www.wsj.com/articles/x", _VALID("source_url appears paywalled and is not allowed")),
     _source_case("ern.source_url.paywalled_bloomberg_bare_host_refused", "https://bloomberg.com/news/x", _VALID("source_url appears paywalled and is not allowed")),
     _source_case("ern.source_url.paywalled_seekingalpha_refused", "https://seekingalpha.com/article/1", _VALID("source_url appears paywalled and is not allowed")),
     _source_case("ern.source_url.http_scheme_refused", "http://example.com/release", _VALID("source_url must use https")),
-    # Scheduled repair (Q2a): the host match is exact, so subdomains of blocked publishers pass the paywall check and
-    # are fetched as company_ir (here the stubbed fetch answers 404, so the visible result is the fetch failure).
+    # Q2a repair (2.10.0, fetch allow-list): the Worker refuses any host that is not on the allow-list before fetching, so subdomains
+    # of paywalled publishers and arbitrary https hosts are input errors there. Python still fetches them as company_ir (the stubbed
+    # fetch answers 404, so the visible result is the fetch failure) until python-mirror ports the allow-list.
+    # TODO(python-mirror, 2.10.0): once Python refuses these too, drop expect_py/expect_ts and use mode equal with expect=_ALLOW_LIST_REFUSED.
     _source_case("ern.source_url.paywalled_subdomain_markets_wsj_not_blocked", "https://markets.wsj.com/a",
-                 _NOFETCH("https://markets.wsj.com/a"), ids=("BR-ERN-017",), routes={"https://markets.wsj.com/a": {"status": 404}},
-                 mode="pinned", decision="Q2a", note="repair: block subdomains of paywalled publishers"),
-    _source_case("ern.source_url.paywalled_subdomain_on_wsj_not_blocked", "https://on.wsj.com/b", _NOFETCH("https://on.wsj.com/b"),
-                 routes={"https://on.wsj.com/b": {"status": 404}}, mode="pinned", decision="Q2a", note="repair: block subdomains of paywalled publishers"),
-    # Any non-SEC https host is accepted as company_ir without an IR-site check (also a Q2a topic).
-    _source_case("ern.source_url.any_https_host_accepted_as_company_ir", "https://example.com/ir/release", _NOFETCH("https://example.com/ir/release"),
-                 routes={"https://example.com/ir/release": {"status": 404}}, mode="pinned", decision="Q2a", note="repair: restrict company_ir to a known IR registry"),
+                 _UNSET, ids=("BR-ERN-017",), routes={"https://markets.wsj.com/a": {"status": 404}},
+                 mode="pinned", decision="Q2a", note="repair: block subdomains of paywalled publishers",
+                 expect_py=_NOFETCH("https://markets.wsj.com/a"), expect_ts=_ALLOW_LIST_REFUSED),
+    _source_case("ern.source_url.paywalled_subdomain_on_wsj_not_blocked", "https://on.wsj.com/b", _UNSET,
+                 routes={"https://on.wsj.com/b": {"status": 404}}, mode="pinned", decision="Q2a", note="repair: block subdomains of paywalled publishers",
+                 expect_py=_NOFETCH("https://on.wsj.com/b"), expect_ts=_ALLOW_LIST_REFUSED),
+    # Until 2.10.0 any non-SEC https host was accepted as company_ir without an IR-site check (also a Q2a topic); now only an
+    # approved company IR registry host is (there are none today).
+    _source_case("ern.source_url.any_https_host_accepted_as_company_ir", "https://example.com/ir/release", _UNSET,
+                 routes={"https://example.com/ir/release": {"status": 404}}, mode="pinned", decision="Q2a", note="repair: restrict company_ir to a known IR registry",
+                 expect_py=_NOFETCH("https://example.com/ir/release"), expect_ts=_ALLOW_LIST_REFUSED),
     _source_case("ern.source_url.sec_archive_url_accepted", "https://www.sec.gov/Archives/edgar/data/1/2/r.htm", _NOFETCH("https://www.sec.gov/Archives/edgar/data/1/2/r.htm"),
                  routes={"https://www.sec.gov/Archives/edgar/data/1/2/r.htm": {"status": 404}}),
 ]
+
+# parse_public_transcript url (2.10.0, Q2a fetch allow-list). The Worker refuses a url that is not on the fetch allow-list
+# (SEC Archives, finance.yahoo.com transcript pages, approved company IR pages) before any fetch. Python still tries to fetch it
+# (the harness network stub refuses, so the visible result is a FETCH_ERROR) until python-mirror ports the allow-list.
+# TODO(python-mirror, 2.10.0): once Python refuses these too, switch each to mode equal with expect=<the Worker value>.
+def _transcript_call(url: str, raw_text: str | None = None):
+    return (lambda: _run(lambda: _srv().parse_public_transcript(url, None, raw_text))()), \
+        {"js": "m.response.setWorkerEnv({}); return m.yahooFinance.parsePublicTranscript(args[0], null, args[1]);", "args": [url, raw_text]}
+
+
+def _transcript_refusal(reason: str) -> dict:
+    return _VALID(f"url is not on the fetch allow-list ({reason}). Allowed: SEC Archives, finance.yahoo.com transcript pages, "
+                  "and approved company IR pages. Paste the text as raw_text instead.")
+
+
+def _py_fetch_error(url: str) -> dict:
+    return {"ok": False, "code": "FETCH_ERROR", "message": f"Fetch error: RuntimeError: UNSTUBBED_FETCH {url}"}
+
+
+for _name, _url, _reason in (
+    ("ptr.url.non_allow_listed_host_refused", "https://example.com/", "URL host not allowed"),
+    ("ptr.url.link_local_metadata_ip_refused", "https://169.254.169.254/latest/meta-data/", "URL host not allowed"),
+    ("ptr.url.sec_host_outside_archives_refused", "https://www.sec.gov/cgi-bin/browse-edgar", "URL path not allowed"),
+):
+    _py_t, _ts_t = _transcript_call(_url)
+    CASES.append(Case(name=_name, ids=["BR-ERN-017"], py=_py_t, ts=_ts_t, select=_err, mode="pinned", decision="Q2a",
+                      expect_py=_py_fetch_error(_url), expect_ts=_transcript_refusal(_reason)))
+
+# raw_text is never fetched, even when it holds a URL; with no routes any fetch would fail, so both runtimes parse the text.
+_py_rt, _ts_rt = _transcript_call("https://example.com/", "See https://169.254.169.254/latest/meta-data/ for the revenue figures.")
+CASES.append(Case(name="ptr.raw_text_with_a_url_is_not_fetched", ids=["BR-ERN-017"], py=_py_rt, ts=_ts_rt,
+                  select=lambda v: {k: (v.get("data") if isinstance(v.get("data"), dict) else v).get(k) for k in ("source", "url", "text")},
+                  expect={"source": "raw_text", "url": None, "text": "See https://169.254.169.254/latest/meta-data/ for the revenue figures."}))
 
 # Finding (Phase 2, for Q3i triage): an unparseable source_url ("not a url") gets a different message in each runtime:
 # Python's urlparse reports "must use https" (earnings.py:116-121), the Worker's URL constructor reports "must be a

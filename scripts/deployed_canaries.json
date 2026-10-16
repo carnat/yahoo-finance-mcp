@@ -88,7 +88,7 @@
     },
     {
       "id": "company-ir-source-status",
-      "description": "Company IR RSS/Atom discovery exposes machine-readable status without requiring a live feed to exist.",
+      "description": "The company_ir source (approved company IR registry only since 2.10.0) exposes machine-readable status without requiring an approved entry to exist.",
       "tool": "get_public_event_timeline",
       "args": {
         "ticker": "AAPL",

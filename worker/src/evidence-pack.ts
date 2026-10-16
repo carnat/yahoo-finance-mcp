@@ -37,7 +37,8 @@ import {
   type SplitHistory,
 } from "./evidence.js";
 import { getEvidenceStore, putOnce, sha256Hex } from "./evidence-store.js";
-import { getServerVersion, getWorkerVar } from "./response.js";
+import { ErrorCode, getServerVersion, getWorkerVar, mcpFailure } from "./response.js";
+import { validateTicker } from "./validate.js";
 import { majorPrice } from "./valuation.js";
 import {
   extractCapitalStructure,
@@ -194,6 +195,8 @@ async function writeConsensusObservation(ticker: string, curve: Rec, observedAt:
  * stored but no tool could read it). Not found lists the dates that are stored.
  */
 async function readConsensusObservation(ticker: string, observationDate: string): Promise<string> {
+  const tickerErr = validateTicker(ticker);
+  if (tickerErr) return mcpFailure("get_consensus_forecast_curve", ErrorCode.INPUT_VALIDATION_ERROR, tickerErr);
   const symbol = ticker.toUpperCase();
   if (!/^\d{4}-\d{2}-\d{2}$/.test(observationDate)) {
     return JSON.stringify({ error: true, code: "INPUT_VALIDATION_ERROR", message: "observation_date must be YYYY-MM-DD." });
@@ -253,6 +256,8 @@ export async function getConsensusForecastCurve(
 }
 
 export async function getEpsRevisions(ticker: string): Promise<string> {
+  const tickerErr = validateTicker(ticker);
+  if (tickerErr) return mcpFailure("get_eps_revisions", ErrorCode.INPUT_VALIDATION_ERROR, tickerErr);
   const asOf = new Date().toISOString();
   const { inputs, splits } = await consensusProviders(ticker);
   const revisions = buildEpsRevisions(ticker, inputs, asOf, splits);
@@ -439,6 +444,8 @@ export async function getEvidenceCut(id: string): Promise<string> {
 }
 
 export async function listEvidenceCuts(ticker: string, limit = 20): Promise<string> {
+  const tickerErr = validateTicker(ticker);
+  if (tickerErr) return mcpFailure("list_evidence_cuts", ErrorCode.INPUT_VALIDATION_ERROR, tickerErr);
   const store = getEvidenceStore();
   const symbol = ticker.toUpperCase();
   if (!store) return JSON.stringify({ ticker: symbol, storageStatus: "UNAVAILABLE", cuts: [] });

@@ -2377,34 +2377,32 @@ class TestGlobeNewswireRSS(unittest.TestCase):
         self.assertNotIn('ct !== "PRESS_RELEASE"', worker_text)
         self.assertNotIn("ct !== 'PRESS_RELEASE'", worker_text)
 
-    def test_worker_company_ir_uses_official_rss_autodiscovery(self):
-        """Worker company_ir source must use official RSS/Atom discovery, not Yahoo backfill."""
+    def test_worker_company_ir_uses_the_approved_registry_only(self):
+        """2.10.0 (fetch allow-list): the Worker company_ir source reads approved company IR registry entries only.
+        Open-web discovery (website probes, investor./ir. hosts, linked feeds on any host) is gone, and so is Yahoo backfill."""
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         with _open_worker_yahoo_news(root) as f:
             worker_text = f.read()
-        self.assertIn("COMPANY_IR_DISCOVERY_PATHS", worker_text)
-        self.assertIn('"/rss.cfm"', worker_text)
-        self.assertIn("companyIrCandidateHosts", worker_text)
-        self.assertIn("investors.${identity.websiteRoot}", worker_text)
-        self.assertIn("ir.${identity.websiteRoot}", worker_text)
-        self.assertIn("collectCompanyIrRssEvents", worker_text)
-        self.assertIn('provider: "company_ir_rss"', worker_text)
-        self.assertIn('discoveredVia: "company_website_rss_autodiscovery"', worker_text)
-        self.assertIn("sameCompanyDomain(candidateHost", worker_text)
-        self.assertIn('hostRelationship: "same_domain"', worker_text)
+        self.assertIn("async function collectCompanyIrEvents(", worker_text)
+        self.assertIn('if (!entry || entry.status !== "approved")', worker_text)
+        self.assertIn("return collectCompanyIrPageEvents(ticker, maxResults, retrievedAt, startDate, endDate, lookbackDays);", worker_text)
+        for removed in ("COMPANY_IR_DISCOVERY_PATHS", "companyIrCandidateHosts", "investors.${identity.websiteRoot}",
+                        "collectCompanyIrRssEvents", "discoverCompanyIrFeeds", "fetchCompanyIrText",
+                        'provider: "company_ir_rss"', 'discoveredVia: "company_website_rss_autodiscovery"',
+                        "sameCompanyDomain(candidateHost", 'hostRelationship: "same_domain"'):
+            self.assertNotIn(removed, worker_text)
         self.assertNotIn('|| selected.includes("company_ir");', worker_text)
         self.assertNotIn('else if (selected.includes("company_ir")', worker_text)
 
-    def test_worker_company_ir_rejects_non_feed_candidates(self):
-        """oEmbed/JSON/social links must not be treated as RSS candidates."""
+    def test_worker_company_ir_has_no_feed_candidates_to_reject(self):
+        """2.10.0: with discovery removed there are no linked-feed candidates; aggregator/social hosts are still
+        refused as a company website for identity diagnostics."""
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         with _open_worker_yahoo_news(root) as f:
             worker_text = f.read()
 
-        self.assertIn("rejectedCompanyIrFeedCandidate", worker_text)
-        self.assertIn('path.includes("/wp-json/")', worker_text)
-        self.assertIn('path.includes("oembed")', worker_text)
-        self.assertIn('path.endsWith(".json")', worker_text)
+        self.assertNotIn("rejectedCompanyIrFeedCandidate", worker_text)
+        self.assertIn("export function blockedCompanyWebsiteHost", worker_text)
         self.assertIn('"twitter.com"', worker_text)
         self.assertIn('"x.com"', worker_text)
 
@@ -2426,7 +2424,7 @@ class TestGlobeNewswireRSS(unittest.TestCase):
             worker_text = f.read()
 
         self.assertIn("function sourceDecisionUse", worker_text)
-        self.assertIn('decisionUse: sourceDecisionUse("company_ir")', worker_text)
+        self.assertIn('decisionUse: sourceDecisionUse("company_ir_page")', worker_text)   # company_ir items come from the registry (2.10.0)
         self.assertIn('decisionUse: sourceDecisionUse("newswire")', worker_text)
         self.assertIn('decisionUse: sourceDecisionUse("sec_filing")', worker_text)
         self.assertIn('decisionUse: sourceDecisionUse("company_news")', worker_text)
@@ -2463,8 +2461,10 @@ class TestGlobeNewswireRSS(unittest.TestCase):
             "PARSE_ERROR",
         ):
             self.assertIn(status, worker_text)
-        self.assertIn("COMPANY_IR_DISCOVERY_MAX_PAGE_PROBES", worker_text)
-        self.assertIn("discoveryPageProbeCount", worker_text)
+        # 2.10.0: the discovery statuses stay in the status mapping (frozen contract values) but can no longer occur;
+        # without an approved registry entry company_ir is NOT_REGISTERED.
+        self.assertNotIn("COMPANY_IR_DISCOVERY_MAX_PAGE_PROBES", worker_text)
+        self.assertIn('status: "NOT_REGISTERED"', worker_text)
         self.assertIn("sourceDiagnostics.company_ir", worker_text)
         self.assertIn("company-ir-source-status", canary_text)
 
@@ -2494,11 +2494,9 @@ class TestGlobeNewswireRSS(unittest.TestCase):
         self.assertNotIn("unsupported XML declaration in company IR RSS/Atom", worker_text)
         self.assertNotIn("unsupported XML declaration in GlobeNewswire RSS", worker_text)
 
-        # Confirm expanded candidate paths are present
-        self.assertIn('"/rss-news-feeds"', worker_text)
-        self.assertIn('"/rss-feeds"', worker_text)
-        self.assertIn('"/feed/press-releases.xml"', worker_text)
-        self.assertIn('"/feed/news.xml"', worker_text)
+        # 2.10.0: discovery candidate paths were removed with the fetch allow-list
+        self.assertNotIn('"/rss-news-feeds"', worker_text)
+        self.assertNotIn('"/feed/press-releases.xml"', worker_text)
 
 
 if __name__ == "__main__":
