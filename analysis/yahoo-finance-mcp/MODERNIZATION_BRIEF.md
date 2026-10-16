@@ -1,8 +1,24 @@
 # Modernization Brief — yahoo-finance-mcp
 
-**Status: v2 APPROVED 2026-10-15 for Phase 2, R3, RN and Phase 3 (§8). Later phases await the post-pilot brief.** This document is the executable plan. The execution commands read it, and they treat each phase's scope, entry criteria and exit criteria as binding gates. **To steer execution, edit this file.** An edited entry criterion is honoured; a note in chat is not.
+**Status: v3 DRAFT 2026-10-16 (post-pilot regeneration), awaiting approval for Phase 1, R4 and Phase 4 (§8).** v2 was approved 2026-10-15 for Phase 2, R3, RN and Phase 3; all four are done and live-verified. This document is the executable plan. The execution commands read it, and they treat each phase's scope, entry criteria and exit criteria as binding gates. **To steer execution, edit this file.** An edited entry criterion is honoured; a note in chat is not.
 
 v2 (2026-10-15) folds in the owner's answers to every v1 open question. The source is `OWNER_DECISIONS_20261015.md`; my verification of its claims against the code is summarised in §7.
+
+**v3 (2026-10-16) is the planned post-pilot regeneration.** Nothing in the objective, the target or the owner decisions changes. The changes are:
+- **Status:** what has shipped (table below).
+- **Lessons:** what the Phase 3 pilot taught (§3 "What the pilot changed").
+- **New prerequisites:** source-text test plumbing before Phase 4, and the reseat helper added to R4's Q8 item.
+- **Q3i triage:** the ~100 pinned Python/Worker divergences found by the harness feed it.
+- **Approval:** a new approval request (§7 A1–A3, §8).
+
+**Done under v2:**
+
+| Item | Release | PR | Live verification |
+|---|---|---|---|
+| Phase 2 parity harness | tests only | #276 | n/a (CI) |
+| R3 news repairs (BR-NWS-007, Q3h) | 2.7.0 | #277 | 6/6 PASS |
+| Q7 news rules in the harness, RN neutrality deprecation | 2.8.0 | #278 | 8/8 PASS |
+| Phase 3 pilot, news move | 2.8.1 | #279 | 18/18, no structure diff; manifest/schema hashes unchanged |
 
 **Universal information outlet (owner direction, 2026-10-15; §7 Q14).** The MCP is a doctrine-neutral information outlet. It publishes facts, provenance and evidence quality in universal language, so any caller can use the data whatever decision framework they follow. It does not carry any one doctrine's vocabulary, permissions or strategy thresholds. Consequences:
 - Doctrine-specific fields are replaced with universal equivalents, through a deprecation window (N1–N3).
@@ -15,7 +31,12 @@ v2 (2026-10-15) folds in the owner's answers to every v1 open question. The sour
 | `ASSESSMENT.md`, `ARCHITECTURE.mmd` | `/modernize-assess` | 2026-10-14 11:01 |
 | `topology.json`, `call-graph.mmd`, `data-lineage.mmd`, `critical-path.mmd` | `/modernize-map` | 2026-10-14 11:13 (`topology.json` regenerated, identical content) |
 | `BUSINESS_RULES.md`, `DATA_OBJECTS.md`, `rules.json` | `/modernize-extract-rules` | 2026-10-14 21:27 (rules.json, verbatim) |
-| `OWNER_DECISIONS_20261015.md`, `rule_overrides.json` → regenerated `BUSINESS_RULES.md` | owner, applied 2026-10-15 | 2026-10-15 |
+| `OWNER_DECISIONS_20261015.md`, `rule_overrides.json` → regenerated `BUSINESS_RULES.md` | owner, applied 2026-10-15 | 2026-10-15 05:21 |
+| `BASELINE.md` (Phase 2 + Q7/RN addendum) | Phase 2 harness | 2026-10-15 18:58 |
+| `NEWS_RULES.md`, `news_rules.json` (BR-NWS-101…280) | `/modernize-extract-rules` (Q7, news) | 2026-10-15 16:33 |
+| `topology.json` (regenerated after the news move) | `extract_topology.py` | 2026-10-16 02:36 |
+| `PLAYBOOK.md`, `PHASE3_SPEC.md`, `PHASE3_IMPORTS_PY.md`, `PHASE3_IMPORTS_TS.md`, `phase3_live_before/after.json` | Phase 3 pilot | 2026-10-16 02:37–03:05 |
+| `RN_INVENTORY.md`, `RN_SPEC.md` | RN | 2026-10-15 |
 | `DELTA_CATALOG.md` | not required: no language or runtime version changes (§1) | — |
 
 **Binding constraints from PREFLIGHT.md (owner answers, verbatim):**
@@ -72,7 +93,7 @@ C4Container
   }
   System_Boundary(py, "Local Python MCP server (stdio)") {
     Container(pedge, "Transport + grouped router", "server.py (thin), tool_groups.py, yfmcp/app.py", "Registers tools only; MCP SDK pinned to 2.x public APIs")
-    Container(pdomains, "Domain modules", "yfmcp/news.py, sec_retrieval.py, exposure.py, ...", "1:1 with Worker")
+    Container(pdomains, "Domain modules", "yfmcp/tools/news.py, sec_retrieval.py, exposure.py, ...", "1:1 with Worker")
     Container(pclients, "Shared clients", "yfmcp/clients/edgar.py, yahoo.py (MarketInputs), safe_fetch.py, endpoints.py, validation.py", "Same policy as Worker")
   }
   Container(harness, "Parity harness (CI)", "scripts/ + node", "Executes both runtimes on fixtures and diffs; the P0 contract suite; pinned divergences flip to equality per repair")
@@ -116,8 +137,8 @@ C4Container
 | Default waterfalls that may call paid providers | Paid providers only with auth plus explicit caller opt-in; exhaustion returns a typed non-evidence state (Q2b, name per Q11) | Phase 1 |
 | `yfmcp/evidence_store.py` `list()` | Prefix-guarded | Phase 1 |
 | Source-text parity assertions; per-module node harnesses | Parity harness, P0 contract suite, pinned divergences | Phase 2 |
-| News coverage FULL with failed sources (BR-NWS-007); `sources=[]` substitution drift | Repaired; explicit `sources=[]` = attempt none, with requested/attempted/skipped/defaulted metadata (Q3h) | R3 |
-| `server.py#news` + `yahoo-finance.ts#news` | `yfmcp/news.py` + `worker/src/news.ts` (**pilot**) | Phase 3 |
+| News coverage FULL with failed sources (BR-NWS-007); `sources=[]` substitution drift | Repaired; explicit `sources=[]` = attempt none, with requested/attempted/skipped/defaulted metadata (Q3h) | R3 ✅ 2.7.0 |
+| `server.py#news` + `yahoo-finance.ts#news` | `yfmcp/tools/news.py` + `worker/src/news.ts` (**pilot**) | Phase 3 ✅ 2.8.1 |
 | Worker ignores `accession_number` | Honoured with Python-equivalent fail-closed semantics (Q3a) | R4 |
 | Ticker/accession validation scattered (Worker mostly unvalidated) | One validation module per runtime applied to every relevant action (Q3b) | R4 |
 | Worker batch truncation at 5; Python unlimited | Per-tool advertised caps in both runtimes (Q12, Free plan), oversize rejected with `BATCH_LIMIT_EXCEEDED` (Q3c) | R4 |
@@ -129,9 +150,9 @@ C4Container
 | Domain regions left in both god files; `_dispatchTool` switch; inline TS schemas; Python evidence-pack orchestration; `earnings.py` `_server_attr` cycle | Domain modules, table router, `schemas.ts`, `evidence_pack.py`, direct imports | Phase 5 |
 | `extract_china_exposure` with hardcoded issuer aliases | Governed preset over `extract_exposure`; aliases in the shared data dir; public action kept (Q5) | R5-extractors, then moved in Phase 5 |
 | Python reading `worker/src/*.json` | Shared data dir | Phase 6 |
-| `doctrineUse` (ALLOWED / VERIFY_ONLY / DIAGNOSTICS_ONLY / BLOCKED), Worker only; `DoctrineToolStatus` type | Universal `reliabilityClass` (`RELIABLE` / `VERIFY_BEFORE_USE` / `DIAGNOSTIC` / `UNRELIABLE`) in **both** runtimes; old field deprecated, then removed (N1) | RN deprecate → Phase 6 remove |
-| Always-null boundary fields `g2`, `opportunity`, `action`, `priceTarget`, `scenarioWeights`, `selectedMethod`, `selectedMultiple` | `decisionUse: EVIDENCE_ONLY` as the single universal marker; null fields deprecated, then removed (N2) | RN deprecate → Phase 6 remove |
-| Strategy labels and thresholds: price-target `bracket` (STRONG_BUY / ACCEPTABLE / CAUTION / AVOID at 75/90/100%), `inferredTag` (SPECULATIVE / LONG / NEAR / INVERTED); liquidity gate (fixed $10M average daily value traded); tier-numbered `t1/t2/t4/t5_inputs` | Raw measures plus neutral, caller-parameterised comparisons: `priceAtOrAboveTarget`; optional caller `min_adv_usd` → `meetsMinimum`; `t1_inputs`/`t2_inputs`/`t4_inputs`/`t5_inputs` → topic-named groups (Q15a). Labels deprecated, then removed (N3) | RN deprecate → Phase 6 remove |
+| `doctrineUse` (ALLOWED / VERIFY_ONLY / DIAGNOSTICS_ONLY / BLOCKED), Worker only; `DoctrineToolStatus` type | Universal `reliabilityClass` (`RELIABLE` / `VERIFY_BEFORE_USE` / `DIAGNOSTIC` / `UNRELIABLE`) in **both** runtimes; old field deprecated, then removed (N1) | RN deprecate (✅ 2.8.0) → Phase 6 remove |
+| Always-null boundary fields `g2`, `opportunity`, `action`, `priceTarget`, `scenarioWeights`, `selectedMethod`, `selectedMultiple` | `decisionUse: EVIDENCE_ONLY` as the single universal marker; null fields deprecated, then removed (N2) | RN deprecate (✅ 2.8.0) → Phase 6 remove |
+| Strategy labels and thresholds: price-target `bracket` (STRONG_BUY / ACCEPTABLE / CAUTION / AVOID at 75/90/100%), `inferredTag` (SPECULATIVE / LONG / NEAR / INVERTED); liquidity gate (fixed $10M average daily value traded); tier-numbered `t1/t2/t4/t5_inputs` | Raw measures plus neutral, caller-parameterised comparisons: `priceAtOrAboveTarget`; optional caller `min_adv_usd` → `meetsMinimum`; `t1_inputs`/`t2_inputs`/`t4_inputs`/`t5_inputs` → topic-named groups (Q15a). Labels deprecated, then removed (N3) | RN deprecate (✅ 2.8.0) → Phase 6 remove |
 
 ## 3. Phased Sequence
 
@@ -154,30 +175,54 @@ C4Container
 - After the pilot, several small, disjoint, byte-identical move PRs may share one deployed release, provided each PR independently shows zero prohibited parity delta and the combined candidate reruns the full acceptance, parity and canary suite.
 - Every deployed release gets one version bump, a docs entry, a convergence check and live verification.
 
-**Phase 3 is the pilot, and this brief is a hypothesis.** The pilot takes News & events all the way through and writes `PLAYBOOK.md`. What it surfaces is *expected* to revise this brief. **Regenerating the brief after the pilot is the normal path.**
+**Phase 3 was the pilot, and this brief is still a hypothesis.** The pilot took News & events all the way through and wrote `PLAYBOOK.md`. This v3 is the expected post-pilot revision. **Phase 4's first unit, the EDGAR client, is itself a pilot slice:** expect one more small revision after it.
+
+**What the pilot changed in this plan (v3):**
+1. **The move recipe is proven and binding.**
+   - Phases 4 and 5 follow `PLAYBOOK.md`.
+   - **Scope:** each move's scope is the topology's region list.
+   - **Agents:** one agent per runtime in separate worktrees, merged afterwards.
+   - **Identity proof:** AST- and text-identity, tool-listing and hash identity, and a harness diff of 0.
+   - **Live check:** a structural before/after comparison on the deployed Worker.
+2. **Source-text tests are the main friction.** Fourteen test scripts read god-file text and had to be retargeted. A tests-only cleanup (read all domain modules through one helper, or switch to behavioural checks) is now a **Phase 4 entry criterion**. Without it, every hub move pays the same tax.
+3. **Patch targets silently follow moved code.** A case that patches `server.X` stops affecting moved code. The harness refuses network access, so a miss fails loudly instead of calling live services. Keep that guard. The playbook requires retargeting patches as part of each move.
+4. **A new private-internals use exists.** `reseat_tool_registration` (`yfmcp/app.py`) keeps the tools/list order by reordering FastMCP's `_tool_manager._tools`, and fails loudly if the internals change. **R4's Q8 item now covers replacing it** with a public registration-order API, or with registering in order.
+5. **Phase 4 inputs are now concrete.** `PHASE3_IMPORTS_TS.md` lists the 23 helpers `news.ts` imports from `yahoo-finance.ts`:
+   - provider fetch, cache and timeout;
+   - the Yahoo `yGet` family;
+   - EDGAR HTML, submissions and CIK;
+   - `_str`, `clampInt`, identity and FX helpers;
+   - `resolveEx991Url`.
+
+   These are the Worker hub candidates. `resolveNewsCompanyIdentity` and `finnhubEligibility` are news-specific but still sit in `#shared`. Python's news module already imports only from `yfmcp.*`.
+6. **The harness found about 100 Python/Worker divergences that no decision covers.** They are pinned as `FINDING` cases: 90 in news, about 10 in pricing, valuation and SEC/earnings (`BASELINE.md`). They don't block moves, which preserve them, but **Q3i triage now has a concrete list**. R4 includes the triage. News repairs no longer gate any move, because news has already moved. They ship as their own release ("R-news") once triaged.
+7. **Release overhead.** A pure move costs about the same release overhead as a behaviour release: version bump, docs, CI, PR and live verification. The Q9 batching rule (several small disjoint moves per release) should be used in Phase 5.
+8. **The harness stays fast.** It holds 1072 cases (1078 tests) and runs in about 28 s, well under the 2-minute budget.
 
 ```mermaid
 flowchart LR
-  P1["Phase 1 (deferred, Q16)<br/>Harden public surface<br/>/modernize-harden · S"]
-  P2["Phase 2<br/>Behaviour-contract harness<br/>/modernize-transform (characterisation) · M"]
-  R3["R3 · repairs before news move<br/>BR-NWS-007 · Q3h · Q7 news extraction<br/>+ RN neutrality deprecation release · S"]
-  P3["Phase 3 · PILOT<br/>Extract News & events · M"]
-  R4["R4 · repairs before hub move<br/>Q3a · Q3b · Q3c cap · Q4 · Q8 pin · Q10 telemetry · Q3i shared · M"]
+  P1["Phase 1 (deferred, Q16) · NEXT<br/>Harden public surface<br/>/modernize-harden · S"]
+  P2["✅ Phase 2<br/>Behaviour-contract harness · M"]
+  R3["✅ R3 (2.7.0) + RN (2.8.0)<br/>news repairs · Q7 news rules · neutrality deprecation · S"]
+  P3["✅ Phase 3 · PILOT (2.8.1)<br/>Extract News & events · M"]
+  R4["R4 · repairs before hub move<br/>Q3a · Q3b · Q3c cap · Q4 · Q8 pin (+ reseat helper) · Q10 telemetry · Q3i triage · M"]
+  RN2["R-news · triaged news divergence repairs<br/>(no move gated) · S"]
   P4["Phase 4<br/>Extract shared clients (+ Q3g MarketInputs release) · L"]
   R5["R5-‹unit› · repairs before each domain move<br/>Q1 repairs · Q3c-f · Q3i · Q5 · Q7 extraction · M"]
   P5["Phase 5<br/>Extract remaining domains · XL"]
   P6["Phase 6<br/>Cleanup & docs · S"]
   P2 --> R3
   R3 --> P3
-  P3 -->|"PLAYBOOK.md + brief regenerated"| P1
+  P3 -->|"PLAYBOOK.md + brief v3"| P1
   P1 --> R4
+  R4 -.->|"after Q3i triage"| RN2
   R4 --> P4
   P4 --> R5
   R5 --> P5
   P5 --> P6
 ```
 
-**Execution order (Q16): Phase 2 → R3 + RN → Phase 3 (pilot) → Phase 1 → R4 → Phase 4 → R5 → Phase 5 → Phase 6.** Phase numbers are kept as identifiers. Sizes are relative shares of the production-code COCOMO-II index (≈ 261 over 59.1 KSLOC, from `ASSESSMENT.md`). **They rank phases against each other and are not durations.**
+**Execution order (Q16): Phase 2 ✅ → R3 + RN ✅ → Phase 3 (pilot) ✅ → Phase 1 → R4 → Phase 4 → R5 → Phase 5 → Phase 6.** R-news follows the R4 triage and gates nothing. Phase numbers are kept as identifiers. Sizes are relative shares of the production-code COCOMO-II index (≈ 261 over 59.1 KSLOC, from `ASSESSMENT.md`). **They rank phases against each other and are not durations.**
 
 Every PR follows `CLAUDE.md`: the TS change first, then the `python-mirror` port, then parity tests, then a section in `docs/provider-runtime-guidance.md`, then `release-clerk`, then `live-verifier` after deploy.
 
@@ -194,7 +239,8 @@ Every PR follows `CLAUDE.md`: the TS change first, then the `python-mirror` port
   - **S-10/S-11:** dependency upgrades, `uv sync --frozen`, audit gates.
   - **S-13:** restrict CORS once auth exists.
 - **Entry criteria:**
-  - [ ] Phase 3 exit criteria are met (Q16: Phase 1 runs after the pilot).
+  - [x] Phase 3 exit criteria are met (Q16: Phase 1 runs after the pilot). *(2.8.1 live-verified 2026-10-16; brief v3 is the last exit item and is approved with §8.)*
+  - [ ] The owner has created the `MCP_TOKEN` Worker secret (at least 32 random bytes, URL-safe) and the matching GitHub Actions secret, and is ready to re-add the claude.ai connector with the `/mcp/<token>` URL in the release window (§7 A1).
   - [ ] Phase 2 harness cases that touch `/mcp` transport, canaries or the two fetching tools are updated in the same release, because they characterised the unauthenticated behaviour.
   - [x] §7 Q12 decided 2026-10-15: stay on Free; per-tool caps; JSON-RPC batch = 1 tool call.
   - [x] §7 V1 / Q13 resolved 2026-10-15: no Request headers in claude.ai, so the credential is accepted as a bearer header **or** the secret path `/mcp/<token>`.
@@ -251,10 +297,14 @@ Each R-release is a set of **separately released** behaviour changes that must b
   - Q3b: central ticker and accession validation in both runtimes, on every relevant action, including the Python paths that skip it.
   - Q3c + Q12: the per-tool ticker caps from the §7 Q12 table, advertised as schema `maxItems` and rejected with `BATCH_LIMIT_EXCEEDED` in both runtimes. Measure `get_market_snapshot` first and set its cap. Correct the stale comment at `yahoo-finance.ts:58–64`.
   - Q4: smoke-ticker table out of the production lookup.
-  - Q8: pin `mcp>=2.2,<3` and replace private-internals use (`_tool_manager._tools`, the `FastMCP.tool` monkey-patch) with public APIs, failing loudly.
+  - Q8: pin `mcp>=2.2,<3` and replace private-internals use with public APIs, failing loudly. That covers `_tool_manager._tools`, the `FastMCP.tool` monkey-patch and, new in v3, `reseat_tool_registration` from the news move.
   - Q10: privacy-minimised telemetry export capturing a **baseline window before any Phase 4 merge**.
   - Q3i items in the SEC and shared domains (3 tagged in §3).
-  - Q3i triage of the remaining 20 untagged defects, classified repair or preserve, with the result written into §7.
+  - Q3i triage, classified repair or preserve, with the result written into §7. It covers the remaining 20 untagged defects plus the pinned `FINDING` divergences from `BASELINE.md` (about 100; 90 in news). The planner drafts one classification table for one owner approval (§7 A2). Triage inputs from live verification:
+    - `get_company_news` reports coverage `FULL` while a source is truncated;
+    - `tool_catalog.json` omits `sources` for `get_company_press_releases`;
+    - two RN deprecation wording notes (see RN status).
+- **R-news (after the R4 triage; gates no move):** the news divergences triaged as "repair" ship as one release, each flipping its pinned case to equal.
 - **Phase 4 inner release:** Q3g, the `MarketInputs` contract. It ships right after the Yahoo-client move PR and before any valuation work.
 - **R5-‹unit› (before each Phase 5 unit), the repairs tagged for that unit's domain in `BUSINESS_RULES.md` §3:**
   - **Pricing/options:** BR-PRC-002 exchange-session-aware freshness (adds a shared exchange-holiday calendar data file; V5), Q3c zero volume (ratio null, flag null/UNKNOWN, explicit warning), Q3d raw-ratio thresholds with deterministic display rounding and no synthesised `dataDate`, short-history CAGR.
@@ -307,10 +357,13 @@ Each R-release is a set of **separately released** behaviour changes that must b
 
   The Q3g `MarketInputs` release ships between units 2 and 3.
 - **Scope:**
-  - Move the shared regions and the inline TS Yahoo/EDGAR clients and parsing into client modules.
+  - Move the shared regions and the inline TS Yahoo/EDGAR clients and parsing into client modules. The 23 helpers listed in `PHASE3_IMPORTS_TS.md` are in scope, and `news.ts` must import them from the client modules afterwards, not from `yahoo-finance.ts`.
   - Route the Python SEC filing tools through `yfmcp/clients/edgar.py`. This changes the User-Agent and adds caching; Q3a in R4 already aligned the accession semantics.
 - **Entry criteria:**
-  - [ ] Phase 3 exit criteria are met; `PLAYBOOK.md` and the regenerated brief are approved.
+  - [x] Phase 3 exit criteria are met; `PLAYBOOK.md` is written. *(The regenerated brief is approved with §8.)*
+  - [ ] Phase 1 is released and live-verified.
+  - [ ] **Source-text test cleanup is merged** (pilot lesson 2): no test reads `server.py` or `yahoo-finance.ts` text directly; they read through one helper that covers all domain modules, or check behaviour.
+  - [ ] Each hub unit's spec lists its scope from the topology (`#shared` plus the client functions), as in `phase3_news_region.json`.
   - [ ] R4 is released.
   - [ ] **The telemetry baseline window is captured** (Q10).
 - **Exit criteria:**
@@ -406,9 +459,9 @@ Each R-release is a set of **separately released** behaviour changes that must b
 |---|---|---|
 | Local request over stdio | `server.py#transport`, `yfmcp/app.py` | R4 (SDK 2.x public APIs); Phase 5 thin `server.py` |
 | Grouped router resolves news_events | `tool_groups.py` | Unchanged |
-| Collect from each source | `server.py#news` | **R3**: `sources=[]` means none, honest source metadata; **Phase 3 pilot** → `yfmcp/news.py` |
+| Collect from each source | `yfmcp/tools/news.py`, `worker/src/news.ts` | ✅ **R3** (2.7.0): `sources=[]` means none, honest source metadata; ✅ **Phase 3 pilot** (2.8.1) moved; R-news repairs after triage |
 | Approved IR pages | IR registry + IR sites | Phase 1 allow-list; Phase 6 shared data dir |
-| Report coverage | `_compute_source_coverage` | **R3**: no `FULL` while sources have failed (BR-NWS-007) |
+| Report coverage | `_compute_source_coverage` (now in the news modules) | ✅ **R3**: no `FULL` while sources have failed (BR-NWS-007); truncation-vs-FULL in the R4 triage |
 
 ### D. A maintainer ships a new release
 *Repository owner merging to main.*
@@ -432,6 +485,9 @@ These are the **84 P0 rules** in `BUSINESS_RULES.md` §2 (data integrity of publ
 | Earnings (5) | BR-ERN-001…005 | Guidance amounts and periods |
 | Evidence (5) | BR-EVD-001…005 | Evidence integrity |
 | Shared (1) | BR-SHR-001 | Decision-grade designation |
+| News, Q7 (9) | BR-NWS-101…109: IR-page registry lifecycle and URL allow-list, evidence class and decision use, press-release decision grade and status precedence, verify `SOURCE_LIMITED_NOT_FOUND` upgrade, `company_ir` meaning (a Python/Worker divergence), EX-99.1 identification | Which news items count as official evidence |
+
+All 9 Q7 news P0 rules were confirmed by the extraction's P0 panel and are covered by execute-both cases (`cases_news_a.py`). Two of them are pinned Python/Worker divergences (`company_ir` semantics, EX-99.1 identification) awaiting the Q3i triage. They are not blockers for any move.
 
 **P0 rules with a scheduled repair.** Pinned as current behaviour in Phase 2, then flipped by the named R-release before their domain moves:
 
@@ -451,7 +507,7 @@ These are the **84 P0 rules** in `BUSINESS_RULES.md` §2 (data integrity of publ
 | 1 Harden | Security regression tests (both runtimes); fetch-spy assertions for paid-provider and `/health` zero-calls; acceptance suite; authenticated canaries; live verifier | The edge changes intentionally; the attack paths and paid-provider leakage must be provably closed |
 | 2 Harness | Characterisation tests plus dual-execution diff; pinned assertions per decision ID | Today's behaviour, defects included, becomes the oracle |
 | R-releases | Pinned assertion flipped in both runtimes; rest of harness diff = 0; **property-based tests** for date and arithmetic repairs (Feb 29, 52/53-week, CAGR windows, ITM boundary); owner **UAT** on changed tools | Deliberate behaviour changes must be both exact and intended |
-| 3 Pilot | Dual-execution diff = 0; acceptance; canaries; live verifier structural before/after | A pure move |
+| 3 Pilot ✅ | Dual-execution diff = 0; AST/text identity of moved code; tool-listing and hash identity; acceptance; live verifier structural before/after (18/18) | A pure move. **Proven; this is the template for Phases 4–5** |
 | 4 Shared clients | Full harness after each unit; cache and throttling suites; **telemetry before/after** (Q10) | Highest fan-in; runtime regressions only show up in production signals |
 | 5 Domains | Per unit: diff = 0 for its P0 IDs; acceptance; canaries; property tests where fixtures are sparse | P0-heavy moves |
 | 6 Cleanup | Acceptance, canaries, live verifier; frozen-contract tests for any new warning code | Low-risk tidy-up |
@@ -525,7 +581,7 @@ These are the **84 P0 rules** in `BUSINESS_RULES.md` §2 (data integrity of publ
 - **V6 (informs Phase 4).** Q3g needs Python to read Yahoo quoteSummary directly; yfinance `.info` does not expose the raw response.
 - Claims confirmed against code: BR-PRC-002 weekday fallback; BR-VAL-006 first group with ≥1 component and conditional zero debt; BR-VAL-022 tolerance terms, precedence and restatement coexisting with AGREED; BR-VAL-025 chosen-concept trigger, NCI match and raw fallback; BR-EXT-015 EPS-only loss wording; Python `sources=[]` substitution; BR-NWS-007 coverage defect.
 
-### Still open
+### Decided before the pilot (kept for reference)
 
 - [x] **Q11. Names for new codes and fields. Accepted by the owner 2026-10-15 as proposed.** Checked against the code: no name clashes with an existing name of different meaning. Three already exist with the same meaning; the repair extends the existing usage instead of adding a parallel name.
 
@@ -613,14 +669,42 @@ These are the **84 P0 rules** in `BUSINESS_RULES.md` §2 (data integrity of publ
   - **Later:** if Request headers becomes available, switch the connector to the header form and optionally disable the path form. No code change is needed beyond a config flag.
   - **Not chosen:** OAuth (ruled out in Q2b; heavy on the Free plan). It remains a possible later project behind the same abstraction.
 
+### Open for v3 approval (2026-10-16)
+
+- [ ] **A1. Approve Phase 1 (security hardening) as scoped above, with no scope change since v2.** Owner actions it needs:
+  1. Create the `MCP_TOKEN` secret. The planner gives the exact `wrangler secret put` and GitHub steps; the token value is never written to the repo or chat.
+  2. Re-add the claude.ai connector with the `/mcp/<token>` URL when the auth release deploys.
+  3. Acknowledge V2: with 0 approved IR-registry entries, company-IR URL fetches are refused until entries are approved; `raw_text` still works.
+
+  Phase 1 ships in two or three releases rather than one:
+  - auth and limits first, with a token-issued grace release before enforcement;
+  - then the SSRF allow-list and the budget guard;
+  - then the supply-chain items.
+- [ ] **A2. Q3i triage method.**
+  - **Input:** the ~120 items (20 untagged defects plus ~100 pinned divergences) as one table.
+  - **Proposed default classification:**
+    - **Repair:** a divergence that changes a published figure, status, `decisionGrade` or coverage claim. Pick the safer behaviour (the one that never overstates evidence), and align both runtimes to it.
+    - **Preserve:** a text-only divergence (warning wording, timestamp precision, id format). Align to one runtime only if it is free, otherwise document it as intentional.
+  - **Approval:** the owner approves the table once, then R4 and R-news implement it. Accept this method?
+- [ ] **A3. Order inside R4.**
+  - **First:** Q10 telemetry, then Q3b validation and Q3c caps. Telemetry baselines take time to accumulate before Phase 4 can compare against them.
+  - **Next:** Q3a accession, Q4 smoke table and Q8 SDK pin.
+  - **Last:** the Q3i triage table.
+  - Accept the order, or name a different one.
+
 ## 8. Approval Block
 
 ```
-Approved by: repository owner (carnat), in session  Date: 2026-10-15
-Approval covers: Phase 2, R3, RN and Phase 3 (pilot)
-Owner's words, verbatim: "approve Phase 2, R3, RN and Phase 3"
+v2 — Approved by: repository owner (carnat), in session  Date: 2026-10-15
+     Approval covers: Phase 2, R3, RN and Phase 3 (pilot) — all done and live-verified
+     Owner's words, verbatim: "approve Phase 2, R3, RN and Phase 3"
+
+v3 — Approved by: ________________  Date: __________
+     Approval covers: Phase 1 | R4 | Phase 4 | R-news | Full remaining plan
 ```
 
-**Not approved yet:** Phase 1 (deferred, Q16), R4, Phases 4–6 and R5. They are approved against the brief regenerated after the Phase 3 pilot.
-
-The Doctrine no longer gates approval (Q14/N4). **All open questions are resolved** (V1 and Q13 on 2026-10-15; naming Q11/Q15/Q15a closed). The brief is ready to sign. Recommended scope under Q16: **Phase 2, R3, RN and Phase 3 (pilot)**; Phase 1 then follows. Phase 3 is the pilot, and the brief will be regenerated afterwards for Phase 1, R4 and onward. Q16 records the security exposure accepted in the meantime.
+**Recommended v3 approval scope: Phase 1, R4 and Phase 4, with R-news after the triage.**
+- Phase 4's EDGAR-client unit is a pilot slice, so expect a small brief revision after it.
+- R5, Phase 5 and Phase 6 stay subject to the brief after Phase 4.
+- §7 A1–A3 need answers with the approval.
+- Q16's accepted security exposure continues until Phase 1's auth release is live.
