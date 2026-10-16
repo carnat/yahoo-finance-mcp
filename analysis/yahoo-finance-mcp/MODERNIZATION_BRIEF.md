@@ -242,18 +242,18 @@ Every PR follows `CLAUDE.md`: the TS change first, then the `python-mirror` port
   - **S-13:** restrict CORS once auth exists.
 - **Entry criteria:**
   - [x] Phase 3 exit criteria are met (Q16: Phase 1 runs after the pilot). *(2.8.1 live-verified 2026-10-16; brief v3 is the last exit item and is approved with §8.)*
-  - [ ] The owner has created the `MCP_TOKEN` Worker secret (at least 32 random bytes, URL-safe) and the matching GitHub Actions secret, and is ready to re-add the claude.ai connector with the `/mcp/<token>` URL in the release window (§7 A1).
-  - [ ] Phase 2 harness cases that touch `/mcp` transport, canaries or the two fetching tools are updated in the same release, because they characterised the unauthenticated behaviour.
+  - [x] The owner has created the `MCP_TOKEN` Worker secret (at least 32 random bytes, URL-safe) and the matching GitHub Actions secret, and is ready to re-add the claude.ai connector with the `/mcp/<token>` URL in the release window (§7 A1). *(Done 2026-10-16; the connector reports `credentialTransport: "path"`.)*
+  - [x] Phase 2 harness cases that touch `/mcp` transport, canaries or the two fetching tools are updated in the same release, because they characterised the unauthenticated behaviour.
   - [x] §7 Q12 decided 2026-10-15: stay on Free; per-tool caps; JSON-RPC batch = 1 tool call.
   - [x] §7 V1 / Q13 resolved 2026-10-15: no Request headers in claude.ai, so the credential is accepted as a bearer header **or** the secret path `/mcp/<token>`.
-  - [ ] Scripts send `Authorization` from an `MCP_TOKEN` secret (all 9 scripts that post to `MCP_URL`).
+  - [x] Scripts send `Authorization` from an `MCP_TOKEN` secret (all 9 scripts that post to `MCP_URL`). *(2.9.0; the ci.yml alias step gained the secret in 2.9.1.)*
   - [x] §7 Q11 names confirmed (2026-10-15): `AUTH_REQUIRED`, `BATCH_LIMIT_EXCEEDED`, `PROVIDER_BUDGET_EXHAUSTED`, `PROVIDER_OPT_IN_REQUIRED`.
   - [x] The owner acknowledges §7 V2: with **0 approved IR entries** today, company-IR URL fetches are refused until entries are approved. *(Acknowledged 2026-10-16.)*
   - [ ] `main` CI is green.
   - [ ] S-01 and S-02 are reproduced as failing tests in both runtimes.
 - **Exit criteria:**
   - [ ] SSRF tests pass in both runtimes (http redirect, non-allow-listed host, loopback, link-local, IP literal, `raw_text` containing a URL is not fetched).
-  - [ ] Unauthenticated `/mcp` is rejected with the confirmed code. Authenticated canaries pass. `/health` makes zero provider calls (asserted).
+  - [x] Unauthenticated `/mcp` is rejected with the confirmed code. Authenticated canaries pass. `/health` makes zero provider calls (asserted). *(2.9.1 live 2026-10-16 07:10Z: no credential and a wrong path token both return 401 `AUTH_REQUIRED`; `/health` 200; deploy run #260 canaries green; zero-fetch `/health` asserted in `test_worker_auth.py`.)*
   - [ ] Anonymous or no-opt-in calls make zero paid-provider requests (asserted with a fetch spy). Exhaustion returns the typed state.
   - [ ] Audits are clean or have documented exceptions. The acceptance suite is green. The live verifier confirms.
 - **Relative size: S.**
