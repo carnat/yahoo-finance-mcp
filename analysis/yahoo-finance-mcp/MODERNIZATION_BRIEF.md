@@ -248,7 +248,7 @@ Every PR follows `CLAUDE.md`: the TS change first, then the `python-mirror` port
   - [x] §7 V1 / Q13 resolved 2026-10-15: no Request headers in claude.ai, so the credential is accepted as a bearer header **or** the secret path `/mcp/<token>`.
   - [ ] Scripts send `Authorization` from an `MCP_TOKEN` secret (all 9 scripts that post to `MCP_URL`).
   - [x] §7 Q11 names confirmed (2026-10-15): `AUTH_REQUIRED`, `BATCH_LIMIT_EXCEEDED`, `PROVIDER_BUDGET_EXHAUSTED`, `PROVIDER_OPT_IN_REQUIRED`.
-  - [ ] The owner acknowledges §7 V2: with **0 approved IR entries** today, company-IR URL fetches are refused until entries are approved.
+  - [x] The owner acknowledges §7 V2: with **0 approved IR entries** today, company-IR URL fetches are refused until entries are approved. *(Acknowledged 2026-10-16.)*
   - [ ] `main` CI is green.
   - [ ] S-01 and S-02 are reproduced as failing tests in both runtimes.
 - **Exit criteria:**
