@@ -350,7 +350,7 @@ function enrichNewsItemForLlm(item: Record<string, unknown>): Record<string, unk
     decisionUse,
   };
 }
-function buildCoverage(sourceStatus: Record<string, unknown>, resolvedAction: string | null = null): Record<string, unknown> {
+export function buildCoverage(sourceStatus: Record<string, unknown>, resolvedAction: string | null = null): Record<string, unknown> {
   const failedStatuses = new Set(["UNCONFIGURED", "PROVIDER_ERROR", "AUTH_ERROR", "RATE_LIMITED", "TIMEOUT", "PROVIDER_CHANGED", "IDENTITY_UNAVAILABLE", "WEBSITE_NOT_AVAILABLE", "DISCOVERY_NOT_FOUND", "DISCOVERY_BUDGET_EXHAUSTED", "FEED_NOT_FOUND", "PARSE_ERROR", "CANDIDATE_AVAILABLE", "NOT_REGISTERED", "DISABLED", "REVALIDATION_DUE", "SOURCE_VALIDATION_FAILED"]);
   const failedSources: Record<string, unknown>[] = [];
   const skippedSources: Record<string, unknown>[] = [];

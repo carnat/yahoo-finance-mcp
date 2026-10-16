@@ -16,6 +16,7 @@ import urllib.request as _urlreq
 
 import yfinance as yf
 
+from yfmcp import url_policy as _url_policy
 from yfmcp.parsing.html import _strip_html_tags
 
 # ---------------------------------------------------------------------------
@@ -94,7 +95,7 @@ async def _load_edgar_tickers() -> dict[str, int]:
             "https://www.sec.gov/files/company_tickers.json",
             headers={"User-Agent": _SEC_REQUIRED_UA},
         )
-        with _urlreq.urlopen(req, timeout=15) as resp:  # noqa: S310
+        with _url_policy.urlopen(req, timeout=15) as resp:  # noqa: S310
             data = json.loads(resp.read())
         return {v["ticker"].upper(): int(v["cik_str"]) for v in data.values()}
 
@@ -123,7 +124,7 @@ async def _edgar_get(url: str) -> dict:
             headers={"User-Agent": _SEC_REQUIRED_UA},
         )
         try:
-            with _urlreq.urlopen(req, timeout=10) as resp:  # noqa: S310
+            with _url_policy.urlopen(req, timeout=10) as resp:  # noqa: S310
                 return json.loads(resp.read())
         except _urlreq.HTTPError as e:
             raise EdgarError(f"SEC API returned HTTP {e.code}: {e.reason}", status_code=e.code) from e
@@ -237,7 +238,7 @@ def _fetch_edgar_html(url: str, max_bytes: int) -> str | None:
         headers={"User-Agent": _SEC_REQUIRED_UA},
     )
     try:
-        with _urlreq.urlopen(req, timeout=30) as resp:  # noqa: S310
+        with _url_policy.urlopen(req, timeout=30) as resp:  # noqa: S310
             raw = resp.read(max_bytes)
         try:
             return raw.decode("utf-8")
@@ -362,7 +363,7 @@ async def _resolve_cik_for_ticker(ticker: str) -> str | None:
         for atom_url in atom_urls:
             req = _urlreq.Request(atom_url, headers={"User-Agent": _SEC_REQUIRED_UA})
             try:
-                with _urlreq.urlopen(req, timeout=15) as resp:  # noqa: S310
+                with _url_policy.urlopen(req, timeout=15) as resp:  # noqa: S310
                     text = resp.read().decode("utf-8", errors="replace")
                 cik = _extract_cik_from_edgar_atom(text)
                 if cik:

@@ -14,20 +14,27 @@ nothing reaches the network:
 - CORS on /mcp, /health and /audit/mcp, through the Worker entry point;
 - evidence tools: invalid tickers rejected before list(), list() prefix rules.
 
-The Python half (yfmcp/url_policy.py) is ported later by python-mirror; its
-cases are the TODO placeholders at the end, which must use the same CHECK_CASES
-table and reason strings.
+The Python half (yfmcp/url_policy.py) is tested at the end of this file against
+the same CHECK_CASES table and reason strings, offline (a fake HTTPS handler and
+a urlopen spy).
 """
 
 from __future__ import annotations
 
+import email.message
+import io
 import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
+import urllib.error
+import urllib.request
+import urllib.response
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -588,35 +595,275 @@ class TestWorkerEvidenceGuard(WorkerCase):
 
 
 # ── Python (yfmcp/url_policy.py) ────────────────────────────────────────────
-# TODO(python-mirror, 2.10.0): port these once yfmcp/url_policy.py exists. They must use CHECK_CASES and
-# the same reason strings as the Worker cases above.
-_PY_TODO = "TODO(python-mirror, 2.10.0): Python url policy not ported yet"
+# Offline: the redirect tests use a fake HTTPS handler, the tool tests spy on the urlopen seam.
+sys.path.insert(0, str(ROOT))
+
+from yfmcp import evidence_store as es  # noqa: E402
+from yfmcp import url_policy as up  # noqa: E402
+
+
+class _FakeHttps(urllib.request.HTTPSHandler):
+    """Serves `routes` {url: (status, location, body)} without a socket and records each request."""
+
+    def __init__(self, routes: dict) -> None:
+        super().__init__()
+        self.routes = routes
+        self.seen: list[dict] = []
+
+    def https_open(self, req):  # noqa: D102
+        self.seen.append({"url": req.full_url, "method": req.get_method(), "data": req.data,
+                          "authorization": req.get_header("Authorization"), "custom": req.get_header("X-custom")})
+        status, location, body = self.routes[req.full_url]
+        headers = email.message.Message()
+        if location:
+            headers["Location"] = location
+        response = urllib.response.addinfourl(io.BytesIO(body), headers, req.full_url, status)
+        response.msg = "stub"
+        return response
+
+
+def _redir(status: int, location: str) -> tuple:
+    return (status, location, b"")
+
+
+def _follow(start: str, routes: dict, **request_kwargs):
+    handler = _FakeHttps(routes)
+    opener = up.build_opener(handler)
+    request = urllib.request.Request(start, **request_kwargs)
+    try:
+        with up.open_checked(opener, request, timeout=5) as resp:
+            return handler, resp.read(), None
+    except up.UrlPolicyError as error:
+        return handler, None, error
 
 
 class TestPythonUrlPolicy(unittest.TestCase):
-    @unittest.skip(_PY_TODO)
     def test_check_fetch_url_table(self) -> None:
-        """for url, expected in CHECK_CASES: check_fetch_url(url) == (expected is None, expected or '')."""
+        for url, expected in CHECK_CASES:
+            self.assertEqual(up.check_fetch_url(url), (expected is None, expected or ""), url)
 
-    @unittest.skip(_PY_TODO)
+    def test_registry_hosts_are_approved_entries_only(self) -> None:
+        self.assertEqual(up.REGISTRY_HOSTS, ())   # the shipped registry holds candidates only
+        registry = {"sources": [
+            {"ticker": "A", "status": "approved", "allowedHosts": ["IR.Example.com"], "allowedPathPrefixes": ["/investors/"]},
+            {"ticker": "B", "status": "candidate", "allowedHosts": ["cand.example.com"], "allowedPathPrefixes": ["/"]},
+            {"ticker": "C", "status": "rejected", "allowedHosts": ["rej.example.com"], "allowedPathPrefixes": ["/"]},
+        ]}
+        with up.registry_override(registry):
+            self.assertEqual(up.REGISTRY_HOSTS, ("ir.example.com",))
+            self.assertEqual(up.check_fetch_url("https://ir.example.com/investors/x"), (True, ""))
+            self.assertEqual(up.check_fetch_url("https://cand.example.com/"), (False, "URL host not allowed"))
+            self.assertEqual(up.check_fetch_url("https://rej.example.com/"), (False, "URL host not allowed"))
+            self.assertEqual(up.allowed_host_kind("https://ir.example.com/x"), "registry")
+            self.assertTrue(up.approved_registry_url_allowed("https://ir.example.com/investors/news"))
+            self.assertFalse(up.approved_registry_url_allowed("https://ir.example.com/other"))
+        self.assertEqual(up.REGISTRY_HOSTS, ())
+
+    def test_redirect_allowed_to_allowed_follows_one_request_per_hop(self) -> None:
+        handler, body, error = _follow("https://www.sec.gov/a", {
+            "https://www.sec.gov/a": _redir(302, "https://data.sec.gov/b"),
+            "https://data.sec.gov/b": (200, None, b"done"),
+        })
+        self.assertIsNone(error)
+        self.assertEqual(body, b"done")
+        self.assertEqual([c["url"] for c in handler.seen], ["https://www.sec.gov/a", "https://data.sec.gov/b"])
+
+    def test_redirect_relative_location_follows(self) -> None:
+        handler, body, error = _follow("https://www.sec.gov/a", {
+            "https://www.sec.gov/a": _redir(301, "/Archives/c"),
+            "https://www.sec.gov/Archives/c": (200, None, b"rel"),
+        })
+        self.assertIsNone(error)
+        self.assertEqual(body, b"rel")
+
     def test_redirect_handler_refuses_a_disallowed_location(self) -> None:
-        """The HTTPRedirectHandler subclass raises UrlPolicyError for http, off-list, loopback, link-local and IP-literal hops."""
+        cases = [
+            ("https://evil.example/x", "URL host not allowed"),
+            ("https://169.254.169.254/latest/meta-data/", "URL host not allowed"),
+            ("https://127.0.0.1/admin", "URL host not allowed"),
+            ("https://[::1]/", "URL host not allowed"),
+            ("https://localhost/", "URL host not allowed"),
+            ("http://www.sec.gov/a", "URL must use https"),
+            ("https://u:p@www.sec.gov/a", "URL must not contain credentials"),
+            ("https://www.sec.gov:8080/a", "URL port not allowed"),
+        ]
+        for location, reason in cases:
+            handler, body, error = _follow("https://www.sec.gov/a", {"https://www.sec.gov/a": _redir(302, location)})
+            self.assertIsNotNone(error, location)
+            self.assertEqual(error.reason, reason, location)
+            self.assertEqual(str(error), reason, location)
+            self.assertIsInstance(error, urllib.error.URLError)
+            self.assertEqual([c["url"] for c in handler.seen], ["https://www.sec.gov/a"], location)   # the target was never requested
 
-    @unittest.skip(_PY_TODO)
+    def test_redirect_hop_limit_is_five(self) -> None:
+        def chain(n: int) -> dict:
+            routes = {f"https://www.sec.gov/h{i}": _redir(302, f"https://www.sec.gov/h{i + 1}") for i in range(n)}
+            routes[f"https://www.sec.gov/h{n}"] = (200, None, f"end{n}".encode())
+            return routes
+
+        handler, body, error = _follow("https://www.sec.gov/h0", chain(5))
+        self.assertIsNone(error)
+        self.assertEqual(body, b"end5")
+        self.assertEqual(len(handler.seen), 6)
+        handler, body, error = _follow("https://www.sec.gov/h0", chain(6))
+        self.assertIsNone(body)
+        self.assertEqual(error.reason, "too many redirects")
+        self.assertEqual(len(handler.seen), 6)   # the sixth redirect was not followed
+
+    def test_see_other_becomes_get_and_authorization_stays_with_its_origin(self) -> None:
+        handler, body, error = _follow("https://efts.sec.gov/post", {
+            "https://efts.sec.gov/post": _redir(303, "https://efts.sec.gov/result"),
+            "https://efts.sec.gov/result": (200, None, b"got"),
+        }, data=b"q=1", method="POST", headers={"Content-Type": "application/x-www-form-urlencoded"})
+        self.assertIsNone(error)
+        self.assertEqual([(c["method"], c["data"]) for c in handler.seen], [("POST", b"q=1"), ("GET", None)])
+        handler, body, error = _follow("https://www.sec.gov/a", {
+            "https://www.sec.gov/a": _redir(302, "https://www.sec.gov/b"),
+            "https://www.sec.gov/b": _redir(302, "https://data.sec.gov/c"),
+            "https://data.sec.gov/c": (200, None, b"x"),
+        }, headers={"Authorization": "Bearer provider-key", "X-Custom": "kept"})
+        self.assertIsNone(error)
+        self.assertEqual([c["authorization"] for c in handler.seen], ["Bearer provider-key", "Bearer provider-key", None])
+        self.assertEqual([c["custom"] for c in handler.seen], ["kept", "kept", "kept"])
+
+    def test_first_url_is_checked_before_any_request(self) -> None:
+        for start in ("https://evil.example/", "https://169.254.169.254/latest/meta-data/", "http://www.sec.gov/a"):
+            handler, body, error = _follow(start, {})
+            self.assertIsNotNone(error, start)
+            self.assertEqual(handler.seen, [], start)
+
+    def test_a_fetch_site_reports_a_refused_hop_as_a_fetch_failure(self) -> None:
+        import server
+        import asyncio
+        refused = up.UrlPolicyError("URL host not allowed")
+        with patch.object(up, "urlopen", side_effect=refused):
+            self.assertIsNone(server._fetch_public_html("https://www.sec.gov/Archives/edgar/data/1/x.htm"))
+            out = json.loads(asyncio.run(server.parse_public_transcript("https://www.sec.gov/Archives/edgar/data/1/x.htm")))
+        self.assertEqual(out["error"]["code"], "FETCH_ERROR")
+        self.assertIn("URL host not allowed", out["error"]["message"])
+
+    def _spy(self):
+        import server  # noqa: F401  (registers the tools)
+        return patch.object(up, "urlopen", side_effect=AssertionError("urlopen must not be called"))
+
     def test_parse_public_transcript_refusal_and_raw_text_not_fetched(self) -> None:
-        """Same refusal envelope (code and message) as TestWorkerCallerUrls; raw_text with URLs makes zero urlopen calls."""
+        import asyncio
+        import server
 
-    @unittest.skip(_PY_TODO)
+        def ptr(url: str, raw_text: str | None = None) -> dict:
+            return json.loads(asyncio.run(server.parse_public_transcript(url, None, raw_text)))
+
+        with self._spy():
+            for url in ("https://example.com/", "https://169.254.169.254/latest/meta-data/", "https://127.0.0.1/", "https://2130706433/"):
+                self.assertEqual(ptr(url)["error"], {"code": "INPUT_VALIDATION_ERROR", "message": TRANSCRIPT_REFUSAL.format(reason=HOST)}, url)
+            self.assertEqual(ptr("https://www.sec.gov:8443/Archives/edgar/data/1/x.htm")["error"]["message"],
+                             TRANSCRIPT_REFUSAL.format(reason="URL port not allowed"))
+            self.assertEqual(ptr("https://u:p@www.sec.gov/Archives/edgar/data/1/x.htm")["error"]["message"],
+                             TRANSCRIPT_REFUSAL.format(reason="URL must not contain credentials"))
+            for url in ("https://www.sec.gov/cgi-bin/browse-edgar", "https://data.sec.gov/submissions/CIK0000320193.json",
+                        "https://finance.yahoo.com/quote/AAPL/", "https://query1.finance.yahoo.com/v8/finance/chart/AAPL",
+                        "https://finnhub.io/api/v1/company-news"):
+                self.assertEqual(ptr(url)["error"], {"code": "INPUT_VALIDATION_ERROR",
+                                                     "message": TRANSCRIPT_REFUSAL.format(reason="URL path not allowed")}, url)
+            self.assertEqual(ptr("http://example.com/")["error"],
+                             {"code": "INPUT_VALIDATION_ERROR", "message": "A valid https:// URL or raw_text is required."})
+            for url, raw in (("https://example.com/", "Revenue rose. See https://169.254.169.254/latest/meta-data/ and http://localhost/."),
+                             ("", "Plain transcript text about revenue.")):
+                out = ptr(url, raw)
+                self.assertEqual(out["data"]["source"], "raw_text")
+                self.assertIsNone(out["data"]["url"])
+
     def test_index_earnings_release_refusal(self) -> None:
-        """source_url off the allow-list -> INPUT_VALIDATION_ERROR 'source_url is not on the fetch allow-list (<reason>)'."""
+        import asyncio
+        import server
 
-    @unittest.skip(_PY_TODO)
+        def ier(url: str) -> dict:
+            return json.loads(asyncio.run(server.index_earnings_release("ZQI", "latest", url)))["error"]
+
+        with self._spy():
+            for url in ("https://example.com/ir/release", "https://markets.wsj.com/a", "https://169.254.169.254/latest/meta-data/"):
+                self.assertEqual(ier(url), {"code": "INPUT_VALIDATION_ERROR",
+                                            "message": "source_url is not on the fetch allow-list (URL host not allowed)"}, url)
+            for url in ("https://www.sec.gov/cgi-bin/browse-edgar", "https://finance.yahoo.com/quote/AAPL/"):
+                self.assertEqual(ier(url), {"code": "INPUT_VALIDATION_ERROR",
+                                            "message": "source_url is not on the fetch allow-list (URL path not allowed)"}, url)
+            self.assertEqual(ier("https://www.wsj.com/articles/x")["message"], "source_url appears paywalled and is not allowed")
+            self.assertEqual(ier("http://example.com/release")["message"], "source_url must use https")
+
+    def test_earnings_release_sec_archives_and_registry_classification(self) -> None:
+        from yfmcp.tools import earnings
+        self.assertEqual(earnings._classify_earnings_source_url("https://www.sec.gov/Archives/edgar/data/1/2/r.htm"), ("sec_8k", None))
+        self.assertEqual(earnings._classify_earnings_source_url("https://www.sec.gov/Archives/../cgi-bin/x")[1],
+                         "source_url is not on the fetch allow-list (URL path not allowed)")
+        registry = {"sources": [{"ticker": "A", "status": "approved", "allowedHosts": ["ir.example.com"], "allowedPathPrefixes": ["/investors/"]}]}
+        with up.registry_override(registry):
+            self.assertEqual(earnings._classify_earnings_source_url("https://ir.example.com/investors/q3"), ("company_ir", None))
+            self.assertEqual(earnings._classify_earnings_source_url("https://ir.example.com/other")[1],
+                             "source_url is not on the fetch allow-list (URL path not allowed)")
+
     def test_evidence_store_prefix_rules_and_path_containment(self) -> None:
-        """LocalDirStore.list / MemoryStore.list reject the prefixes in TestWorkerEvidenceGuard; LocalDirStore stays under root."""
+        bad = ("", "evidence-cuts/AAPL", "evidence-cuts/../", "evidence-cuts//", "evidence-cuts\\AAPL/", "evidence-cuts/A..B/")
+        mem = es.MemoryStore()
+        mem.objects["evidence-cuts/AAPL/x.json"] = "{}"
+        mem.objects["evidence-cuts/AAPLX/y.json"] = "{}"
+        self.assertEqual(mem.list("evidence-cuts/AAPL/", 10), ["evidence-cuts/AAPL/x.json"])
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "store"
+            (root / "evidence-cuts" / "AAPL").mkdir(parents=True)
+            (root / "evidence-cuts" / "AAPL" / "x.json").write_text("{}", encoding="utf-8")
+            (Path(tmp) / "secret.json").write_text("{}", encoding="utf-8")
+            local = es.LocalDirStore(str(root))
+            self.assertEqual(local.list("evidence-cuts/AAPL/", 10), ["evidence-cuts/AAPL/x.json"])
+            self.assertEqual(local.list("evidence-cuts/NONE/", 10), [])
+            for store in (mem, local):
+                for prefix in bad + ("../",):
+                    with self.assertRaises(ValueError, msg=prefix) as caught:
+                        store.list(prefix, 10)
+                    self.assertEqual(str(caught.exception), "invalid evidence list prefix", prefix)
+            # A prefix that passes the string rules but resolves outside the root (absolute, or through a symlink) is refused.
+            with self.assertRaises(ValueError) as caught:
+                local.list("/etc/", 10)
+            self.assertEqual(str(caught.exception), "invalid evidence list prefix")
+            link = root / "evidence-cuts" / "LINK"
+            try:
+                link.symlink_to(tmp, target_is_directory=True)
+            except OSError:
+                self.skipTest("symlinks unavailable")
+            with self.assertRaises(ValueError) as caught:
+                local.list("evidence-cuts/LINK/", 10)
+            self.assertEqual(str(caught.exception), "invalid evidence list prefix")
 
-    @unittest.skip(_PY_TODO)
     def test_evidence_tools_validate_the_ticker_first(self) -> None:
-        """get_eps_revisions, list_evidence_cuts and the consensus observation read return the invalid-ticker error first."""
+        import asyncio
+        import server
+
+        class _SpyStore(es.MemoryStore):
+            listed: list[str] = []
+
+            def list(self, prefix: str, limit: int) -> list[str]:
+                self.listed.append(prefix)
+                return super().list(prefix, limit)
+
+        store = _SpyStore()
+        es.set_store_for_tests(store)
+        try:
+            with patch.object(server, "_consensus_providers", side_effect=AssertionError("providers must not be called")):
+                results = [
+                    json.loads(asyncio.run(server.get_eps_revisions("BAD/TICKER"))),
+                    json.loads(asyncio.run(server.list_evidence_cuts("../ETC"))),
+                    json.loads(asyncio.run(server.get_consensus_forecast_curve("A/B", observation_date="2026-10-01"))),
+                ]
+            for out in results:
+                self.assertEqual(out["error"]["code"], "INPUT_VALIDATION_ERROR")
+                self.assertIn("Invalid ticker symbol", out["error"]["message"])
+            self.assertEqual(store.listed, [])
+            valid = json.loads(asyncio.run(server.list_evidence_cuts("aapl")))
+            self.assertEqual(valid["storageStatus"], "AVAILABLE")
+            self.assertEqual(store.listed, ["evidence-cuts/AAPL/"])
+            dotdot = json.loads(asyncio.run(server.list_evidence_cuts("A..B")))
+            self.assertEqual((dotdot["storageStatus"], dotdot["message"]), ("FAILED", "invalid evidence list prefix"))
+        finally:
+            es.set_store_for_tests(es._UNSET)
 
 
 if __name__ == "__main__":

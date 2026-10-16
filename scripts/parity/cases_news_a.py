@@ -54,6 +54,7 @@ from unittest.mock import patch
 import server
 from scripts.parity.harness import WORKER, Case
 from yfmcp import capital_structure as cs
+from yfmcp import url_policy
 from yfmcp.clients import edgar
 from yfmcp.tools import news as news_tools
 
@@ -141,6 +142,7 @@ def _python_world(scn: dict):
         if scn.get("registry") is not None:
             registry = scn["registry"]
             stack.enter_context(patch.object(news_tools, "_load_company_ir_page_registry", lambda: copy.deepcopy(registry)))
+            stack.enter_context(url_policy.registry_override(registry))     # the fetch allow-list holds approved registry hosts
         yield
 
 
@@ -1539,12 +1541,16 @@ CASES += [
                  lambda v: {"count": len(v["items"]), "has_50": any(it["title"].endswith("item 50") for it in v["items"]),
                             "has_51": any(it["title"].endswith("item 51") for it in v["items"])},
                  expect={"count": 50, "has_50": True, "has_51": False}),
-    # Finding (Q7, for triage; card 101): any status other than disabled/candidate (here 'rejected') is fetched and its items are
-    # stamped approvalStatus 'approved' / decisionUse USE_OFFICIAL_EVIDENCE, in both runtimes.
-    ir_news_case("ir_page.unknown_status_is_fetched_and_stamped_approved", ["BR-NWS-101", "BR-NWS-102"], "IRREJ",
+    # 2.10.0 (Q2a, planner decision): only an approved entry is fetched. An entry with any other status (here 'rejected') is not
+    # fetched in either runtime: no items, and the same COMPANY_IR_PAGE_VALIDATION_FAILED warning (the page host is not on the
+    # fetch allow-list, which holds the hosts of approved entries only). Until then both fetched it and stamped it approved.
+    ir_news_case("ir_page.non_approved_status_is_not_fetched", ["BR-NWS-101", "BR-NWS-102"], "IRREJ",
                  ir_routes("IRREJ", _article("IRREJ reports quarterly earnings", "/investors/news/q3", "2026-10-12")),
-                 lambda v: [(it["title"], it["approvalStatus"], it["decisionUse"]) for it in ir_items(v)],
-                 expect=[("IRREJ reports quarterly earnings", "approved", "USE_OFFICIAL_EVIDENCE")]),
+                 lambda v: {"items": [(it["title"], it["approvalStatus"], it["decisionUse"]) for it in ir_items(v)],
+                            "warnings": [(w["code"], w["message"]) for w in v["warnings"]], "row": ir_row(v, "status", "rawCount")},
+                 expect={"items": [],
+                         "warnings": [("COMPANY_IR_PAGE_VALIDATION_FAILED", "Approved company IR page validation failed: URL host not allowed")],
+                         "row": {"status": "SOURCE_VALIDATION_FAILED", "rawCount": 0}}),
     # Card 171: the revalidation deadline. An absent deadline (IROKH) and a future one (IRFUT) are fresh; so is a deadline equal to
     # now; a past one and an unparseable one are stale and the source is skipped.
     *[ir_news_case(f"ir_page.revalidation_deadline_{label}", ["BR-NWS-171", "BR-NWS-102"], ticker,

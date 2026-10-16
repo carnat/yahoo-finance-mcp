@@ -135,7 +135,7 @@ class TestLocalDataAccuracy(unittest.TestCase):
             def read(self):
                 return html.encode()
 
-        with patch("urllib.request.urlopen", return_value=_Resp()):
+        with patch("yfmcp.url_policy.urlopen", return_value=_Resp()):
             raw = _run(srv.get_filing_section("AAPL", "Item 1A", "https://www.sec.gov/Archives/edgar/data/320193/x/a.htm"))
         text = _data(raw)["text"]
         self.assertIn("The Company’s business", text)

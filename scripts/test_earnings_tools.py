@@ -682,7 +682,7 @@ class TestNewFixesAndFeatures(unittest.TestCase):
             def read(self):
                 return b'<html><body><a href="#risk">Item 1A. Risk Factors</a></body></html>'
 
-        with patch("urllib.request.urlopen", return_value=_Response()):
+        with patch("yfmcp.url_policy.urlopen", return_value=_Response()):
             data = _parse(_run(srv.get_filing_section(
                 "AAPL",
                 "Item 1A",

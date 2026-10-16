@@ -794,10 +794,21 @@ class TestClassifyEarningsSourceUrl(unittest.TestCase):
         self.assertIsNone(error)
 
     def test_company_ir_url_classified(self):
+        # Since 2.10.0 only the hosts and path prefixes of an approved registry entry are company_ir.
+        from yfmcp import url_policy
         url = "https://investor.apple.com/news-releases/2026/earnings.html"
-        source_type, error = srv._classify_earnings_source_url(url)
+        registry = {"sources": [{"ticker": "AAPL", "status": "approved", "allowedHosts": ["investor.apple.com"],
+                                 "allowedPathPrefixes": ["/news-releases/"]}]}
+        with url_policy.registry_override(registry):
+            source_type, error = srv._classify_earnings_source_url(url)
         self.assertEqual(source_type, "company_ir")
         self.assertIsNone(error)
+
+    def test_company_ir_url_without_an_approved_entry_is_refused(self):
+        url = "https://investor.apple.com/news-releases/2026/earnings.html"
+        source_type, error = srv._classify_earnings_source_url(url)
+        self.assertIsNone(source_type)
+        self.assertEqual(error, "source_url is not on the fetch allow-list (URL host not allowed)")
 
     def test_paywalled_url_rejected(self):
         url = "https://seekingalpha.com/article/12345"

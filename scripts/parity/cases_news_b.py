@@ -48,6 +48,7 @@ from scripts.parity.cases_news_a import _REGISTRY_BUNDLE_JS
 
 # Registers the tools (server.py imports the yfmcp modules) the way the existing suites do.
 import server  # noqa: F401,E402
+from yfmcp import url_policy  # noqa: E402
 from yfmcp import capital_structure as cs  # noqa: E402
 from yfmcp import cache as pycache  # noqa: E402
 from yfmcp.clients import edgar  # noqa: E402
@@ -1693,17 +1694,16 @@ _UPGRADE_HISTORY_ROUTE = {"https://query1.finance.yahoo.com/v10/finance/quoteSum
 def _valuation_tool_case(name, ids, days, *, ticker="RKLB", news=None, info=None, identity_fails=False, env=None, routes=None, **kw) -> Case:
     """extract_analyst_valuation_methods with no rating changes; also records the Finnhub URLs requested."""
     def py():
-        import urllib.request as ur
         urls = []
         with _py_news_env(news=news, info=info, env=env), \
                 patch.object(server, "get_analyst_upgrade_radar", AsyncMock(return_value=json.dumps({"changes": []}))):
-            real = ur.urlopen
+            real = url_policy.urlopen
 
             def record(req, *a, **k):
                 urls.append(req if isinstance(req, str) else req.full_url)
                 return real(req, *a, **k)
 
-            with patch.object(ur, "urlopen", record):
+            with patch.object(url_policy, "urlopen", record):
                 out = json.loads(asyncio.run(server.extract_analyst_valuation_methods(ticker, days)))
         out["_finnhub"] = [u for u in urls if "finnhub" in u]
         return out
@@ -1896,17 +1896,16 @@ CASES += [
 
 def _gnw_cache_py():
     """Fetch counts for the same ticker at +0, +14 and +16 minutes (Python: the cache entries are aged by rewinding their stored time)."""
-    import urllib.request as ur
     urls = []
     counts = []
     with _py_news_env(news=[], info=_NVDA_INFO):
-        real = ur.urlopen
+        real = url_policy.urlopen
 
         def record(req, *a, **k):
             urls.append(req if isinstance(req, str) else req.full_url)
             return real(req, *a, **k)
 
-        with patch.object(ur, "urlopen", record):
+        with patch.object(url_policy, "urlopen", record):
             original = {}
             for minutes in (0, 14, 16):
                 store = pycache._tool_cache._store
@@ -2037,7 +2036,8 @@ def _ir_page_case(name, ids, body, *, entry=None, content_type="text/html; chars
         with tempfile.TemporaryDirectory(prefix="ir-registry-") as tmp:
             path = Path(tmp) / "registry.json"
             path.write_text(json.dumps({"schemaVersion": "2026-07-10", "registryVersion": "2026-09-25.1200", "sources": [entry]}), encoding="utf-8")
-            with _py_news_env(news=[], info={}), patch.object(news_tools, "_COMPANY_IR_PAGE_REGISTRY_PATH", path):
+            with _py_news_env(news=[], info={}), patch.object(news_tools, "_COMPANY_IR_PAGE_REGISTRY_PATH", path), \
+                    url_policy.registry_override(news_tools._load_company_ir_page_registry()):
                 return json.loads(asyncio.run(server.get_company_news("IQE.L", max_results, lookback, ["company_ir_page"])))
 
     worker_entry = {k: entry.get(k) for k in _IR_WORKER_FIELDS}

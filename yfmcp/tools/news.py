@@ -30,6 +30,7 @@ from typing import Annotated
 import yfinance as yf
 from pydantic import Field
 
+from yfmcp import url_policy as _url_policy
 from yfmcp.app import yfinance_server
 from yfmcp.schemas import _TOOL_OUTPUT_SCHEMAS
 from yfmcp.envelope import ErrorCode, _mcp_failure
@@ -952,6 +953,10 @@ async def _fetch_company_ir_page(entry: dict) -> tuple[str, str, str]:
     canonical_url = str(entry.get("canonicalUrl") or "")
     if not _company_ir_page_url_allowed(entry, canonical_url):
         raise ValueError("registry canonical URL is outside its allow-list")
+    if str(entry.get("status") or "") != "approved":
+        # Only approved entries are fetched. The Worker reaches the same refusal because the fetch allow-list
+        # holds the hosts of approved entries only.
+        raise _url_policy.UrlPolicyError("URL host not allowed")
 
     def _fetch() -> tuple[str, str, str]:
         req = _urlrequest.Request(
@@ -961,7 +966,7 @@ async def _fetch_company_ir_page(entry: dict) -> tuple[str, str, str]:
                 "Accept": "application/json, application/xml, text/xml, text/html;q=0.9",
             },
         )
-        with _urlrequest.urlopen(req, timeout=15) as resp:
+        with _url_policy.urlopen(req, timeout=15) as resp:
             final_url = resp.geturl()
             if not _company_ir_page_url_allowed(entry, final_url):
                 raise ValueError("redirect target is outside registry allow-list")
@@ -1412,7 +1417,7 @@ async def _collect_globenewswire_events(
                     feed_url,
                     headers={"User-Agent": _PROVIDER_USER_AGENT},
                 )
-                with _urlrequest.urlopen(req, timeout=20) as resp:  # noqa: S310
+                with _url_policy.urlopen(req, timeout=20) as resp:  # noqa: S310
                     raw = resp.read(_GLOBENEWSWIRE_MAX_BYTES + 1)
                     if len(raw) > _GLOBENEWSWIRE_MAX_BYTES:
                         raise ValueError("GlobeNewswire RSS response exceeded size limit")
@@ -1593,7 +1598,7 @@ async def _collect_finnhub_events(
             url,
             headers={"User-Agent": _PROVIDER_USER_AGENT, "X-Finnhub-Token": api_key},
         )
-        with _urlrequest.urlopen(req, timeout=20) as resp:  # noqa: S310
+        with _url_policy.urlopen(req, timeout=20) as resp:  # noqa: S310
             return json.loads(resp.read().decode("utf-8", errors="replace"))
 
     try:
@@ -1767,7 +1772,7 @@ async def _collect_marketaux_events(
 
     def _fetch() -> dict:
         req = _urlrequest.Request(request_url, headers={"User-Agent": _PROVIDER_USER_AGENT})
-        with _urlrequest.urlopen(req, timeout=12) as resp:  # noqa: S310
+        with _url_policy.urlopen(req, timeout=12) as resp:  # noqa: S310
             return json.loads(resp.read().decode("utf-8", errors="replace"))
 
     try:

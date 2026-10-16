@@ -150,7 +150,7 @@ class TestMarketauxCollector(unittest.TestCase):
         with patch.dict(
             os.environ,
             {"MARKETAUX_API_TOKEN": "super-secret-token", "MARKETAUX_API_KEY": ""},
-        ), patch("server._urlrequest.urlopen", side_effect=_urlopen):
+        ), patch("yfmcp.url_policy.urlopen", side_effect=_urlopen):
             items, warnings, used, diagnostics = _run(srv._collect_marketaux_events(
                 "AEHR",
                 retrieved_at="2026-08-10T00:00:00Z",
@@ -191,7 +191,7 @@ class TestMarketauxCollector(unittest.TestCase):
         with patch.dict(
             os.environ,
             {"MARKETAUX_API_TOKEN": "", "MARKETAUX_API_KEY": ""},
-        ), patch("server._urlrequest.urlopen") as mocked_urlopen:
+        ), patch("yfmcp.url_policy.urlopen") as mocked_urlopen:
             items, warnings, used, diagnostics = _run(srv._collect_marketaux_events(
                 "AEHR",
                 retrieved_at="2026-08-10T00:00:00Z",
@@ -210,7 +210,7 @@ class TestMarketauxCollector(unittest.TestCase):
         with patch.dict(
             os.environ,
             {"MARKETAUX_API_TOKEN": secret, "MARKETAUX_API_KEY": ""},
-        ), patch("server._urlrequest.urlopen", side_effect=RuntimeError(f"failure: {secret}")):
+        ), patch("yfmcp.url_policy.urlopen", side_effect=RuntimeError(f"failure: {secret}")):
             _items, warnings, used, diagnostics = _run(srv._collect_marketaux_events(
                 "AEHR",
                 retrieved_at="2026-08-10T00:00:00Z",
@@ -226,7 +226,7 @@ class TestMarketauxCollector(unittest.TestCase):
             os.environ,
             {"MARKETAUX_API_TOKEN": "quota-token", "MARKETAUX_API_KEY": ""},
         ), patch(
-            "server._urlrequest.urlopen",
+            "yfmcp.url_policy.urlopen",
             side_effect=HTTPError("https://api.marketaux.com", 402, "quota", None, None),
         ):
             _items, warnings, used, diagnostics = _run(srv._collect_marketaux_events(

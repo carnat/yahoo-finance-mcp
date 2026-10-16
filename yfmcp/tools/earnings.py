@@ -22,6 +22,7 @@ from yfmcp.earnings_period import extract_earnings_period_from_text as _extract_
 import pandas as pd
 from pydantic import Field
 
+from yfmcp import url_policy as _url_policy
 from yfmcp.app import yfinance_server
 from yfmcp.schemas import _TOOL_OUTPUT_SCHEMAS
 from yfmcp.envelope import ErrorCode, _wrap_envelope_v2
@@ -121,9 +122,16 @@ def _classify_earnings_source_url(url: str) -> tuple[str | None, str | None]:
         return None, "source_url must use https"
     if _is_paywalled_url(url):
         return None, "source_url appears paywalled and is not allowed"
-    if url.startswith("https://www.sec.gov/Archives/"):
+    candidate = url.strip()
+    ok, reason = _url_policy.check_fetch_url(candidate)
+    if not ok:
+        return None, f"source_url is not on the fetch allow-list ({reason})"
+    kind = _url_policy.allowed_host_kind(candidate)
+    if kind == "sec" and _url_policy.sec_archives_url(candidate):
         return "sec_8k", None
-    return "company_ir", None
+    if kind == "registry" and _url_policy.approved_registry_url_allowed(candidate):
+        return "company_ir", None
+    return None, "source_url is not on the fetch allow-list (URL path not allowed)"
 
 
 def _fetch_public_html(url: str, max_bytes: int = 3_000_000) -> str | None:
@@ -133,7 +141,7 @@ def _fetch_public_html(url: str, max_bytes: int = 3_000_000) -> str | None:
         method="GET",
     )
     try:
-        with _urlrequest.urlopen(req, timeout=60) as resp:
+        with _url_policy.urlopen(req, timeout=60) as resp:
             data = resp.read(max_bytes)
             return data.decode("utf-8", errors="ignore")
     except (_urlerror.URLError, ValueError):
@@ -967,6 +975,42 @@ def _public_transcript_payload(url: str, clean_text: str, topics: list[str] | No
 _YAHOO_TRANSCRIPT_URL_RE = _re.compile(r"^https://finance\.yahoo\.com/quote/([^/?#]+)/earnings/[^?#]*-earnings_call-\d+\.html", _re.IGNORECASE)
 
 
+_YAHOO_TRANSCRIPT_PAGE_PREFIX_RE = _re.compile(r"^https://finance\.yahoo\.com/quote/([^/?#]+)/earnings/", _re.IGNORECASE)
+
+
+def _yahoo_transcript_url_ticker(url: str) -> str | None:
+    """The ticker of a Yahoo earnings-call transcript URL that the transcript parser accepts, else None."""
+    match = _YAHOO_TRANSCRIPT_PAGE_PREFIX_RE.match(url or "")
+    if not match:
+        return None
+    try:
+        ticker = _urlparse.unquote(match.group(1), errors="strict").upper()
+    except UnicodeDecodeError:
+        return None
+    identity, _ = parse_yahoo_transcript_source_url(ticker, url)
+    return ticker if identity else None
+
+
+def _caller_url_refusal(url: str) -> str | None:
+    """Allow-list check for a caller-supplied URL (2.10.0): check_fetch_url plus the caller path rule.
+
+    SEC URLs must be under /Archives/, Yahoo URLs must be transcript pages the parser accepts, and registry
+    hosts must sit inside an approved entry's path prefixes. Other allow-listed hosts are never fetched
+    for a caller URL.
+    """
+    ok, reason = _url_policy.check_fetch_url(url)
+    if not ok:
+        return reason
+    kind = _url_policy.allowed_host_kind(url)
+    if kind == "sec" and url.startswith("https://www.sec.gov/Archives/"):
+        return None
+    if kind == "yahoo" and _yahoo_transcript_url_ticker(url) is not None:
+        return None
+    if kind == "registry" and _url_policy.approved_registry_url_allowed(url):
+        return None
+    return "URL path not allowed"
+
+
 async def _yahoo_transcript_text_for_url(url: str) -> str | None:
     """Full text of a finance.yahoo.com transcript URL from the structured Yahoo/Quartr transcript.
 
@@ -1034,6 +1078,15 @@ async def parse_public_transcript(url: str = "", topics: list[str] | None = None
     if not url or not url.startswith("https://"):
         return _wrap_envelope_v2("parse_public_transcript", None, error="A valid https:// URL or raw_text is required.", error_code=ErrorCode.INPUT_VALIDATION_ERROR)
 
+    refusal = _caller_url_refusal(url)
+    if refusal is not None:
+        return _wrap_envelope_v2(
+            "parse_public_transcript", None,
+            error=(f"url is not on the fetch allow-list ({refusal}). Allowed: SEC Archives, finance.yahoo.com transcript pages, "
+                   "and approved company IR pages. Paste the text as raw_text instead."),
+            error_code=ErrorCode.INPUT_VALIDATION_ERROR,
+        )
+
     yahoo_text = await _yahoo_transcript_text_for_url(url)
     if yahoo_text is not None:
         return _public_transcript_payload(url, yahoo_text, topics, [])
@@ -1047,7 +1100,7 @@ async def parse_public_transcript(url: str = "", topics: list[str] | None = None
             headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"},
         )
         try:
-            with _urlrequest.urlopen(req, timeout=30) as resp:  # noqa: S310
+            with _url_policy.urlopen(req, timeout=30) as resp:  # noqa: S310
                 status_code = resp.getcode()
                 raw = resp.read(5_000_000)
             try:

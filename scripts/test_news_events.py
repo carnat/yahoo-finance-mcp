@@ -1796,7 +1796,7 @@ class TestGlobeNewswireRSS(unittest.TestCase):
                     pass
             return _Resp()
 
-        return patch("server._urlrequest.urlopen", side_effect=_fake_urlopen)
+        return patch("yfmcp.url_policy.urlopen", side_effect=_fake_urlopen)
 
     def _mock_yf_no_info(self):
         """yfinance stub that returns no company info."""
@@ -1823,7 +1823,7 @@ class TestGlobeNewswireRSS(unittest.TestCase):
             return _Resp()
 
         with patch("yfmcp.tools.news.yf") as mock_yf, \
-             patch("server._urlrequest.urlopen", side_effect=_fake_urlopen), \
+             patch("yfmcp.url_policy.urlopen", side_effect=_fake_urlopen), \
              patch("yfmcp.tools.news._tool_cache") as mock_cache:
             mock_yf.Ticker.return_value.info = {"shortName": "Apple Inc.", "longName": "Apple Inc."}
             mock_cache.get.return_value = None
@@ -1873,7 +1873,7 @@ class TestGlobeNewswireRSS(unittest.TestCase):
             return _Resp()
 
         with patch("yfmcp.tools.news.yf") as mock_yf, \
-             patch("server._urlrequest.urlopen", side_effect=_fake_urlopen), \
+             patch("yfmcp.url_policy.urlopen", side_effect=_fake_urlopen), \
              patch("yfmcp.tools.news._tool_cache") as mock_cache:
             mock_yf.Ticker.return_value.info = {}
             mock_cache.get.return_value = None
@@ -2147,7 +2147,7 @@ class TestGlobeNewswireRSS(unittest.TestCase):
             raise OSError("connection refused")
 
         with patch("yfmcp.tools.news.yf") as mock_yf, \
-             patch("server._urlrequest.urlopen", side_effect=_raise_error), \
+             patch("yfmcp.url_policy.urlopen", side_effect=_raise_error), \
              patch("yfmcp.tools.news._tool_cache") as mock_cache:
             mock_yf.Ticker.return_value.info = {}
             mock_cache.get.return_value = None
@@ -2185,7 +2185,7 @@ class TestGlobeNewswireRSS(unittest.TestCase):
             return _Resp()
 
         with patch("yfmcp.tools.news.yf") as mock_yf, \
-             patch("server._urlrequest.urlopen", side_effect=_fake_urlopen), \
+             patch("yfmcp.url_policy.urlopen", side_effect=_fake_urlopen), \
              patch("yfmcp.tools.news._tool_cache") as mock_cache:
             mock_yf.Ticker.return_value.info = {}
             mock_cache.get.return_value = None
@@ -2220,7 +2220,7 @@ class TestGlobeNewswireRSS(unittest.TestCase):
             return _Resp()
 
         with patch("yfmcp.tools.news.yf") as mock_yf, \
-             patch("server._urlrequest.urlopen", side_effect=_fake_urlopen), \
+             patch("yfmcp.url_policy.urlopen", side_effect=_fake_urlopen), \
              patch("yfmcp.tools.news._tool_cache") as mock_cache:
             mock_yf.Ticker.return_value.info = {}
             mock_cache.get.return_value = None
@@ -2256,7 +2256,7 @@ class TestGlobeNewswireRSS(unittest.TestCase):
 
         # First call: cache miss → fetch
         with patch("yfmcp.tools.news.yf") as mock_yf, \
-             patch("server._urlrequest.urlopen", side_effect=_fake_urlopen):
+             patch("yfmcp.url_policy.urlopen", side_effect=_fake_urlopen):
             mock_yf.Ticker.return_value.info = {}
             for key in list(srv_mod._tool_cache._store):
                 if key.startswith("gnw_rss:"):
@@ -2269,7 +2269,7 @@ class TestGlobeNewswireRSS(unittest.TestCase):
 
         # Second call: cache hit → no fetch
         with patch("yfmcp.tools.news.yf") as mock_yf, \
-             patch("server._urlrequest.urlopen", side_effect=_fake_urlopen):
+             patch("yfmcp.url_policy.urlopen", side_effect=_fake_urlopen):
             mock_yf.Ticker.return_value.info = {}
             _run(srv_mod._collect_globenewswire_events(
                 "TSLA", retrieved_at=retrieved, max_results=10, lookback_days=365,

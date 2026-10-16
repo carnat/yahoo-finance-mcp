@@ -176,7 +176,7 @@ class ProviderGapRoutingTests(unittest.TestCase):
         secret = "provider-gap-secret"
         error = urllib.error.HTTPError("https://www.alphavantage.co/query", 403, "Forbidden", {}, None)
         with patch.dict(os.environ, {"ALPHA_VANTAGE_API_KEY": secret}, clear=True), \
-             patch("yfmcp.clients.market_providers.urllib.request.urlopen", side_effect=error):
+             patch("yfmcp.url_policy.urlopen", side_effect=error):
             result = _run(fetch_alpha_vantage_json("TEST_ONLY", {"symbol": "ZZTEST"}, ttl_seconds=60))
         self.assertEqual(result.status, "AUTH_ERROR")
         self.assertNotIn(secret, result.public_url)
@@ -195,7 +195,7 @@ class ProviderGapRoutingTests(unittest.TestCase):
             {"headline": "AEHR old item", "summary": "old", "datetime": old},
         ])
         with patch.dict(os.environ, {"FINNHUB_API_KEY": "test-finnhub"}, clear=True), \
-             patch("server._urlrequest.urlopen", return_value=_JsonResponse(rows)):
+             patch("yfmcp.url_policy.urlopen", return_value=_JsonResponse(rows)):
             items, warnings, used, diagnostics = _run(
                 srv._collect_finnhub_events(
                     "AEHR",

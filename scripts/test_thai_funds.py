@@ -261,20 +261,20 @@ class ThaiFundFixtureTest(unittest.TestCase):
         self.assertNotIn("fixture-key", json.dumps(response))
 
         os.environ["SEC_OPEN_DATA_API_KEY"] = "fixture-key"
-        original = thai._urlrequest.urlopen
+        original = thai._url_policy.urlopen
         try:
             def reject(*_args, **_kwargs):
                 raise HTTPError("https://api.sec.or.th", 403, "Forbidden", {}, io.BytesIO())
-            thai._urlrequest.urlopen = reject
+            thai._url_policy.urlopen = reject
             with self.assertRaises(thai.SecThailandProviderError) as captured:
                 thai._request_json_sync("/general-info/profiles", {"fund_class_name": "SCBSEMI(E)", "page_size": 1})
             self.assertEqual(captured.exception.code, "AUTH_ERROR")
         finally:
-            thai._urlrequest.urlopen = original
+            thai._url_policy.urlopen = original
 
     def test_provider_uses_query_string_get_without_body(self) -> None:
         captured: dict[str, object] = {}
-        original = thai._urlrequest.urlopen
+        original = thai._url_policy.urlopen
         try:
             class FakeResponse:
                 status = 200
@@ -295,10 +295,10 @@ class ThaiFundFixtureTest(unittest.TestCase):
                 captured["headers"] = dict(request.header_items())
                 return FakeResponse()
 
-            thai._urlrequest.urlopen = fake_urlopen
+            thai._url_policy.urlopen = fake_urlopen
             thai._request_json_sync("/daily-info/nav", {"proj_id": "M0232_2564", "start_nav_date": "2026-07-01", "latest": True})
         finally:
-            thai._urlrequest.urlopen = original
+            thai._url_policy.urlopen = original
         self.assertEqual(captured["method"], "GET")
         self.assertIsNone(captured["data"])
         self.assertIn("proj_id=M0232_2564", captured["url"])
@@ -312,7 +312,7 @@ class ThaiFundFixtureTest(unittest.TestCase):
         self.assertEqual(request_headers["ocp-apim-subscription-key"], "fixture-key")
 
     def test_http_204_is_a_bounded_empty_page(self) -> None:
-        original = thai._urlrequest.urlopen
+        original = thai._url_policy.urlopen
         try:
             class FakeResponse:
                 status = 204
@@ -327,19 +327,19 @@ class ThaiFundFixtureTest(unittest.TestCase):
                 def read(self):
                     return b""
 
-            thai._urlrequest.urlopen = lambda *_args, **_kwargs: FakeResponse()
+            thai._url_policy.urlopen = lambda *_args, **_kwargs: FakeResponse()
             payload = thai._request_json_sync(
                 "/daily-info/dividend-history",
                 {"proj_id": "M0232_2564", "page_size": 100},
             )
         finally:
-            thai._urlrequest.urlopen = original
+            thai._url_policy.urlopen = original
         self.assertEqual(payload["items"], [])
         self.assertEqual(payload["next_cursor"], "")
         self.assertEqual(payload["message"], "no_content")
 
     def test_invalid_json_is_redacted_but_diagnosable(self) -> None:
-        original = thai._urlrequest.urlopen
+        original = thai._url_policy.urlopen
         raw = b"<html>upstream error</html>"
         try:
             class FakeResponse:
@@ -355,11 +355,11 @@ class ThaiFundFixtureTest(unittest.TestCase):
                 def read(self):
                     return raw
 
-            thai._urlrequest.urlopen = lambda *_args, **_kwargs: FakeResponse()
+            thai._url_policy.urlopen = lambda *_args, **_kwargs: FakeResponse()
             with self.assertRaises(thai.SecThailandProviderError) as captured:
                 thai._request_json_sync("/general-info/profiles", {"fund_class_name": "SCBRMJP"})
         finally:
-            thai._urlrequest.urlopen = original
+            thai._url_policy.urlopen = original
         self.assertEqual(captured.exception.code, "PROVIDER_ERROR")
         self.assertEqual(captured.exception.diagnostics, {
             "httpStatus": 200,
