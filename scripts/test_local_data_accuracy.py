@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import server as srv  # noqa: E402
 from yfmcp import envelope  # noqa: E402
 from yfmcp.tools import earnings  # noqa: E402
+from yfmcp.tools import news as news_tools  # noqa: E402
 
 
 def _run(coro):
@@ -59,7 +60,7 @@ class TestLocalDataAccuracy(unittest.TestCase):
         items = [{"title": f"Garmin story {i}", "tickerRelevance": "LOW"} for i in range(12)]
         items += [{"title": "New iPhone launch", "tickerRelevance": "LOW"}, {"title": "Apple iPhone sales", "tickerRelevance": "HIGH"}]
         collect = AsyncMock(return_value=(items, ["finnhub"], [], "2026-09-25T00:00:00Z", {}))
-        with patch.object(srv, "_collect_company_events", collect):
+        with patch.object(news_tools, "_collect_company_events", collect):
             data = _data(_run(srv.search_company_news("AAPL", "iphone", max_results=10)))
         self.assertEqual(collect.await_args.kwargs["max_results"], 100)
         self.assertEqual(data["matchCount"], 2)
@@ -68,7 +69,7 @@ class TestLocalDataAccuracy(unittest.TestCase):
     def test_company_news_ranks_relevant_items_first(self) -> None:
         items = [{"title": "Garmin", "tickerRelevance": "LOW"}, {"title": "Apple", "tickerRelevance": "HIGH"}]
         collect = AsyncMock(return_value=(items, ["finnhub"], [], "2026-09-25T00:00:00Z", {}))
-        with patch.object(srv, "_collect_company_events", collect):
+        with patch.object(news_tools, "_collect_company_events", collect):
             data = _data(_run(srv.get_company_news("AAPL", max_results=1)))
         self.assertEqual(collect.await_args.kwargs["max_results"], 3)
         self.assertEqual([item["title"] for item in data["items"]], ["Apple"])

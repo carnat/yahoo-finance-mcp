@@ -98,7 +98,7 @@ class TestPhase6BCompanyNews(unittest.TestCase):
             "tickerRelevance": "LOW",
             "duplicateGroupId": "abc123",
         }]
-        with patch("server._collect_company_events", new_callable=AsyncMock) as mocked:
+        with patch("yfmcp.tools.news._collect_company_events", new_callable=AsyncMock) as mocked:
             mocked.return_value = (fake_items, ["yahoo_finance"], [], "2026-05-15T13:01:22Z")
             data = _parse(_run(srv.get_company_news("AAPL")))
             self.assertEqual(data["ticker"], "AAPL")
@@ -113,7 +113,7 @@ class TestPhase6BCompanyNews(unittest.TestCase):
     def test_get_company_news_rejects_empty_batches_before_collection(self):
         for ticker in ([], [""]):
             with self.subTest(ticker=ticker), patch(
-                "server._collect_company_events",
+                "yfmcp.tools.news._collect_company_events",
                 new_callable=AsyncMock,
             ) as mocked:
                 payload = _parse(_run(srv.get_company_news(ticker)))
@@ -145,7 +145,7 @@ class TestPhase6BCompanyNews(unittest.TestCase):
             "tickerRelevance": "HIGH",
             "duplicateGroupId": "g1",
         }]
-        with patch("server._collect_company_events", new_callable=AsyncMock) as mocked:
+        with patch("yfmcp.tools.news._collect_company_events", new_callable=AsyncMock) as mocked:
             mocked.return_value = (fake_items, ["sec"], [], "2026-05-05T13:01:00Z")
             data = _parse(_run(srv.search_company_news("AAPL", "China revenue")))
             self.assertEqual(data.get("query"), "China revenue")
@@ -153,7 +153,7 @@ class TestPhase6BCompanyNews(unittest.TestCase):
             self.assertNotIn("articleBody", json.dumps(data))
 
     def test_press_release_no_official_source_warning(self):
-        with patch("server._collect_company_events", new_callable=AsyncMock) as mocked:
+        with patch("yfmcp.tools.news._collect_company_events", new_callable=AsyncMock) as mocked:
             mocked.return_value = ([], ["yahoo_finance"], [], "2026-05-05T13:01:00Z")
             data = _parse(_run(srv.get_company_press_releases("AAPL")))
             codes = [w.get("code") for w in data.get("warnings", []) if isinstance(w, dict)]
@@ -165,7 +165,7 @@ class TestPhase6BCompanyNews(unittest.TestCase):
             "message": "Finnhub company-news source is not configured; skipped.",
             "severity": "warning",
         }]
-        with patch("server._collect_company_events", new_callable=AsyncMock) as mocked:
+        with patch("yfmcp.tools.news._collect_company_events", new_callable=AsyncMock) as mocked:
             mocked.return_value = ([], [], finnhub_warning, "2026-05-15T13:01:22Z")
             data = _parse(_run(srv.get_company_news("AAPL", sources=["finnhub"])))
             self.assertEqual(data.get("sourceStatus", {}).get("finnhub", {}).get("status"), "UNCONFIGURED")
@@ -187,7 +187,7 @@ class TestPhase6BCompanyNews(unittest.TestCase):
             "tickerRelevance": "HIGH",
             "duplicateGroupId": "fh1",
         }]
-        with patch("server._collect_company_events", new_callable=AsyncMock) as mocked:
+        with patch("yfmcp.tools.news._collect_company_events", new_callable=AsyncMock) as mocked:
             mocked.return_value = (finnhub_items, ["finnhub"], [], "2026-05-15T13:01:22Z")
             data = _parse(_run(srv.get_company_news("AAPL", sources=["finnhub"])))
             self.assertEqual(data.get("sourceStatus", {}).get("finnhub", {}).get("status"), "OK")
@@ -233,7 +233,7 @@ class TestPhase6BCompanyNews(unittest.TestCase):
             "message": "Finnhub company-news source is not configured; skipped.",
             "severity": "warning",
         }]
-        with patch("server._collect_company_events", new_callable=AsyncMock) as mocked:
+        with patch("yfmcp.tools.news._collect_company_events", new_callable=AsyncMock) as mocked:
             mocked.return_value = (yf_items, ["yahoo_finance_news"], finnhub_unconfigured_warning, "2026-05-15T13:01:22Z")
             data = _parse(_run(srv.get_company_news("AAPL")))
             # Must return 2 items from Yahoo even though Finnhub is absent
@@ -297,7 +297,7 @@ class TestPhase6BCompanyNews(unittest.TestCase):
             "message": "Finnhub company-news source is not configured; skipped.",
             "severity": "warning",
         }]
-        with patch("server._collect_company_events", new_callable=AsyncMock) as mocked:
+        with patch("yfmcp.tools.news._collect_company_events", new_callable=AsyncMock) as mocked:
             mocked.return_value = (yf_items, ["yahoo_finance_news"], finnhub_unconfigured_warning, "2026-05-16T08:01:00Z")
             data = _parse(_run(srv.get_yahoo_finance_news("AAPL")))
             # Must return 2 Yahoo items even with no Finnhub key
@@ -378,7 +378,7 @@ class TestPhase6BCompanyNews(unittest.TestCase):
             "message": "Finnhub company-news source is not configured; skipped.",
             "severity": "warning",
         }]
-        with patch("server._collect_company_events", new_callable=AsyncMock) as mocked:
+        with patch("yfmcp.tools.news._collect_company_events", new_callable=AsyncMock) as mocked:
             mocked.return_value = (yf_feed_items, ["yahoo_finance"], finnhub_warning, "2026-05-16T16:01:00Z")
             # Call with legacy yahoo_finance source explicitly
             data = _parse(_run(srv.get_company_news("AAPL", sources=["yahoo_finance", "finnhub"])))
@@ -431,8 +431,8 @@ class TestPhase6BCompanyNews(unittest.TestCase):
             "duplicateGroupId": "ir2",
         }
 
-        with patch("server._collect_yahoo_events", new_callable=AsyncMock) as mock_yf, \
-             patch("server._collect_finnhub_events", new_callable=AsyncMock) as mock_fh:
+        with patch("yfmcp.tools.news._collect_yahoo_events", new_callable=AsyncMock) as mock_yf, \
+             patch("yfmcp.tools.news._collect_finnhub_events", new_callable=AsyncMock) as mock_fh:
             mock_yf.return_value = ([news_item, pr_item], [], True)
             mock_fh.return_value = ([], [{"code": "SOURCE_UNAVAILABLE", "message": "Finnhub company-news source is not configured; skipped.", "severity": "warning"}], False)
             items, sources_used, warnings, _ = _run(
@@ -458,11 +458,11 @@ class TestPhase6BCompanyNews(unittest.TestCase):
                 return [], [warning], False
             return _collect
 
-        with patch("server._collect_sec_events", side_effect=_source("sec", 3)), \
-             patch("server._collect_company_ir_page_events", side_effect=_source("ir", 3)), \
-             patch("server._collect_yahoo_events", side_effect=_source("yahoo", 4)), \
-             patch("server._collect_finnhub_events", side_effect=_source("finnhub", 4)), \
-             patch("server._finnhub_eligibility", return_value=(True, None)), \
+        with patch("yfmcp.tools.news._collect_sec_events", side_effect=_source("sec", 3)), \
+             patch("yfmcp.tools.news._collect_company_ir_page_events", side_effect=_source("ir", 3)), \
+             patch("yfmcp.tools.news._collect_yahoo_events", side_effect=_source("yahoo", 4)), \
+             patch("yfmcp.tools.news._collect_finnhub_events", side_effect=_source("finnhub", 4)), \
+             patch("yfmcp.tools.news._finnhub_eligibility", return_value=(True, None)), \
              patch("server.yf.Ticker") as ticker_cls:
             ticker_cls.return_value.info = {"longName": "Tesla, Inc.", "exchange": "NMS"}
             started = time.monotonic()
@@ -531,7 +531,7 @@ class TestPhase6BCompanyNews(unittest.TestCase):
 
     def test_yahoo_empty_finnhub_unavailable_no_sec_default_behavior(self):
         """Regression: Yahoo empty + Finnhub unavailable must NOT surface SEC-only defaults."""
-        with patch("server._collect_company_events", new_callable=AsyncMock) as mocked:
+        with patch("yfmcp.tools.news._collect_company_events", new_callable=AsyncMock) as mocked:
             mocked.return_value = (
                 [],
                 [],
@@ -568,7 +568,7 @@ class TestPhase6BSecEvents(unittest.TestCase):
                 }
             },
         }
-        with patch("server._get_submissions_for_ticker", new_callable=AsyncMock) as mocked:
+        with patch("yfmcp.tools.news._get_submissions_for_ticker", new_callable=AsyncMock) as mocked:
             mocked.return_value = ("0000000000", subs)
             data = _parse(
                 _run(
@@ -593,7 +593,7 @@ class TestPhase6BSecEvents(unittest.TestCase):
             {"title": "B", "publishedAt": "2026-05-03T00:00:00Z", "source": "SEC", "sourceType": "sec_filing", "url": "https://www.sec.gov/Archives/x", "eventType": "regulatory", "confidence": "HIGH", "duplicateGroupId": "2"},
             {"title": "A", "publishedAt": "2026-05-01T00:00:00Z", "source": "SEC", "sourceType": "sec_filing", "url": "https://www.sec.gov/Archives/y", "eventType": "regulatory", "confidence": "HIGH", "duplicateGroupId": "1"},
         ]
-        with patch("server._collect_company_events", new_callable=AsyncMock) as mocked:
+        with patch("yfmcp.tools.news._collect_company_events", new_callable=AsyncMock) as mocked:
             mocked.return_value = (fake_items, ["sec"], [], "2026-05-03T01:00:00Z")
             data = _parse(_run(srv.get_public_event_timeline("AAPL", max_results=1)))
             self.assertEqual(len(data.get("timeline", [])), 1)
@@ -614,18 +614,18 @@ class TestPhase6BVerifyEvent(unittest.TestCase):
             "evidenceText": "guidance",
             "eventType": "guidance",
         }]
-        with patch("server._collect_company_events", new_callable=AsyncMock) as mocked:
+        with patch("yfmcp.tools.news._collect_company_events", new_callable=AsyncMock) as mocked:
             mocked.return_value = (confirmed, ["sec"], [], "2026-05-10T10:01:00Z")
             data = _parse(_run(srv.verify_company_event("AAPL", "guidance")))
             self.assertEqual(data.get("status"), "CONFIRMED")
 
         partial = [dict(confirmed[0], source="Yahoo Finance", sourceType="yahoo_finance", confidence="LOW")]
-        with patch("server._collect_company_events", new_callable=AsyncMock) as mocked:
+        with patch("yfmcp.tools.news._collect_company_events", new_callable=AsyncMock) as mocked:
             mocked.return_value = (partial, ["yahoo_finance"], [], "2026-05-10T10:01:00Z")
             data = _parse(_run(srv.verify_company_event("AAPL", "guidance")))
             self.assertEqual(data.get("status"), "PARTIAL")
 
-        with patch("server._collect_company_events", new_callable=AsyncMock) as mocked:
+        with patch("yfmcp.tools.news._collect_company_events", new_callable=AsyncMock) as mocked:
             mocked.return_value = ([], ["sec"], [], "2026-05-10T10:01:00Z")
             data = _parse(_run(srv.verify_company_event("AAPL", "guidance")))
             self.assertEqual(data.get("status"), "NOT_FOUND")
@@ -643,7 +643,7 @@ class TestPhase6BVerifyEvent(unittest.TestCase):
                 "severity": "warning",
             },
         ]
-        with patch("server._collect_company_events", new_callable=AsyncMock) as mocked:
+        with patch("yfmcp.tools.news._collect_company_events", new_callable=AsyncMock) as mocked:
             mocked.return_value = ([], [], warnings, "2026-05-10T10:01:00Z")
             data = _parse(_run(srv.verify_company_event(
                 "AAPL",
@@ -669,8 +669,8 @@ class TestPhase6BVerifyEvent(unittest.TestCase):
             "confidence": "HIGH",
             "tickers": ["SIVE.ST"],
         }]
-        with patch("server._collect_company_events", new_callable=AsyncMock) as mocked, patch(
-            "server._get_submissions_for_ticker", new_callable=AsyncMock
+        with patch("yfmcp.tools.news._collect_company_events", new_callable=AsyncMock) as mocked, patch(
+            "yfmcp.tools.news._get_submissions_for_ticker", new_callable=AsyncMock
         ) as submissions:
             mocked.return_value = (unrelated, ["company_ir"], [], "2026-07-17T08:00:00Z")
             submissions.return_value = (None, None)
@@ -693,8 +693,8 @@ class TestPhase6BVerifyEvent(unittest.TestCase):
             "confidence": "HIGH",
             "tickers": ["SIVE.ST"],
         }]
-        with patch("server._collect_company_events", new_callable=AsyncMock) as mocked, patch(
-            "server._get_submissions_for_ticker", new_callable=AsyncMock
+        with patch("yfmcp.tools.news._collect_company_events", new_callable=AsyncMock) as mocked, patch(
+            "yfmcp.tools.news._get_submissions_for_ticker", new_callable=AsyncMock
         ) as submissions:
             mocked.return_value = (matching, ["company_ir"], [], "2026-07-17T08:00:00Z")
             submissions.return_value = (None, None)
@@ -716,8 +716,8 @@ class TestPhase6BVerifyEvent(unittest.TestCase):
             "confidence": "HIGH",
             "tickers": ["SIVE.ST"],
         }]
-        with patch("server._collect_company_events", new_callable=AsyncMock) as mocked, patch(
-            "server._get_submissions_for_ticker", new_callable=AsyncMock
+        with patch("yfmcp.tools.news._collect_company_events", new_callable=AsyncMock) as mocked, patch(
+            "yfmcp.tools.news._get_submissions_for_ticker", new_callable=AsyncMock
         ) as submissions:
             mocked.return_value = (item, ["company_ir"], [], "2026-07-17T08:00:00Z")
             submissions.return_value = (None, None)
@@ -740,19 +740,19 @@ class TestPhase6BVerifyEvent(unittest.TestCase):
             "evidenceText": "guidance",
             "eventType": "guidance",
         }]
-        with patch("server._collect_company_events", new_callable=AsyncMock) as mocked:
+        with patch("yfmcp.tools.news._collect_company_events", new_callable=AsyncMock) as mocked:
             mocked.return_value = (stale_item, ["sec"], [], "2026-05-10T10:01:00Z")
             data = _parse(_run(srv.verify_company_event("AAPL", "guidance", start_date="2026-05-01", end_date="2026-05-15")))
             self.assertEqual(data.get("status"), "STALE")
 
-        with patch("server._collect_company_events", new_callable=AsyncMock) as mocked:
+        with patch("yfmcp.tools.news._collect_company_events", new_callable=AsyncMock) as mocked:
             mocked.return_value = (stale_item, ["sec"], [{"code": "TIMESTAMP_VARIANCE", "message": "x", "duplicateGroupId": "other", "statusImpact": False}], "2026-05-10T10:01:00Z")
             data = _parse(_run(srv.verify_company_event("AAPL", "guidance")))
             self.assertEqual(data.get("status"), "CONFIRMED")
             self.assertEqual(data.get("conflicts"), [])
 
         matched_item = [dict(stale_item[0], duplicateGroupId="guidance-group", publishedAt="2026-05-10T10:00:00Z")]
-        with patch("server._collect_company_events", new_callable=AsyncMock) as mocked:
+        with patch("yfmcp.tools.news._collect_company_events", new_callable=AsyncMock) as mocked:
             mocked.return_value = (matched_item, ["sec"], [{"code": "EVIDENCE_CONFLICT", "message": "Amounts differ.", "duplicateGroupId": "guidance-group"}], "2026-05-10T10:01:00Z")
             data = _parse(_run(srv.verify_company_event("AAPL", "guidance")))
             self.assertEqual(data.get("status"), "CONFLICTING")
@@ -911,7 +911,7 @@ class TestPhase6BYahooFinanceSources(unittest.TestCase):
             self._make_news_item("fh1", "finnhub", "company_news", "Barron's"),
         ]
         items[-1]["originalSource"] = "Barron's"
-        with patch("server._collect_company_events", new_callable=AsyncMock) as mocked:
+        with patch("yfmcp.tools.news._collect_company_events", new_callable=AsyncMock) as mocked:
             mocked.return_value = (items, ["yahoo_finance_news", "yahoo_finance_press_releases", "finnhub"], [], "2026-05-15T12:00:00Z")
             data = _parse(_run(srv.get_company_news("AAPL")))
             returned_sources = {it["source"] for it in data.get("items", [])}
@@ -929,7 +929,7 @@ class TestPhase6BYahooFinanceSources(unittest.TestCase):
         pr_items = [self._make_news_item("pr1", "yahoo_finance_press_releases", "yahoo_finance_press_releases")]
         finnhub_items = [self._make_news_item("fh1", "finnhub", "company_news")]
 
-        with patch("server._collect_company_events", new_callable=AsyncMock) as mocked:
+        with patch("yfmcp.tools.news._collect_company_events", new_callable=AsyncMock) as mocked:
             mocked.return_value = (
                 news_items + pr_items + finnhub_items,
                 ["yahoo_finance_news", "yahoo_finance_press_releases", "finnhub"],
@@ -951,7 +951,7 @@ class TestPhase6BYahooFinanceSources(unittest.TestCase):
     def test_get_company_press_releases_yahoo_pr_as_first_class_source(self):
         """get_company_press_releases returns yahoo_finance_press_releases items."""
         pr_item = self._make_news_item("pr1", "yahoo_finance_press_releases", "yahoo_finance_press_releases", "PR Newswire")
-        with patch("server._collect_company_events", new_callable=AsyncMock) as mocked:
+        with patch("yfmcp.tools.news._collect_company_events", new_callable=AsyncMock) as mocked:
             mocked.return_value = ([pr_item], ["yahoo_finance_press_releases"], [], "2026-05-15T12:00:00Z")
             data = _parse(_run(srv.get_company_press_releases("AAPL")))
             sources = {it["source"] for it in data.get("items", [])}
@@ -960,7 +960,7 @@ class TestPhase6BYahooFinanceSources(unittest.TestCase):
 
     def test_get_company_press_releases_default_includes_yahoo_pr_source(self):
         """get_company_press_releases default sources include yahoo_finance_press_releases."""
-        with patch("server._collect_company_events", new_callable=AsyncMock) as mocked:
+        with patch("yfmcp.tools.news._collect_company_events", new_callable=AsyncMock) as mocked:
             mocked.return_value = ([], [], [], "2026-05-15T12:00:00Z")
             _run(srv.get_company_press_releases("AAPL"))
             call_kwargs = mocked.call_args
@@ -1003,7 +1003,7 @@ class TestPhase6BYahooFinanceSources(unittest.TestCase):
                 "severity": "warning",
             }], now
 
-        with patch("server._collect_company_events", new_callable=AsyncMock) as mocked_collect, \
+        with patch("yfmcp.tools.news._collect_company_events", new_callable=AsyncMock) as mocked_collect, \
              patch("yfmcp.tools.earnings._resolve_ex991_url", new_callable=AsyncMock) as mocked_ex99:
             mocked_collect.side_effect = _side_effect
             mocked_ex99.return_value = "https://www.sec.gov/Archives/edgar/data/723125/000072312526000004/a2026q2ex991-pressrelease.htm"
@@ -1057,7 +1057,7 @@ class TestPhase6BYahooFinanceSources(unittest.TestCase):
             self.assertEqual(cik, 723125)
             return f"https://www.sec.gov/Archives/edgar/data/723125/{acc}/ex991.htm" if acc == "0002" else None
 
-        with patch("server._collect_company_events", side_effect=_collect), \
+        with patch("yfmcp.tools.news._collect_company_events", side_effect=_collect), \
              patch("yfmcp.tools.earnings._resolve_ex991_url", side_effect=_resolve):
             started = time.monotonic()
             data = _parse(_run(srv.get_company_press_releases("MU")))
@@ -1095,7 +1095,7 @@ class TestPhase6BYahooFinanceSources(unittest.TestCase):
             "tickerRelevance": "HIGH",
             "duplicateGroupId": "mu-ir-page",
         }
-        with patch("server._collect_company_events", new_callable=AsyncMock) as mocked:
+        with patch("yfmcp.tools.news._collect_company_events", new_callable=AsyncMock) as mocked:
             mocked.return_value = ([page_item], ["company_ir_page"], [], now)
             data = _parse(_run(srv.get_company_press_releases("MU", sources=["company_ir_page"])))
         self.assertTrue(data.get("decisionGrade"))
@@ -1235,7 +1235,7 @@ class TestPhase6BYahooFinanceSources(unittest.TestCase):
             "tickerRelevance": "HIGH",
             "duplicateGroupId": "aapl-launch-fh",
         }
-        with patch("server._collect_company_events", new_callable=AsyncMock) as mocked:
+        with patch("yfmcp.tools.news._collect_company_events", new_callable=AsyncMock) as mocked:
             mocked.return_value = ([yf_item, fh_item], ["yahoo_finance_news", "finnhub"], [], now)
             data = _parse(_run(srv.get_company_news("AAPL")))
             items = data.get("items", [])
@@ -1251,7 +1251,7 @@ class TestPhase6BYahooFinanceSources(unittest.TestCase):
     def test_legacy_yahoo_finance_source_still_accepted(self):
         """Passing sources=['yahoo_finance', 'finnhub'] still works without errors."""
         items = [self._make_news_item("n1", "yahoo_finance_news", "yahoo_finance_news")]
-        with patch("server._collect_company_events", new_callable=AsyncMock) as mocked:
+        with patch("yfmcp.tools.news._collect_company_events", new_callable=AsyncMock) as mocked:
             mocked.return_value = (items, ["yahoo_finance"], [], "2026-05-15T12:00:00Z")
             data = _parse(_run(srv.get_company_news("AAPL", sources=["yahoo_finance", "finnhub"])))
             self.assertEqual(len(data.get("items", [])), 1)
@@ -1278,9 +1278,9 @@ class TestPhase6BYahooFinanceSources(unittest.TestCase):
                     raise RuntimeError("profile unavailable")
                 return info
 
-        search = patch("server._yahoo_search_news", side_effect=raw_items) if isinstance(raw_items, Exception) \
-            else patch("server._yahoo_search_news", return_value=raw_items)
-        with patch("server.yf") as mock_yf, search:
+        search = patch("yfmcp.tools.news._yahoo_search_news", side_effect=raw_items) if isinstance(raw_items, Exception) \
+            else patch("yfmcp.tools.news._yahoo_search_news", return_value=raw_items)
+        with patch("yfmcp.tools.news.yf") as mock_yf, search:
             mock_yf.Ticker.return_value = _TickerMock()
             return _run(srv_mod._collect_yahoo_events(ticker, retrieved_at=retrieved, max_results=10, feed="press_releases", include_diagnostics=True))
 
@@ -1375,7 +1375,7 @@ class TestPhase6BYahooFinanceSources(unittest.TestCase):
                     "exchangeName": "NasdaqGS"
                 }
 
-        with patch("server.yf") as mock_yf, patch("server._yahoo_search_news", return_value=[bad_item, good_item]):
+        with patch("yfmcp.tools.news.yf") as mock_yf, patch("yfmcp.tools.news._yahoo_search_news", return_value=[bad_item, good_item]):
             mock_yf.Ticker.return_value = _TickerMock([bad_item, good_item])
             items, warnings, used = _run(
                 srv_mod._collect_yahoo_events(
@@ -1435,7 +1435,7 @@ class TestPhase6BYahooFinanceSources(unittest.TestCase):
             def info(self):
                 return {"shortName": "Marvell Technology, Inc.", "exchange": "NMS"}
 
-        with patch("server.yf") as mock_yf, patch("server._yahoo_search_news", return_value=raw_items):
+        with patch("yfmcp.tools.news.yf") as mock_yf, patch("yfmcp.tools.news._yahoo_search_news", return_value=raw_items):
             mock_yf.Ticker.return_value = _TickerMock()
             items, _warnings, used, diagnostics = _run(
                 srv_mod._collect_yahoo_events(
@@ -1474,7 +1474,7 @@ class TestPhase6BYahooFinanceSources(unittest.TestCase):
             def info(self):
                 raise RuntimeError("profile unavailable")
 
-        with patch("server.yf") as mock_yf, patch("server._yahoo_search_news", return_value=raw_items):
+        with patch("yfmcp.tools.news.yf") as mock_yf, patch("yfmcp.tools.news._yahoo_search_news", return_value=raw_items):
             mock_yf.Ticker.return_value = _TickerMock()
             items, _warnings, used, diagnostics = _run(
                 srv_mod._collect_yahoo_events(
@@ -1560,7 +1560,7 @@ class TestPhase6BYahooFinanceSources(unittest.TestCase):
             "message": "Yahoo company identity lookup was unavailable; only exact ticker-token matches were retained.",
             "severity": "warning",
         }]
-        with patch("server._collect_company_events", new_callable=AsyncMock) as mocked:
+        with patch("yfmcp.tools.news._collect_company_events", new_callable=AsyncMock) as mocked:
             mocked.return_value = ([], ["yahoo_finance_news"], warnings, "2026-05-15T13:01:22Z", diagnostics)
             data = _parse(_run(srv.get_company_news("ASTS", sources=["yahoo_finance_news"])))
 
@@ -1572,6 +1572,8 @@ class TestPhase6BYahooFinanceSources(unittest.TestCase):
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         with open(os.path.join(root, "server.py"), encoding="utf-8") as f:
             server_text = f.read()
+        with open(os.path.join(root, "yfmcp", "tools", "news.py"), encoding="utf-8") as f:
+            server_text += "\n" + f.read()  # the news tools moved from server.py to yfmcp/tools/news.py (Phase 3)
         with open(os.path.join(root, "worker", "src", "tools.ts"), encoding="utf-8") as f:
             tools_text = f.read()
         private_terms = ("Commander", "portfolio state", "doctrine", "DC-", "TPS", "PCCE")
@@ -1802,7 +1804,7 @@ class TestGlobeNewswireRSS(unittest.TestCase):
             @property
             def info(self):
                 return {}
-        mock_yf = patch("server.yf").__enter__()
+        mock_yf = patch("yfmcp.tools.news.yf").__enter__()
         return mock_yf
 
     def test_relevant_item_returned_filtered_out_unrelated(self):
@@ -1820,9 +1822,9 @@ class TestGlobeNewswireRSS(unittest.TestCase):
                     pass
             return _Resp()
 
-        with patch("server.yf") as mock_yf, \
+        with patch("yfmcp.tools.news.yf") as mock_yf, \
              patch("server._urlrequest.urlopen", side_effect=_fake_urlopen), \
-             patch("server._tool_cache") as mock_cache:
+             patch("yfmcp.tools.news._tool_cache") as mock_cache:
             mock_yf.Ticker.return_value.info = {"shortName": "Apple Inc.", "longName": "Apple Inc."}
             mock_cache.get.return_value = None
             mock_cache.set.return_value = None
@@ -1870,9 +1872,9 @@ class TestGlobeNewswireRSS(unittest.TestCase):
                     pass
             return _Resp()
 
-        with patch("server.yf") as mock_yf, \
+        with patch("yfmcp.tools.news.yf") as mock_yf, \
              patch("server._urlrequest.urlopen", side_effect=_fake_urlopen), \
-             patch("server._tool_cache") as mock_cache:
+             patch("yfmcp.tools.news._tool_cache") as mock_cache:
             mock_yf.Ticker.return_value.info = {}
             mock_cache.get.return_value = None
             mock_cache.set.return_value = None
@@ -1903,9 +1905,9 @@ class TestGlobeNewswireRSS(unittest.TestCase):
 
         for ticker, category in expected.items():
             with self.subTest(ticker=ticker), \
-                 patch("server.yf") as mock_yf, \
+                 patch("yfmcp.tools.news.yf") as mock_yf, \
                  self._mock_urlopen(_MOCK_RSS_EXACT_TICKERS), \
-                 patch("server._tool_cache") as mock_cache:
+                 patch("yfmcp.tools.news._tool_cache") as mock_cache:
                 mock_yf.Ticker.return_value.info = {}
                 mock_cache.get.return_value = None
                 mock_cache.set.return_value = None
@@ -1931,9 +1933,9 @@ class TestGlobeNewswireRSS(unittest.TestCase):
 
         for ticker in ("NVDA", "ASTS", "LITE"):
             with self.subTest(ticker=ticker), \
-                 patch("server.yf") as mock_yf, \
+                 patch("yfmcp.tools.news.yf") as mock_yf, \
                  self._mock_urlopen(_MOCK_RSS_TEXT_FALSE_POSITIVES), \
-                 patch("server._tool_cache") as mock_cache:
+                 patch("yfmcp.tools.news._tool_cache") as mock_cache:
                 mock_yf.Ticker.return_value.info = {}
                 mock_cache.get.return_value = None
                 mock_cache.set.return_value = None
@@ -1955,9 +1957,9 @@ class TestGlobeNewswireRSS(unittest.TestCase):
         srv_mod = self._get_srv()
         retrieved = self._retrieved()
 
-        with patch("server.yf") as mock_yf, \
+        with patch("yfmcp.tools.news.yf") as mock_yf, \
              self._mock_urlopen(_MOCK_RSS_AMBIGUOUS_WORDS), \
-             patch("server._tool_cache") as mock_cache:
+             patch("yfmcp.tools.news._tool_cache") as mock_cache:
             mock_yf.Ticker.return_value.info = {}
             mock_cache.get.return_value = None
             mock_cache.set.return_value = None
@@ -1979,9 +1981,9 @@ class TestGlobeNewswireRSS(unittest.TestCase):
         srv_mod = self._get_srv()
         retrieved = self._retrieved()
 
-        with patch("server.yf") as mock_yf, \
+        with patch("yfmcp.tools.news.yf") as mock_yf, \
              self._mock_urlopen(_MOCK_RSS_AMBIGUOUS_MARKER), \
-             patch("server._tool_cache") as mock_cache:
+             patch("yfmcp.tools.news._tool_cache") as mock_cache:
             mock_yf.Ticker.return_value.info = {}
             mock_cache.get.return_value = None
             mock_cache.set.return_value = None
@@ -2018,9 +2020,9 @@ class TestGlobeNewswireRSS(unittest.TestCase):
 </rss>
 """
 
-        with patch("server.yf") as mock_yf, \
+        with patch("yfmcp.tools.news.yf") as mock_yf, \
              self._mock_urlopen(rss), \
-             patch("server._tool_cache") as mock_cache:
+             patch("yfmcp.tools.news._tool_cache") as mock_cache:
             mock_yf.Ticker.return_value.info = {"shortName": "ON Semiconductor Corporation"}
             mock_cache.get.return_value = None
             mock_cache.set.return_value = None
@@ -2042,9 +2044,9 @@ class TestGlobeNewswireRSS(unittest.TestCase):
         srv_mod = self._get_srv()
         retrieved = self._retrieved()
 
-        with patch("server.yf") as mock_yf, \
+        with patch("yfmcp.tools.news.yf") as mock_yf, \
              self._mock_urlopen(_MOCK_RSS_DATED_MANY), \
-             patch("server._tool_cache") as mock_cache:
+             patch("yfmcp.tools.news._tool_cache") as mock_cache:
             mock_yf.Ticker.return_value.info = {}
             mock_cache.get.return_value = None
             mock_cache.set.return_value = None
@@ -2069,9 +2071,9 @@ class TestGlobeNewswireRSS(unittest.TestCase):
         srv_mod = self._get_srv()
         retrieved = self._retrieved()
 
-        with patch("server.yf") as mock_yf, \
+        with patch("yfmcp.tools.news.yf") as mock_yf, \
              self._mock_urlopen(_MOCK_RSS_DATED_MANY), \
-             patch("server._tool_cache") as mock_cache:
+             patch("yfmcp.tools.news._tool_cache") as mock_cache:
             mock_yf.Ticker.return_value.info = {}
             mock_cache.get.return_value = None
             mock_cache.set.return_value = None
@@ -2094,9 +2096,9 @@ class TestGlobeNewswireRSS(unittest.TestCase):
         retrieved = self._retrieved()
         oversized = b"x" * (srv_mod._GLOBENEWSWIRE_MAX_BYTES + 1)
 
-        with patch("server.yf") as mock_yf, \
+        with patch("yfmcp.tools.news.yf") as mock_yf, \
              self._mock_urlopen(oversized), \
-             patch("server._tool_cache") as mock_cache:
+             patch("yfmcp.tools.news._tool_cache") as mock_cache:
             mock_yf.Ticker.return_value.info = {}
             mock_cache.get.return_value = None
 
@@ -2117,9 +2119,9 @@ class TestGlobeNewswireRSS(unittest.TestCase):
         srv_mod = self._get_srv()
         retrieved = self._retrieved()
 
-        with patch("server.yf") as mock_yf, \
+        with patch("yfmcp.tools.news.yf") as mock_yf, \
              self._mock_urlopen(_MOCK_RSS_DOCTYPE), \
-             patch("server._tool_cache") as mock_cache:
+             patch("yfmcp.tools.news._tool_cache") as mock_cache:
             mock_yf.Ticker.return_value.info = {}
             mock_cache.get.return_value = None
             mock_cache.set.return_value = None
@@ -2144,9 +2146,9 @@ class TestGlobeNewswireRSS(unittest.TestCase):
         def _raise_error(req, timeout=20):
             raise OSError("connection refused")
 
-        with patch("server.yf") as mock_yf, \
+        with patch("yfmcp.tools.news.yf") as mock_yf, \
              patch("server._urlrequest.urlopen", side_effect=_raise_error), \
-             patch("server._tool_cache") as mock_cache:
+             patch("yfmcp.tools.news._tool_cache") as mock_cache:
             mock_yf.Ticker.return_value.info = {}
             mock_cache.get.return_value = None
 
@@ -2182,9 +2184,9 @@ class TestGlobeNewswireRSS(unittest.TestCase):
                     pass
             return _Resp()
 
-        with patch("server.yf") as mock_yf, \
+        with patch("yfmcp.tools.news.yf") as mock_yf, \
              patch("server._urlrequest.urlopen", side_effect=_fake_urlopen), \
-             patch("server._tool_cache") as mock_cache:
+             patch("yfmcp.tools.news._tool_cache") as mock_cache:
             mock_yf.Ticker.return_value.info = {}
             mock_cache.get.return_value = None
             mock_cache.set.return_value = None
@@ -2217,9 +2219,9 @@ class TestGlobeNewswireRSS(unittest.TestCase):
                     pass
             return _Resp()
 
-        with patch("server.yf") as mock_yf, \
+        with patch("yfmcp.tools.news.yf") as mock_yf, \
              patch("server._urlrequest.urlopen", side_effect=_fake_urlopen), \
-             patch("server._tool_cache") as mock_cache:
+             patch("yfmcp.tools.news._tool_cache") as mock_cache:
             mock_yf.Ticker.return_value.info = {}
             mock_cache.get.return_value = None
             mock_cache.set.return_value = None
@@ -2253,7 +2255,7 @@ class TestGlobeNewswireRSS(unittest.TestCase):
             return _Resp()
 
         # First call: cache miss → fetch
-        with patch("server.yf") as mock_yf, \
+        with patch("yfmcp.tools.news.yf") as mock_yf, \
              patch("server._urlrequest.urlopen", side_effect=_fake_urlopen):
             mock_yf.Ticker.return_value.info = {}
             for key in list(srv_mod._tool_cache._store):
@@ -2266,7 +2268,7 @@ class TestGlobeNewswireRSS(unittest.TestCase):
         first_count = fetch_count["n"]
 
         # Second call: cache hit → no fetch
-        with patch("server.yf") as mock_yf, \
+        with patch("yfmcp.tools.news.yf") as mock_yf, \
              patch("server._urlrequest.urlopen", side_effect=_fake_urlopen):
             mock_yf.Ticker.return_value.info = {}
             _run(srv_mod._collect_globenewswire_events(
