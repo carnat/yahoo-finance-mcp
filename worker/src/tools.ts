@@ -2073,7 +2073,8 @@ function compactFilingIndexPayload(raw: string): string {
 // ── Tool-call gate (2.12.0, Q3b/Q3c) ─────────────────────────────────────────
 // One check at the tool-call boundary, before any handler code or fetch, for
 // every public action in both tool modes (grouped dispatch reaches it through
-// callToolResult). Absent or null arguments are skipped; non-string values are
+// callToolResult). Absent or null arguments, empty or whitespace-only ticker
+// values (and an empty accession) are skipped; they and non-string values are
 // left to the handler, as before.
 
 const TICKER_ARGS = ["ticker", "tickers", "subject", "peers"] as const;
@@ -2121,7 +2122,8 @@ export function validateToolArgs(name: string, args: Record<string, unknown>): s
     const value = args[arg];
     const values = Array.isArray(value) ? value : [value];
     for (const item of values) {
-      if (typeof item !== "string") continue;
+      // Empty or whitespace-only values read as absent: the handler keeps its own empty-value behaviour.
+      if (typeof item !== "string" || item.trim() === "") continue;
       const error = validateTicker(item);
       if (error) return mcpFailure(name, ErrorCode.INPUT_VALIDATION_ERROR, error);
     }

@@ -67,15 +67,22 @@ def reject(action: str, message: str) -> dict:
 
 
 # ── Function level: validateAccession mirrors _validate_accession exactly (message included) ────────────────────
-ACCESSION_INPUTS = [VALID_ACC, f"  {VALID_ACC}\n", "000032019324000123", "320193-24-123", "", "0000320193-24-00012a",
-                    # Python's str-pattern \d matches any Unicode decimal digit, so both runtimes accept these.
-                    "٠" * 10 + "-" + "٠" * 2 + "-" + "٠" * 6]
+ACCESSION_INPUTS = [VALID_ACC, f"  {VALID_ACC}\n", "000032019324000123", "320193-24-123", "", "0000320193-24-00012a"]
+# Accession digits are ASCII only (2.12.0 planner decision). Python's str-pattern \d still accepts any Unicode
+# decimal digit. TODO(python-mirror): narrow Python to [0-9], then flip the Unicode case to mode "equal" with
+# expect_ts as `expect`.
+UNICODE_ACC = "٠" * 10 + "-" + "٠" * 2 + "-" + "٠" * 6
 CASES += [
     Case(name="validation.accession.function_mirrors_python_exactly", ids=["BR-ENV-005"],
          py=lambda: [_validate_accession(a) for a in ACCESSION_INPUTS],
          ts={"js": f"return {json.dumps(ACCESSION_INPUTS)}.map((a) => m.validate.validateAccession(a));"},
          expect=[None, None, ACCESSION_MSG.format("000032019324000123"), ACCESSION_MSG.format("320193-24-123"),
-                 ACCESSION_MSG.format(""), ACCESSION_MSG.format("0000320193-24-00012a"), None]),
+                 ACCESSION_MSG.format(""), ACCESSION_MSG.format("0000320193-24-00012a")]),
+    Case(name="validation.accession.unicode_digits_are_rejected", ids=["BR-ENV-005"],
+         py=lambda: _validate_accession(UNICODE_ACC),
+         ts={"js": f"return m.validate.validateAccession({json.dumps(UNICODE_ACC)});"},
+         mode="pinned", decision="Q3b TODO(python-mirror)",
+         expect_py=None, expect_ts=ACCESSION_MSG.format(UNICODE_ACC)),
 ]
 
 # ── The gate: tickers (string or each array element), subject, peers, tickers ───────────────────────────────────
@@ -91,7 +98,11 @@ TICKER_ROWS = [
     ("twenty_one_chars", "get_market_quote", {"ticker": "A" * 21}),
     ("raw_value_echoed", "get_historical_prices", {"ticker": " aapl$ "}),
     ("bad_element_in_array", "get_market_quote", {"ticker": ["AAPL", "BRK/B", "MSFT"]}),
+    # Empty or whitespace-only values read as absent; the handler keeps its own empty-value behaviour.
     ("empty_element_in_array", "get_company_news", {"ticker": ["AAPL", ""]}),
+    ("blank_peer_elements", "compare_peer_valuations", {"tickers": ["AAPL", "MSFT", " "], "subject": ""}),
+    ("blank_peers", "get_historical_valuation_context", {"ticker": "AAPL", "peers": ["", "MSFT"]}),
+    ("blank_optional_ticker", "get_uk_company_filings", {"ticker": "  ", "company_number": "00102498"}),
     ("subject", "compare_peer_valuations", {"tickers": ["AAPL", "MSFT"], "subject": "BAD$"}),
     ("tickers_element", "compare_peer_valuations", {"tickers": ["AAPL", "M SFT"]}),
     ("peers_element", "get_historical_valuation_context", {"ticker": "AAPL", "peers": ["MSFT", "X|Y"]}),
@@ -114,13 +125,16 @@ CASES += [
         "index_fx_future_forms": PASS,
         "slash": reject("list_sec_company_filings", TICKER_MSG.format("BRK/B")),
         "comma_string_is_not_split": reject("get_company_profile", TICKER_MSG.format("A,B")),
-        "empty_string": reject("get_historical_prices", TICKER_MSG.format("")),
-        "whitespace_only": reject("get_earnings_analysis", TICKER_MSG.format("   ")),
+        "empty_string": PASS,
+        "whitespace_only": PASS,
         "twenty_chars": PASS,
         "twenty_one_chars": reject("get_market_quote", TICKER_MSG.format("A" * 21)),
         "raw_value_echoed": reject("get_historical_prices", TICKER_MSG.format(" aapl$ ")),
         "bad_element_in_array": reject("get_market_quote", TICKER_MSG.format("BRK/B")),
-        "empty_element_in_array": reject("get_company_news", TICKER_MSG.format("")),
+        "empty_element_in_array": PASS,
+        "blank_peer_elements": PASS,
+        "blank_peers": PASS,
+        "blank_optional_ticker": PASS,
         "subject": reject("compare_peer_valuations", TICKER_MSG.format("BAD$")),
         "tickers_element": reject("compare_peer_valuations", TICKER_MSG.format("M SFT")),
         "peers_element": reject("get_historical_valuation_context", TICKER_MSG.format("X|Y")),

@@ -1,6 +1,6 @@
 const TICKER_RE = /^[A-Z0-9.\-\^=]{1,20}$/;
-// Python's str-pattern \d is any Unicode decimal digit (\p{Nd}); JS \d is ASCII only.
-const ACCESSION_RE = /^\p{Nd}{10}-\p{Nd}{2}-\p{Nd}{6}$/u;
+// ASCII digits only (2.12.0 planner decision; Python's `\d` is to be narrowed to match).
+const ACCESSION_RE = /^[0-9]{10}-[0-9]{2}-[0-9]{6}$/;
 
 export function validateTicker(ticker: string): string | null {
   const t = ticker.trim().toUpperCase();
@@ -10,7 +10,7 @@ export function validateTicker(ticker: string): string | null {
   return null;
 }
 
-/** Mirrors Python yfmcp/validation.py `_validate_accession`, message included. */
+/** Mirrors Python yfmcp/validation.py `_validate_accession`, message included (ASCII digits only). */
 export function validateAccession(acc: string): string | null {
   if (!ACCESSION_RE.test(acc.trim())) {
     return `Invalid accession number: '${acc}'. Expected format: XXXXXXXXXX-YY-ZZZZZZ.`;

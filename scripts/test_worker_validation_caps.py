@@ -126,6 +126,13 @@ for (const [label, action, args] of input.noTruncationRows) {
   out.noTruncation[label] = { ok: r.envelope.ok, keys: r.envelope.ok ? Object.keys(r.envelope.data).sort() : null };
 }
 
+// Empty ticker values are left to the handler (unchanged messages).
+out.emptyValues = {};
+for (const mode of ["expanded", "grouped"]) {
+  out.emptyValues[`${mode}:get_historical_prices`] = await run(mode, "get_historical_prices", { ticker: "  " });
+  out.emptyValues[`${mode}:get_company_news`] = await run(mode, "get_company_news", { ticker: ["AAPL", ""], sources: [] });
+}
+
 // The grouped shape checker still enforces schema length (peers maxItems 5).
 out.groupedLength.peers6 = await run("grouped", "get_historical_valuation_context", { ticker: "AAPL", peers: input.pool.slice(1, 7) });
 
@@ -256,10 +263,16 @@ class TestGateRejections(unittest.TestCase):
                 self.assertEqual(_view(r[label]["envelope"]), EXPECT[label])
         self.assertGreater(checked, len(REJECT_ROWS) - 6)
 
-    def test_empty_required_ticker_in_grouped_mode_keeps_the_shape_checker_message(self):
-        r = _run()["rejected"]["grouped"]
-        self.assertEqual(r["empty_string"]["envelope"]["error"]["message"],
+    def test_empty_ticker_values_keep_the_existing_messages(self):
+        r = _run()["emptyValues"]
+        self.assertEqual(r["expanded:get_historical_prices"]["envelope"]["error"]["message"], "ticker is required")
+        self.assertEqual(r["grouped:get_historical_prices"]["envelope"]["error"]["message"],
                          "Invalid params for 'get_historical_prices': empty required parameter(s): ticker.")
+        for mode in ("expanded", "grouped"):
+            with self.subTest(mode=mode):
+                self.assertEqual(r[f"{mode}:get_company_news"]["envelope"]["error"]["message"],
+                                 "ticker is required and must not contain empty symbols.")
+                self.assertEqual(r[f"{mode}:get_company_news"]["fetches"], 0)
 
     def test_batch_limit_error_shape(self):
         env = _run()["rejected"]["expanded"]["get_market_quote@11"]["envelope"]
