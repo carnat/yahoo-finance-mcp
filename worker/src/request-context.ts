@@ -31,6 +31,15 @@ export interface CacheScope {
   caches: Record<string, CacheUsage>;
   /** Outbound provider HTTP requests, cached reads' misses included. */
   upstreamRequests: number;
+  /**
+   * Provider fetches refused for the subrequest budget (or by Cloudflare's own
+   * subrequest limit) while this scope or a scope nested in it was current.
+   */
+  budgetRefusals: number;
+  /** Root scope only: subrequests (fetches and Cache API calls) this invocation has made. */
+  subrequests?: number;
+  /** Root scope only: the budget guard refused at least one fetch in this invocation. */
+  budgetExhausted?: boolean;
   parent: CacheScope | undefined;
 }
 
@@ -44,6 +53,101 @@ export function countCacheEvent(cache: string, event: CacheEvent): void {
 
 function countUpstreamRequest(): void {
   for (let scope = scopes.getStore(); scope; scope = scope.parent) scope.upstreamRequests++;
+}
+
+/**
+ * Per-invocation subrequest budget (2.11.0). Workers Free allows 50 subrequests
+ * per invocation, Cache API calls and redirect hops included; new upstream work
+ * stops at 45 so the reserve covers the response path and waitUntil cache writes.
+ */
+export const SUBREQUEST_LIMIT = 50;
+export const SUBREQUEST_RESERVE = 5;
+export const SUBREQUEST_BUDGET = SUBREQUEST_LIMIT - SUBREQUEST_RESERVE;
+
+/** A provider fetch the budget guard refused; providerFetch throws it instead of calling fetch. */
+export class BudgetExhaustedError extends Error {
+  constructor() {
+    super(`PROVIDER_BUDGET_EXHAUSTED: the per-request subrequest budget (${SUBREQUEST_BUDGET} of ${SUBREQUEST_LIMIT}) is spent; the request was not sent.`);
+    this.name = "BudgetExhaustedError";
+  }
+}
+
+/** A BudgetExhaustedError, or Cloudflare's own "Too many subrequests" error, which maps to the same state. */
+export function isBudgetExhaustedError(error: unknown): boolean {
+  if (error instanceof BudgetExhaustedError) return true;
+  if (!error || typeof error !== "object") return false;
+  const { name, message } = error as { name?: unknown; message?: unknown };
+  return name === "BudgetExhaustedError" || (typeof message === "string" && /too many subrequests/i.test(message));
+}
+
+function rootScope(): CacheScope | undefined {
+  let scope = scopes.getStore();
+  while (scope?.parent) scope = scope.parent;
+  return scope;
+}
+
+function countBudgetRefusal(): void {
+  for (let scope = scopes.getStore(); scope; scope = scope.parent) scope.budgetRefusals++;
+}
+
+/**
+ * Count one subrequest against the invocation's budget, at the call site of a
+ * provider fetch (each redirect hop included) or a Cache API match/put/delete.
+ * False means the budget is spent: the caller must not make the call. A refused
+ * fetch marks the invocation as budget-exhausted; a refused cache call is
+ * skipped by its caller (a miss, or a no-op) and consumes nothing. Outside a
+ * request scope nothing is counted and the answer is always true.
+ */
+export function consumeSubrequest(kind: "fetch" | "cache"): boolean {
+  const root = rootScope();
+  if (!root) return true;
+  const used = root.subrequests ?? 0;
+  if (used >= SUBREQUEST_BUDGET) {
+    if (kind === "fetch") {
+      root.budgetExhausted = true;
+      countBudgetRefusal();
+    }
+    return false;
+  }
+  root.subrequests = used + 1;
+  return true;
+}
+
+/** The budget guard refused at least one fetch in the current invocation (drives the meta.warnings row). */
+export function subrequestBudgetExhausted(): boolean {
+  return rootScope()?.budgetExhausted === true;
+}
+
+/** The meta.warnings row of a response in an invocation where the budget guard refused a fetch. */
+export const SUBREQUEST_BUDGET_WARNING = Object.freeze({
+  code: "PROVIDER_BUDGET_EXHAUSTED",
+  message: `Stopped starting new upstream requests at the per-request subrequest budget (${SUBREQUEST_BUDGET} of ${SUBREQUEST_LIMIT}); some sources were not queried.`,
+  severity: "warning",
+});
+
+/** Fetches refused for budget while the current scope was current, nested scopes included. */
+export function budgetRefusalCount(): number {
+  return scopes.getStore()?.budgetRefusals ?? 0;
+}
+
+/**
+ * Await a provider promise that may be shared with other callers (an in-flight
+ * request): when it fails for budget, the refusal also counts in this caller's
+ * scopes, so a waiter's source is reported as starved like the one that asked.
+ */
+export async function awaitNotingBudget<T>(pending: Promise<T>): Promise<T> {
+  try {
+    return await pending;
+  } catch (error) {
+    if (isBudgetExhaustedError(error) && scopes.getStore()) countBudgetRefusal();
+    throw error;
+  }
+}
+
+/** Run fn in a nested scope and say whether a provider fetch in it was refused for budget. */
+export async function withBudgetWatch<T>(fn: () => Promise<T>): Promise<{ result: T; starved: boolean }> {
+  const { result, scope } = await withCacheScope(fn);
+  return { result, starved: scope.budgetRefusals > 0 };
 }
 
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
@@ -62,7 +166,10 @@ function checkedUrl(url: string): URL {
  * The first URL and every redirect target must pass checkFetchUrl, or a
  * UrlPolicyError is thrown. Redirects are followed here (`redirect: "manual"`),
  * at most MAX_REDIRECT_HOPS of them; a 303 continues as GET. Each request,
- * redirect hops included, counts against the current scopes.
+ * redirect hops included, counts against the current scopes and against the
+ * invocation's subrequest budget: once it is spent, BudgetExhaustedError is
+ * thrown before fetch is called. Cloudflare's own "Too many subrequests" error
+ * counts as a budget refusal too, and is rethrown as is.
  */
 export async function providerFetch(input: string | URL, init: RequestInit = {}): Promise<Response> {
   // The first request goes out exactly as the caller spelled it; hops use the resolved target.
@@ -70,8 +177,15 @@ export async function providerFetch(input: string | URL, init: RequestInit = {})
   let current = checkedUrl(href);
   let requestInit: RequestInit = { ...init, redirect: "manual" };
   for (let hops = 0; ; hops++) {
+    if (!consumeSubrequest("fetch")) throw new BudgetExhaustedError();
     countUpstreamRequest();
-    const response = await fetch(href, requestInit);
+    let response: Response;
+    try {
+      response = await fetch(href, requestInit);
+    } catch (error) {
+      if (isBudgetExhaustedError(error) && scopes.getStore()) countBudgetRefusal();
+      throw error;
+    }
     const location = REDIRECT_STATUSES.has(response.status) ? response.headers.get("Location") : null;
     if (location === null) return response;
     await response.body?.cancel();
@@ -101,7 +215,10 @@ export async function providerFetch(input: string | URL, init: RequestInit = {})
 
 /** Run fn in a new scope nested in the current one, and return that scope's events. */
 export async function withCacheScope<T>(fn: () => Promise<T>): Promise<{ result: T; scope: CacheScope }> {
-  const scope: CacheScope = { caches: {}, upstreamRequests: 0, parent: scopes.getStore() };
+  const parent = scopes.getStore();
+  const scope: CacheScope = parent
+    ? { caches: {}, upstreamRequests: 0, budgetRefusals: 0, parent }
+    : { caches: {}, upstreamRequests: 0, budgetRefusals: 0, subrequests: 0, budgetExhausted: false, parent };
   const result = await scopes.run(scope, fn);
   return { result, scope };
 }

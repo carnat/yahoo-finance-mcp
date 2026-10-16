@@ -121,6 +121,9 @@ jobs:
       - name: Fetch allow-list, redirect, CORS and evidence-guard tests
         run: python scripts/test_url_policy.py -v
 
+      - name: Worker per-invocation subrequest budget guard tests
+        run: python scripts/test_worker_budget.py -v
+
       - name: Worker doctrine safety tests
         run: python scripts/test_worker_doctrine_safety.py
 

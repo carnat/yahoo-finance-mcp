@@ -5,7 +5,7 @@
  */
 
 import { setBounded } from "./cache.js";
-import { providerFetch } from "./request-context.js";
+import { providerFetch, withBudgetWatch } from "./request-context.js";
 import { getWorkerVar } from "./response.js";
 import { rankEvidence, stemWord } from "./extraction-rules.js";
 import { reliabilityClassFor } from "./deprecations.js";
@@ -299,6 +299,8 @@ type CompanyEventCollectionResult = {
   warnings: Record<string, unknown>[];
   watermark: string;
   sourceDiagnostics: Record<string, unknown>;
+  /** Sources whose collection had a fetch refused for the subrequest budget (2.11.0); never serialized. */
+  budgetStarvedSources?: string[];
 };
 function sourceDecisionUse(sourceType: unknown): string {
   const src = _str(sourceType);
@@ -351,7 +353,7 @@ function enrichNewsItemForLlm(item: Record<string, unknown>): Record<string, unk
   };
 }
 export function buildCoverage(sourceStatus: Record<string, unknown>, resolvedAction: string | null = null): Record<string, unknown> {
-  const failedStatuses = new Set(["UNCONFIGURED", "PROVIDER_ERROR", "AUTH_ERROR", "RATE_LIMITED", "TIMEOUT", "PROVIDER_CHANGED", "IDENTITY_UNAVAILABLE", "WEBSITE_NOT_AVAILABLE", "DISCOVERY_NOT_FOUND", "DISCOVERY_BUDGET_EXHAUSTED", "FEED_NOT_FOUND", "PARSE_ERROR", "CANDIDATE_AVAILABLE", "NOT_REGISTERED", "DISABLED", "REVALIDATION_DUE", "SOURCE_VALIDATION_FAILED"]);
+  const failedStatuses = new Set(["UNCONFIGURED", "PROVIDER_ERROR", "AUTH_ERROR", "RATE_LIMITED", "TIMEOUT", "PROVIDER_BUDGET_EXHAUSTED", "PROVIDER_CHANGED", "IDENTITY_UNAVAILABLE", "WEBSITE_NOT_AVAILABLE", "DISCOVERY_NOT_FOUND", "DISCOVERY_BUDGET_EXHAUSTED", "FEED_NOT_FOUND", "PARSE_ERROR", "CANDIDATE_AVAILABLE", "NOT_REGISTERED", "DISABLED", "REVALIDATION_DUE", "SOURCE_VALIDATION_FAILED"]);
   const failedSources: Record<string, unknown>[] = [];
   const skippedSources: Record<string, unknown>[] = [];
   const truncatedSources: Record<string, unknown>[] = [];
@@ -373,7 +375,7 @@ export function buildCoverage(sourceStatus: Record<string, unknown>, resolvedAct
   }
   const coverageLimitingSkips = skippedSources.filter(entry => entry.status !== "NOT_NEEDED");
   const recommendedNextAction = resolvedAction ?? (
-    failedSources.some(entry => ["RATE_LIMITED", "TIMEOUT"].includes(_str(entry.status)))
+    failedSources.some(entry => ["RATE_LIMITED", "TIMEOUT", "PROVIDER_BUDGET_EXHAUSTED"].includes(_str(entry.status)))
       ? "RETRY_RETRYABLE_SOURCES"
       : (failedSources.length || coverageLimitingSkips.length
         ? "CHECK_OFFICIAL_RELEASES"
@@ -1348,7 +1350,8 @@ function computeSourceStatus(
   warnings: Record<string, unknown>[],
   items: Record<string, unknown>[],
   selectedSources: string[],
-  sourceDiagnostics: Record<string, unknown> = {}
+  sourceDiagnostics: Record<string, unknown> = {},
+  budgetStarvedSources: string[] = [],
 ): Record<string, unknown> {
   const warningCodes = new Set(warnings.map(w => _str(w.code)));
   const warningMsgs = warnings
@@ -1574,7 +1577,22 @@ function computeSourceStatus(
       result.newswire = { status: "EMPTY_RESULT", rawCount: 0, filteredCount: 0 };
     }
   }
-  return result;
+  return markBudgetStarvedSources(result, budgetStarvedSources);
+}
+/**
+ * A source whose collection had a fetch refused for the subrequest budget and
+ * did not end OK reports PROVIDER_BUDGET_EXHAUSTED (2.11.0), never
+ * PROVIDER_ERROR, EMPTY_RESULT or another absence. Only `status` changes.
+ */
+const BUDGET_UNAFFECTED_STATUSES = new Set(["OK", "APPROVED_SOURCE_OK"]);
+function markBudgetStarvedSources(sourceStatus: Record<string, unknown>, budgetStarvedSources: string[]): Record<string, unknown> {
+  for (const source of budgetStarvedSources) {
+    const info = sourceStatus[source];
+    if (!info || typeof info !== "object") continue;
+    const row = info as Record<string, unknown>;
+    if (!BUDGET_UNAFFECTED_STATUSES.has(_str(row.status))) row.status = "PROVIDER_BUDGET_EXHAUSTED";
+  }
+  return sourceStatus;
 }
 function computeSourceCoverage(sourceStatus: Record<string, unknown>): string {
   const limitedStatuses = new Set([
@@ -1584,6 +1602,7 @@ function computeSourceCoverage(sourceStatus: Record<string, unknown>): string {
     "AUTH_ERROR",
     "RATE_LIMITED",
     "TIMEOUT",
+    "PROVIDER_BUDGET_EXHAUSTED",
     "PROVIDER_CHANGED",
     "IDENTITY_UNAVAILABLE",
     "WEBSITE_NOT_AVAILABLE",
@@ -1615,7 +1634,7 @@ function verifyCoverageFailureMode(
     .filter(w => _str(w.code) === "SOURCE_UNAVAILABLE")
     .map(w => _str(w.message).toLowerCase())
     .join(" ");
-  if (warningText.includes("too many subrequests")) return "WORKER_SUBREQUEST_LIMIT";
+  if (warningText.includes("too many subrequests") || sourceStatuses.includes("PROVIDER_BUDGET_EXHAUSTED")) return "WORKER_SUBREQUEST_LIMIT";
   if (sourceStatuses.includes("RATE_LIMITED")) return "RATE_LIMITED";
   if (sourceStatuses.includes("TIMEOUT")) return "PROVIDER_TIMEOUT";
   if (sourceStatuses.includes("PROVIDER_CHANGED")) return "PROVIDER_CHANGED";
@@ -2275,7 +2294,7 @@ async function collectCompanyEvents(
     /** Keep every deduplicated item instead of the newest maxResults (event verification matches before capping). */
     keepAll?: boolean;
   } = {}
-): Promise<{ items: Record<string, unknown>[]; sourcesUsed: string[]; warnings: Record<string, unknown>[]; watermark: string; sourceDiagnostics: Record<string, unknown> }> {
+): Promise<CompanyEventCollectionResult> {
   const safeMax = clampInt(maxResults, 10, 1, 100);
   const safeLookback = clampInt(lookbackDays, 14, 1, 3650);
   const watermark = new Date().toISOString();
@@ -2288,11 +2307,19 @@ async function collectCompanyEvents(
   const items: Record<string, unknown>[] = [];
   const sourcesUsed: string[] = [];
   const sourceDiagnostics: Record<string, unknown> = {};
+  // Each source is collected in its own scope, so a fetch the subrequest budget
+  // refused is charged to the source that asked for it (2.11.0).
+  const budgetStarved = new Set<string>();
+  const watched = async <T>(charged: string[], fn: () => Promise<T>): Promise<T> => {
+    const { result, starved } = await withBudgetWatch(fn);
+    if (starved) for (const source of charged) budgetStarved.add(source);
+    return result;
+  };
   let eventIdentity: NewsCompanyIdentity | null = null;
   const getEventIdentity = async (): Promise<NewsCompanyIdentity | null> => {
     if (eventIdentity) return eventIdentity;
     try {
-      eventIdentity = await resolveNewsCompanyIdentity(ticker);
+      eventIdentity = await watched(["yahoo_finance_identity"], () => resolveNewsCompanyIdentity(ticker));
     } catch {
       eventIdentity = null;
     }
@@ -2300,14 +2327,14 @@ async function collectCompanyEvents(
   };
 
   if (selected.includes("sec")) {
-    const sec = await collectSecEvents(ticker, secFilingTypes, safeMax, watermark, startDate, endDate, safeLookback);
+    const sec = await watched(["sec"], () => collectSecEvents(ticker, secFilingTypes, safeMax, watermark, startDate, endDate, safeLookback));
     if (sec.used) sourcesUsed.push("sec");
     items.push(...sec.items);
     warnings.push(...sec.warnings);
   }
 
   if (selected.includes("company_ir")) {
-    const ir = await collectCompanyIrEvents(ticker, safeMax, watermark, startDate, endDate, safeLookback);
+    const ir = await watched(["company_ir"], () => collectCompanyIrEvents(ticker, safeMax, watermark, startDate, endDate, safeLookback));
     sourceDiagnostics.company_ir = ir.diagnostics;
     if (ir.used) sourcesUsed.push("company_ir");
     items.push(...ir.items);
@@ -2315,7 +2342,7 @@ async function collectCompanyEvents(
   }
 
   if (selected.includes("company_ir_page")) {
-    const page = await collectCompanyIrPageEvents(ticker, safeMax, watermark, startDate, endDate, safeLookback);
+    const page = await watched(["company_ir_page"], () => collectCompanyIrPageEvents(ticker, safeMax, watermark, startDate, endDate, safeLookback));
     sourceDiagnostics.company_ir_page = page.diagnostics;
     if (page.used) sourcesUsed.push("company_ir_page");
     items.push(...page.items);
@@ -2346,7 +2373,7 @@ async function collectCompanyEvents(
     });
   }
   if (needYfNews) {
-    const yf = await collectYahooEvents(ticker, safeMax, watermark, yahooIdentity!, startDate, endDate, safeLookback, "news");
+    const yf = await watched(["yahoo_finance_news", "yahoo_finance"], () => collectYahooEvents(ticker, safeMax, watermark, yahooIdentity!, startDate, endDate, safeLookback, "news"));
     const diagnostic = { ...yf.diagnostics, attempted: true, completed: yf.used };
     sourceDiagnostics.yahoo_finance_news = diagnostic;
     yahooDiagnostics.push(diagnostic);
@@ -2364,7 +2391,7 @@ async function collectCompanyEvents(
 
   // Yahoo Finance press releases tab (explicit or via legacy yahoo_finance)
   if (needYfPr) {
-    const pr = await collectYahooEvents(ticker, safeMax, watermark, yahooIdentity!, startDate, endDate, safeLookback, "press_releases");
+    const pr = await watched(["yahoo_finance_press_releases", "yahoo_finance"], () => collectYahooEvents(ticker, safeMax, watermark, yahooIdentity!, startDate, endDate, safeLookback, "press_releases"));
     const diagnostic = { ...pr.diagnostics, attempted: true, completed: pr.used };
     sourceDiagnostics.yahoo_finance_press_releases = diagnostic;
     yahooDiagnostics.push(diagnostic);
@@ -2396,7 +2423,7 @@ async function collectCompanyEvents(
   }
 
   if (selected.includes("finnhub") && finnhubEligibility(ticker).eligible) {
-    const finnhub = await collectFinnhubEvents(ticker, safeMax, watermark, startDate, endDate, safeLookback);
+    const finnhub = await watched(["finnhub"], () => collectFinnhubEvents(ticker, safeMax, watermark, startDate, endDate, safeLookback));
     sourceDiagnostics.finnhub = finnhub.diagnostics;
     if (finnhub.used) sourcesUsed.push("finnhub");
     items.push(...finnhub.items);
@@ -2437,7 +2464,7 @@ async function collectCompanyEvents(
         },
       };
     } else {
-      const marketaux = await collectMarketauxEvents(
+      const marketaux = await watched(["marketaux"], () => collectMarketauxEvents(
         ticker,
         safeMax,
         watermark,
@@ -2447,7 +2474,7 @@ async function collectCompanyEvents(
         fallbackReason,
         searchQuery,
         yahooIdentity?.exchange ?? null,
-      );
+      ));
       sourceDiagnostics.marketaux = marketaux.diagnostics;
       if (marketaux.used) sourcesUsed.push("marketaux");
       items.push(...marketaux.items);
@@ -2459,7 +2486,7 @@ async function collectCompanyEvents(
   // after bounded API sources so cold feed latency cannot delay them.
   if (selected.includes("newswire")) {
     const identity = await getEventIdentity();
-    const gnw = await collectGlobeNewswireEvents(ticker, safeMax, watermark, startDate, endDate, safeLookback, identity?.exchange ?? null);
+    const gnw = await watched(["newswire"], () => collectGlobeNewswireEvents(ticker, safeMax, watermark, startDate, endDate, safeLookback, identity?.exchange ?? null));
     if (gnw.used) sourcesUsed.push("newswire");
     items.push(...gnw.items);
     warnings.push(...gnw.warnings);
@@ -2475,7 +2502,7 @@ async function collectCompanyEvents(
     warningKeys.add(key);
     uniqueWarnings.push(w);
   }
-  return { items: deduped, sourcesUsed, warnings: uniqueWarnings, watermark, sourceDiagnostics };
+  return { items: deduped, sourcesUsed, warnings: uniqueWarnings, watermark, sourceDiagnostics, budgetStarvedSources: [...budgetStarved] };
 }
 // ─── Public event / news tools ─────────────────────────────────────────────────
 
@@ -2518,7 +2545,7 @@ export async function getCompanyNews(
   const out = await collectCompanyEvents(ticker, { maxResults: Math.min(100, safeMax * 3), lookbackDays, sources });
   out.items = rankNewsItemsByRelevance(out.items).slice(0, safeMax);
   const status = collectionStatus(out.items, out.sourcesUsed, out.warnings);
-  const sourceStatus = computeSourceStatus(out.sourcesUsed, out.warnings, out.items, sources, out.sourceDiagnostics);
+  const sourceStatus = computeSourceStatus(out.sourcesUsed, out.warnings, out.items, sources, out.sourceDiagnostics, out.budgetStarvedSources);
   const sourceCoverage = computeSourceCoverage(sourceStatus);
   const coverage = buildCoverage(sourceStatus);
   const payload: Record<string, unknown> = {
@@ -2559,7 +2586,7 @@ export async function searchCompanyNews(
     : out.items;
   const matched = rankNewsItemsByRelevance(matchedAll).slice(0, clampInt(maxResults, 10, 1, 100));
   const status = collectionStatus(matched, out.sourcesUsed, out.warnings);
-  const sourceStatus = computeSourceStatus(out.sourcesUsed, out.warnings, matched, sources, out.sourceDiagnostics);
+  const sourceStatus = computeSourceStatus(out.sourcesUsed, out.warnings, matched, sources, out.sourceDiagnostics, out.budgetStarvedSources);
   const sourceCoverage = computeSourceCoverage(sourceStatus);
   const coverage = buildCoverage(sourceStatus);
   const payload: Record<string, unknown> = {
@@ -2745,7 +2772,8 @@ export async function getCompanyPressReleases(
       ? "Resolved SEC 8-K EX-99 press-release exhibit for this call."
       : "Resolved an approved, registry-reviewed company IR page source for this call."
     : "No resolved SEC EX-99 press-release exhibit in this call; use for verification/context only.";
-  const sourceStatus = computeSourceStatus(sourcesUsed, uniqueWarnings, processedItems, selected, sourceDiagnostics);
+  const budgetStarvedSources = [...new Set([...(primary.budgetStarvedSources ?? []), ...(supplemental.budgetStarvedSources ?? [])])];
+  const sourceStatus = computeSourceStatus(sourcesUsed, uniqueWarnings, processedItems, selected, sourceDiagnostics, budgetStarvedSources);
   const sourceCoverage = computeSourceCoverage(sourceStatus);
   const coverage = buildCoverage(sourceStatus, payloadDecisionGrade ? "USE_OFFICIAL_EVIDENCE" : null);
 
@@ -2779,9 +2807,12 @@ export async function getSecRecentEvents(
   maxResults = 20
 ): Promise<string> {
   const watermark = new Date().toISOString();
-  const sec = await collectSecEvents(ticker, filingTypes, clampInt(maxResults, 20, 1, 100), watermark, "", "", clampInt(lookbackDays, 90, 1, 3650));
+  const { result: sec, starved } = await withBudgetWatch(() => collectSecEvents(ticker, filingTypes, clampInt(maxResults, 20, 1, 100), watermark, "", "", clampInt(lookbackDays, 90, 1, 3650)));
   const status = collectionStatus(sec.items, sec.used ? ["sec"] : [], sec.warnings);
-  const sourceStatus = { sec: { status: sec.used ? (sec.items.length ? "OK" : "EMPTY_RESULT") : "PROVIDER_ERROR", rawCount: sec.items.length, filteredCount: sec.items.length } };
+  const sourceStatus = markBudgetStarvedSources(
+    { sec: { status: sec.used ? (sec.items.length ? "OK" : "EMPTY_RESULT") : "PROVIDER_ERROR", rawCount: sec.items.length, filteredCount: sec.items.length } },
+    starved ? ["sec"] : [],
+  );
   const sourceCoverage = computeSourceCoverage(sourceStatus);
   const coverage = buildCoverage(sourceStatus);
   const payload: Record<string, unknown> = {
@@ -2829,7 +2860,7 @@ export async function getPublicEventTimeline(
       : _str(a.timestamp).localeCompare(_str(b.timestamp)))
     .slice(0, clampInt(maxResults, 50, 1, 100));
   const status = collectionStatus(out.items, out.sourcesUsed, out.warnings);
-  const sourceStatus = computeSourceStatus(out.sourcesUsed, out.warnings, out.items, sources, out.sourceDiagnostics);
+  const sourceStatus = computeSourceStatus(out.sourcesUsed, out.warnings, out.items, sources, out.sourceDiagnostics, out.budgetStarvedSources);
   const sourceCoverage = computeSourceCoverage(sourceStatus);
   const coverage = buildCoverage(sourceStatus);
   const payload: Record<string, unknown> = {
@@ -3026,7 +3057,7 @@ export async function verifyCompanyEvent(
       });
     }
   }
-  const sourceStatus = computeSourceStatus(out.sourcesUsed, out.warnings, out.items, sources, out.sourceDiagnostics);
+  const sourceStatus = computeSourceStatus(out.sourcesUsed, out.warnings, out.items, sources, out.sourceDiagnostics, out.budgetStarvedSources);
   const sourceCoverage = computeSourceCoverage(sourceStatus);
   const coverage = buildCoverage(sourceStatus);
   const coverageFailureMode = verifyCoverageFailureMode(sourceStatus, out.warnings);
