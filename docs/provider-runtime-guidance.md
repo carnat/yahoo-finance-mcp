@@ -2699,6 +2699,25 @@ F-024, F-026, F-029). Both runtimes change alike.
 - **Unchanged:** `/health` stays public and makes no provider calls; the local stdio server is unaffected.
 - **Rollback:** set `MCP_AUTH_MODE = "grace"` (config change plus deploy).
 
+## CI Supply Chain (Phase 1 release 3a; no runtime change, version stays 2.9.1)
+
+- **Why:** Phase 1 security hardening, items S-07, S-09, S-10 and S-11. Nothing a tool returns changes.
+- **Pinned actions:** every workflow `uses:` names a full commit SHA, with the release tag in a trailing comment.
+  `scripts/test_workflow_sdk_versions.py` enforces this. To move an action, resolve the new tag's SHA with
+  `git ls-remote --tags https://github.com/<owner>/<action>` and update the SHA and the comment together.
+- **Token scope:** `deploy-worker.yml` now sets `permissions: contents: read` at the top level, so no job gets the
+  default write token. `ir-source-discovery.yml` keeps `contents: write` and `pull-requests: write`, because it opens PRs.
+- **Install scripts:** every `npm ci` runs with `--ignore-scripts`. esbuild and workerd load their platform binaries
+  from optional dependencies, so the type-check, the transcript contract and `wrangler deploy` work without them.
+- **Frozen Python deps:** CI installs the exact `uv.lock` versions with hash checking (`uv export --frozen`, then
+  `pip install --require-hashes`) instead of resolving the latest releases on each run.
+- **Upgrades:** `uv.lock` was refreshed to the latest versions within `pyproject.toml`'s ranges, which clears 38
+  advisories across 9 packages. pandas moves to 3.x, which CI was already installing unpinned. Wrangler moves to
+  4.149.0 (dev-only; it clears 4 high advisories in miniflare, undici and sharp). The Worker bundle is unchanged.
+- **Audit gate:** a new `Dependency audit` CI job fails when `uv.lock` is out of date, when `pip-audit` reports a
+  known vulnerability in the locked Python set, or when `npm audit` reports a high or critical advisory. If an
+  advisory has no fix, record the exception here with a review date, and use `pip-audit --ignore-vuln <id>` in the job.
+
 ## Non-US Primary Filings
 
 - `get_uk_company_filings` reads Companies House, the UK statutory registry:
