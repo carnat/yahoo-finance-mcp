@@ -2,14 +2,16 @@ import asyncio
 import datetime
 import json
 import sys
-from typing import Literal, get_args
+from typing import Annotated, Literal, get_args
 import zoneinfo
 
 import pandas as pd
 import yfinance as yf
+from pydantic import Field
 
 from yfmcp.app import yfinance_server
 from yfmcp.schemas import _MARKET_SNAPSHOT_OUTPUT_SCHEMA, _TOOL_OUTPUT_SCHEMAS
+from yfmcp.deprecations import MIN_ADV_USD_DESCRIPTION, meets_minimum, parse_min_adv_usd
 from yfmcp.envelope import ErrorCode, _mcp_failure
 from yfmcp.validation import _validate_ticker
 from yfmcp.cache import _PRICE_TTL, _STMT_TTL, _tool_cache
@@ -1489,8 +1491,8 @@ def _usd_conversion(currency: str | None) -> dict:
         return {"ok": False, "note": f"{iso}=X fetch failed"}
 
 
-async def get_volume_gate(ticker: str, foreign_exchange: bool = False) -> str:
-    """Return volume liquidity threshold assessment."""
+async def get_volume_gate(ticker: str, foreign_exchange: bool = False, min_adv_usd: float | None = None) -> str:
+    """Return volume liquidity threshold assessment. ``min_adv_usd`` is the caller's already-validated floor."""
     company = yf.Ticker(ticker)
     try:
         fi = company.fast_info
@@ -1527,6 +1529,8 @@ async def get_volume_gate(ticker: str, foreign_exchange: bool = False) -> str:
             "fxPriceTimestamp": None,
             "notionalUsd": None,
             "gatePass": None,
+            "meetsMinimum": None,
+            "minAdvUsd": min_adv_usd,
             "observationType": "COMPLETED_DAILY_VOLUME_NOTIONAL",
             "barStatus": "STALE",
             "freshnessStatus": "STALE",
@@ -1575,6 +1579,8 @@ async def get_volume_gate(ticker: str, foreign_exchange: bool = False) -> str:
             "fxPriceTimestamp": None,
             "notionalUsd": None,
             "gatePass": None,
+            "meetsMinimum": None,
+            "minAdvUsd": min_adv_usd,
             "observationType": "COMPLETED_DAILY_VOLUME_NOTIONAL",
             "barStatus": "INCOMPLETE",
             "freshnessStatus": prepared["freshnessStatus"],
@@ -1654,6 +1660,8 @@ async def get_volume_gate(ticker: str, foreign_exchange: bool = False) -> str:
         "gateBasis": "ADV20_TRADED_VALUE_USD",
         "gateThresholdUsd": LIQUIDITY_GATE_MIN_ADV_USD,
         "gatePass": gate_pass,
+        "meetsMinimum": meets_minimum(adv20d_traded_value_usd, min_adv_usd),
+        "minAdvUsd": min_adv_usd,
         "observationType": "COMPLETED_DAILY_VOLUME_NOTIONAL",
         "barStatus": "COMPLETE",
         "freshnessStatus": prepared["freshnessStatus"],
@@ -1709,17 +1717,21 @@ def _classify_quote_freshness(
         return "UNKNOWN"
 
 
-@yfinance_server.tool(name="get_market_snapshot", output_schema=_MARKET_SNAPSHOT_OUTPUT_SCHEMA, description="Compact market-state packet with separate live-quote and completed-bar dates, component status, price/range, moving-average trend, completed-session volume/liquidity, and technical indicators. Supports compact/full modes and ticker batches.")
+@yfinance_server.tool(name="get_market_snapshot", output_schema=_MARKET_SNAPSHOT_OUTPUT_SCHEMA, description="Compact market-state packet with separate live-quote and completed-bar dates, component status, price/range, moving-average trend, completed-session volume/liquidity, and technical indicators. Supports compact/full modes and ticker batches. Pass min_adv_usd for a caller-chosen threshold; meetsMinimum reports adv20dTradedValueUsd >= min_adv_usd.")
 async def get_market_snapshot(
     ticker: str | list[str],
     mode: str = "compact",
     foreign_exchange: bool = False,
+    min_adv_usd: Annotated[float | None, Field(description=MIN_ADV_USD_DESCRIPTION)] = None,
 ) -> str:
     """Return a compact or full market-state snapshot for one or more tickers."""
+    min_adv_usd, min_adv_error = parse_min_adv_usd(min_adv_usd)
+    if min_adv_error:
+        return _mcp_failure("get_market_snapshot", ErrorCode.INPUT_VALIDATION_ERROR, min_adv_error)
     if isinstance(ticker, list):
         cap = 2 if mode == "full" else 5
         limited = ticker[:cap]
-        outcomes = await _run_ticker_batch(limited, lambda t: get_market_snapshot(t, mode, foreign_exchange))
+        outcomes = await _run_ticker_batch(limited, lambda t: get_market_snapshot(t, mode, foreign_exchange, min_adv_usd))
         results = {}
         for t, outcome in zip(limited, outcomes):
             if isinstance(outcome, Exception):
@@ -1747,7 +1759,7 @@ async def get_market_snapshot(
         get_price_stats(ticker),
         get_ma_position(ticker),
         get_volume_ratio(ticker, 10),
-        get_volume_gate(ticker, foreign_exchange),
+        get_volume_gate(ticker, foreign_exchange, min_adv_usd),
         get_technical_indicators(ticker, INDICATOR_MIN_LOOKBACK),
         return_exceptions=True,
     )
@@ -1862,6 +1874,8 @@ async def get_market_snapshot(
             "ratio90d": volume_ratio.get("ratio90d") if volume_ratio else None,
             "volumeFlag": volume_ratio.get("volumeFlag") if volume_ratio else None,
             "liquidityGatePass": volume_gate.get("gatePass") if volume_gate else None,
+            "meetsMinimum": meets_minimum(volume_gate.get("adv20dTradedValueUsd") if volume_gate else None, min_adv_usd),
+            "minAdvUsd": min_adv_usd,
         },
         "risk": {
             "annualizedVolatility30d": price_stats.get("annualizedVolatility30d") if price_stats else None,

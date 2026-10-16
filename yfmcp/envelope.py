@@ -9,9 +9,10 @@ import datetime
 import json
 import os
 import re
-from typing import TypedDict
+from typing import NotRequired, TypedDict
 
 from yfmcp.build_info import BUILD_DATE, SERVER_VERSION
+from yfmcp.deprecations import TOOL_RELIABILITY_CLASS, deprecation_warnings_for
 
 # ---------------------------------------------------------------------------
 # Server version and envelope feature flag
@@ -60,6 +61,7 @@ class ToolMeta(TypedDict):
     cacheHit: bool
     cacheSource: str | None
     warnings: list[object]
+    reliabilityClass: NotRequired[str]
 
 
 class ErrorDetail(TypedDict):
@@ -486,6 +488,26 @@ def _legacy_text_failure(tool: str, text: str) -> str | None:
     return _mcp_failure(tool, code, text)
 
 
+def _success_meta(tool: str, **kwargs) -> dict:
+    """Base meta for a success envelope, with reliabilityClass for the tools that carry one (2.8.0)."""
+    meta = _base_meta(tool, **kwargs)
+    reliability_class = TOOL_RELIABILITY_CLASS.get(tool)
+    if reliability_class is not None:
+        meta["reliabilityClass"] = reliability_class
+    return meta
+
+
+def _with_deprecation_notices(tool: str, meta: dict, data: object) -> dict:
+    """``meta`` with the DEPRECATED_FIELD notices the success payload ``data`` calls for appended to
+    meta.warnings (2.8.0). The notices stay out of ``data``: evidence payloads are hashed into the cut id."""
+    from yfmcp.evidence import EVIDENCE_ONLY_ACTIONS
+
+    notices = deprecation_warnings_for(tool, data, evidence_only=tool in EVIDENCE_ONLY_ACTIONS)
+    if notices:
+        meta["warnings"] = [*(meta.get("warnings") or []), *notices]
+    return meta
+
+
 def _envelope_tool_result(tool: str, result: object) -> object:
     """Return a tool's raw result in the V2 envelope, as the Worker does.
 
@@ -509,7 +531,7 @@ def _envelope_tool_result(tool: str, result: object) -> object:
         failure = _legacy_text_failure(tool, parsed)
         if failure is not None:
             return failure
-        return json.dumps({"ok": True, "data": parsed, "meta": _base_meta(tool), "error": None})
+        return json.dumps({"ok": True, "data": parsed, "meta": _success_meta(tool), "error": None})
     if isinstance(parsed, dict):
         if isinstance(parsed.get("ok"), bool) and ("data" in parsed or "error" in parsed):
             inner_meta = parsed.get("meta") if isinstance(parsed.get("meta"), dict) else {}
@@ -520,6 +542,9 @@ def _envelope_tool_result(tool: str, result: object) -> object:
                 parsed["meta"]["dataDate"] = _payload_data_date(parsed.get("data"))
             if parsed["ok"] is True:
                 parsed["data"] = _enrich_facts(parsed.get("data"))
+                if tool in TOOL_RELIABILITY_CLASS:
+                    parsed["meta"]["reliabilityClass"] = TOOL_RELIABILITY_CLASS[tool]
+                _with_deprecation_notices(tool, parsed["meta"], parsed["data"])
             return json.dumps(parsed)
         if parsed.get("error") is True:
             meta_extra: dict = {}
@@ -538,4 +563,6 @@ def _envelope_tool_result(tool: str, result: object) -> object:
                 message,
                 meta_extra=meta_extra or None,
             )
-    return json.dumps({"ok": True, "data": _enrich_facts(parsed), "meta": _base_meta(tool, data_date=_payload_data_date(parsed)), "error": None})
+    data = _enrich_facts(parsed)
+    meta = _with_deprecation_notices(tool, _success_meta(tool, data_date=_payload_data_date(parsed)), data)
+    return json.dumps({"ok": True, "data": data, "meta": meta, "error": None})

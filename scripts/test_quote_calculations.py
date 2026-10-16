@@ -123,7 +123,9 @@ globalThis.fetch = async (req) => {
   return new Response("not found", { status: 404 });
 };
 out.gates = {};
+out.gatesMin = {};
 for (const symbol of Object.keys(data.listings)) out.gates[symbol] = JSON.parse(await m.getVolumeGate(symbol, false));
+for (const symbol of Object.keys(data.listings)) out.gatesMin[symbol] = JSON.parse(await m.getVolumeGate(symbol, false, 20000000));
 out.shortInterest = JSON.parse(await m.getShortInterest("SHRT"));
 out.optionsRateLimited = JSON.parse(m.mcpSuccess("summarize_options_flow", await m.getOptionsSummary("RL")));
 console.log(JSON.stringify(out));
@@ -230,19 +232,22 @@ def _local() -> dict:
     }
     out["classified"] = [None if c is None else {"code": str(c[0]), "retryable": c[1]} for c in out["classified"]]
     gates = {}
+    gates_min = {}
     with patch.object(pricing.yf, "Ticker", _FakeTicker):
         for symbol in GATE_LISTINGS:
             with patch.object(pricing, "_load_completed_daily_history", AsyncMock(return_value=_prepared(symbol))):
                 gates[symbol] = json.loads(asyncio.run(pricing.get_volume_gate(symbol, False)))
+                gates_min[symbol] = json.loads(asyncio.run(pricing.get_volume_gate(symbol, False, 20_000_000)))
         pricing._tool_cache.clear() if hasattr(pricing._tool_cache, "clear") else None
         raw = asyncio.run(pricing.get_short_interest("SHRT"))
     out["gates"] = gates
+    out["gatesMin"] = gates_min
     parsed = json.loads(raw)
     out["shortInterest"] = parsed["data"] if isinstance(parsed, dict) and "ok" in parsed else parsed
     return out
 
 
-GATE_FIELDS = ("status", "gatePass", "adv20dTradedValueUsd", "notionalUsd", "ratio20d", "fxRate", "fxCurrency",
+GATE_FIELDS = ("status", "gatePass", "meetsMinimum", "minAdvUsd", "adv20dTradedValueUsd", "notionalUsd", "ratio20d", "fxRate", "fxCurrency",
                "gateBasis", "gateThresholdUsd", "adv20d", "recommendedNextAction")
 
 
@@ -302,6 +307,21 @@ class TestQuoteCalculations(unittest.TestCase):
                 worker = {k: self.worker["gates"][symbol].get(k) for k in GATE_FIELDS}
                 local = {k: self.local["gates"][symbol].get(k) for k in GATE_FIELDS}
                 self.assertEqual(worker, local)
+
+    def test_meets_minimum_compares_average_traded_value_with_the_callers_minimum(self) -> None:
+        """2.8.0: min_adv_usd replaces the fixed $10M gate; the old gatePass and gateThresholdUsd keep their values."""
+        for name, out in self.both():
+            with self.subTest(runtime=name):
+                for symbol, gate in out["gates"].items():
+                    self.assertIsNone(gate["meetsMinimum"], symbol)
+                    self.assertIsNone(gate["minAdvUsd"], symbol)
+                # $20M floor: £50M a day ($62.5M) and $14B pass, $0.5M fails.
+                expected = {"LSEX.L": True, "THIN": False, "MEGA": True}
+                for symbol, gate in out["gatesMin"].items():
+                    self.assertIs(gate["meetsMinimum"], expected[symbol], symbol)
+                    self.assertEqual(gate["minAdvUsd"], 20_000_000, symbol)
+                    self.assertEqual(gate["gatePass"], out["gates"][symbol]["gatePass"], symbol)
+                    self.assertEqual(gate["gateThresholdUsd"], 10_000_000, symbol)
 
     def test_same_day_option_expiry_is_skipped(self) -> None:
         for name, out in self.both():

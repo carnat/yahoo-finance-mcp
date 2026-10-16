@@ -53,6 +53,7 @@ export interface ToolMeta {
   capabilityStatus?: string;
   decisionGrade?: boolean;
   doctrineUse?: string;
+  reliabilityClass?: string;
   failureMode?: string | null;
   evidenceRequired?: boolean;
   sourceType?: string;
@@ -320,6 +321,12 @@ export type McpSuccessOptions = {
   cacheHit?: boolean;
   warnings?: unknown[];
   metaExtra?: Record<string, unknown>;
+  /**
+   * Notices appended to meta.warnings on a successful response only, from the
+   * success payload (2.8.0 DEPRECATED_FIELD). Never applied to failures or the
+   * legacy envelope, and never written into `data`.
+   */
+  successWarnings?: (data: unknown) => unknown[];
 };
 
 function toolResult(value: unknown): ToolResult {
@@ -393,7 +400,11 @@ export function mcpSuccessFromValue(
           cacheHit: baseMeta.cacheHit,
           cacheSource: baseMeta.cacheSource,
           dataDate: (innerMeta.dataDate as string | null | undefined) ?? baseMeta.dataDate,
-          warnings: [...baseWarnings, ...innerWarnings],
+          warnings: [
+            ...baseWarnings,
+            ...innerWarnings,
+            ...(inner.ok === true && opts?.successWarnings ? opts.successWarnings(inner.data) : []),
+          ],
           ...(workerVersionId ? { workerVersionId } : {}),
         } as ToolMeta,
         error: inner.ok === true ? null : (inner.error as ErrorDetail | null) ?? {
@@ -437,10 +448,15 @@ export function mcpSuccessFromValue(
   } catch {
     data = rawData;
   }
+  const meta = buildMeta(tool, { ...opts, dataDate: opts?.dataDate ?? payloadDataDate(parsed) });
+  if (opts?.successWarnings && data !== rawData) {
+    const notices = opts.successWarnings(data);
+    if (notices.length > 0) meta.warnings = [...meta.warnings, ...notices];
+  }
   const resp: McpResponse = {
     ok: true,
     data,
-    meta: buildMeta(tool, { ...opts, dataDate: opts?.dataDate ?? payloadDataDate(parsed) }),
+    meta,
     error: null,
   };
   return toolResult(resp);

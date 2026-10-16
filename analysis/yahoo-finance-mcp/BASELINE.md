@@ -288,3 +288,44 @@ None of these were resolved during Phase 2. Under CLAUDE.md, a divergence that n
   - query-string route matching;
   - one shared home for the iXBRL builders that are now imported from `scripts/test_*.py`;
   - fixtures referenced by path instead of embedded in each case.
+
+## Addendum: Q7 news rules and RN (2026-10-15)
+
+The harness now holds 1072 cases. They run as 1078 tests in about 28 s, all passing.
+
+### Q7 news rules
+
+The 180 rules `BR-NWS-101`…`280` from `NEWS_RULES.md` (9 P0, 139 P1, 32 P2) each have at least one case running in both runtimes. The cases are in two files:
+
+| File | Cases | Pinned (both current answers held) |
+|---|---|---|
+| `cases_news_a.py` | 144 | 33 |
+| `cases_news_b.py` | 138 | 57 |
+
+Every pinned news case holds a Python/Worker divergence. Its `decision` string starts with `FINDING:` and names both values and both code sites. No owner decision covers these divergences yet. They don't block the Phase 3 move, which must keep both runtimes byte-identical to themselves. The Q3i triage needs to classify each one as repair or preserve. The largest groups:
+
+- **The `company_ir` source means different things.** Python passes Yahoo items through; the Worker discovers the company's own RSS/Atom feeds.
+- **Exhibit identification:** EX-99.1 detection differs, which flips `decisionGrade`.
+- **Dedupe:** the group id format differs (16-hex SHA-256 vs 8-hex 32-bit hash), and only Python decodes HTML entities in titles.
+- **Event-type keywords:** Python has three keyword phrases the Worker lacks.
+- **Yahoo `contentType`:** only Python reads it.
+- **Yahoo summaries:** the Worker drops them.
+- **IR registry entries:** disabled, stale and candidate entries get different actions and statuses.
+- **GlobeNewswire:** exchange filtering and DOCTYPE handling differ.
+- **Rounding:** Form 4 half values round differently.
+- **Zero inputs:** `max_results=0` and `lookback_days=0` are read differently.
+- **Validation:** ticker-format checks run in Python only, and the batch-size limit applies in the Worker only.
+- **Provider messages:** the text of Finnhub and Marketaux warnings differs.
+- **Remembered denials:** only the Worker remembers entitlement denials.
+
+Defects that both runtimes share are kept as `equal` cases with `# Finding (Q7, for triage)` comments. Examples: event-type keywords matching inside other words, "NYSE American" read as NYSE, the legacy `yahoo_finance` source counting the same feed twice, and a verification downgrade that never fires.
+
+### RN
+
+`cases_neutrality.py` has 74 cases, 10 of them pinned. It covers `reliabilityClass`, `DEPRECATED_FIELD` notices in `meta.warnings` (evidence data stays byte-identical), `priceAtOrAboveTarget`, `min_adv_usd`/`meetsMinimum`, and the four renamed input groups.
+
+The pinned findings:
+- the `analyze_position_signals` asymmetries;
+- section-markdown status and `decisionGrade` differences;
+- `doctrineUse` emitted by the Worker only;
+- a zero last price makes Python `calculate_price_target_distance` raise ZeroDivisionError, while the Worker returns null.

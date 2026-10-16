@@ -68,9 +68,12 @@ DIRECT_OUTPUT_SCHEMA_FIELDS: dict[str, tuple[str, ...]] = {
         "ticker", "status", "barStatus", "freshnessStatus",
         "retryAttempted", "recommendedNextAction", "dataDate",
     ),
+    # gatePass and gateThresholdUsd are deprecated (2.8.0) and stay required until they are removed;
+    # meetsMinimum and minAdvUsd are their replacements.
     "check_volume_liquidity_threshold": (
         "ticker", "status", "barStatus", "freshnessStatus",
         "retryAttempted", "recommendedNextAction", "dataDate",
+        "gatePass", "gateThresholdUsd", "meetsMinimum", "minAdvUsd",
     ),
 }
 

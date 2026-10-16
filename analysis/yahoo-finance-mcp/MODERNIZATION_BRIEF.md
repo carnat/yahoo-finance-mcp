@@ -221,12 +221,12 @@ Every PR follows `CLAUDE.md`: the TS change first, then the `python-mirror` port
   - Record `BASELINE.md`.
 - **Entry criteria:**
   - [x] `BUSINESS_RULES.md` has the 6 P0 cards corrected per Q1 (done 2026-10-15; all 84 P0 cards are now High confidence).
-  - [ ] Node is available in CI (it is).
+  - [x] Node is available in CI (it is).
 - **Exit criteria:**
-  - [ ] Every P0 ID maps to at least one execute-both case; the table is in `BASELINE.md`.
-  - [ ] Every repair-scheduled item has a pinned current-behaviour assertion carrying its decision ID.
-  - [ ] The harness adds less than 2 minutes to CI.
-  - [ ] `BASELINE.md` is committed.
+  - [x] Every P0 ID maps to at least one execute-both case; the table is in `BASELINE.md`. *(Met 2026-10-15, #276: 84/84.)*
+  - [x] Every repair-scheduled item has a pinned current-behaviour assertion carrying its decision ID. *(39/39.)*
+  - [x] The harness adds less than 2 minutes to CI. *(About 15 s.)*
+  - [x] `BASELINE.md` is committed.
 - **Relative size: M.**
 - **Risk: Low.**
   - Risk 1: buried TS functions are hard to call. *Mitigation:* the esbuild bundle-and-call pattern, or testing at the tool boundary.
@@ -284,9 +284,9 @@ Each R-release is a set of **separately released** behaviour changes that must b
   - The tools are `get_company_news`, `search_company_news`, `get_company_press_releases`, `get_public_event_timeline`, `get_sec_recent_events` and `verify_company_event`. `get_uk_company_filings` moves with providers.
   - Output must be byte-identical. Imports back into the god files are allowed and recorded.
 - **Entry criteria:**
-  - [ ] Phase 2 exit criteria are met. (Phase 1 is no longer a prerequisite: Q16.)
-  - [ ] R3 is released and live-verified.
-  - [ ] The Q7 news rules are in the harness.
+  - [x] Phase 2 exit criteria are met. (Phase 1 is no longer a prerequisite: Q16.) *(#276 merged 2026-10-15.)*
+  - [x] R3 is released and live-verified. *(2.7.0, #277; live verifier 6/6 PASS on build 2.7.0+git.e420803, 2026-10-15.)*
+  - [ ] The Q7 news rules are in the harness. *(Extraction done: `NEWS_RULES.md`, BR-NWS-101..280; harness cases in progress.)*
 - **Exit criteria:**
   - [ ] The topology re-run shows 0 NLOC in both `#news` regions.
   - [ ] Harness diff = 0; acceptance suite and canaries green; the live verifier compares structure and coverage before and after.

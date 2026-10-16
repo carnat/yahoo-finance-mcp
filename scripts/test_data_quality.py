@@ -466,6 +466,9 @@ class TestPr2DataQuality(unittest.TestCase):
         self.assertEqual(data["ratio20d"], 0.5)
         self.assertEqual(data["adv20dTradedValueUsd"], 50_000_000)
         self.assertTrue(data["gatePass"])
+        # 2.8.0: meetsMinimum is null until the caller supplies min_adv_usd.
+        self.assertIsNone(data["meetsMinimum"])
+        self.assertIsNone(data["minAdvUsd"])
         self.assertTrue(data["excludedIncompleteBar"])
         self.assertEqual(data["dataDate"], index[-2].date().isoformat())
 
@@ -1037,6 +1040,11 @@ class TestPr2DataQuality(unittest.TestCase):
             ) = originals
         self.assertEqual(position["t1_inputs"]["upgrades30d"], 1)
         self.assertEqual(position["t1_inputs"]["initiations30d"], 1)
+        # 2.8.0: plain-named twins hold the same contents as the deprecated groups.
+        self.assertEqual(position["analystInputs"], position["t1_inputs"])
+        self.assertEqual(position["pricePositionInputs"], position["t2_inputs"])
+        self.assertEqual(position["earningsInputs"], position["t4_inputs"])
+        self.assertEqual(position["technicalInputs"], position["t5_inputs"])
 
     def test_recent_revision_signal_beats_negative_90d_context(self):
         class FakeTicker:
@@ -1074,6 +1082,8 @@ class TestPr2DataQuality(unittest.TestCase):
         srv.yf.Ticker = lambda ticker: FakeTicker()  # type: ignore[assignment]
         data = json.loads(_run(srv.calculate_price_target_distance("ASTS", reference_target_price=120.0)))
         self.assertEqual(data["inferredTag"], "NEAR")
+        self.assertEqual(data["bracket"], "ACCEPTABLE")
+        self.assertIs(data["priceAtOrAboveTarget"], False)
         self.assertEqual(data["tag"], "NEAR")
         self.assertIn("Deprecated", data["tagNote"])
         self.assertEqual(data["currentToTargetRatioPct"], 83.3)
