@@ -63,15 +63,16 @@ def _public_metadata() -> dict:
         "envelopeSchemaVersion": "2026-07-08",
         "generatedAt": datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
         "privacyScope": "public_market_data_only",
-        # The local stdio server has no HTTP request, so this is always null.
+        # The local stdio server has no HTTP request, so these are always null.
         "authorizationHeaderPresent": None,
+        "credentialTransport": None,
     }
 
 
 @yfinance_server.tool(
     name="health_check",
     output_schema=_MANIFEST_DIAGNOSTICS_OUTPUT_SCHEMA,
-    description="Return public-safe MCP availability, release/build identity, schema identity, tool mode, and connector-freshness metadata. authorizationHeaderPresent reports whether the request carried an Authorization header (never its value).",
+    description="Return public-safe MCP availability, release/build identity, schema identity, tool mode, and connector-freshness metadata. authorizationHeaderPresent reports whether the request carried an Authorization header (never its value). credentialTransport reports how the calling request presented its credential (header, path or none), never the credential itself.",
 )
 async def health_check() -> str:
     return json.dumps(_public_metadata())

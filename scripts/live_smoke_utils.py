@@ -7,6 +7,7 @@ time-sensitive fixtures such as expired option dates.
 from __future__ import annotations
 
 import json
+import os
 import time
 import urllib.error
 import urllib.request
@@ -14,6 +15,16 @@ from typing import Any
 
 RETRY_STATUSES = {429, 502, 503, 504}
 OPAQUE_PLATFORM_TEXT = {"no approval received."}
+
+
+def auth_headers() -> dict[str, str]:
+    """`Authorization: Bearer $MCP_TOKEN` when MCP_TOKEN is set, else no headers.
+
+    The Worker accepts the credential in grace mode and requires it once
+    enforcement is on. The token is never printed or logged here.
+    """
+    token = os.environ.get("MCP_TOKEN", "").strip()
+    return {"Authorization": f"Bearer {token}"} if token else {}
 
 
 def rpc(
@@ -35,7 +46,7 @@ def rpc(
         req = urllib.request.Request(
             url,
             data=data,
-            headers={"Content-Type": "application/json", "User-Agent": user_agent},
+            headers={"Content-Type": "application/json", "User-Agent": user_agent, **auth_headers()},
             method="POST",
         )
         try:

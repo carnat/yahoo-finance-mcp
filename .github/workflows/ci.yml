@@ -111,6 +111,9 @@ jobs:
       - name: Worker health_check Authorization-header presence tests
         run: python scripts/test_worker_health_auth_header.py -v
 
+      - name: Worker credential (grace and enforce) and request-limit tests
+        run: python scripts/test_worker_auth.py -v
+
       - name: Worker doctrine safety tests
         run: python scripts/test_worker_doctrine_safety.py
 

@@ -101,6 +101,8 @@ export function currentCacheSummary(): { cacheHit: boolean; cacheSource: CacheSo
 export interface RequestFacts {
   /** A non-empty Authorization header arrived with this /mcp request. */
   authorizationHeaderPresent: boolean;
+  /** How this /mcp request presented its credential. Never the credential itself. */
+  credentialTransport: "header" | "path" | "none";
 }
 
 const requestFacts = new AsyncLocalStorage<RequestFacts>();

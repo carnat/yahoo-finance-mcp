@@ -898,6 +898,7 @@ _MANIFEST_DIAGNOSTICS_OUTPUT_SCHEMA = {
         "generatedAt": {"type": "string"},
         "privacyScope": {"type": "string"},
         "authorizationHeaderPresent": {"type": ["boolean", "null"]},
+        "credentialTransport": {"type": ["string", "null"], "enum": ["header", "path", "none", None]},
     },
     "additionalProperties": False,
 }
