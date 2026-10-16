@@ -228,7 +228,7 @@ flowchart LR
 
 Every PR follows `CLAUDE.md`: the TS change first, then the `python-mirror` port, then parity tests, then a section in `docs/provider-runtime-guidance.md`, then `release-clerk`, then `live-verifier` after deploy.
 
-### Phase 1 — Harden the public surface (DEFERRED: runs after Phase 3, before R4; Q16)
+### Phase 1 — Harden the public surface ✅ (complete 2026-10-16: releases 2.9.0–2.11.0)
 - **Command:** `/modernize-harden yahoo-finance-mcp`.
 - **Scope:**
   - **Q2a:** strict HTTPS allow-list. SEC Archives and approved SEC endpoints, the exact Yahoo hosts needed by the transcript and news workflows, and the exact hosts of IR-registry entries with status `approved`. Every redirect hop is re-validated. Private, loopback, link-local and IP-literal destinations are rejected. No wildcards. `raw_text` is caller content only and never auto-fetches. This also covers the earnings-release URL policy (BR-ERN-017).
@@ -250,13 +250,13 @@ Every PR follows `CLAUDE.md`: the TS change first, then the `python-mirror` port
   - [x] Scripts send `Authorization` from an `MCP_TOKEN` secret (all 9 scripts that post to `MCP_URL`). *(2.9.0; the ci.yml alias step gained the secret in 2.9.1.)*
   - [x] §7 Q11 names confirmed (2026-10-15): `AUTH_REQUIRED`, `BATCH_LIMIT_EXCEEDED`, `PROVIDER_BUDGET_EXHAUSTED`, `PROVIDER_OPT_IN_REQUIRED`.
   - [x] The owner acknowledges §7 V2: with **0 approved IR entries** today, company-IR URL fetches are refused until entries are approved. *(Acknowledged 2026-10-16.)*
-  - [ ] `main` CI is green.
-  - [ ] S-01 and S-02 are reproduced as failing tests in both runtimes.
+  - [x] `main` CI is green. *(Every Phase 1 PR (#280–#284) merged green, including the new Dependency audit job.)*
+  - [x] S-01 and S-02 are covered by tests. *(S-01 SSRF and its Python mirror S-04: `scripts/test_url_policy.py` and parity `ptr.url.*`. S-02 unauthenticated `/mcp`: `scripts/test_worker_auth.py`. S-02 is Worker-only, because the Python server is stdio. The tests were written alongside the fixes, not as failing tests first.)*
 - **Exit criteria:**
   - [x] SSRF tests pass in both runtimes (http redirect, non-allow-listed host, loopback, link-local, IP literal, `raw_text` containing a URL is not fetched). *(2.10.0, #283; `scripts/test_url_policy.py` in both runtimes. Live-verified 2026-10-16 09:02Z: `example.com` and `169.254.169.254` refused, `raw_text` with a URL not fetched, SEC/Yahoo paths intact, CORS restricted. Deploy run #262 green on re-run: the first attempt's blocking failure was a Thai SEC Open Data upstream timeout that passed on the candidate 30 s earlier.)*
   - [x] Unauthenticated `/mcp` is rejected with the confirmed code. Authenticated canaries pass. `/health` makes zero provider calls (asserted). *(2.9.1 live 2026-10-16 07:10Z: no credential and a wrong path token both return 401 `AUTH_REQUIRED`; `/health` 200; deploy run #260 canaries green; zero-fetch `/health` asserted in `test_worker_auth.py`.)*
-  - [ ] Anonymous or no-opt-in calls make zero paid-provider requests (asserted with a fetch spy). Exhaustion returns the typed state.
-  - [ ] Audits are clean or have documented exceptions. The acceptance suite is green. The live verifier confirms.
+  - [x] Anonymous or no-opt-in calls make zero paid-provider requests (asserted with a fetch spy). Exhaustion returns the typed state. *(Anonymous `/mcp` calls are refused before any fetch (2.9.1). Opt-in is not applicable: the owner decided on 2026-10-16 that Finnhub, Alpha Vantage and Marketaux are free tiers. Exhaustion returns `PROVIDER_BUDGET_EXHAUSTED` (2.11.0, #284), covered by `test_worker_budget.py`, `test_python_budget.py` and parity `budget.*`.)*
+  - [x] Audits are clean or have documented exceptions. The acceptance suite is green. The live verifier confirms. *(pip-audit and npm audit report 0 (3a, #282). Live-verified: 2.9.1 enforcement, 2.10.0 allow-list and CORS, and 2.11.0, served at 15:24Z with deploy run #263 green and default MSFT news unchanged. A live call over the budget could not be produced through grouped mode, so the guard's refusal path rests on the offline tests.)*
 - **Relative size: S.**
 - **Risk: Medium.**
   - Risk 1: auth locks out a client that can't send headers. *Mitigation:* V1 gate, plus a token-issued grace release before enforcement.
