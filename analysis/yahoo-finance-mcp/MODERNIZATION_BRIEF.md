@@ -252,7 +252,7 @@ Every PR follows `CLAUDE.md`: the TS change first, then the `python-mirror` port
   - [ ] `main` CI is green.
   - [ ] S-01 and S-02 are reproduced as failing tests in both runtimes.
 - **Exit criteria:**
-  - [ ] SSRF tests pass in both runtimes (http redirect, non-allow-listed host, loopback, link-local, IP literal, `raw_text` containing a URL is not fetched).
+  - [x] SSRF tests pass in both runtimes (http redirect, non-allow-listed host, loopback, link-local, IP literal, `raw_text` containing a URL is not fetched). *(2.10.0, #283; `scripts/test_url_policy.py` in both runtimes. Live-verified 2026-10-16 09:02Z: `example.com` and `169.254.169.254` refused, `raw_text` with a URL not fetched, SEC/Yahoo paths intact, CORS restricted. Deploy run #262 green on re-run: the first attempt's blocking failure was a Thai SEC Open Data upstream timeout that passed on the candidate 30 s earlier.)*
   - [x] Unauthenticated `/mcp` is rejected with the confirmed code. Authenticated canaries pass. `/health` makes zero provider calls (asserted). *(2.9.1 live 2026-10-16 07:10Z: no credential and a wrong path token both return 401 `AUTH_REQUIRED`; `/health` 200; deploy run #260 canaries green; zero-fetch `/health` asserted in `test_worker_auth.py`.)*
   - [ ] Anonymous or no-opt-in calls make zero paid-provider requests (asserted with a fetch spy). Exhaustion returns the typed state.
   - [ ] Audits are clean or have documented exceptions. The acceptance suite is green. The live verifier confirms.
@@ -332,6 +332,7 @@ Each R-release is a set of **separately released** behaviour changes that must b
   - Q8: pin `mcp>=2.2,<3` and replace private-internals use with public APIs, failing loudly. That covers `_tool_manager._tools`, the `FastMCP.tool` monkey-patch and, new in v3, `reseat_tool_registration` from the news move.
   - Q10: privacy-minimised telemetry export capturing a **baseline window before any Phase 4 merge**.
   - Q3i items in the SEC and shared domains (3 tagged in §3).
+  - **R4 triage input (added 2026-10-16, from the 2.10.0 deploy):** `extract_sec_filing_fact` on the PARSED_TABLE path returns `evidence: null` because `worker/src/response.ts` drops evidence rows that have no url or row fields. The content survives only as `sourceEvidence`. 2.9.1 behaves identically (checked side by side against live SEC). The advisory `test_deployed_discovery.py` AAOI check fails or passes depending on data and cache state. Classify as repair (map table evidence into the standardised row) or preserve (relax the smoke check).
   - Q3i triage, classified repair or preserve, with the result written into §7. It covers the remaining 20 untagged defects plus the pinned `FINDING` divergences from `BASELINE.md` (about 100; 90 in news). The planner drafts one classification table for one owner approval (§7 A2). Triage inputs from live verification:
     - `get_company_news` reports coverage `FULL` while a source is truncated;
     - `tool_catalog.json` omits `sources` for `get_company_press_releases`;
