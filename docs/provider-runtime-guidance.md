@@ -2649,6 +2649,16 @@ F-024, F-026, F-029). Both runtimes change alike.
 - **Window and removal:** old fields keep identical values for at least one minor version. Removal is planned for a
   later major version (modernization Phase 6). Consumers should move to the replacements now.
 
+## News Domain Module Move (2.8.1)
+
+- **Why:** internal restructuring only. Release type: patch. No behaviour change.
+- **What moved:** the News & public events tools (`get_company_news`, `search_company_news`,
+  `get_company_press_releases`, `get_sec_recent_events`, `get_public_event_timeline`, `verify_company_event`) and their
+  helpers now live in `yfmcp/tools/news.py` and `worker/src/news.ts`.
+- **Unchanged:** no tool name, input, output, schema, status, warning or ordering changed.
+- **Compatibility:** `server.py` and `yahoo-finance.ts` re-export the moved names.
+- **Verification:** the 1078-test parity harness passes, and tool listings (expanded and grouped) are byte-identical.
+
 ## Non-US Primary Filings
 
 - `get_uk_company_filings` reads Companies House, the UK statutory registry:

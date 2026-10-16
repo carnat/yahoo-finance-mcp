@@ -18,8 +18,14 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 TOOLS_TS = ROOT / "worker" / "src" / "tools.ts"
 YAHOO_FINANCE_TS = ROOT / "worker" / "src" / "yahoo-finance.ts"
+NEWS_TS = ROOT / "worker" / "src" / "news.ts"
 DEPLOYED_DISCOVERY = ROOT / "scripts" / "test_deployed_discovery.py"
 DEPLOYED_CANARIES = ROOT / "scripts" / "test_deployed_canaries.py"
+
+
+def _yahoo_worker_source() -> str:
+    """yahoo-finance.ts plus news.ts (the news code moved there in Phase 3; the combined text is what the file held before)."""
+    return YAHOO_FINANCE_TS.read_text(encoding="utf-8") + "\n" + NEWS_TS.read_text(encoding="utf-8")
 
 
 def _node_json(source: str) -> dict:
@@ -191,7 +197,7 @@ class TestWorkerDoctrineSafety(unittest.TestCase):
             self.assertNotIn(field, tools)
 
     def test_press_releases_exposes_8k_without_ex99_status(self) -> None:
-        worker = YAHOO_FINANCE_TS.read_text(encoding="utf-8")
+        worker = _yahoo_worker_source()
         self.assertIn("SEC_8K_FOUND_EX99_NOT_FOUND", worker)
         self.assertIn("secEvidence", worker)
         self.assertIn("sec8kWithoutEx99Count", worker)
@@ -214,7 +220,7 @@ class TestWorkerDoctrineSafety(unittest.TestCase):
         self.assertNotIn('failureMode: "SEC_EX99_LINKAGE_INCOMPLETE"', tools)
 
     def test_press_release_ex99_resolver_uses_index_exhibits(self) -> None:
-        worker = YAHOO_FINANCE_TS.read_text(encoding="utf-8")
+        worker = _yahoo_worker_source()
         start = worker.index("async function resolveEx991Url")
         end = worker.index("/** Parse inline XBRL", start)
         resolver = worker[start:end]
@@ -224,7 +230,7 @@ class TestWorkerDoctrineSafety(unittest.TestCase):
         self.assertIn("edgarBuildFilingUrls(cikInt, accessionNumber, String(ex991.document))", resolver)
 
     def test_section_markdown_success_is_not_decision_grade(self) -> None:
-        worker = YAHOO_FINANCE_TS.read_text(encoding="utf-8")
+        worker = _yahoo_worker_source()
         self.assertIn("SECTION_MARKDOWN_UNVERIFIED", worker)
         self.assertIn("LIVE_SECTION_EXTRACTION_UNRELIABLE", worker)
         self.assertIn('confidence: "NOT_DECISION_GRADE"', worker)
@@ -232,7 +238,7 @@ class TestWorkerDoctrineSafety(unittest.TestCase):
         self.assertIn('doctrineUse: "BLOCKED"', worker)
 
     def test_sec_filing_fact_preserves_xbrl_context_metadata(self) -> None:
-        worker = YAHOO_FINANCE_TS.read_text(encoding="utf-8")
+        worker = _yahoo_worker_source()
         tools = TOOLS_TS.read_text(encoding="utf-8")
         self.assertIn("xbrlContext: payload.xbrlContext ?? null", worker)
         self.assertIn("XBRL_CONTEXT_METADATA_UNAVAILABLE", worker)
@@ -259,7 +265,7 @@ class TestWorkerDoctrineSafety(unittest.TestCase):
         self.assertIn("UNSUPPORTED_QUERY_TYPE", smoke)
 
     def test_sec_exposure_preserves_parser_limitation_statuses(self) -> None:
-        worker = YAHOO_FINANCE_TS.read_text(encoding="utf-8")
+        worker = _yahoo_worker_source()
         self.assertIn("NON_DECISION_REVENUE_STATUSES", worker)
         self.assertIn("explicitRevenueLimitationStatus", worker)
         self.assertIn('"TABLE_NOT_PARSED"', worker)
@@ -268,7 +274,7 @@ class TestWorkerDoctrineSafety(unittest.TestCase):
         self.assertIn("code: explicitRevenueStatus", worker)
 
     def test_geo_not_disclosed_requires_search_coverage_metadata(self) -> None:
-        worker = YAHOO_FINANCE_TS.read_text(encoding="utf-8")
+        worker = _yahoo_worker_source()
         for field in (
             "scanCoverage",
             "searchedTerms",
@@ -302,11 +308,12 @@ class TestWorkerDoctrineSafety(unittest.TestCase):
             for name, use in re.findall(r'(\w+): \{[^{}]*?doctrineUse: "(\w+)"', table)
         }
         self.assertEqual(worker_status, TOOL_RELIABILITY_CLASS)
-        worker = YAHOO_FINANCE_TS.read_text(encoding="utf-8")
+        worker = _yahoo_worker_source()
         self.assertIn('doctrineUse: "ALLOWED",\n    reliabilityClass: reliabilityClassFor("ALLOWED")', worker)
         self.assertIn('doctrineUse: "BLOCKED",\n    reliabilityClass: reliabilityClassFor("BLOCKED")', worker)
         self.assertIn("reliabilityClass: reliabilityClassFor(doctrineUse)", tools)
-        python = (ROOT / "server.py").read_text(encoding="utf-8")
+        # get_company_press_releases moved from server.py to yfmcp/tools/news.py (Phase 3).
+        python = (ROOT / "server.py").read_text(encoding="utf-8") + "\n" + (ROOT / "yfmcp" / "tools" / "news.py").read_text(encoding="utf-8")
         self.assertIn('"reliabilityClass": _TOOL_RELIABILITY_CLASS["get_company_press_releases"]', python)
         self.assertIn('"reliabilityClass": _TOOL_RELIABILITY_CLASS["get_sec_filing_section_markdown"]', python)
         self.assertNotIn("doctrineUse", python)  # Python never emitted it and still does not

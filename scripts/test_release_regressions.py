@@ -185,10 +185,12 @@ class TestSourceContracts(unittest.TestCase):
     """Wiring that needs every news provider to exercise end to end."""
 
     def test_event_verification_matches_before_the_display_cap(self) -> None:
-        ts = (WORKER / "src" / "yahoo-finance.ts").read_text(encoding="utf-8")
+        # yahoo-finance.ts plus news.ts: the news code moved to news.ts in Phase 3
+        ts = (WORKER / "src" / "yahoo-finance.ts").read_text(encoding="utf-8") + "\n" + (WORKER / "src" / "news.ts").read_text(encoding="utf-8")
         self.assertRegex(ts, r"collectCompanyEvents\(ticker, \{[^}]*keepAll: true")
         self.assertIn("keepAll ? allDeduped : allDeduped.slice(0, safeMax)", ts)
-        py = (ROOT / "server.py").read_text(encoding="utf-8")
+        # The news collectors moved from server.py to yfmcp/tools/news.py (Phase 3).
+        py = (ROOT / "server.py").read_text(encoding="utf-8") + "\n" + (ROOT / "yfmcp" / "tools" / "news.py").read_text(encoding="utf-8")
         self.assertRegex(py, r"keep_all=True")
         self.assertRegex(py, r"if not keep_all:\s*\n\s*deduped = deduped\[:max_cap\]")
 

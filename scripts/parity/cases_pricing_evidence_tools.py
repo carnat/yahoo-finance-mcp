@@ -28,6 +28,7 @@ from scripts.parity.harness import Case
 
 # Registers the tools (server.py imports the yfmcp modules) the way the existing suites do.
 import server  # noqa: F401,E402
+from yfmcp.tools import news as news_tools  # noqa: E402
 from yfmcp.tools import pricing  # noqa: E402
 
 CASES: list[Case] = []
@@ -1884,7 +1885,7 @@ _Q3H_STATUS_FIXTURE = {
 
 
 def _python_news_sources_omitted():
-    with patch.object(server, "_collect_company_events", AsyncMock(return_value=([], [], [], "2026-10-15T00:00:00Z", {}))):
+    with patch.object(news_tools, "_collect_company_events", AsyncMock(return_value=([], [], [], "2026-10-15T00:00:00Z", {}))):
         return json.loads(asyncio.run(server.get_company_news("TEST", 5, 14)))
 
 

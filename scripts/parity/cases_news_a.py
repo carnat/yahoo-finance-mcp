@@ -55,6 +55,7 @@ import server
 from scripts.parity.harness import WORKER, Case
 from yfmcp import capital_structure as cs
 from yfmcp.clients import edgar
+from yfmcp.tools import news as news_tools
 
 CASES: list[Case] = []
 
@@ -120,8 +121,8 @@ def _python_world(scn: dict):
         for var in _PROVIDER_ENV:
             os.environ.pop(var, None)
         os.environ.update(scn.get("env", {}))
-        stack.enter_context(patch.object(server, "datetime", _frozen_datetime_module(now)))
-        stack.enter_context(patch.object(server, "_utc_now_iso", lambda: now))
+        stack.enter_context(patch.object(news_tools, "datetime", _frozen_datetime_module(now)))
+        stack.enter_context(patch.object(news_tools, "_utc_now_iso", lambda: now))
         stack.enter_context(patch.dict(server._tool_cache._store, {}, clear=True))
         for cache in (edgar._FILING_CIK_CACHE, edgar._EDGAR_SUBS_CACHE, edgar._EDGAR_HTML_CACHE):
             stack.enter_context(patch.dict(cache, {}, clear=True))
@@ -136,10 +137,10 @@ def _python_world(scn: dict):
                 raise news
             return copy.deepcopy(news)
 
-        stack.enter_context(patch.object(server, "_yahoo_search_news", search))
+        stack.enter_context(patch.object(news_tools, "_yahoo_search_news", search))
         if scn.get("registry") is not None:
             registry = scn["registry"]
-            stack.enter_context(patch.object(server, "_load_company_ir_page_registry", lambda: copy.deepcopy(registry)))
+            stack.enter_context(patch.object(news_tools, "_load_company_ir_page_registry", lambda: copy.deepcopy(registry)))
         yield
 
 

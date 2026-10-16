@@ -18,6 +18,7 @@ from unittest.mock import AsyncMock, patch
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 TOOLS_TS = ROOT / "worker" / "src" / "tools.ts"
 YAHOO_TS = ROOT / "worker" / "src" / "yahoo-finance.ts"
+NEWS_TS = ROOT / "worker" / "src" / "news.ts"
 
 
 class TestWorkerSecProvider(unittest.TestCase):
@@ -136,6 +137,11 @@ class TestWorkerSecProvider(unittest.TestCase):
         helper_start = self.worker.index("function stripHtmlTags")
         helper_end = self.worker.index("function filingHasRelevantGeoText")
         helper_source = self.worker[helper_start:helper_end]
+        # parseHtmlTable sat inside this slice before the Phase 3 move; it now lives in news.ts.
+        news_source = NEWS_TS.read_text(encoding="utf-8")
+        table_start = news_source.index("export function parseHtmlTable")
+        table_end = news_source.index("\n}\n", table_start) + 3
+        helper_source += "\n" + news_source[table_start:table_end].removeprefix("export ")
         fixture = r"""
 const aaoiTable = `
   <p>The following tables set forth the Company's revenue and asset information by geographic region (in thousands):</p>

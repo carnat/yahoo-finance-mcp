@@ -301,9 +301,9 @@ class TestMarketauxPriorityRouting(unittest.TestCase):
         ))
         marketaux = AsyncMock()
         with patch("server.yf.Ticker") as ticker_factory, patch(
-            "server._collect_yahoo_events", yahoo,
-        ), patch("server._collect_finnhub_events", finnhub), patch(
-            "server._collect_marketaux_events", marketaux,
+            "yfmcp.tools.news._collect_yahoo_events", yahoo,
+        ), patch("yfmcp.tools.news._collect_finnhub_events", finnhub), patch(
+            "yfmcp.tools.news._collect_marketaux_events", marketaux,
         ):
             ticker_factory.return_value.info = {"longName": "Aehr Test Systems"}
             result = _run(srv._collect_company_events(
@@ -347,9 +347,9 @@ class TestMarketauxPriorityRouting(unittest.TestCase):
             {"status": "OK", "acceptedCount": 1, "completed": True},
         ))
         with patch("server.yf.Ticker") as ticker_factory, patch(
-            "server._collect_yahoo_events", empty,
-        ), patch("server._collect_finnhub_events", empty), patch(
-            "server._collect_marketaux_events", marketaux,
+            "yfmcp.tools.news._collect_yahoo_events", empty,
+        ), patch("yfmcp.tools.news._collect_finnhub_events", empty), patch(
+            "yfmcp.tools.news._collect_marketaux_events", marketaux,
         ):
             ticker_factory.return_value.info = {"longName": "Aehr Test Systems"}
             result = _run(srv._collect_company_events(
@@ -371,9 +371,9 @@ class TestMarketauxPriorityRouting(unittest.TestCase):
         self.assertEqual(diagnostics["marketaux"]["status"], "OK")
 
     def test_worker_has_matching_bounded_fallback_contract(self):
-        worker_source = (
-            Path(__file__).resolve().parents[1] / "worker" / "src" / "yahoo-finance.ts"
-        ).read_text(encoding="utf-8")
+        worker_dir = Path(__file__).resolve().parents[1] / "worker" / "src"
+        # yahoo-finance.ts plus news.ts: the news code moved to news.ts in Phase 3
+        worker_source = (worker_dir / "yahoo-finance.ts").read_text(encoding="utf-8") + "\n" + (worker_dir / "news.ts").read_text(encoding="utf-8")
         self.assertIn('const MARKETAUX_MAX_ITEMS = 3;', worker_source)
         self.assertIn('const MARKETAUX_WIRE_DOMAINS = ["businesswire.com", "prnewswire.com", "globenewswire.com"]', worker_source)
         self.assertIn('api_token: "REDACTED"', worker_source)
