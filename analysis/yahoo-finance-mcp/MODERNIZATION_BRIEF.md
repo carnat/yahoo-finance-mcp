@@ -280,7 +280,7 @@ Each R-release is a set of **separately released** behaviour changes that must b
 ### Phase 3 — PILOT: extract News & public events
 - **Command:** `/modernize-transform yahoo-finance-mcp`, unit: News & public events.
 - **Scope:**
-  - Move the `server.py#news` and `yahoo-finance.ts#news` functions into `yfmcp/news.py` and `worker/src/news.ts`.
+  - Move the `server.py#news` and `yahoo-finance.ts#news` functions into `yfmcp/tools/news.py` and `worker/src/news.ts`. *(Path amended 2026-10-16 to follow the repo's `yfmcp/tools/<domain>.py` precedent from the pricing and earnings moves; implementation spec: `PHASE3_SPEC.md`.)*
   - The tools are `get_company_news`, `search_company_news`, `get_company_press_releases`, `get_public_event_timeline`, `get_sec_recent_events` and `verify_company_event`. `get_uk_company_filings` moves with providers.
   - Output must be byte-identical. Imports back into the god files are allowed and recorded.
 - **Entry criteria:**

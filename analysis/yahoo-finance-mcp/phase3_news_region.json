@@ -1,0 +1,886 @@
+{
+ "server.py": [
+  {
+   "name": "_finnhub_policy",
+   "line": 256,
+   "nloc": 3
+  },
+  {
+   "name": "_finnhub_eligibility",
+   "line": 261,
+   "nloc": 7
+  },
+  {
+   "name": "_evidence_class_for",
+   "line": 270,
+   "nloc": 11
+  },
+  {
+   "name": "_url_provenance_for",
+   "line": 283,
+   "nloc": 11
+  },
+  {
+   "name": "_enrich_news_item_for_llm",
+   "line": 296,
+   "nloc": 17
+  },
+  {
+   "name": "_build_coverage",
+   "line": 315,
+   "nloc": 40
+  },
+  {
+   "name": "_normalize_event_text",
+   "line": 364,
+   "nloc": 2
+  },
+  {
+   "name": "_strip_yahoo_news_legal_suffix",
+   "line": 368,
+   "nloc": 5
+  },
+  {
+   "name": "_yahoo_news_identity_from_info",
+   "line": 375,
+   "nloc": 27
+  },
+  {
+   "name": "_yahoo_item_issuer",
+   "line": 404,
+   "nloc": 9
+  },
+  {
+   "name": "_yahoo_news_match_for",
+   "line": 415,
+   "nloc": 11
+  },
+  {
+   "name": "_yahoo_decision_use",
+   "line": 428,
+   "nloc": 4
+  },
+  {
+   "name": "_globenewswire_xml_is_safe",
+   "line": 506,
+   "nloc": 3
+  },
+  {
+   "name": "_xml_local_name",
+   "line": 511,
+   "nloc": 2
+  },
+  {
+   "name": "_xml_child_texts",
+   "line": 515,
+   "nloc": 8
+  },
+  {
+   "name": "_xml_first_child_text",
+   "line": 525,
+   "nloc": 3
+  },
+  {
+   "name": "_globenewswire_category_values",
+   "line": 530,
+   "nloc": 14
+  },
+  {
+   "name": "_globenewswire_stock_category_matches",
+   "line": 546,
+   "nloc": 7
+  },
+  {
+   "name": "_globenewswire_plain_text",
+   "line": 555,
+   "nloc": 4
+  },
+  {
+   "name": "_coerce_max_results",
+   "line": 561,
+   "nloc": 2
+  },
+  {
+   "name": "_coerce_lookback_days",
+   "line": 565,
+   "nloc": 2
+  },
+  {
+   "name": "_normalize_event_sources",
+   "line": 569,
+   "nloc": 18
+  },
+  {
+   "name": "_source_request_fields",
+   "line": 605,
+   "nloc": 16
+  },
+  {
+   "name": "_mark_no_source_selected",
+   "line": 623,
+   "nloc": 9
+  },
+  {
+   "name": "_event_type_from_keywords",
+   "line": 634,
+   "nloc": 23
+  },
+  {
+   "name": "_normalized_event_title_stem",
+   "line": 659,
+   "nloc": 13
+  },
+  {
+   "name": "_event_type_from_form",
+   "line": 674,
+   "nloc": 11
+  },
+  {
+   "name": "_short_text",
+   "line": 687,
+   "nloc": 5
+  },
+  {
+   "name": "_make_duplicate_group_id",
+   "line": 694,
+   "nloc": 14
+  },
+  {
+   "name": "_xml_text",
+   "line": 710,
+   "nloc": 6
+  },
+  {
+   "name": "_strip_xml_namespaces",
+   "line": 718,
+   "nloc": 2
+  },
+  {
+   "name": "_form4_num",
+   "line": 733,
+   "nloc": 15
+  },
+  {
+   "name": "_form4_date",
+   "line": 750,
+   "nloc": 11
+  },
+  {
+   "name": "_form4_owner_from_html",
+   "line": 763,
+   "nloc": 7
+  },
+  {
+   "name": "_form4_role_from_html",
+   "line": 772,
+   "nloc": 22
+  },
+  {
+   "name": "_parse_form4_html_transaction",
+   "line": 796,
+   "nloc": 42
+  },
+  {
+   "name": "_form4_transaction_payload",
+   "line": 840,
+   "nloc": 21
+  },
+  {
+   "name": "_parse_form4_transaction",
+   "line": 863,
+   "nloc": 35
+  },
+  {
+   "name": "_try_attach_form4_transaction",
+   "line": 900,
+   "nloc": 30
+  },
+  {
+   "name": "_source_rank",
+   "line": 932,
+   "nloc": 2
+  },
+  {
+   "name": "_safe_sec_url",
+   "line": 936,
+   "nloc": 3
+  },
+  {
+   "name": "_within_date_window",
+   "line": 947,
+   "nloc": 18
+  },
+  {
+   "name": "_load_company_ir_page_registry",
+   "line": 967,
+   "nloc": 5
+  },
+  {
+   "name": "_company_ir_page_entry",
+   "line": 974,
+   "nloc": 7
+  },
+  {
+   "name": "_host_without_www",
+   "line": 983,
+   "nloc": 2
+  },
+  {
+   "name": "_company_ir_page_url_allowed",
+   "line": 987,
+   "nloc": 11
+  },
+  {
+   "name": "_company_ir_page_registry_fresh",
+   "line": 1000,
+   "nloc": 11
+  },
+  {
+   "name": "_company_ir_page_item",
+   "line": 1013,
+   "nloc": 39
+  },
+  {
+   "name": "_company_ir_page_json_records",
+   "line": 1054,
+   "nloc": 22
+  },
+  {
+   "name": "_parse_company_ir_page_json",
+   "line": 1078,
+   "nloc": 17
+  },
+  {
+   "name": "_html_attr",
+   "line": 1097,
+   "nloc": 3
+  },
+  {
+   "name": "_parse_company_ir_page_html",
+   "line": 1102,
+   "nloc": 33
+  },
+  {
+   "name": "_fetch_company_ir_page",
+   "line": 1137,
+   "nloc": 22
+  },
+  {
+   "name": "_collect_company_ir_page_events",
+   "line": 1163,
+   "nloc": 47
+  },
+  {
+   "name": "_build_yahoo_event_item",
+   "line": 1212,
+   "nloc": 63
+  },
+  {
+   "name": "_build_sec_event_item",
+   "line": 1280,
+   "nloc": 49
+  },
+  {
+   "name": "_collect_sec_events",
+   "line": 1331,
+   "nloc": 50
+  },
+  {
+   "name": "_normalize_exchange",
+   "line": 1383,
+   "nloc": 15
+  },
+  {
+   "name": "_is_ticker_compatible_with_context",
+   "line": 1400,
+   "nloc": 29
+  },
+  {
+   "name": "_collect_yahoo_events",
+   "line": 1435,
+   "nloc": 106
+  },
+  {
+   "name": "_yahoo_search_news",
+   "line": 1552,
+   "nloc": 3
+  },
+  {
+   "name": "_collect_globenewswire_events",
+   "line": 1562,
+   "nloc": 151
+  },
+  {
+   "name": "_collect_finnhub_events",
+   "line": 1729,
+   "nloc": 141
+  },
+  {
+   "name": "_collect_marketaux_events",
+   "line": 1879,
+   "nloc": 177
+  },
+  {
+   "name": "_marketaux_fallback_reason",
+   "line": 2067,
+   "nloc": 60
+  },
+  {
+   "name": "_dedupe_event_items",
+   "line": 2132,
+   "nloc": 39
+  },
+  {
+   "name": "_build_collection_status",
+   "line": 2173,
+   "nloc": 18
+  },
+  {
+   "name": "_compute_source_status",
+   "line": 2193,
+   "nloc": 239
+  },
+  {
+   "name": "_compute_source_coverage",
+   "line": 2445,
+   "nloc": 12
+  },
+  {
+   "name": "_verify_coverage_failure_mode",
+   "line": 2459,
+   "nloc": 29
+  },
+  {
+   "name": "_collect_company_events",
+   "line": 2490,
+   "nloc": 247
+  },
+  {
+   "name": "_unpack_company_event_result",
+   "line": 2755,
+   "nloc": 7
+  },
+  {
+   "name": "_rank_news_items_by_relevance",
+   "line": 2767,
+   "nloc": 3
+  },
+  {
+   "name": "search_company_news",
+   "line": 2783,
+   "nloc": 62
+  },
+  {
+   "name": "get_company_press_releases",
+   "line": 2863,
+   "nloc": 203
+  },
+  {
+   "name": "get_sec_recent_events",
+   "line": 3087,
+   "nloc": 44
+  },
+  {
+   "name": "get_public_event_timeline",
+   "line": 3144,
+   "nloc": 61
+  },
+  {
+   "name": "verify_company_event",
+   "line": 3222,
+   "nloc": 236
+  },
+  {
+   "name": "get_company_news",
+   "line": 8325,
+   "nloc": 61
+  }
+ ],
+ "worker/src/yahoo-finance.ts": [
+  {
+   "name": "fetchMarketauxJson",
+   "line": 382,
+   "nloc": 172
+  },
+  {
+   "name": "getNews",
+   "line": 1727,
+   "nloc": 30
+  },
+  {
+   "name": "parseHtmlTable",
+   "line": 5800,
+   "nloc": 21
+  },
+  {
+   "name": "confidenceForSourceType",
+   "line": 9120,
+   "nloc": 7
+  },
+  {
+   "name": "sourceRequestFields",
+   "line": 9141,
+   "nloc": 11
+  },
+  {
+   "name": "normalizeSources",
+   "line": 9153,
+   "nloc": 22
+  },
+  {
+   "name": "markNoSourceSelected",
+   "line": 9176,
+   "nloc": 36
+  },
+  {
+   "name": "sourceDecisionUse",
+   "line": 9216,
+   "nloc": 8
+  },
+  {
+   "name": "evidenceClassFor",
+   "line": 9233,
+   "nloc": 8
+  },
+  {
+   "name": "urlProvenanceFor",
+   "line": 9242,
+   "nloc": 11
+  },
+  {
+   "name": "tickerMatchFor",
+   "line": 9254,
+   "nloc": 8
+  },
+  {
+   "name": "enrichNewsItemForLlm",
+   "line": 9263,
+   "nloc": 15
+  },
+  {
+   "name": "buildCoverage",
+   "line": 9279,
+   "nloc": 51
+  },
+  {
+   "name": "companyIrPageEntry",
+   "line": 9334,
+   "nloc": 4
+  },
+  {
+   "name": "companyIrPageUrlAllowed",
+   "line": 9339,
+   "nloc": 12
+  },
+  {
+   "name": "registryFresh",
+   "line": 9352,
+   "nloc": 5
+  },
+  {
+   "name": "arrayRecords",
+   "line": 9358,
+   "nloc": 3
+  },
+  {
+   "name": "hostWithoutWww",
+   "line": 9362,
+   "nloc": 3
+  },
+  {
+   "name": "sameCompanyDomain",
+   "line": 9374,
+   "nloc": 9
+  },
+  {
+   "name": "companyIrCandidateHosts",
+   "line": 9384,
+   "nloc": 25
+  },
+  {
+   "name": "blockedCompanyWebsiteHost",
+   "line": 9410,
+   "nloc": 4
+  },
+  {
+   "name": "rejectedCompanyIrFeedCandidate",
+   "line": 9415,
+   "nloc": 14
+  },
+  {
+   "name": "nameTokensForIdentity",
+   "line": 9474,
+   "nloc": 9
+  },
+  {
+   "name": "identityMatchesText",
+   "line": 9484,
+   "nloc": 23
+  },
+  {
+   "name": "normalizedYahooNewsPhrase",
+   "line": 9511,
+   "nloc": 3
+  },
+  {
+   "name": "stripYahooNewsLegalSuffix",
+   "line": 9515,
+   "nloc": 5
+  },
+  {
+   "name": "yahooNewsIdentityFor",
+   "line": 9521,
+   "nloc": 31
+  },
+  {
+   "name": "yahooItemIssuer",
+   "line": 9553,
+   "nloc": 7
+  },
+  {
+   "name": "yahooNewsMatchFor",
+   "line": 9561,
+   "nloc": 10
+  },
+  {
+   "name": "yahooDecisionUse",
+   "line": 9572,
+   "nloc": 5
+  },
+  {
+   "name": "htmlAttr",
+   "line": 9578,
+   "nloc": 5
+  },
+  {
+   "name": "normalizeLinkedUrl",
+   "line": 9584,
+   "nloc": 12
+  },
+  {
+   "name": "looksLikeFeed",
+   "line": 9597,
+   "nloc": 3
+  },
+  {
+   "name": "normalizedExchangeCode",
+   "line": 9601,
+   "nloc": 9
+  },
+  {
+   "name": "exchangeCompatibleWithStockCategory",
+   "line": 9611,
+   "nloc": 10
+  },
+  {
+   "name": "normalizeIso",
+   "line": 9622,
+   "nloc": 11
+  },
+  {
+   "name": "shortText",
+   "line": 9634,
+   "nloc": 4
+  },
+  {
+   "name": "eventTypeFromKeywords",
+   "line": 9639,
+   "nloc": 14
+  },
+  {
+   "name": "normalizedEventTitleStem",
+   "line": 9654,
+   "nloc": 12
+  },
+  {
+   "name": "eventTypeFromForm",
+   "line": 9667,
+   "nloc": 8
+  },
+  {
+   "name": "makeDupGroupId",
+   "line": 9676,
+   "nloc": 10
+  },
+  {
+   "name": "xmlTag",
+   "line": 9687,
+   "nloc": 10
+  },
+  {
+   "name": "xmlBlock",
+   "line": 9698,
+   "nloc": 13
+  },
+  {
+   "name": "form4Num",
+   "line": 9713,
+   "nloc": 12
+  },
+  {
+   "name": "form4Date",
+   "line": 9726,
+   "nloc": 8
+  },
+  {
+   "name": "form4Payload",
+   "line": 9735,
+   "nloc": 21
+  },
+  {
+   "name": "form4OwnerFromHtml",
+   "line": 9757,
+   "nloc": 4
+  },
+  {
+   "name": "form4RoleFromHtml",
+   "line": 9762,
+   "nloc": 16
+  },
+  {
+   "name": "parseForm4HtmlTransaction",
+   "line": 9779,
+   "nloc": 45
+  },
+  {
+   "name": "parseForm4Transaction",
+   "line": 9825,
+   "nloc": 22
+  },
+  {
+   "name": "tryAttachForm4Transaction",
+   "line": 9848,
+   "nloc": 22
+  },
+  {
+   "name": "withinDateWindow",
+   "line": 9871,
+   "nloc": 11
+  },
+  {
+   "name": "decodeXmlText",
+   "line": 9883,
+   "nloc": 10
+  },
+  {
+   "name": "extractXmlTag",
+   "line": 9894,
+   "nloc": 5
+  },
+  {
+   "name": "extractXmlTagValues",
+   "line": 9900,
+   "nloc": 11
+  },
+  {
+   "name": "extractGlobeNewswireCategories",
+   "line": 9912,
+   "nloc": 16
+  },
+  {
+   "name": "globenewswireStockCategoryMatches",
+   "line": 9929,
+   "nloc": 7
+  },
+  {
+   "name": "globenewswirePlainText",
+   "line": 9937,
+   "nloc": 3
+  },
+  {
+   "name": "fetchCompanyIrText",
+   "line": 10009,
+   "nloc": 19
+  },
+  {
+   "name": "fetchApprovedCompanyIrPage",
+   "line": 10029,
+   "nloc": 37
+  },
+  {
+   "name": "companyIrPageItemBase",
+   "line": 10067,
+   "nloc": 39
+  },
+  {
+   "name": "companyIrPageFeedItems",
+   "line": 10107,
+   "nloc": 29
+  },
+  {
+   "name": "structuredJsonItemArrays",
+   "line": 10137,
+   "nloc": 22
+  },
+  {
+   "name": "companyIrPageStructuredJsonItems",
+   "line": 10160,
+   "nloc": 25
+  },
+  {
+   "name": "companyIrPageHtmlItems",
+   "line": 10186,
+   "nloc": 35
+  },
+  {
+   "name": "collectCompanyIrPageEvents",
+   "line": 10222,
+   "nloc": 84
+  },
+  {
+   "name": "candidateCompanyIrPageUrlGroups",
+   "line": 10308,
+   "nloc": 18
+  },
+  {
+   "name": "extractCompanyIrFeedLinks",
+   "line": 10327,
+   "nloc": 31
+  },
+  {
+   "name": "discoverCompanyIrFeeds",
+   "line": 10361,
+   "nloc": 90
+  },
+  {
+   "name": "parseCompanyIrFeedItems",
+   "line": 10456,
+   "nloc": 13
+  },
+  {
+   "name": "atomEntryLink",
+   "line": 10470,
+   "nloc": 10
+  },
+  {
+   "name": "companyIrFeedItem",
+   "line": 10481,
+   "nloc": 51
+  },
+  {
+   "name": "collectCompanyIrRssEvents",
+   "line": 10533,
+   "nloc": 82
+  },
+  {
+   "name": "buildYfEventItem",
+   "line": 10621,
+   "nloc": 53
+  },
+  {
+   "name": "buildSecEventItem",
+   "line": 10677,
+   "nloc": 65
+  },
+  {
+   "name": "dedupeEventItems",
+   "line": 10743,
+   "nloc": 45
+  },
+  {
+   "name": "collectionStatus",
+   "line": 10789,
+   "nloc": 20
+  },
+  {
+   "name": "computeSourceStatus",
+   "line": 10810,
+   "nloc": 233
+  },
+  {
+   "name": "computeSourceCoverage",
+   "line": 11044,
+   "nloc": 28
+  },
+  {
+   "name": "verifyCoverageFailureMode",
+   "line": 11073,
+   "nloc": 21
+  },
+  {
+   "name": "collectSecEvents",
+   "line": 11095,
+   "nloc": 44
+  },
+  {
+   "name": "normalizeExchange",
+   "line": 11140,
+   "nloc": 10
+  },
+  {
+   "name": "isTickerCompatibleWithContext",
+   "line": 11151,
+   "nloc": 31
+  },
+  {
+   "name": "collectYahooEvents",
+   "line": 11188,
+   "nloc": 84
+  },
+  {
+   "name": "fetchGlobeNewswireFeed",
+   "line": 11274,
+   "nloc": 22
+  },
+  {
+   "name": "collectGlobeNewswireEvents",
+   "line": 11298,
+   "nloc": 112
+  },
+  {
+   "name": "collectFinnhubEvents",
+   "line": 11419,
+   "nloc": 117
+  },
+  {
+   "name": "collectMarketauxEvents",
+   "line": 11537,
+   "nloc": 156
+  },
+  {
+   "name": "marketauxFallbackReason",
+   "line": 11694,
+   "nloc": 38
+  },
+  {
+   "name": "collectCompanyEvents",
+   "line": 11733,
+   "nloc": 217
+  },
+  {
+   "name": "rankNewsItemsByRelevance",
+   "line": 11963,
+   "nloc": 6
+  },
+  {
+   "name": "getCompanyNews",
+   "line": 11970,
+   "nloc": 47
+  },
+  {
+   "name": "searchCompanyNews",
+   "line": 12018,
+   "nloc": 43
+  },
+  {
+   "name": "getCompanyPressReleases",
+   "line": 12062,
+   "nloc": 189
+  },
+  {
+   "name": "getSecRecentEvents",
+   "line": 12258,
+   "nloc": 24
+  },
+  {
+   "name": "getPublicEventTimeline",
+   "line": 12283,
+   "nloc": 49
+  },
+  {
+   "name": "verifyCompanyEvent",
+   "line": 12333,
+   "nloc": 216
+  }
+ ]
+}
