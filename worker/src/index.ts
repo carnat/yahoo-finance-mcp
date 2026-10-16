@@ -4,7 +4,8 @@
  * Exposes a single MCP endpoint using the Streamable HTTP transport
  * (stateless — no Durable Objects required):
  *
- *   POST /mcp   →  MCP JSON-RPC request / batch
+ *   POST /mcp          →  MCP JSON-RPC request / batch
+ *   POST /mcp/<token>  →  the same, with the credential in the path
  *   GET  /      →  health check
  *
  * Connect from Claude Desktop (claude_desktop_config.json):
@@ -20,6 +21,7 @@
  *   Add the URL https://<your-worker>.workers.dev/mcp in Settings → Integrations.
  */
 
+import { resolveCredential, timingSafeEqual } from "./auth.js";
 import { handleMcp } from "./mcp.js";
 import { setEvidenceBucket } from "./evidence-store.js";
 import { getBuildVersion, getServerVersion, setCacheSummaryProvider, setWorkerEnv, getWorkerVar } from "./response.js";
@@ -34,6 +36,8 @@ export interface Env {
   WORKER_VERSION?: string;
   TOOL_MODE?: string;
   AUDIT_TOKEN?: string;
+  MCP_TOKEN?: string;
+  MCP_AUTH_MODE?: string;
   BUILD_SHA?: string;
   DEPLOYED_AT?: string;
   CF_VERSION_METADATA?: WorkerVersionMetadata;
@@ -49,6 +53,35 @@ const CORS_HEADERS: Record<string, string> = {
   "Access-Control-Max-Age": "86400",
   "Access-Control-Expose-Headers": "X-Yahoo-Cache, X-Sec-Cache",
 };
+
+/** Largest accepted request body: 1 MiB. */
+const MAX_BODY_BYTES = 1_048_576;
+/** Most tools/call requests accepted in one JSON-RPC batch. */
+const MAX_TOOL_CALLS_PER_BATCH = 1;
+
+const AUTH_REQUIRED_BODY = {
+  jsonrpc: "2.0",
+  id: null,
+  error: {
+    code: -32001,
+    message: "AUTH_REQUIRED: a valid credential is required (Authorization: Bearer <token> or /mcp/<token>).",
+    data: { code: "AUTH_REQUIRED" },
+  },
+};
+
+function rpcError(status: number, code: number, message: string, dataCode: string): Response {
+  return json({ jsonrpc: "2.0", id: null, error: { code, message, data: { code: dataCode } } }, status);
+}
+
+/** `grace` (the default) serves requests without a credential; anything else enforces. */
+function authEnforced(env: Env): boolean {
+  const mode = typeof env.MCP_AUTH_MODE === "string" ? env.MCP_AUTH_MODE.trim().toLowerCase() : "";
+  return mode !== "" && mode !== "grace";
+}
+
+function isToolCall(message: unknown): boolean {
+  return typeof message === "object" && message !== null && (message as { method?: unknown }).method === "tools/call";
+}
 
 function json(data: unknown, status = 200, extraHeaders: Record<string, string> = {}): Response {
   return new Response(JSON.stringify(data), {
@@ -107,15 +140,28 @@ export default {
       return json(await runAudit());
     }
 
-    // MCP endpoint
-    if (pathname === "/mcp") {
+    // MCP endpoint: /mcp, or /mcp/<token> with the credential in the path
+    const credential = resolveCredential(request, pathname, env);
+    if (credential.route === "mcp") {
+      // Auth first, so an unauthenticated client learns nothing about limits or methods.
+      if (credential.status === "invalid" || (credential.status === "absent" && authEnforced(env))) {
+        return json(AUTH_REQUIRED_BODY, 401, { "WWW-Authenticate": 'Bearer realm="yahoo-finance-mcp"' });
+      }
+
       if (method !== "POST") {
         return new Response("Method Not Allowed", { status: 405, headers: CORS_HEADERS });
       }
 
+      const tooLarge = () =>
+        rpcError(413, -32600, `PAYLOAD_TOO_LARGE: request body exceeds ${MAX_BODY_BYTES} bytes.`, "PAYLOAD_TOO_LARGE");
+      const declaredLength = Number(request.headers.get("Content-Length"));
+      if (Number.isFinite(declaredLength) && declaredLength > MAX_BODY_BYTES) return tooLarge();
+      const text = await request.text();
+      if (new TextEncoder().encode(text).length > MAX_BODY_BYTES) return tooLarge();
+
       let body: unknown;
       try {
-        body = await request.json();
+        body = JSON.parse(text);
       } catch {
         return json(
           { jsonrpc: "2.0", id: null, error: { code: -32700, message: "Parse error" } },
@@ -123,10 +169,23 @@ export default {
         );
       }
 
+      if (Array.isArray(body)) {
+        if (body.length === 0) {
+          return json({ jsonrpc: "2.0", id: null, error: { code: -32600, message: "Invalid Request" } }, 400);
+        }
+        if (body.filter(isToolCall).length > MAX_TOOL_CALLS_PER_BATCH) {
+          return rpcError(
+            400, -32600,
+            `BATCH_LIMIT_EXCEEDED: at most ${MAX_TOOL_CALLS_PER_BATCH} tools/call per request.`,
+            "BATCH_LIMIT_EXCEEDED",
+          );
+        }
+      }
+
       try {
         const authorizationHeaderPresent = (request.headers.get("Authorization") ?? "").trim() !== "";
         const { result, scope } = await withRequestFacts(
-          { authorizationHeaderPresent },
+          { authorizationHeaderPresent, credentialTransport: credential.transport },
           () => withCacheScope(() => handleMcp(body)),
         );
 
@@ -154,17 +213,6 @@ export default {
     return new Response("Not Found", { status: 404 });
   },
 };
-
-/** Constant-time string comparison so the audit token cannot be probed by timing. */
-function timingSafeEqual(a: string, b: string): boolean {
-  const left = new TextEncoder().encode(a);
-  const right = new TextEncoder().encode(b);
-  let diff = left.length ^ right.length;
-  for (let i = 0; i < Math.max(left.length, right.length); i++) {
-    diff |= (left[i] ?? 0) ^ (right[i] ?? 0);
-  }
-  return diff === 0;
-}
 
 async function runAudit(): Promise<Record<string, unknown>> {
   const healthRaw = await callTool("health_check", {});

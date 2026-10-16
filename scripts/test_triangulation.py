@@ -17,6 +17,11 @@ import json
 import sys
 import urllib.request
 
+try:  # Supports direct execution and module-based regression checks.
+    from live_smoke_utils import auth_headers
+except ModuleNotFoundError:
+    from scripts.live_smoke_utils import auth_headers
+
 URL = "https://yahoo-finance-mcp.artinatw.workers.dev/mcp"
 UA = "Mozilla/5.0 (compatible; yahoo-finance-mcp-triangulation/1.0)"
 TICKER = "AAPL"
@@ -32,7 +37,7 @@ def rpc(name: str, args: dict, req_id: int = 1) -> dict:
     req = urllib.request.Request(
         URL,
         data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json", "User-Agent": UA},
+        headers={"Content-Type": "application/json", "User-Agent": UA, **auth_headers()},
         method="POST",
     )
     with urllib.request.urlopen(req, timeout=90) as resp:

@@ -29,7 +29,7 @@ import urllib.error
 import urllib.request
 from typing import Any
 
-from live_smoke_utils import resolve_option_expiration
+from live_smoke_utils import auth_headers, resolve_option_expiration
 
 # Browser-like User-Agent to avoid Cloudflare bot-protection blocking Python-urllib
 _UA = "Mozilla/5.0 (compatible; yahoo-finance-mcp-test/1.0)"
@@ -471,7 +471,7 @@ def _call(url: str, tool: str, args: dict[str, Any]) -> dict[str, Any]:
         req = urllib.request.Request(
             url,
             data=data,
-            headers={"Content-Type": "application/json", "User-Agent": _UA},
+            headers={"Content-Type": "application/json", "User-Agent": _UA, **auth_headers()},
             method="POST",
         )
         try:

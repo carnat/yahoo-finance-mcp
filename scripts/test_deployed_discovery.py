@@ -29,7 +29,7 @@ try:
 except ModuleNotFoundError:  # direct ``python scripts/test_deployed_discovery.py`` execution
     from test_deployed_canaries import health_contract  # type: ignore[no-redef]
 
-from live_smoke_utils import choose_stable_option_expiration
+from live_smoke_utils import auth_headers, choose_stable_option_expiration
 
 URL = "https://yahoo-finance-mcp.artinatw.workers.dev/mcp"
 UA = "Mozilla/5.0 (compatible; yahoo-finance-mcp-deployed-discovery/1.0)"
@@ -155,7 +155,7 @@ def rpc(method: str, params: dict | None = None, req_id: int = 1) -> dict:
         req = urllib.request.Request(
             URL,
             data=data,
-            headers={"Content-Type": "application/json", "User-Agent": UA},
+            headers={"Content-Type": "application/json", "User-Agent": UA, **auth_headers()},
             method="POST",
         )
         try:
@@ -570,7 +570,7 @@ def _post_with_cache_header(name: str, arguments: dict, req_id: int) -> tuple[di
     body = json.dumps({"jsonrpc": "2.0", "id": req_id, "method": "tools/call",
                        "params": {"name": call_name, "arguments": call_args}}).encode("utf-8")
     req = urllib.request.Request(URL, data=body, method="POST",
-                                 headers={"Content-Type": "application/json", "User-Agent": UA})
+                                 headers={"Content-Type": "application/json", "User-Agent": UA, **auth_headers()})
     with urllib.request.urlopen(req, timeout=90) as resp:
         return json.loads(resp.read()), resp.headers.get("X-Yahoo-Cache")
 

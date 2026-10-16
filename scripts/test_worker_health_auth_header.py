@@ -33,7 +33,9 @@ async function health(headers) {
       body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call",
         params: { name: "system", arguments: { action: "health_check", params: {} } } }),
     }),
-    { TOOL_MODE: "grouped" },
+    // MCP_TOKEN matches SECRET so the Bearer header is a valid credential (a header
+    // presented while MCP_TOKEN is unset is rejected with 401 since 2.9.0).
+    { TOOL_MODE: "grouped", MCP_TOKEN: "test-secret-value-123" },
     { waitUntil() {}, passThroughOnException() {} },
   );
   const text = await response.text();

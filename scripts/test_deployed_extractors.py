@@ -22,6 +22,11 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+try:  # Supports direct execution and module-based regression checks.
+    from live_smoke_utils import auth_headers
+except ModuleNotFoundError:
+    from scripts.live_smoke_utils import auth_headers
+
 MCP_URL = os.environ.get("MCP_URL", "https://yahoo-finance-mcp.artinatw.workers.dev/mcp").strip()
 UA = "Mozilla/5.0 (compatible; yahoo-finance-mcp-phase3-extractor-smoke/1.0)"
 _ALLOW_SKIP = os.environ.get("ALLOW_NETWORK_SKIP", "1").lower() in ("1", "true", "yes")
@@ -49,7 +54,7 @@ def rpc(method: str, params: dict | None = None, req_id: int = 1) -> dict:
         req = urllib.request.Request(
             MCP_URL,
             data=data,
-            headers={"Content-Type": "application/json", "User-Agent": UA},
+            headers={"Content-Type": "application/json", "User-Agent": UA, **auth_headers()},
             method="POST",
         )
         try:

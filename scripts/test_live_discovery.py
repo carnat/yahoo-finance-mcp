@@ -7,7 +7,7 @@ import sys
 import urllib.request
 from typing import Any
 
-from live_smoke_utils import resolve_option_expiration
+from live_smoke_utils import auth_headers, resolve_option_expiration
 
 DEFAULT_URL = "https://yahoo-finance-mcp.artinatw.workers.dev/mcp"
 _UA = "Mozilla/5.0 (compatible; yahoo-finance-mcp-live-discovery/1.0)"
@@ -22,7 +22,7 @@ def _rpc(url: str, method: str, params: dict[str, Any] | None = None, req_id: in
     req = urllib.request.Request(
         url,
         data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json", "User-Agent": _UA},
+        headers={"Content-Type": "application/json", "User-Agent": _UA, **auth_headers()},
         method="POST",
     )
     with urllib.request.urlopen(req, timeout=60) as resp:
