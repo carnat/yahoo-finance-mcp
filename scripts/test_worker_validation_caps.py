@@ -45,11 +45,11 @@ GROUP_OF = {action: group for group, spec in CATALOG["groups"].items() for actio
 
 
 def _expectations() -> dict[str, object]:
-    """label -> expected gate view, from the parity cases' Worker expectations."""
+    """label -> expected gate view, from the parity cases' (mode equal) expectations."""
     out: dict[str, object] = {}
     for case in VALIDATION_CASES + CAP_CASES:
-        if isinstance(case.expect_ts, dict) and case.name.startswith(("validation.gate.", "caps.every", "caps.company")):
-            out.update(case.expect_ts)
+        if isinstance(case.expect, dict) and case.name.startswith(("validation.gate.", "caps.every", "caps.company")):
+            out.update(case.expect)
     return out
 
 

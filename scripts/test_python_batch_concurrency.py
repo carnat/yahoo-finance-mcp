@@ -84,13 +84,14 @@ class TestPythonBatchConcurrency(unittest.TestCase):
                 self.assertEqual(sorted(call[1:] for call in probe.calls), [extra] * len(TICKERS))
 
     def test_market_snapshot_batch(self) -> None:
-        result, probe, elapsed = self._run_batch("get_market_snapshot", ("compact", False), TICKERS + ["EXTRA"])
+        result, probe, elapsed = self._run_batch("get_market_snapshot", ("compact", False), TICKERS)
         self.assertEqual(probe.peak, 3)
         self.assertLess(elapsed, 1.2)
         self.assertEqual(list(result["tickers"]), TICKERS)
         self.assertEqual(result["tickers"]["FAIL"], {"error": True, "message": "provider exploded"})
-        self.assertEqual(result["droppedTickers"], ["EXTRA"])
-        self.assertTrue(result["truncated"])
+        # Nothing is truncated any more (2.12.0): over-cap requests are rejected by the tool-call gate, and an
+        # in-cap response carries no truncated/droppedTickers keys.
+        self.assertEqual(list(result), ["tickers"])
 
 
 # Batch tools defined in server.py (tool, extra positional args after ticker).

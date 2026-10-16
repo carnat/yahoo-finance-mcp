@@ -4,12 +4,9 @@ Worker side: `validateToolArgs(action, args)` in worker/src/tools.ts, the one ga
 handler code or fetch (it returns the failure envelope text, or null when the call may proceed), and
 `validateAccession` in worker/src/validate.ts.
 
-Python side: `_validate_accession` (yfmcp/validation.py) exists today, so the function-level accession cases are mode
-"equal". The Python gate does not exist yet: `_py_gate` looks for `yfmcp.validation.validate_tool_args(action, args)`
-(same contract as the Worker's `validateToolArgs`: the failure envelope JSON text, or None) and reports
-PYTHON_GATE_PENDING while it is missing.
-TODO(python-mirror): add the Python gate, then flip every case pinned under GATE_DECISION to mode "equal" with its
-`expect_ts` as `expect`.
+Python side: `_validate_accession` and `validate_tool_args(action, args)` (yfmcp/validation.py; the same contract as
+the Worker's `validateToolArgs`: the failure envelope JSON text, or None). Python runs the gate in the yfmcp.app tool
+wrapper (expanded mode) and in tool_groups._route_grouped_call (grouped mode); every case here is mode "equal".
 
 No case here touches the network: the gate rejects before any fetch, and a passing call is only checked, not run.
 """
@@ -20,12 +17,10 @@ import copy
 import json
 
 from scripts.parity.harness import Case
-from yfmcp.validation import _validate_accession
+from yfmcp.validation import _validate_accession, validate_tool_args
 
 CASES: list[Case] = []
 
-GATE_DECISION = "Q3b TODO(python-mirror)"
-PY_PENDING = "PYTHON_GATE_PENDING"
 PASS = "PASS"
 
 TICKER_MSG = "Invalid ticker symbol: '{}'. Must be 1-20 characters: uppercase letters, digits, or . - ^ ="
@@ -34,10 +29,6 @@ VALID_ACC = "0000320193-24-000123"
 
 
 def _py_gate(rows):
-    try:
-        from yfmcp.validation import validate_tool_args  # type: ignore[attr-defined]  # TODO(python-mirror)
-    except ImportError:
-        return PY_PENDING
     return {label: validate_tool_args(action, copy.deepcopy(args)) for label, action, args in rows}
 
 
@@ -52,14 +43,13 @@ def gate_view(v):
             "retryable": meta.get("retryable")}
 
 
-def gate_case(name: str, ids: list[str], rows: list[tuple[str, str, dict]], expect_ts: dict, note: str = "") -> Case:
+def gate_case(name: str, ids: list[str], rows: list[tuple[str, str, dict]], expect: dict, note: str = "") -> Case:
     """One table of (label, public action, args) through the gate in both runtimes."""
     js = ("const out = {};\n"
           f"for (const [label, action, a] of {json.dumps([list(r) for r in rows])}) out[label] = m.tools.validateToolArgs(action, a);\n"
           "return out;")
     return Case(name=name, ids=ids, py=lambda: _py_gate(rows), ts={"js": js},
-                select=lambda v: v if v == PY_PENDING else {k: gate_view(x) for k, x in v.items()},
-                mode="pinned", decision=GATE_DECISION, expect_py=PY_PENDING, expect_ts=expect_ts, note=note)
+                select=lambda v: {k: gate_view(x) for k, x in v.items()}, expect=expect, note=note)
 
 
 def reject(action: str, message: str) -> dict:
@@ -68,9 +58,7 @@ def reject(action: str, message: str) -> dict:
 
 # ── Function level: validateAccession mirrors _validate_accession exactly (message included) ────────────────────
 ACCESSION_INPUTS = [VALID_ACC, f"  {VALID_ACC}\n", "000032019324000123", "320193-24-123", "", "0000320193-24-00012a"]
-# Accession digits are ASCII only (2.12.0 planner decision). Python's str-pattern \d still accepts any Unicode
-# decimal digit. TODO(python-mirror): narrow Python to [0-9], then flip the Unicode case to mode "equal" with
-# expect_ts as `expect`.
+# Accession digits are ASCII only (2.12.0 planner decision): both runtimes reject other Unicode decimal digits.
 UNICODE_ACC = "٠" * 10 + "-" + "٠" * 2 + "-" + "٠" * 6
 CASES += [
     Case(name="validation.accession.function_mirrors_python_exactly", ids=["BR-ENV-005"],
@@ -81,8 +69,7 @@ CASES += [
     Case(name="validation.accession.unicode_digits_are_rejected", ids=["BR-ENV-005"],
          py=lambda: _validate_accession(UNICODE_ACC),
          ts={"js": f"return m.validate.validateAccession({json.dumps(UNICODE_ACC)});"},
-         mode="pinned", decision="Q3b TODO(python-mirror)",
-         expect_py=None, expect_ts=ACCESSION_MSG.format(UNICODE_ACC)),
+         expect=ACCESSION_MSG.format(UNICODE_ACC)),
 ]
 
 # ── The gate: tickers (string or each array element), subject, peers, tickers ───────────────────────────────────

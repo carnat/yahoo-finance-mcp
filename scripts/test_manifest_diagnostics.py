@@ -482,21 +482,28 @@ class TestMarketSnapshotSchema(unittest.TestCase):
         result = json.loads(_run(self.srv.get_market_snapshot("ASTS", mode="compact")))
         self.assertNotIn("_components", result)
 
-    def test_batch_compact_respects_cap(self):
-        self._mock_all_components(self.srv)
-        tickers = ["ASTS", "VRT", "AAPL", "MSFT", "GOOG", "TSLA"]
-        result = json.loads(_run(self.srv.get_market_snapshot(tickers, mode="compact")))
-        self.assertIn("tickers", result)
-        self.assertLessEqual(len(result["tickers"]), 5)
-        self.assertTrue(result.get("truncated", False))
+    def test_batch_compact_is_capped_by_the_gate_and_never_truncated(self):
+        from yfmcp.validation import validate_tool_args
 
-    def test_batch_full_respects_cap(self):
         self._mock_all_components(self.srv)
-        tickers = ["ASTS", "VRT", "AAPL"]
+        tickers = ["ASTS", "VRT", "AAPL", "MSFT", "GOOG"]
+        result = json.loads(_run(self.srv.get_market_snapshot(tickers, mode="compact")))
+        self.assertEqual(list(result), ["tickers"])  # no truncated/droppedTickers keys (2.12.0)
+        self.assertEqual(list(result["tickers"]), tickers)
+        failure = json.loads(validate_tool_args("get_market_snapshot", {"ticker": tickers + ["TSLA"], "mode": "compact"}))
+        self.assertEqual(failure["error"]["code"], "BATCH_LIMIT_EXCEEDED")
+        self.assertEqual(failure["error"]["message"], "Too many tickers: 6. Maximum is 5 per call for get_market_snapshot.")
+
+    def test_batch_full_is_capped_by_the_gate_and_never_truncated(self):
+        from yfmcp.validation import validate_tool_args
+
+        self._mock_all_components(self.srv)
+        tickers = ["ASTS", "VRT", "AAPL", "MSFT", "GOOG"]
         result = json.loads(_run(self.srv.get_market_snapshot(tickers, mode="full")))
-        self.assertIn("tickers", result)
-        self.assertLessEqual(len(result["tickers"]), 2)
-        self.assertTrue(result.get("truncated", False))
+        self.assertEqual(list(result), ["tickers"])
+        self.assertEqual(list(result["tickers"]), tickers)
+        failure = json.loads(validate_tool_args("get_market_snapshot", {"ticker": tickers + ["TSLA"], "mode": "full"}))
+        self.assertEqual(failure["error"]["message"], "Too many tickers: 6. Maximum is 5 per call for get_market_snapshot.")
 
 
 # ---------------------------------------------------------------------------

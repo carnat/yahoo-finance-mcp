@@ -26,7 +26,7 @@ from pydantic import Field
 
 # Phase 2b: yfmcp.app owns the FastMCP compat shim, yfinance_server instance, and
 # build_handler_registry.  Import first so the compat shim fires before any decorator runs.
-from yfmcp.app import create_server, yfinance_server, build_handler_registry, reseat_tool_registration
+from yfmcp.app import apply_ticker_caps, create_server, yfinance_server, build_handler_registry, reseat_tool_registration
 from yfmcp.schemas import (
     FinancialType, HolderType, RecommendationType, FilingFactType,
     _TOOL_OUTPUT_SCHEMAS, _MARKET_SNAPSHOT_OUTPUT_SCHEMA,
@@ -9189,6 +9189,9 @@ async def list_evidence_cuts(ticker: str, limit: int = 20) -> str:
 #   - "expanded": all 79 individual tools (compatibility/debug mode)
 # ---------------------------------------------------------------------------
 _TOOL_MODE = os.environ.get("TOOL_MODE", "grouped").lower().strip()
+
+# Every expanded tool is registered by here: advertise tool_catalog.json tickerCaps as maxItems (2.12.0, Q3c).
+apply_ticker_caps(yfinance_server)
 
 
 def _build_grouped_server():

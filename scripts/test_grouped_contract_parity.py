@@ -112,9 +112,6 @@ class TestGroupedContractParity(unittest.TestCase):
         advertised = {action.split(".", 1)[1]: v["tickerMaxItems"] for action, v in worker.items() if v["tickerMaxItems"] is not None}
         self.assertEqual(advertised, {k: v for k, v in caps.items() if "." not in k})
 
-    # TODO(python-mirror): Python's grouped schemas gain max_length from tool_catalog.json tickerCaps (2.12.0, Q3c);
-    # remove expectedFailure then (an unexpected success fails the run until it is removed).
-    @unittest.expectedFailure
     def test_every_grouped_action_has_the_same_ticker_max_items(self) -> None:
         worker = _worker_grouped_schemas()
         local = _python_grouped_schemas()

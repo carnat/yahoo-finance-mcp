@@ -5,10 +5,8 @@ rejected by the tool-call gate with BATCH_LIMIT_EXCEEDED before any fetch; nothi
 get_company_news is capped at 1 when `sources` names company_ir, company_ir_page or newswire, and
 get_market_snapshot uses its "get_market_snapshot.full" entry when mode is "full".
 
-Worker side: `validateToolArgs` (worker/src/tools.ts) and the expanded tool listing. Python side: see
-cases_validation.py (`_py_gate`, PYTHON_GATE_PENDING) for the gate; the schema case reads Python's own listing.
-TODO(python-mirror): add the Python gate and schema max_length, then flip every case pinned under CAPS_DECISION to
-mode "equal" with its `expect_ts` as `expect`.
+Worker side: `validateToolArgs` (worker/src/tools.ts) and the expanded tool listing. Python side: `validate_tool_args`
+(see cases_validation.py `_py_gate`) and Python's own expanded listing, whose ticker array branch carries maxItems.
 """
 
 from __future__ import annotations
@@ -17,12 +15,11 @@ import asyncio
 import json
 from pathlib import Path
 
-from scripts.parity.cases_validation import PASS, PY_PENDING, _py_gate, gate_view
+from scripts.parity.cases_validation import PASS, _py_gate, gate_view
 from scripts.parity.harness import Case
 
 CASES: list[Case] = []
 
-CAPS_DECISION = "Q3c TODO(python-mirror)"
 TICKER_CAPS: dict[str, int] = json.loads(
     (Path(__file__).resolve().parents[2] / "tool_catalog.json").read_text(encoding="utf-8"))["tickerCaps"]
 POOL = ["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "BRK-B", "AVGO", "TSLA", "JPM", "LLY", "V", "UNH", "XOM",
@@ -34,13 +31,12 @@ def over(action: str, n: int, cap: int) -> dict:
             "tool": action, "retryable": False}
 
 
-def caps_case(name: str, ids: list[str], rows: list[tuple[str, str, dict]], expect_ts: dict) -> Case:
+def caps_case(name: str, ids: list[str], rows: list[tuple[str, str, dict]], expect: dict) -> Case:
     js = ("const out = {};\n"
           f"for (const [label, action, a] of {json.dumps([list(r) for r in rows])}) out[label] = m.tools.validateToolArgs(action, a);\n"
           "return out;")
     return Case(name=name, ids=ids, py=lambda: _py_gate(rows), ts={"js": js},
-                select=lambda v: v if v == PY_PENDING else {k: gate_view(x) for k, x in v.items()},
-                mode="pinned", decision=CAPS_DECISION, expect_py=PY_PENDING, expect_ts=expect_ts)
+                select=lambda v: {k: gate_view(x) for k, x in v.items()}, expect=expect)
 
 
 def _action_args(key: str, n: int) -> tuple[str, dict]:
@@ -135,6 +131,5 @@ return out;
 SCHEMA_CAPS = {k: v for k, v in TICKER_CAPS.items() if "." not in k}
 CASES += [
     Case(name="caps.schema_max_items_match_ticker_caps", ids=["Q3c"], py=_py_listing_caps, ts={"js": _TS_LISTING},
-         mode="pinned", decision=CAPS_DECISION, expect_py={}, expect_ts=SCHEMA_CAPS,
-         note="Python schemas carry no max_length yet."),
+         expect=SCHEMA_CAPS),
 ]

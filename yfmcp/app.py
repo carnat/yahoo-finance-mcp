@@ -24,6 +24,7 @@ except ImportError:  # mcp 1.x
 from yfmcp.build_info import BUILD_VERSION
 from yfmcp import url_policy
 from yfmcp.envelope import _budget_guarded_result, _envelope_tool_result
+from yfmcp.validation import validate_tool_args
 
 try:
     from mcp.types import ToolAnnotations
@@ -104,6 +105,16 @@ def _fastmcp_tool_compat(self: FastMCP, *args: Any, **kwargs: Any) -> Any:
     return decorator
 
 
+def _call_arguments(fn: Callable[..., Any], args: tuple, kwargs: dict[str, Any]) -> dict[str, Any]:
+    """The call's arguments by parameter name, for the tool-call gate."""
+    if not args:
+        return kwargs
+    try:
+        return dict(inspect.signature(fn).bind_partial(*args, **kwargs).arguments)
+    except TypeError:
+        return kwargs
+
+
 def _offload_to_thread(fn: Callable[..., Any], tool_name: str) -> Callable[..., Any]:
     """Run each MCP invocation of an async tool on a worker thread.
 
@@ -121,7 +132,13 @@ def _offload_to_thread(fn: Callable[..., Any], tool_name: str) -> Callable[..., 
 
     def run(*args: Any, **kwargs: Any) -> Any:
         with url_policy.invocation_scope():
-            result = _envelope_tool_result(tool_name, asyncio.run(fn(*args, **kwargs)))
+            # The tool-call gate (2.12.0, Q3b/Q3c): central ticker/accession validation and per-tool ticker caps,
+            # before any handler code or fetch. Grouped dispatch runs it in tool_groups._route_grouped_call.
+            gate_failure = validate_tool_args(tool_name, _call_arguments(fn, args, kwargs))
+            if gate_failure is not None:
+                result = _envelope_tool_result(tool_name, gate_failure)
+            else:
+                result = _envelope_tool_result(tool_name, asyncio.run(fn(*args, **kwargs)))
             return _budget_guarded_result(
                 tool_name,
                 result,
@@ -167,7 +184,7 @@ yfinance_server = create_server(
 This server provides financial market data from Yahoo Finance and SEC EDGAR via canonical tool names.
 
 ## Tool selection guidance
-- **Prefer `get_market_snapshot`** for a one-call market overview (price, range, MA trend, volume, RSI, MACD, liquidity gate, freshness). Supports compact (max 5 tickers) and full (max 2 tickers) modes.
+- **Prefer `get_market_snapshot`** for a one-call market overview (price, range, MA trend, volume, RSI, MACD, liquidity gate, freshness). Supports compact and full modes (max 5 tickers per call in either).
 - **Prefer `get_market_quote`** over `get_company_profile` for current price, market cap, 52-week range, or moving averages — it returns ~20 fields instead of 120+ and uses far fewer tokens.
 - Use `get_company_profile` only when you need deep fundamentals, business description, or fields not in get_market_quote. For ETFs or mutual funds, use `get_fund_profile` instead.
 - **Prefer `analyze_financial_ratios`** over fetching full financial statements when you need current ratios; request history_periods only for valuation history.
@@ -191,7 +208,7 @@ This server provides financial market data from Yahoo Finance and SEC EDGAR via 
 ## Available tools
 
 ### Snapshot & diagnostics
-- get_market_snapshot: One-call market-state packet: price, range, MA trend, volume, RSI, MACD, liquidity gate, freshness. Compact (default, max 5 tickers) or full (max 2) modes.
+- get_market_snapshot: One-call market-state packet: price, range, MA trend, volume, RSI, MACD, liquidity gate, freshness. Compact (default) or full modes, max 5 tickers per call.
 - health_check: Public-safe MCP availability, release/build identity, schema identity, tool mode, and connector-freshness metadata.
 
 ### Price & market data
@@ -359,3 +376,33 @@ def reseat_tool_registration(server: FastMCP, name: str, after: str) -> None:
     ordered.insert(position, (name, moved))
     tools.clear()
     tools.update(ordered)
+
+
+def apply_ticker_caps(*servers: FastMCP) -> None:
+    """Advertise each capped action's tool_catalog.json tickerCaps entry as ``maxItems`` on its ticker array branch.
+
+    The listing schema only: the pydantic argument model is untouched, so an oversize array still reaches the
+    tool-call gate and gets BATCH_LIMIT_EXCEEDED. get_market_snapshot advertises its compact cap; the full-mode
+    cap is enforced by the gate (as in the Worker). Call once every tool is registered and before the grouped
+    contract registry is built.
+    """
+    from yfmcp.validation import TICKER_CAPS
+
+    for key, cap in TICKER_CAPS.items():
+        if "." in key:
+            continue
+        for server in servers:
+            manager = getattr(server, "_tool_manager", None)
+            tools = getattr(manager, "_tools", None) if manager is not None else None
+            tool = (tools or {}).get(key)
+            if tool is None:  # not registered on this server (a partially re-imported module set)
+                continue
+            parameters = getattr(tool, "parameters", None)
+            ticker = parameters.get("properties", {}).get("ticker") if isinstance(parameters, dict) else None
+            array_branch = next(
+                (b for b in (ticker or {}).get("anyOf", []) + (ticker or {}).get("oneOf", []) if b.get("type") == "array"),
+                None,
+            )
+            if array_branch is None:
+                raise RuntimeError(f"tickerCaps names '{key}', which has no ticker array schema")
+            array_branch["maxItems"] = cap

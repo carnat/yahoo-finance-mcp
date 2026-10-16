@@ -1385,6 +1385,11 @@ _SIX_TICKERS = ["AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOG"]
 _VALIDATION_ROUTES = {SEC_TICKERS_URL: {"json": {}}}
 
 
+async def _gated_tool(name, args):
+    """The registered Python tool, i.e. through the tool-call gate (yfmcp.app wrapper); returns the envelope text."""
+    return await server.yfinance_server._tool_manager._tools[name].fn(**args)
+
+
 def _alias_py():
     with _py_news_env(news=[], info={}):
         return json.loads(asyncio.run(server.get_yahoo_finance_news("AAPL")))
@@ -1434,18 +1439,15 @@ CASES += [
                    "get_company_press_releases_dollar": ["INPUT_VALIDATION_ERROR", _INVALID_TICKER_MSG.format("AAPL$")],
                    "get_public_event_timeline_dollar": ["INPUT_VALIDATION_ERROR", _INVALID_TICKER_MSG.format("AAPL$")],
                 "get_sec_recent_events_dollar": ["INPUT_VALIDATION_ERROR", _INVALID_TICKER_MSG.format("AAPL$")]}),
-    # Card 204 (Q3c, 2.12.0): six tickers is over get_company_news's cap of 5; the Worker's tool-call gate rejects it with
-    # BATCH_LIMIT_EXCEEDED. Python fetches all six (three at a time). TODO(python-mirror): once the Python gate runs on this
-    # path, flip to mode "equal" with expect_ts as `expect`.
+    # Card 204 (Q3c, 2.12.0): six tickers is over get_company_news's cap of 5; the tool-call gate rejects it with
+    # BATCH_LIMIT_EXCEEDED in both runtimes (Python through the registered, gated tool wrapper), before any fetch.
     _multi_scenario(
-        "news.validation.batch_of_six_tickers_runs_in_python_and_fails_in_the_worker", ["BR-NWS-204", "BR-NWS-275"],
-        [("six", lambda: server.get_company_news(_SIX_TICKERS, 10, 14, []), _call_tool("get_company_news", {"ticker": _SIX_TICKERS, "sources": []})),
-         ("five", lambda: server.get_company_news(_SIX_TICKERS[:5], 10, 14, []), _call_tool("get_company_news", {"ticker": _SIX_TICKERS[:5], "sources": []}))],
-        news=[], info={}, select=_tool_outcome, mode="pinned", decision="Q3c TODO(python-mirror)",
-        expect_py={"six": {"batch": {t: [t, _NO_NEWS_STATUS] for t in _SIX_TICKERS}},
-                   "five": {"batch": {t: [t, _NO_NEWS_STATUS] for t in _SIX_TICKERS[:5]}}},
-        expect_ts={"six": ["BATCH_LIMIT_EXCEEDED", "Too many tickers: 6. Maximum is 5 per call for get_company_news."],
-                   "five": {"batch": {t: [t, _NO_NEWS_STATUS] for t in _SIX_TICKERS[:5]}}}),
+        "news.validation.batch_of_six_tickers_is_rejected_over_the_cap_in_both_runtimes", ["BR-NWS-204", "BR-NWS-275"],
+        [("six", lambda: _gated_tool("get_company_news", {"ticker": _SIX_TICKERS, "sources": []}), _call_tool("get_company_news", {"ticker": _SIX_TICKERS, "sources": []})),
+         ("five", lambda: _gated_tool("get_company_news", {"ticker": _SIX_TICKERS[:5], "sources": []}), _call_tool("get_company_news", {"ticker": _SIX_TICKERS[:5], "sources": []}))],
+        news=[], info={}, select=_tool_outcome,
+        expect={"six": ["BATCH_LIMIT_EXCEEDED", "Too many tickers: 6. Maximum is 5 per call for get_company_news."],
+                "five": {"batch": {t: [t, _NO_NEWS_STATUS] for t in _SIX_TICKERS[:5]}}}),
     # Card 271: get_yahoo_finance_news is a Python alias of get_company_news with a fixed source list (no Marketaux); the Worker has no such tool.
     Case(name="news.validation.get_yahoo_finance_news_alias_exists_in_python_only", ids=["BR-NWS-271"],
          py=lambda: _alias_py(),

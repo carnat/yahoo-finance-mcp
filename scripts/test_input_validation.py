@@ -6,6 +6,7 @@ Run: PYTHONPATH=. python scripts/test_phase3.py
 """
 
 import asyncio
+import json
 import os
 import sys
 import unittest
@@ -50,6 +51,98 @@ class TestAccessionValidation(unittest.TestCase):
     def test_invalid_accession_format(self):
         for bad in ["bad-accession", "1234567890-12-123456-extra", "AAPL", ""]:
             self.assertIsNotNone(srv._validate_accession(bad), f"Expected '{bad}' to be invalid")
+
+
+    def test_accession_digits_are_ascii_only(self):
+        self.assertIsNotNone(srv._validate_accession("٠" * 10 + "-" + "٠" * 2 + "-" + "٠" * 6))
+
+
+class TestToolCallGate(unittest.TestCase):
+    """The tool-call gate (2.12.0, Q3b/Q3c): rejects before any handler code or fetch, in both tool modes."""
+
+    @staticmethod
+    def _expanded(name, **args):
+        fn = srv.yfinance_server._tool_manager._tools[name].fn
+        with patch.object(srv.yf, "Ticker", side_effect=AssertionError("fetched")) as ticker:
+            out = json.loads(asyncio.run(fn(**args)))
+        return out, ticker
+
+    @staticmethod
+    def _grouped(group, action, params):
+        from tool_groups import _route_grouped_call
+        from yfmcp.app import build_handler_registry
+
+        registry = build_handler_registry(srv.yfinance_server)
+        with patch.object(srv.yf, "Ticker", side_effect=AssertionError("fetched")) as ticker:
+            out = json.loads(asyncio.run(_route_grouped_call(group, action, params, registry)))
+        return out, ticker
+
+    def test_expanded_rejects_bad_symbol_with_raw_echo_before_any_fetch(self):
+        out, ticker = self._expanded("get_market_quote", ticker=["AAPL", " brk/b "])
+        self.assertEqual(out["error"]["code"], "INPUT_VALIDATION_ERROR")
+        self.assertEqual(out["meta"]["tool"], "get_market_quote")
+        self.assertIn("' brk/b '", out["error"]["message"])
+        ticker.assert_not_called()
+
+    def test_expanded_cap_plus_one_is_batch_limit_exceeded_before_any_fetch(self):
+        out, ticker = self._expanded("get_market_quote", ticker=[f"T{i}" for i in range(11)])
+        self.assertEqual(out["error"], {"code": "BATCH_LIMIT_EXCEEDED", "message": "Too many tickers: 11. Maximum is 10 per call for get_market_quote."})
+        self.assertIs(out["meta"]["retryable"], False)
+        ticker.assert_not_called()
+
+    def test_cap_is_checked_before_the_symbol_format(self):
+        out, _ = self._expanded("get_market_quote", ticker=["BAD$"] * 11)
+        self.assertEqual(out["error"]["code"], "BATCH_LIMIT_EXCEEDED")
+
+    def test_grouped_mode_runs_the_same_gate(self):
+        out, ticker = self._grouped("stock_pricing", "get_market_quote", {"ticker": [f"T{i}" for i in range(11)]})
+        self.assertEqual(out["error"]["code"], "BATCH_LIMIT_EXCEEDED")
+        self.assertEqual(out["meta"]["tool"], "get_market_quote")
+        out, ticker = self._grouped("stock_pricing", "get_market_quote", {"ticker": "BRK/B"})
+        self.assertEqual(out["error"]["code"], "INPUT_VALIDATION_ERROR")
+        ticker.assert_not_called()
+
+    def test_grouped_accession_is_checked_at_the_gate(self):
+        out, ticker = self._grouped("sec_filings", "get_sec_filing_index", {"ticker": "AAPL", "accession_number": "000032019324000123"})
+        self.assertEqual(out["error"]["code"], "INPUT_VALIDATION_ERROR")
+        self.assertIn("Invalid accession number", out["error"]["message"])
+
+    def test_news_with_single_issuer_sources_is_capped_at_one(self):
+        out, _ = self._expanded("get_company_news", ticker=["AAPL", "MSFT"], sources=[" NewsWire "])
+        self.assertEqual(out["error"]["message"], "Too many tickers: 2. Maximum is 1 per call for get_company_news.")
+
+    def test_snapshot_full_mode_uses_its_own_cap_entry(self):
+        from yfmcp.validation import TICKER_CAPS, validate_tool_args
+
+        over = TICKER_CAPS["get_market_snapshot.full"] + 1
+        failure = json.loads(validate_tool_args("get_market_snapshot", {"ticker": ["A"] * over, "mode": "full"}))
+        self.assertEqual(failure["error"]["code"], "BATCH_LIMIT_EXCEEDED")
+        self.assertIsNone(validate_tool_args("get_market_snapshot", {"ticker": ["A"] * TICKER_CAPS["get_market_snapshot.full"], "mode": "full"}))
+
+    def test_blank_and_non_string_values_are_left_to_the_handler(self):
+        from yfmcp.validation import validate_tool_args
+
+        for args in ({"ticker": ""}, {"ticker": "  "}, {"ticker": ["AAPL", ""]}, {"ticker": 123}, {"ticker": None}, {}):
+            self.assertIsNone(validate_tool_args("get_market_quote", args), args)
+        self.assertIsNone(validate_tool_args("get_sec_filing_index", {"ticker": "AAPL", "accession_number": ""}))
+
+    def test_listing_advertises_ticker_caps_as_max_items(self):
+        from yfmcp.validation import TICKER_CAPS
+
+        tools = {t.name: t for t in asyncio.run(srv.yfinance_server.list_tools())}
+        for key, cap in TICKER_CAPS.items():
+            if "." in key:
+                continue
+            schema = getattr(tools[key], "input_schema", None) or getattr(tools[key], "inputSchema", None)
+            branches = schema["properties"]["ticker"]["anyOf"]
+            self.assertEqual(next(b for b in branches if b.get("type") == "array")["maxItems"], cap, key)
+
+    def test_grouped_shape_checker_enforces_array_length(self):
+        from tool_groups import _matches_annotation
+
+        self.assertTrue(_matches_annotation(["A"] * 5, str | list[str], 5))
+        self.assertFalse(_matches_annotation(["A"] * 6, str | list[str], 5))
+        self.assertTrue(_matches_annotation("A", str | list[str], 5))
 
 
 class TestSecUrlValidation(unittest.TestCase):
@@ -148,7 +241,7 @@ class TestSecDocumentUrlGuard(unittest.TestCase):
 if __name__ == "__main__":
     loader = unittest.TestLoader()
     suite = unittest.TestSuite()
-    for cls in [TestTickerValidation, TestAccessionValidation,
+    for cls in [TestTickerValidation, TestAccessionValidation, TestToolCallGate,
                 TestSecUrlValidation, TestHtmlSanitization, TestSecCikResolutionFallbacks]:
         suite.addTests(loader.loadTestsFromTestCase(cls))
     runner = unittest.TextTestRunner(verbosity=2)

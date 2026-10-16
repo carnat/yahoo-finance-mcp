@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Literal, Union, get_args, get_origin, get_type_hints
 
 from yfmcp.envelope import ErrorCode, _envelope_tool_result, _mcp_failure
+from yfmcp.validation import TICKER_CAPS, ticker_cap_failure, validate_tool_args
 
 
 _CATALOG_PATH = Path(__file__).with_name("tool_catalog.json")
@@ -49,7 +50,8 @@ def _is_empty_required_value(value: Any) -> bool:
     return False
 
 
-def _matches_annotation(value: Any, annotation: Any) -> bool:
+def _matches_annotation(value: Any, annotation: Any, max_items: int | None = None) -> bool:
+    """Type check for the grouped boundary; ``max_items`` is the schema maxItems of an array branch (2.12.0)."""
     if annotation in (Any, inspect.Parameter.empty):
         return True
     if annotation is None or annotation is type(None):
@@ -57,11 +59,13 @@ def _matches_annotation(value: Any, annotation: Any) -> bool:
     origin = get_origin(annotation)
     args = get_args(annotation)
     if origin in (Union, types.UnionType):
-        return any(_matches_annotation(value, option) for option in args)
+        return any(_matches_annotation(value, option, max_items) for option in args)
     if origin is Literal:
         # ponytail: grouped boundary checks type; handlers own semantic values.
         return any(_matches_annotation(value, type(option)) for option in args)
     if origin is list:
+        if isinstance(value, list) and max_items is not None and len(value) > max_items:
+            return False
         return isinstance(value, list) and (
             not args or all(_matches_annotation(item, args[0]) for item in value)
         )
@@ -234,6 +238,10 @@ async def _route_grouped_call(
         params = {}
     if not isinstance(params, dict):
         return _input_failure(action, "params must be an object when provided.")
+    # Ticker caps come before the shape check, as in the Worker (2.12.0, Q3c).
+    cap_failure = ticker_cap_failure(action, params)
+    if cap_failure is not None:
+        return cap_failure
 
     try:
         handler = _resolve_handler(handler_name, handler_registry)
@@ -272,7 +280,12 @@ async def _route_grouped_call(
         name
         for name, value in params.items()
         if name in parameters
-        and not _matches_annotation(value, type_hints.get(name, parameters[name].annotation))
+        and not _matches_annotation(
+            value,
+            type_hints.get(name, parameters[name].annotation),
+            # The ticker array's schema maxItems comes from tool_catalog.json tickerCaps (2.12.0, Q3c).
+            TICKER_CAPS.get(action) if name == "ticker" else None,
+        )
     )
     invalid = sorted(set(empty + invalid_types))
     if missing or invalid or unexpected:
@@ -304,6 +317,10 @@ async def _route_grouped_call(
             invalid_params=sorted(params),
             expected_params=expected,
         )
+    # The tool-call gate (2.12.0, Q3b/Q3c) runs before any handler code or fetch, as expanded mode's wrapper does.
+    gate_failure = validate_tool_args(action, params)
+    if gate_failure is not None:
+        return gate_failure
     result = handler(*bound.args, **bound.kwargs)
     if inspect.isawaitable(result):
         result = await result
