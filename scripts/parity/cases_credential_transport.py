@@ -15,6 +15,7 @@ import json
 from scripts.parity.harness import Case
 
 import server  # noqa: F401,E402
+from yfmcp.schemas import _MANIFEST_DIAGNOSTICS_OUTPUT_SCHEMA  # noqa: E402
 
 CASES: list[Case] = []
 
@@ -49,9 +50,10 @@ CASES += [
 
 
 def _py_contract() -> dict:
+    # The registered schema, not the listing's: FastMCP wraps a listed output schema in a {"result": string} object.
     tool = next(t for t in asyncio.run(server.yfinance_server.list_tools()) if t.name == "health_check")
     return {
-        "schema": tool.output_schema["properties"]["credentialTransport"],
+        "schema": _MANIFEST_DIAGNOSTICS_OUTPUT_SCHEMA["properties"]["credentialTransport"],
         "hasSentence": tool.description.endswith(DESCRIPTION_SENTENCE),
-        "additionalProperties": tool.output_schema["additionalProperties"],
+        "additionalProperties": _MANIFEST_DIAGNOSTICS_OUTPUT_SCHEMA["additionalProperties"],
     }
