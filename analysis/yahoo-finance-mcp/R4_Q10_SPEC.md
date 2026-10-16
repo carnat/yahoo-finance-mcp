@@ -82,7 +82,7 @@ The point is written once, in `worker/src/index.ts`, after the response is built
 
 ## 4. Export (baseline capture)
 
-- **`scripts/export_telemetry.py` (new).** It needs `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_TELEMETRY_TOKEN`, a token with **Account Analytics: Read** plus **Workers Observability: Read**. It queries:
+- **`scripts/export_telemetry.py` (new).** It needs `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_TELEMETRY_TOKEN`, a token with **Account Analytics: Read** plus **Workers Observability: Write** (Cloudflare's telemetry query endpoint accepts only Write; see §6). It queries:
   1. **The Analytics Engine SQL API**, hourly per action, for the last 24 h: count, `outcome` counts, p50/p95/p99 `latencyMs`, mean `upstreamRequests` and `subrequestsUsed`, the sum of `budgetRefusals`, `providerTimeouts` and `providerRetries`, the `sizeBucket` histogram, and the error-code counts. Use `_sample_interval` weighting.
   2. **The Workers Observability telemetry query API**, for the last 24 h: invocation outcome counts (`ok`, `exceededCpu`, `exceededResources`, `exception`, …), joined to `action` via the §1 log line. Only `action`/`domain`/`build` and the outcome are read.
 
@@ -110,7 +110,7 @@ The point is written once, in `worker/src/index.ts`, after the response is built
 
 ## 6. Owner actions (one-time, at release)
 
-1. Create a Cloudflare API token with **Account Analytics: Read** and **Workers Observability: Read**, scoped to this account. Store it as the GitHub secret `CLOUDFLARE_TELEMETRY_TOKEN`. `CLOUDFLARE_ACCOUNT_ID` already exists as a secret; the deploy workflow uses it. The planner gives the exact steps; the token value never enters the repo or chat.
+1. Create a Cloudflare API token with **Account Analytics: Read** and **Workers Observability: Write**, scoped to this account. The telemetry query endpoint lists Write as its only accepted permission (checked 2026-10-16). Write also allows changing observability settings, so the token is a secret like the deploy token. Store it as the GitHub secret `CLOUDFLARE_TELEMETRY_TOKEN`. `CLOUDFLARE_ACCOUNT_ID` already exists as a secret; the deploy workflow uses it. The planner gives the exact steps; the token value never enters the repo or chat.
 2. Nothing else. The dataset is created on first write.
 
 ## 7. Docs and live verification
@@ -126,3 +126,16 @@ The point is written once, in `worker/src/index.ts`, after the response is built
   - the dispatch log line appears in Workers Logs without arguments;
   - responses are unchanged;
   - the canaries pass.
+
+## 8. Planner decisions taken during execution (2026-10-16)
+
+- The token permission is **Workers Observability: Write**; see §6.
+- A JSON-RPC batch records its `tools/call`, or else its first message.
+- A notification records `rpc:other`.
+- A known group with an unknown action records `tools/call:unknown`, with `domain` set to the group.
+- A parse error or an empty batch records `-32700` or `-32600`. A 405 records an empty `errorCode`.
+- An exception that escapes records `exception` and status 500.
+- Action names up to 96 bytes are allowed through the registry allow-set; the longest today is 68 characters.
+- The Worker has no SEC retry site, so `providerRetries` counts only the Yahoo retries.
+- `latencyMs` uses `Date.now()`, which only advances across I/O, so a request with no I/O can record 0 ms.
+- `$workers.outcome` and `$workers.scriptName` are to be confirmed on the first live export.
