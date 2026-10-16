@@ -96,6 +96,7 @@ FILE_DOMAIN = {
     "yfmcp/valuation.py": "valuation", "yfmcp/valuation_history.py": "valuation",
     "yfmcp/metric_reconciliation.py": "valuation",
     "yfmcp/tools/earnings.py": "earnings", "yfmcp/clients/yahoo_transcripts.py": "earnings",
+    "yfmcp/tools/news.py": "news",
     "yfmcp/earnings_period.py": "earnings", "yfmcp/guidance_history.py": "earnings",
     "yfmcp/evidence.py": "evidence", "yfmcp/evidence_store.py": "evidence",
     "yfmcp/tools/thai_funds.py": "thai",

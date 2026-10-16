@@ -188,7 +188,8 @@ class TestSourceContracts(unittest.TestCase):
         ts = (WORKER / "src" / "yahoo-finance.ts").read_text(encoding="utf-8")
         self.assertRegex(ts, r"collectCompanyEvents\(ticker, \{[^}]*keepAll: true")
         self.assertIn("keepAll ? allDeduped : allDeduped.slice(0, safeMax)", ts)
-        py = (ROOT / "server.py").read_text(encoding="utf-8")
+        # The news collectors moved from server.py to yfmcp/tools/news.py (Phase 3).
+        py = (ROOT / "server.py").read_text(encoding="utf-8") + "\n" + (ROOT / "yfmcp" / "tools" / "news.py").read_text(encoding="utf-8")
         self.assertRegex(py, r"keep_all=True")
         self.assertRegex(py, r"if not keep_all:\s*\n\s*deduped = deduped\[:max_cap\]")
 

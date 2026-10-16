@@ -306,7 +306,8 @@ class TestWorkerDoctrineSafety(unittest.TestCase):
         self.assertIn('doctrineUse: "ALLOWED",\n    reliabilityClass: reliabilityClassFor("ALLOWED")', worker)
         self.assertIn('doctrineUse: "BLOCKED",\n    reliabilityClass: reliabilityClassFor("BLOCKED")', worker)
         self.assertIn("reliabilityClass: reliabilityClassFor(doctrineUse)", tools)
-        python = (ROOT / "server.py").read_text(encoding="utf-8")
+        # get_company_press_releases moved from server.py to yfmcp/tools/news.py (Phase 3).
+        python = (ROOT / "server.py").read_text(encoding="utf-8") + "\n" + (ROOT / "yfmcp" / "tools" / "news.py").read_text(encoding="utf-8")
         self.assertIn('"reliabilityClass": _TOOL_RELIABILITY_CLASS["get_company_press_releases"]', python)
         self.assertIn('"reliabilityClass": _TOOL_RELIABILITY_CLASS["get_sec_filing_section_markdown"]', python)
         self.assertNotIn("doctrineUse", python)  # Python never emitted it and still does not

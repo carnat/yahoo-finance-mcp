@@ -50,6 +50,7 @@ import server  # noqa: F401,E402
 from yfmcp import capital_structure as cs  # noqa: E402
 from yfmcp import cache as pycache  # noqa: E402
 from yfmcp.clients import edgar  # noqa: E402
+from yfmcp.tools import news as news_tools  # noqa: E402
 from yfmcp.tools import provider_gaps  # noqa: E402
 
 CASES: list[Case] = []
@@ -130,12 +131,12 @@ def _py_news_env(*, news=None, info=None, env=None, submissions=None, clock=True
     with contextlib.ExitStack() as stack:
         stack.enter_context(_env_scope(env))
         if clock:
-            stack.enter_context(patch.object(server, "datetime", _DT_SHIM))
-            stack.enter_context(patch.object(server, "_utc_now_iso", lambda: NOW_ISO))
-        stack.enter_context(patch.object(server, "_yahoo_search_news", lambda ticker: copy.deepcopy(news or [])))
+            stack.enter_context(patch.object(news_tools, "datetime", _DT_SHIM))
+            stack.enter_context(patch.object(news_tools, "_utc_now_iso", lambda: NOW_ISO))
+        stack.enter_context(patch.object(news_tools, "_yahoo_search_news", lambda ticker: copy.deepcopy(news or [])))
         stack.enter_context(patch.object(server.yf, "Ticker", lambda ticker, *a, **k: _FakeTicker(info if info is not None else {})))
         if submissions is not None:
-            stack.enter_context(patch.object(server, "_get_submissions_for_ticker", AsyncMock(return_value=submissions)))
+            stack.enter_context(patch.object(news_tools, "_get_submissions_for_ticker", AsyncMock(return_value=submissions)))
         saved = dict(pycache._tool_cache._store)
         saved_html = dict(edgar._EDGAR_HTML_CACHE)
         if gnw_cache_clear:
@@ -2030,7 +2031,7 @@ def _ir_page_case(name, ids, body, *, entry=None, content_type="text/html; chars
         with tempfile.TemporaryDirectory(prefix="ir-registry-") as tmp:
             path = Path(tmp) / "registry.json"
             path.write_text(json.dumps({"schemaVersion": "2026-07-10", "registryVersion": "2026-09-25.1200", "sources": [entry]}), encoding="utf-8")
-            with _py_news_env(news=[], info={}), patch.object(server, "_COMPANY_IR_PAGE_REGISTRY_PATH", path):
+            with _py_news_env(news=[], info={}), patch.object(news_tools, "_COMPANY_IR_PAGE_REGISTRY_PATH", path):
                 return json.loads(asyncio.run(server.get_company_news("IQE.L", max_results, lookback, ["company_ir_page"])))
 
     worker_entry = {k: entry.get(k) for k in _IR_WORKER_FIELDS}

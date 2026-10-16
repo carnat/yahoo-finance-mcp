@@ -25,6 +25,9 @@ from yfmcp.cache import _tool_cache
 _ALPHA_URL = "https://www.alphavantage.co/query"
 _FINNHUB_URL = "https://finnhub.io/api/v1"
 _USER_AGENT = "yahoo-finance-mcp/1.0"
+# Non-SEC providers (news feeds, Finnhub, Marketaux) get a plain agent; the
+# SEC agent carries the operator contact and is for SEC hosts only.
+_PROVIDER_USER_AGENT = "yahoo-finance-mcp"
 
 
 @dataclass(frozen=True)

@@ -320,3 +320,26 @@ def build_tool_contract_registry(*servers: FastMCP) -> dict[str, dict[str, Any]]
             if fn is not None and isinstance(parameters, dict):
                 registry[fn.__name__] = parameters
     return registry
+
+
+def reseat_tool_registration(server: FastMCP, name: str, after: str) -> None:
+    """Move an already registered tool to sit directly after tool ``after`` in the registry.
+
+    A tool's position in ``tools/list`` is its registration order. When a handler
+    moves out of ``server.py`` into a ``yfmcp.tools.*`` module its decorator runs
+    at that module's import, which can change the order the listing had when the
+    handler sat between ``server.py`` registrations. Calling this at the
+    handler's old position in ``server.py`` restores the original order, so the
+    published listing (names, order, schemas) stays byte-identical. Idempotent,
+    so re-executing ``server.py`` (``importlib.reload``) keeps the same order.
+    """
+    manager = getattr(server, "_tool_manager", None)
+    tools = getattr(manager, "_tools", None) if manager is not None else None
+    if not isinstance(tools, dict) or name not in tools or after not in tools:
+        return
+    moved = tools[name]
+    ordered = [(key, tool) for key, tool in tools.items() if key != name]
+    position = next(i for i, (key, _tool) in enumerate(ordered) if key == after) + 1
+    ordered.insert(position, (name, moved))
+    tools.clear()
+    tools.update(ordered)

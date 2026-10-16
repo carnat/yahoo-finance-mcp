@@ -704,7 +704,7 @@ class TestNewFixesAndFeatures(unittest.TestCase):
         self.assertIn("$130 million", data["matchedParagraphs"][0]["paragraph"])
 
     def test_get_company_press_releases_status_split(self):
-        with patch("server._collect_company_events", new_callable=AsyncMock) as mocked_collect, \
+        with patch("yfmcp.tools.news._collect_company_events", new_callable=AsyncMock) as mocked_collect, \
              patch("yfmcp.tools.earnings._resolve_ex991_url", new_callable=AsyncMock) as mocked_ex991:
             
             mocked_collect.return_value = (

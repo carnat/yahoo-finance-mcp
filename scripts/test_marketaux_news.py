@@ -301,9 +301,9 @@ class TestMarketauxPriorityRouting(unittest.TestCase):
         ))
         marketaux = AsyncMock()
         with patch("server.yf.Ticker") as ticker_factory, patch(
-            "server._collect_yahoo_events", yahoo,
-        ), patch("server._collect_finnhub_events", finnhub), patch(
-            "server._collect_marketaux_events", marketaux,
+            "yfmcp.tools.news._collect_yahoo_events", yahoo,
+        ), patch("yfmcp.tools.news._collect_finnhub_events", finnhub), patch(
+            "yfmcp.tools.news._collect_marketaux_events", marketaux,
         ):
             ticker_factory.return_value.info = {"longName": "Aehr Test Systems"}
             result = _run(srv._collect_company_events(
@@ -347,9 +347,9 @@ class TestMarketauxPriorityRouting(unittest.TestCase):
             {"status": "OK", "acceptedCount": 1, "completed": True},
         ))
         with patch("server.yf.Ticker") as ticker_factory, patch(
-            "server._collect_yahoo_events", empty,
-        ), patch("server._collect_finnhub_events", empty), patch(
-            "server._collect_marketaux_events", marketaux,
+            "yfmcp.tools.news._collect_yahoo_events", empty,
+        ), patch("yfmcp.tools.news._collect_finnhub_events", empty), patch(
+            "yfmcp.tools.news._collect_marketaux_events", marketaux,
         ):
             ticker_factory.return_value.info = {"longName": "Aehr Test Systems"}
             result = _run(srv._collect_company_events(
