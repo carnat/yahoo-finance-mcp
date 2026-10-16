@@ -261,6 +261,7 @@ jobs:
         run: python scripts/test_universal_aliases.py
         env:
           ALLOW_NETWORK_SKIP: "1"
+          MCP_TOKEN: ${{ secrets.MCP_TOKEN }}
 
       # ── 9. Worker type-check (last: slowest step) ─────────────────────────
       - name: Worker type-check
