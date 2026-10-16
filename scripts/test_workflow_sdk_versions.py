@@ -20,7 +20,12 @@ REQUIRED_ACTION_VERSIONS = {
     "actions/upload-artifact": "v7",
 }
 
-ACTION_USE_PATTERN = re.compile(r"^\s*-\s*uses:\s*(actions/[a-zA-Z0-9_-]+)@([vV][0-9]+)\s*$", re.MULTILINE)
+# Actions are pinned to a full commit SHA, with the release tag in a trailing comment (S-09).
+ACTION_USE_PATTERN = re.compile(
+    r"^\s*-?\s*uses:\s*(actions/[a-zA-Z0-9_-]+)@[0-9a-f]{40}\s*#\s*([vV][0-9]+)(?:\.[0-9]+)*\s*$", re.MULTILINE
+)
+ANY_USE_PATTERN = re.compile(r"^\s*-?\s*uses:\s*(\S+)", re.MULTILINE)
+PINNED_REF_PATTERN = re.compile(r"^[^@\s]+@[0-9a-f]{40}$")
 NODE_VERSION_PATTERN = re.compile(r'^\s*node-version:\s*"?(\d+)(?:\.\d+)?(?:\.x)?"?\s*$', re.MULTILINE)
 
 
@@ -47,6 +52,22 @@ class TestWorkflowSdkVersions(unittest.TestCase):
                 if required is None:
                     continue
                 self.assertEqual(major.lower(), required, f"{wf.name}: {action} must use {required}, got {major}")
+
+    def test_every_action_is_pinned_to_a_commit_sha(self) -> None:
+        workflows = sorted(WORKFLOWS_DIR.glob("*.yml"))
+        self.assertTrue(workflows, "No workflow files found")
+        for wf in workflows:
+            content = wf.read_text(encoding="utf-8")
+            for ref in ANY_USE_PATTERN.findall(content):
+                if ref.startswith("./"):
+                    continue
+                self.assertRegex(ref, PINNED_REF_PATTERN, f"{wf.name}: {ref} must be pinned to a full commit SHA")
+
+    def test_npm_ci_skips_install_scripts(self) -> None:
+        for wf in sorted(WORKFLOWS_DIR.glob("*.yml")):
+            for line in wf.read_text(encoding="utf-8").splitlines():
+                if "npm ci" in line:
+                    self.assertIn("--ignore-scripts", line, f"{wf.name}: npm ci must use --ignore-scripts")
 
     def test_node_version_is_24_when_declared(self) -> None:
         workflows = sorted(WORKFLOWS_DIR.glob("*.yml"))
