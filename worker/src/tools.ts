@@ -1,7 +1,7 @@
 import { mcpSuccessFromValue, mcpSuccessResult, mcpFailure, mcpFailureResult, type McpSuccessOptions, type ToolResult, ErrorCode, envelopeV2Enabled, getBuildVersion, getServerVersion, getWorkerVar } from "./response.js";
 import { FILING_PERIOD_HELP, parseFilingPeriod } from "./sec-facts.js";
 import { GROUPED_TOOL_DEFS } from "./tool-catalog.js";
-import { withCacheScope, currentRequestFacts } from "./request-context.js";
+import { withCacheScope, currentRequestFacts, budgetRefusalCount, SUBREQUEST_BUDGET, SUBREQUEST_LIMIT } from "./request-context.js";
 import {
   getAnalystConsensus,
   getAnalystUpgradeRadar,
@@ -1907,7 +1907,29 @@ export async function callTool(name: string, args: Record<string, unknown>): Pro
  * meta.cacheSource describe that call alone.
  */
 export async function callToolResult(name: string, args: Record<string, unknown>): Promise<ToolResult> {
-  return (await withCacheScope(() => callToolResultInScope(name, args))).result;
+  return (await withCacheScope(async () => budgetExhaustedFailure(name, await callToolResultInScope(name, args)))).result;
+}
+
+/**
+ * A tool call that failed after the subrequest budget refused one of its
+ * fetches failed for budget, whatever its own error path called it (2.11.0).
+ * Calls that succeeded, or that met no refusal, are returned unchanged.
+ */
+function budgetExhaustedFailure(name: string, result: ToolResult): ToolResult {
+  if (budgetRefusalCount() === 0) return result;
+  let value = result.value;
+  if (value === undefined) {
+    try { value = JSON.parse(result.text); } catch { return result; }
+  }
+  if (value == null || typeof value !== "object" || Array.isArray(value)) return result;
+  const record = value as Record<string, unknown>;
+  if (record.ok !== false && record.error !== true) return result;
+  return mcpFailureResult(
+    name,
+    ErrorCode.PROVIDER_BUDGET_EXHAUSTED,
+    `The per-request subrequest budget (${SUBREQUEST_BUDGET} of ${SUBREQUEST_LIMIT}) was spent before this request could complete. Retry later.`,
+    { metaExtra: { retryable: true, recoveryAction: "RETRY_LATER" } },
+  );
 }
 
 async function callToolResultInScope(name: string, args: Record<string, unknown>): Promise<ToolResult> {

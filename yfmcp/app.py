@@ -22,7 +22,8 @@ except ImportError:  # mcp 1.x
     from mcp.server.fastmcp import FastMCP
 
 from yfmcp.build_info import BUILD_VERSION
-from yfmcp.envelope import _envelope_tool_result
+from yfmcp import url_policy
+from yfmcp.envelope import _budget_guarded_result, _envelope_tool_result
 
 try:
     from mcp.types import ToolAnnotations
@@ -113,12 +114,24 @@ def _offload_to_thread(fn: Callable[..., Any], tool_name: str) -> Callable[..., 
     and grouped routing (see ``build_handler_registry``) are unaffected. The
     MCP response gets the same V2 envelope the Worker applies; grouped results
     arrive already enveloped by the router and pass through unchanged.
+
+    One MCP invocation is one subrequest-budget scope (2.11.0, ``yfmcp.url_policy``): the counter starts fresh
+    for every call, and a grouped dispatch is a single call because the router reaches the handlers directly.
     """
+
+    def run(*args: Any, **kwargs: Any) -> Any:
+        with url_policy.invocation_scope():
+            result = _envelope_tool_result(tool_name, asyncio.run(fn(*args, **kwargs)))
+            return _budget_guarded_result(
+                tool_name,
+                result,
+                refusals=url_policy.budget_refusal_count(),
+                exhausted=url_policy.subrequest_budget_exhausted(),
+            )
 
     @functools.wraps(fn)
     async def wrapper(*args: Any, **kwargs: Any) -> Any:
-        result = await asyncio.to_thread(lambda: asyncio.run(fn(*args, **kwargs)))
-        return _envelope_tool_result(tool_name, result)
+        return await asyncio.to_thread(run, *args, **kwargs)
 
     wrapper._yfmcp_handler = fn  # type: ignore[attr-defined]
     return wrapper

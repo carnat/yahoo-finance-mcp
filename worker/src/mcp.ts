@@ -8,7 +8,8 @@
  * Notifications (no `id` field) are accepted but produce no response body.
  */
 
-import { getBuildVersion } from "./response.js";
+import { SUBREQUEST_BUDGET_WARNING, subrequestBudgetExhausted } from "./request-context.js";
+import { getBuildVersion, type ToolResult } from "./response.js";
 import { callVisibleToolResult, listVisibleTools } from "./tools.js";
 
 interface JsonRpcRequest {
@@ -88,7 +89,7 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
       const p = params as { name?: string; arguments?: Record<string, unknown> };
       if (!p?.name) throw Object.assign(new Error("Missing tool name"), { code: -32602 });
 
-      const { text, value } = await callVisibleToolResult(p.name, p.arguments ?? {});
+      const { text, value } = withBudgetWarning(await callVisibleToolResult(p.name, p.arguments ?? {}));
       // Envelope builders hand over the object they serialized; parse only
       // results that arrive as text alone.
       let parsed: unknown = value ?? null;
@@ -113,4 +114,25 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
     default:
       throw Object.assign(new Error(`Method not found: ${method}`), { code: -32601 });
   }
+}
+
+/**
+ * One PROVIDER_BUDGET_EXHAUSTED row in meta.warnings when the budget guard
+ * refused a fetch in this invocation (2.11.0). Otherwise the result is
+ * returned untouched, byte for byte.
+ */
+function withBudgetWarning(result: ToolResult): ToolResult {
+  if (!subrequestBudgetExhausted()) return result;
+  let value = result.value;
+  if (value === undefined) {
+    try { value = JSON.parse(result.text); } catch { return result; }
+  }
+  if (value == null || typeof value !== "object" || Array.isArray(value)) return result;
+  const meta = (value as Record<string, unknown>).meta;
+  if (meta == null || typeof meta !== "object" || Array.isArray(meta)) return result;
+  const warnings = (meta as Record<string, unknown>).warnings;
+  if (!Array.isArray(warnings)) return result;
+  if (warnings.some((w) => (w as Record<string, unknown> | null)?.code === SUBREQUEST_BUDGET_WARNING.code)) return result;
+  const next = { ...(value as Record<string, unknown>), meta: { ...meta, warnings: [...warnings, { ...SUBREQUEST_BUDGET_WARNING }] } };
+  return { text: JSON.stringify(next), value: next };
 }

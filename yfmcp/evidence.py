@@ -968,7 +968,7 @@ QUARTERLY_REPORT_STALE_DAYS = 135
 # A year plus the four months a 20-F has after year end, plus a week of 52/53-week drift.
 ANNUAL_REPORT_STALE_DAYS = 365 + 120 + 7
 # Provider statuses that mean the request failed, as opposed to the provider having nothing (NO_DATA).
-PROVIDER_FAILURE_STATUSES = {"PROVIDER_ERROR", "RATE_LIMIT", "PROVIDER_TIMEOUT", "ERROR", "TIMEOUT"}
+PROVIDER_FAILURE_STATUSES = {"PROVIDER_ERROR", "RATE_LIMIT", "PROVIDER_TIMEOUT", "ERROR", "TIMEOUT", "PROVIDER_BUDGET_EXHAUSTED"}
 
 
 def evidence_quality(*, ticker: str, as_of: str, quote: dict | None, filings: list[dict] | None, filings_status: str,

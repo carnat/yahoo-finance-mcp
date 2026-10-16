@@ -39,6 +39,7 @@ import {
 import { getEvidenceStore, putOnce, sha256Hex } from "./evidence-store.js";
 import { ErrorCode, getServerVersion, getWorkerVar, mcpFailure } from "./response.js";
 import { validateTicker } from "./validate.js";
+import { withBudgetWatch } from "./request-context.js";
 import { majorPrice } from "./valuation.js";
 import {
   extractCapitalStructure,
@@ -133,12 +134,17 @@ async function alphaVantageEstimates(symbol: string): Promise<ProviderConsensusI
 /** Yahoo earningsTrend + quote and Alpha Vantage EARNINGS_ESTIMATES, fetched together; each provider fails on its own. */
 async function consensusProviders(ticker: string): Promise<{ inputs: ProviderConsensusInput[]; quote: MarketQuote; splits: SplitHistory }> {
   const symbol = ticker.toUpperCase();
-  const [yahoo, alpha, splits] = await Promise.all([
-    yGet(`https://query1.finance.yahoo.com/v10/finance/quoteSummary/${encodeURIComponent(symbol)}?modules=earningsTrend,financialData,price`)
-      .then((d) => ({ ok: true as const, d, at: new Date().toISOString() }), (e) => ({ ok: false as const, e, at: new Date().toISOString() })),
-    alphaVantageEstimates(symbol),
+  // Each provider runs in its own scope, so a fetch the subrequest budget refused is charged to it (2.11.0).
+  const [{ result: yahoo, starved: yahooStarved }, { result: alphaRead, starved: alphaStarved }, splits] = await Promise.all([
+    withBudgetWatch(() => yGet(`https://query1.finance.yahoo.com/v10/finance/quoteSummary/${encodeURIComponent(symbol)}?modules=earningsTrend,financialData,price`)
+      .then((d) => ({ ok: true as const, d, at: new Date().toISOString() }), (e) => ({ ok: false as const, e, at: new Date().toISOString() }))),
+    withBudgetWatch(() => alphaVantageEstimates(symbol)),
     splitHistory(symbol),
   ]);
+  // A provider starved of budget reports PROVIDER_BUDGET_EXHAUSTED, never PROVIDER_ERROR or NO_DATA.
+  const alpha: ProviderConsensusInput = alphaStarved && alphaRead.status !== "OK"
+    ? { ...alphaRead, status: "PROVIDER_BUDGET_EXHAUSTED" }
+    : alphaRead;
 
   let yahooInput: ProviderConsensusInput;
   let quote: MarketQuote;
@@ -162,7 +168,7 @@ async function consensusProviders(ticker: string): Promise<{ inputs: ProviderCon
     };
   } else {
     const message = yahoo.ok ? "Yahoo returned no quote summary." : (yahoo.e instanceof Error ? yahoo.e.message : String(yahoo.e));
-    yahooInput = yahooConsensusInput([], { retrievedAt: yahoo.at, status: yahoo.ok ? "NO_DATA" : "PROVIDER_ERROR", message });
+    yahooInput = yahooConsensusInput([], { retrievedAt: yahoo.at, status: yahooStarved ? "PROVIDER_BUDGET_EXHAUSTED" : yahoo.ok ? "NO_DATA" : "PROVIDER_ERROR", message });
     quote = { price: null, currency: null, priceTime: null, status: yahoo.ok ? "NO_DATA" : "PROVIDER_ERROR", message };
   }
 

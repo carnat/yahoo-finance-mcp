@@ -9,6 +9,7 @@ import pandas as pd
 import yfinance as yf
 from pydantic import Field
 
+from yfmcp import url_policy
 from yfmcp.app import yfinance_server
 from yfmcp.schemas import _MARKET_SNAPSHOT_OUTPUT_SCHEMA, _TOOL_OUTPUT_SCHEMAS
 from yfmcp.deprecations import MIN_ADV_USD_DESCRIPTION, meets_minimum, parse_min_adv_usd
@@ -24,6 +25,34 @@ from yfmcp.clients.yahoo import _safe_parse
 _BATCH_TICKER_CONCURRENCY = 3
 
 
+def _budget_exhausted_ticker_result(ticker: str, result: object) -> object:
+    """A failed ticker whose work met a budget refusal keeps its message and reports PROVIDER_BUDGET_EXHAUSTED,
+    retryable, RETRY_LATER. A ticker that completed is returned as is."""
+    message: str | None = None
+    if isinstance(result, Exception):
+        message = str(result)
+    else:
+        try:
+            parsed = json.loads(result)  # type: ignore[arg-type]
+        except Exception:
+            message = str(result)
+        else:
+            if isinstance(parsed, dict) and (parsed.get("error") is True or parsed.get("ok") is False):
+                error = parsed.get("error")
+                detail = error.get("message") if isinstance(error, dict) else parsed.get("message")
+                message = detail if isinstance(detail, str) else f"Error for {ticker}"
+    if message is None:
+        return result
+    return json.dumps({
+        "error": True,
+        "code": ErrorCode.PROVIDER_BUDGET_EXHAUSTED,
+        "message": message,
+        "ticker": ticker,
+        "retryable": True,
+        "recoveryAction": "RETRY_LATER",
+    })
+
+
 async def _run_ticker_batch(tickers: list[str], call) -> list[object]:
     """Run ``call(ticker)`` for each ticker, at most three at a time.
 
@@ -36,10 +65,16 @@ async def _run_ticker_batch(tickers: list[str], call) -> list[object]:
 
     async def one(ticker: str) -> object:
         async with semaphore:
-            try:
-                return await asyncio.to_thread(lambda: asyncio.run(call(ticker)))
-            except Exception as e:
-                return e
+            # Each ticker runs in its own budget watch, so a fetch the subrequest budget refused is charged
+            # to the ticker that asked for it (2.11.0).
+            with url_policy.budget_watch() as watch:
+                try:
+                    result: object = await asyncio.to_thread(lambda: asyncio.run(call(ticker)))
+                except Exception as e:
+                    result = e
+            if watch.starved or (isinstance(result, Exception) and url_policy.is_budget_exhausted_error(result)):
+                return _budget_exhausted_ticker_result(ticker, result)
+            return result
 
     return await asyncio.gather(*(one(t) for t in tickers))
 

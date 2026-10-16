@@ -9,20 +9,33 @@ hops). Reason strings are identical to the Worker's.
 
 DNS is not checked; the exact-host list means a DNS-based bypass needs a host
 we already trust.
+
+Per-invocation subrequest budget (2.11.0): the Worker may make 50 subrequests
+per invocation and stops starting new work at 45. This module mirrors that
+guard for the tool-call boundary so both runtimes report the same typed state
+(``PROVIDER_BUDGET_EXHAUSTED``). Python has no hard limit and no Cache API;
+only urllib fetches through this seam are counted (yfinance is not).
 """
 
 from __future__ import annotations
 
 import contextlib
+import contextvars
+import functools
 import ipaddress
 import json
 import re
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
 
 MAX_REDIRECT_HOPS = 5
+
+SUBREQUEST_LIMIT = 50
+SUBREQUEST_RESERVE = 5
+SUBREQUEST_BUDGET = SUBREQUEST_LIMIT - SUBREQUEST_RESERVE
 
 
 class UrlPolicyError(urllib.error.URLError):
@@ -37,6 +50,144 @@ class UrlPolicyError(urllib.error.URLError):
 
     def __str__(self) -> str:
         return str(self.reason)
+
+
+class BudgetExhaustedError(UrlPolicyError):
+    """A fetch the per-invocation subrequest budget refused; raised before the request is opened."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            f"PROVIDER_BUDGET_EXHAUSTED: the per-request subrequest budget ({SUBREQUEST_BUDGET} of {SUBREQUEST_LIMIT}) "
+            "is spent; the request was not sent."
+        )
+
+
+def is_budget_exhausted_error(error: object) -> bool:
+    """A BudgetExhaustedError, or Cloudflare's own "Too many subrequests" error, which maps to the same state."""
+    if isinstance(error, BudgetExhaustedError):
+        return True
+    return bool(re.search(r"too many subrequests", str(error), re.IGNORECASE))
+
+
+# The meta.warnings row of a response in an invocation where the guard refused a fetch.
+SUBREQUEST_BUDGET_WARNING: dict = {
+    "code": "PROVIDER_BUDGET_EXHAUSTED",
+    "message": (
+        f"Stopped starting new upstream requests at the per-request subrequest budget ({SUBREQUEST_BUDGET} of {SUBREQUEST_LIMIT}); "
+        "some sources were not queried."
+    ),
+    "severity": "warning",
+}
+
+
+# ── per-invocation budget ───────────────────────────────────────────────────────────────────────────────────────
+# One mutable _Invocation is shared by every task and thread the tool call starts (contextvars copy the reference,
+# not the object); _Watch objects form a chain so a refusal is charged to every enclosing watch, as the Worker's
+# nested scopes do.
+
+_budget_lock = threading.Lock()
+
+
+class _Invocation:
+    __slots__ = ("used", "exhausted")
+
+    def __init__(self, used: int = 0) -> None:
+        self.used = used
+        self.exhausted = False
+
+
+class BudgetWatch:
+    """Fetches refused for budget while this watch, or a watch nested in it, was current."""
+
+    __slots__ = ("refusals", "parent")
+
+    def __init__(self, parent: "BudgetWatch | None") -> None:
+        self.refusals = 0
+        self.parent = parent
+
+    @property
+    def starved(self) -> bool:
+        return self.refusals > 0
+
+
+_invocation: contextvars.ContextVar[_Invocation | None] = contextvars.ContextVar("yfmcp_subrequest_invocation", default=None)
+_watch: contextvars.ContextVar[BudgetWatch | None] = contextvars.ContextVar("yfmcp_subrequest_watch", default=None)
+
+
+@contextlib.contextmanager
+def invocation_scope(spent: int = 0):
+    """One tool call: a fresh budget with ``spent`` units already used (tests and the parity harness pre-spend).
+
+    Always starts a new budget, so each call resets it; outside any scope counting is a no-op.
+    """
+    invocation_token = _invocation.set(_Invocation(spent))
+    watch_token = _watch.set(BudgetWatch(None))
+    try:
+        yield
+    finally:
+        _watch.reset(watch_token)
+        _invocation.reset(invocation_token)
+
+
+@contextlib.contextmanager
+def budget_watch():
+    """A nested watch: ``watch.starved`` says whether a fetch inside was refused for budget."""
+    watch = BudgetWatch(_watch.get())
+    token = _watch.set(watch)
+    try:
+        yield watch
+    finally:
+        _watch.reset(token)
+
+
+def _count_refusal() -> None:
+    with _budget_lock:
+        watch = _watch.get()
+        while watch is not None:
+            watch.refusals += 1
+            watch = watch.parent
+
+
+def consume_subrequest() -> bool:
+    """Count one fetch (each redirect hop included). False means the budget is spent: the caller must not fetch.
+
+    A refusal marks the invocation as budget-exhausted and is charged to the current watch chain.
+    Outside an invocation scope nothing is counted and the answer is always True.
+    """
+    invocation = _invocation.get()
+    if invocation is None:
+        return True
+    with _budget_lock:
+        if invocation.used >= SUBREQUEST_BUDGET:
+            invocation.exhausted = True
+            refused = True
+        else:
+            invocation.used += 1
+            refused = False
+    if refused:
+        _count_refusal()
+    return not refused
+
+
+def in_context(fn, *args):
+    """``fn(*args)`` bound to a copy of the caller's context, for ``loop.run_in_executor``.
+
+    run_in_executor does not carry contextvars into the worker thread; wrapping the callable keeps the
+    invocation's budget and watches visible to the fetch it makes. Call it where the executor call is made.
+    """
+    return functools.partial(contextvars.copy_context().run, fn, *args)
+
+
+def subrequest_budget_exhausted() -> bool:
+    """The guard refused at least one fetch in the current invocation (drives the meta.warnings row)."""
+    invocation = _invocation.get()
+    return invocation is not None and invocation.exhausted
+
+
+def budget_refusal_count() -> int:
+    """Fetches refused for budget while the current watch was current, nested watches included."""
+    watch = _watch.get()
+    return watch.refusals if watch is not None else 0
 
 
 SEC_HOSTS: tuple[str, ...] = ("www.sec.gov", "data.sec.gov", "efts.sec.gov")
@@ -346,6 +497,8 @@ class CheckedRedirectHandler(urllib.request.HTTPRedirectHandler):
         if followed >= MAX_REDIRECT_HOPS:
             raise UrlPolicyError("too many redirects")
         require_allowed(newurl)
+        if not consume_subrequest():
+            raise BudgetExhaustedError()
         method = req.get_method()
         if code == 303 and method not in ("GET", "HEAD"):
             # 303 continues as GET, without the body or its content headers.
@@ -373,9 +526,19 @@ _OPENER = build_opener()
 
 
 def open_checked(opener: urllib.request.OpenerDirector, req, timeout=None):
-    """opener.open after checking the first URL."""
+    """opener.open after checking the first URL and counting it against the invocation's subrequest budget."""
     require_allowed(req if isinstance(req, str) else req.full_url)
-    return opener.open(req, timeout=timeout) if timeout is not None else opener.open(req)
+    if not consume_subrequest():
+        raise BudgetExhaustedError()
+    try:
+        return opener.open(req, timeout=timeout) if timeout is not None else opener.open(req)
+    except BudgetExhaustedError:
+        raise
+    except Exception as error:
+        # Cloudflare's own "Too many subrequests" counts as a refusal too, and is raised as is.
+        if is_budget_exhausted_error(error) and _invocation.get() is not None:
+            _count_refusal()
+        raise
 
 
 def urlopen(req, timeout=None):

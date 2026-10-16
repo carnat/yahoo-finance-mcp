@@ -80,6 +80,8 @@ export const ErrorCode = {
   RATE_LIMIT: "RATE_LIMIT",
   INPUT_VALIDATION_ERROR: "INPUT_VALIDATION_ERROR",
   DEPRECATED_TOOL: "DEPRECATED_TOOL",
+  // The per-request subrequest budget was spent before this work could run (2.11.0).
+  PROVIDER_BUDGET_EXHAUSTED: "PROVIDER_BUDGET_EXHAUSTED",
 } as const;
 
 export type ErrorCodeValue = (typeof ErrorCode)[keyof typeof ErrorCode];

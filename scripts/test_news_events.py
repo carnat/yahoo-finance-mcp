@@ -643,8 +643,13 @@ class TestPhase6BVerifyEvent(unittest.TestCase):
                 "severity": "warning",
             },
         ]
+        # The collector reports which sources had a fetch refused for budget (2.11.0); those sources then
+        # carry PROVIDER_BUDGET_EXHAUSTED, as the Worker does, instead of PROVIDER_ERROR.
+        from yfmcp.tools.news import _SourceDiagnostics
+        diagnostics = _SourceDiagnostics()
+        diagnostics.budget_starved = ["yahoo_finance_news", "finnhub"]
         with patch("yfmcp.tools.news._collect_company_events", new_callable=AsyncMock) as mocked:
-            mocked.return_value = ([], [], warnings, "2026-05-10T10:01:00Z")
+            mocked.return_value = ([], [], warnings, "2026-05-10T10:01:00Z", diagnostics)
             data = _parse(_run(srv.verify_company_event(
                 "AAPL",
                 "guidance",
@@ -654,8 +659,10 @@ class TestPhase6BVerifyEvent(unittest.TestCase):
         self.assertEqual(data.get("failureMode"), "WORKER_SUBREQUEST_LIMIT")
         self.assertTrue(data.get("retryable"))
         self.assertEqual(data.get("sourceCoverage"), "PARTIAL")
-        self.assertEqual(data.get("sourceStatus", {}).get("yahoo_finance_news", {}).get("status"), "PROVIDER_ERROR")
-        self.assertEqual(data.get("sourceStatus", {}).get("finnhub", {}).get("status"), "PROVIDER_ERROR")
+        self.assertEqual(data.get("sourceStatus", {}).get("yahoo_finance_news", {}).get("status"), "PROVIDER_BUDGET_EXHAUSTED")
+        self.assertEqual(data.get("sourceStatus", {}).get("finnhub", {}).get("status"), "PROVIDER_BUDGET_EXHAUSTED")
+        self.assertEqual([row["status"] for row in data["coverage"]["failedSources"]], ["PROVIDER_BUDGET_EXHAUSTED"] * 2)
+        self.assertEqual(data["coverage"]["recommendedNextAction"], "RETRY_RETRYABLE_SOURCES")
 
     def test_verify_does_not_confirm_on_generic_announcement_word(self):
         unrelated = [{

@@ -1,5 +1,5 @@
 import { BoundedTtlCache, setBounded } from "./cache.js";
-import { countCacheEvent, emptyCacheUsage, providerFetch, type CacheEvent, type CacheUsage } from "./request-context.js";
+import { awaitNotingBudget, budgetRefusalCount, consumeSubrequest, countCacheEvent, emptyCacheUsage, isBudgetExhaustedError, providerFetch, withBudgetWatch, type CacheEvent, type CacheUsage } from "./request-context.js";
 import { classifyErrorMessage, ErrorCode, getWorkerVar, mcpFailure } from "./response.js";
 import { yahooTranscriptContentSha256 } from "./transcript-contract.js";
 import { allowedHostKind, approvedRegistryUrlAllowed, checkFetchUrl } from "./url-policy.js";
@@ -166,6 +166,8 @@ export async function getProviderCache(cacheKey: string, ttlMs: number): Promise
   }
   const cache = edgeCache();
   if (!cache) return null;
+  // A spent subrequest budget skips the edge read: a miss, never an error.
+  if (!consumeSubrequest("cache")) return null;
   try {
     const response = await cache.match(providerEdgeRequest(cacheKey));
     if (!response) return null;
@@ -196,7 +198,7 @@ export async function setProviderCache(
   const value: ProviderCacheEntry = { payload, publicUrl, fetchedAt, storedAt: Date.now(), ttlMs };
   setBounded(providerJsonCache, cacheKey, value, PROVIDER_JSON_CACHE_MAX);
   const cache = edgeCache();
-  if (!cache) return;
+  if (!cache || !consumeSubrequest("cache")) return;
   try {
     await cache.put(
       providerEdgeRequest(cacheKey),
@@ -215,7 +217,7 @@ export async function setProviderCache(
 async function deleteProviderCache(cacheKey: string): Promise<void> {
   providerJsonCache.delete(cacheKey);
   const cache = edgeCache();
-  if (!cache) return;
+  if (!cache || !consumeSubrequest("cache")) return;
   try {
     await cache.delete(providerEdgeRequest(cacheKey));
   } catch {
@@ -761,7 +763,7 @@ async function getCrumb(): Promise<{ value: string; cookie: string }> {
     .finally(() => {
       _crumbRefresh = null;
     });
-  return _crumbRefresh;
+  return awaitNotingBudget(_crumbRefresh);
 }
 
 /** Drop the cached crumb after a 401, unless a concurrent caller already replaced it. */
@@ -938,7 +940,7 @@ function yahooEdgeRequest(cacheUrl: string): Request {
 
 async function readYahooEdge(cacheUrl: string, ttlMs: number): Promise<string | null> {
   const cache = edgeCache();
-  if (!cache) return null;
+  if (!cache || !consumeSubrequest("cache")) return null;
   try {
     const response = await cache.match(yahooEdgeRequest(cacheUrl));
     if (!response) return null;
@@ -955,7 +957,7 @@ async function readYahooEdge(cacheUrl: string, ttlMs: number): Promise<string | 
 
 async function writeYahooEdge(cacheUrl: string, text: string, ttlMs: number): Promise<void> {
   const cache = edgeCache();
-  if (!cache) return;
+  if (!cache || !consumeSubrequest("cache")) return;
   try {
     await cache.put(
       yahooEdgeRequest(cacheUrl),
@@ -1020,7 +1022,7 @@ export async function yGet(url: string, auth = true): Promise<unknown> {
         });
       yahooGetInflight.set(key, pending);
     }
-    body = await pending;
+    body = await awaitNotingBudget(pending);
   }
   try {
     return JSON.parse(body);
@@ -1176,12 +1178,15 @@ export async function runPartialBatch(
   const out: Record<string, unknown> = {};
   let successCount = 0;
   let errorCount = 0;
+  // Each ticker runs in its own scope, so a fetch the subrequest budget refused
+  // is charged to the ticker that asked for it (2.11.0).
   const settled = await mapWithConcurrency(tickers, BATCH_TICKER_CONCURRENCY, (t) =>
-    perTicker(t).then(
+    withBudgetWatch(() => perTicker(t).then(
       (raw) => ({ raw }),
       (error: unknown) => ({ error }),
-    ));
+    )).then(({ result, starved }) => ({ ...result, starved })));
   for (const [index, t] of tickers.entries()) {
+    const starved = settled[index].starved;
     try {
       const result = settled[index];
       if ("error" in result) throw result.error;
@@ -1192,7 +1197,17 @@ export async function runPartialBatch(
       else errorCount += 1;
       out[t] = shaped.ok === true
         ? (shaped.data ?? null)
-        : {
+        : starved
+          ? {
+              error: true,
+              code: ErrorCode.PROVIDER_BUDGET_EXHAUSTED,
+              message: typeof (shaped.error as Record<string, unknown> | undefined)?.message === "string"
+                ? (shaped.error as Record<string, unknown>).message
+                : `Error for ${t}`,
+              retryable: true,
+              recoveryAction: "RETRY_LATER",
+            }
+          : {
             error: true,
             code: typeof (shaped.error as Record<string, unknown> | undefined)?.code === "string"
               ? (shaped.error as Record<string, unknown>).code
@@ -1206,6 +1221,14 @@ export async function runPartialBatch(
       errorCount += 1;
       const message = e instanceof Error ? e.message : String(e);
       const lower = message.toLowerCase();
+      if (starved || isBudgetExhaustedError(e)) {
+        out[t] = {
+          ok: false,
+          data: null,
+          error: { ...toBatchError(message, ErrorCode.PROVIDER_BUDGET_EXHAUSTED, true), recoveryAction: "RETRY_LATER" },
+        };
+        continue;
+      }
       const code = lower.includes("timeout") ? "PROVIDER_TIMEOUT"
         : lower.includes("api error 404") ? "TICKER_NOT_FOUND"
         : "PROVIDER_ERROR";
@@ -4962,7 +4985,7 @@ function secDocumentEdgeRequest(url: string): Request {
 
 async function readSecDocumentEdge(url: string): Promise<string | null> {
   const cache = edgeCache();
-  if (!cache) return null;
+  if (!cache || !consumeSubrequest("cache")) return null;
   try {
     const response = await cache.match(secDocumentEdgeRequest(url));
     if (!response) return null;
@@ -4979,7 +5002,7 @@ async function readSecDocumentEdge(url: string): Promise<string | null> {
 
 async function writeSecDocumentEdge(url: string, text: string): Promise<boolean> {
   const cache = edgeCache();
-  if (!cache) return false;
+  if (!cache || !consumeSubrequest("cache")) return false;
   try {
     await cache.put(
       secDocumentEdgeRequest(url),
@@ -5037,7 +5060,7 @@ async function fetchSecDocument(url: string): Promise<SecDocumentResult> {
       });
     secDocumentInflight.set(url, pending);
   }
-  return pending;
+  return awaitNotingBudget(pending);
 }
 
 const FILING_CIK_TTL_MS = 24 * 60 * 60 * 1000;
@@ -9934,6 +9957,21 @@ function transcriptAttempt(sourceType: string, status: string, extra: Record<str
   return Object.fromEntries(Object.entries({ sourceType, status, ...extra }).filter(([, v]) => v != null));
 }
 
+// Attempts that read content, or never fetched, keep their status when the budget ran out.
+const TRANSCRIPT_BUDGET_UNAFFECTED = new Set(["SUCCESS", "SKIPPED", "INCOMPLETE_TRANSCRIPT"]);
+
+/**
+ * A transcript source attempt during which the subrequest budget refused a
+ * fetch (refusals counted since `mark`, from budgetRefusalCount()) reports
+ * PROVIDER_BUDGET_EXHAUSTED unless it read content (2.11.0). The waterfall
+ * runs its sources one after another, so the count since the mark is this
+ * source's alone. Only `status` changes.
+ */
+function budgetCheckedAttempt(attempt: Record<string, unknown>, mark: number): Record<string, unknown> {
+  if (budgetRefusalCount() <= mark || TRANSCRIPT_BUDGET_UNAFFECTED.has(String(attempt.status))) return attempt;
+  return { ...attempt, status: "PROVIDER_BUDGET_EXHAUSTED" };
+}
+
 type YahooTranscriptSourceIdentity = {
   eventId: string;
   fiscalQuarter: string;
@@ -10840,10 +10878,11 @@ export async function getEarningsCallTranscript(
   const pageCursor = Math.max(0, Math.trunc(paragraphCursor));
   const explicitYahoo = Boolean(normalizedEventId || normalizedSourceUrl);
   if (explicitYahoo) {
+    const yahooMark = budgetRefusalCount();
     const yahoo = await attemptYahooQuartrTranscript(
       ticker, normalizedFiscalQuarter, topics, normalizedEventId, normalizedSourceUrl, pageLimit, pageCursor,
     );
-    attemptedSources.push(yahoo.attempt);
+    attemptedSources.push(budgetCheckedAttempt(yahoo.attempt, yahooMark));
     if (yahoo.payload) {
       const { warnings = [], ...payload } = yahoo.payload;
       return JSON.stringify({
@@ -10860,9 +10899,10 @@ export async function getEarningsCallTranscript(
 
   let secFallback: Record<string, unknown>;
   let officialReleaseSource: Record<string, unknown> | null = null;
+  const secMark = budgetRefusalCount();
   const secSource = await resolveLatestEarningsSecSource(ticker);
   if (!secSource) {
-    attemptedSources.push(transcriptAttempt("sec_8k_exhibit", "NOT_FOUND"));
+    attemptedSources.push(budgetCheckedAttempt(transcriptAttempt("sec_8k_exhibit", "NOT_FOUND"), secMark));
     secFallback = {
       ticker: ticker.toUpperCase(),
       period,
@@ -10877,9 +10917,9 @@ export async function getEarningsCallTranscript(
     let cik: number | null = issuerCik ? parseInt(issuerCik, 10) : null;
     if (!cik) cik = edgarCikFromAccession(accessionNumber);
     if (!cik) {
-      attemptedSources.push(transcriptAttempt("sec_8k_exhibit", "FAILED", {
+      attemptedSources.push(budgetCheckedAttempt(transcriptAttempt("sec_8k_exhibit", "FAILED", {
         accessionNumber, reason: "CIK resolution failed.",
-      }));
+      }), secMark));
       secFallback = {
         ticker: ticker.toUpperCase(), period, status: "CIK_RESOLUTION_FAILED",
         message: "Could not resolve CIK for ticker.", content: null,
@@ -10958,14 +10998,14 @@ export async function getEarningsCallTranscript(
         });
       }
 
-      attemptedSources.push(transcriptAttempt("sec_8k_exhibit", "NOT_FOUND", {
+      attemptedSources.push(budgetCheckedAttempt(transcriptAttempt("sec_8k_exhibit", "NOT_FOUND", {
         url: edgarIndexUrl,
         accessionNumber,
         filingDate: secSource.filingDate ?? null,
         exhibitsSearched: exhibits.length,
         candidatesChecked: candidateDiagnostics.length,
         candidateDiagnostics,
-      }));
+      }), secMark));
       secFallback = {
         ticker: ticker.toUpperCase(), period, status: "SEC_EXHIBIT_NOT_FOUND", accessionNumber,
         filingDate: secSource.filingDate ?? null,
@@ -10983,10 +11023,11 @@ export async function getEarningsCallTranscript(
     reason: "No approved company IR transcript source was configured.",
   }));
   if (!explicitYahoo) {
+    const yahooMark = budgetRefusalCount();
     const yahoo = await attemptYahooQuartrTranscript(
       ticker, normalizedFiscalQuarter, topics, null, null, pageLimit, pageCursor,
     );
-    attemptedSources.push(yahoo.attempt);
+    attemptedSources.push(budgetCheckedAttempt(yahoo.attempt, yahooMark));
     if (yahoo.payload) {
       const metadataQuarter = yahoo.payload.fiscalYear && yahoo.payload.fiscalPeriod
         ? `${yahoo.payload.fiscalYear}${String(yahoo.payload.fiscalPeriod).toUpperCase()}`
@@ -11007,8 +11048,9 @@ export async function getEarningsCallTranscript(
   attemptedSources.push(transcriptAttempt("public_transcript_url", "SKIPPED", {
     reason: "No non-Yahoo public transcript URL was provided to parse_public_transcript.",
   }));
+  const alphaMark = budgetRefusalCount();
   const alpha = await attemptAlphaVantageTranscript(ticker, normalizedFiscalQuarter, officialReleaseSource, topics);
-  attemptedSources.push(alpha.attempt);
+  attemptedSources.push(budgetCheckedAttempt(alpha.attempt, alphaMark));
   if (alpha.payload) {
     return JSON.stringify({
       ticker: ticker.toUpperCase(), period, ...alpha.resolution, ...alpha.payload,

@@ -1117,7 +1117,7 @@ async def parse_public_transcript(url: str = "", topics: list[str] | None = None
         except Exception as exc:
             return None, f"Fetch error: {type(exc).__name__}: {exc}", None
 
-    html, error_detail, http_status = await loop.run_in_executor(None, _fetch_page)
+    html, error_detail, http_status = await loop.run_in_executor(None, _url_policy.in_context(_fetch_page))
     if not html:
         diagnostics: dict = {"url": url}
         if http_status is not None:
@@ -1157,6 +1157,20 @@ def _transcript_attempt(source_type: str, status: str, **extra: object) -> dict:
     attempt = {"sourceType": source_type, "status": status}
     attempt.update({k: v for k, v in extra.items() if v is not None})
     return attempt
+
+
+# Attempts that read content, or never fetched, keep their status when the budget ran out.
+_TRANSCRIPT_BUDGET_UNAFFECTED = {"SUCCESS", "SKIPPED", "INCOMPLETE_TRANSCRIPT"}
+
+
+def _budget_checked_attempt(attempt: dict, mark: int) -> dict:
+    """A transcript source attempt during which the subrequest budget refused a fetch (refusals counted since
+    ``mark``, from budget_refusal_count()) reports PROVIDER_BUDGET_EXHAUSTED unless it read content (2.11.0).
+    The waterfall runs its sources one after another, so the count since the mark is this source's alone.
+    Only ``status`` changes."""
+    if _url_policy.budget_refusal_count() <= mark or str(attempt.get("status")) in _TRANSCRIPT_BUDGET_UNAFFECTED:
+        return attempt
+    return {**attempt, "status": "PROVIDER_BUDGET_EXHAUSTED"}
 
 
 _SEC_TRANSCRIPT_MARKER_RE = _re.compile(
@@ -1776,6 +1790,7 @@ async def get_earnings_call_transcript(
     attempted_sources: list[dict] = []
     explicit_yahoo = bool(normalized_event_id or normalized_source_url)
     if explicit_yahoo:
+        yahoo_mark = _url_policy.budget_refusal_count()
         yahoo_payload, yahoo_attempt = await _attempt_yahoo_quartr_transcript(
             ticker,
             fiscal_quarter=normalized_fiscal_quarter,
@@ -1785,7 +1800,7 @@ async def get_earnings_call_transcript(
             paragraph_limit=int(paragraph_limit),
             paragraph_cursor=cursor_offset,
         )
-        attempted_sources.append(yahoo_attempt)
+        attempted_sources.append(_budget_checked_attempt(yahoo_attempt, yahoo_mark))
         if yahoo_payload:
             yahoo_payload.update({
                 "period": period,
@@ -1799,9 +1814,10 @@ async def get_earnings_call_transcript(
 
     sec_fallback: dict[str, object]
     official_release_source: dict | None = None
+    sec_mark = _url_policy.budget_refusal_count()
     sec_source = await _resolve_latest_earnings_sec_source(ticker)
     if not sec_source:
-        attempted_sources.append(_transcript_attempt("sec_8k_exhibit", "NOT_FOUND"))
+        attempted_sources.append(_budget_checked_attempt(_transcript_attempt("sec_8k_exhibit", "NOT_FOUND"), sec_mark))
         sec_fallback = {
             "ticker": ticker.upper(),
             "period": period,
@@ -1818,9 +1834,9 @@ async def get_earnings_call_transcript(
         if not cik:
             cik = _edgar_cik_from_accession(accession)
         if not cik:
-            attempted_sources.append(_transcript_attempt(
+            attempted_sources.append(_budget_checked_attempt(_transcript_attempt(
                 "sec_8k_exhibit", "FAILED", accessionNumber=accession, reason="CIK resolution failed."
-            ))
+            ), sec_mark))
             sec_fallback = {
                 "ticker": ticker.upper(), "period": period, "status": "CIK_RESOLUTION_FAILED",
                 "message": "Could not resolve CIK for ticker.", "content": None,
@@ -1891,11 +1907,11 @@ async def get_earnings_call_transcript(
                     **common, "filteredByTopics": None, "content": clean_text[:max_chars], "truncated": truncated,
                 }, warnings=warnings)
 
-            attempted_sources.append(_transcript_attempt(
+            attempted_sources.append(_budget_checked_attempt(_transcript_attempt(
                 "sec_8k_exhibit", "NOT_FOUND", url=index_url, accessionNumber=accession,
                 filingDate=sec_source.get("filingDate"), exhibitsSearched=len(exhibits),
                 candidatesChecked=len(candidate_diagnostics), candidateDiagnostics=candidate_diagnostics,
-            ))
+            ), sec_mark))
             sec_fallback = {
                 "ticker": ticker.upper(), "period": period, "status": "SEC_EXHIBIT_NOT_FOUND",
                 "accessionNumber": accession, "filingDate": sec_source.get("filingDate"),
@@ -1912,6 +1928,7 @@ async def get_earnings_call_transcript(
         "company_ir", "SKIPPED", reason="No approved company IR transcript source was configured."
     ))
     if not explicit_yahoo:
+        yahoo_mark = _url_policy.budget_refusal_count()
         yahoo_payload, yahoo_attempt = await _attempt_yahoo_quartr_transcript(
             ticker,
             fiscal_quarter=normalized_fiscal_quarter,
@@ -1921,7 +1938,7 @@ async def get_earnings_call_transcript(
             paragraph_limit=int(paragraph_limit),
             paragraph_cursor=cursor_offset,
         )
-        attempted_sources.append(yahoo_attempt)
+        attempted_sources.append(_budget_checked_attempt(yahoo_attempt, yahoo_mark))
         if yahoo_payload:
             metadata_quarter = None
             if yahoo_payload.get("fiscalYear") and yahoo_payload.get("fiscalPeriod"):
@@ -1939,10 +1956,11 @@ async def get_earnings_call_transcript(
     attempted_sources.append(_transcript_attempt(
         "public_transcript_url", "SKIPPED", reason="No non-Yahoo public transcript URL was provided to parse_public_transcript."
     ))
+    alpha_mark = _url_policy.budget_refusal_count()
     alpha_payload, alpha_attempt, quarter_resolution = await _attempt_alpha_vantage_transcript(
         ticker, normalized_fiscal_quarter, official_release_source, topics
     )
-    attempted_sources.append(alpha_attempt)
+    attempted_sources.append(_budget_checked_attempt(alpha_attempt, alpha_mark))
     if alpha_payload:
         alpha_payload.update({
             "ticker": ticker.upper(), "period": period, **quarter_resolution,
