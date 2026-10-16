@@ -1,6 +1,6 @@
 # Modernization Brief — yahoo-finance-mcp
 
-**Status: v3 DRAFT 2026-10-16 (post-pilot regeneration), awaiting approval for Phase 1, R4 and Phase 4 (§8).** v2 was approved 2026-10-15 for Phase 2, R3, RN and Phase 3; all four are done and live-verified. This document is the executable plan. The execution commands read it, and they treat each phase's scope, entry criteria and exit criteria as binding gates. **To steer execution, edit this file.** An edited entry criterion is honoured; a note in chat is not.
+**Status: v3 APPROVED 2026-10-16 for Phase 1, R4 and Phase 4 (§8).** v2 was approved 2026-10-15 for Phase 2, R3, RN and Phase 3; all four are done and live-verified. This document is the executable plan. The execution commands read it, and they treat each phase's scope, entry criteria and exit criteria as binding gates. **To steer execution, edit this file.** An edited entry criterion is honoured; a note in chat is not.
 
 v2 (2026-10-15) folds in the owner's answers to every v1 open question. The source is `OWNER_DECISIONS_20261015.md`; my verification of its claims against the code is summarised in §7.
 
@@ -602,6 +602,7 @@ All 9 Q7 news P0 rules were confirmed by the extraction's P0 panel and are cover
   | Attempted sources | `attemptedSources` | field | **exists** in the transcript tool (`earnings.py:1741`); news uses the same list shape |
   | Skipped sources | `skippedSources` | field | **exists** in the news coverage block (`server.py:350`); Q3h keeps its row shape and adds the explicit-empty and opt-in reasons |
   | Defaults substituted | `defaultSourcesApplied` | field (boolean) | new |
+  | Credential transport of the calling request (Phase 1 grace check, accepted 2026-10-16) | `credentialTransport` (`header` / `path` / `none`) | `health_check` field | new |
 
   Every name lands as a deliberate frozen-contract change: `public_tool_contract.py`, canaries and docs are updated in the release that introduces it, with a minor version bump.
 - [x] **Q14. Universal information outlet (owner decision 2026-10-15): apply N1–N4 with deprecation.** Owner, verbatim: "apply N1–N4 with deprecation, free means mcp as information outlet ,not telling doctrine specific data. We should replace them with universal language instead of doctrine specific. So if others who doesn't use the doctrine and connect to the mcp can use any data universally"
@@ -671,7 +672,7 @@ All 9 Q7 news P0 rules were confirmed by the extraction's P0 panel and are cover
 
 ### Open for v3 approval (2026-10-16)
 
-- [ ] **A1. Approve Phase 1 (security hardening) as scoped above, with no scope change since v2.** Owner actions it needs:
+- [x] **A1. Approve Phase 1 (security hardening) as scoped above, with no scope change since v2.** *(Approved 2026-10-16. Grace-check field chosen: `health_check.credentialTransport` = `header` | `path` | `none`; it never carries the token.)* Owner actions it needs:
   1. Create the `MCP_TOKEN` secret. The planner gives the exact `wrangler secret put` and GitHub steps; the token value is never written to the repo or chat.
   2. Re-add the claude.ai connector with the `/mcp/<token>` URL when the auth release deploys.
   3. Acknowledge V2: with 0 approved IR-registry entries, company-IR URL fetches are refused until entries are approved; `raw_text` still works.
@@ -680,13 +681,13 @@ All 9 Q7 news P0 rules were confirmed by the extraction's P0 panel and are cover
   - auth and limits first, with a token-issued grace release before enforcement;
   - then the SSRF allow-list and the budget guard;
   - then the supply-chain items.
-- [ ] **A2. Q3i triage method.**
+- [x] **A2. Q3i triage method.** *(Defaults accepted 2026-10-16.)*
   - **Input:** the ~120 items (20 untagged defects plus ~100 pinned divergences) as one table.
   - **Proposed default classification:**
     - **Repair:** a divergence that changes a published figure, status, `decisionGrade` or coverage claim. Pick the safer behaviour (the one that never overstates evidence), and align both runtimes to it.
     - **Preserve:** a text-only divergence (warning wording, timestamp precision, id format). Align to one runtime only if it is free, otherwise document it as intentional.
   - **Approval:** the owner approves the table once, then R4 and R-news implement it. Accept this method?
-- [ ] **A3. Order inside R4.**
+- [x] **A3. Order inside R4.** *(Defaults accepted 2026-10-16.)*
   - **First:** Q10 telemetry, then Q3b validation and Q3c caps. Telemetry baselines take time to accumulate before Phase 4 can compare against them.
   - **Next:** Q3a accession, Q4 smoke table and Q8 SDK pin.
   - **Last:** the Q3i triage table.
@@ -699,8 +700,10 @@ v2 — Approved by: repository owner (carnat), in session  Date: 2026-10-15
      Approval covers: Phase 2, R3, RN and Phase 3 (pilot) — all done and live-verified
      Owner's words, verbatim: "approve Phase 2, R3, RN and Phase 3"
 
-v3 — Approved by: ________________  Date: __________
-     Approval covers: Phase 1 | R4 | Phase 4 | R-news | Full remaining plan
+v3 — Approved by: repository owner (carnat), in session  Date: 2026-10-16
+     Approval covers: Phase 1, R4 and Phase 4
+     Owner's words, verbatim: "approve Phase 1, R4 and Phase 4"
+     A1 approved (credentialTransport field); A2/A3 defaults accepted.
 ```
 
 **Recommended v3 approval scope: Phase 1, R4 and Phase 4, with R-news after the triage.**
