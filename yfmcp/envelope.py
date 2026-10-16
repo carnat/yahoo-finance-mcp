@@ -13,6 +13,7 @@ from typing import NotRequired, TypedDict
 
 from yfmcp.build_info import BUILD_DATE, SERVER_VERSION
 from yfmcp.deprecations import TOOL_RELIABILITY_CLASS, deprecation_warnings_for
+from yfmcp.url_policy import SUBREQUEST_BUDGET, SUBREQUEST_BUDGET_WARNING, SUBREQUEST_LIMIT
 
 # ---------------------------------------------------------------------------
 # Server version and envelope feature flag
@@ -45,6 +46,8 @@ class ErrorCode:
     INPUT_VALIDATION_ERROR = "INPUT_VALIDATION_ERROR"
     DEPRECATED_TOOL = "DEPRECATED_TOOL"
     AMBIGUOUS_CONTEXT = "AMBIGUOUS_CONTEXT"
+    # The per-request subrequest budget was spent before this work could run (2.11.0).
+    PROVIDER_BUDGET_EXHAUSTED = "PROVIDER_BUDGET_EXHAUSTED"
 
 
 # ---------------------------------------------------------------------------
@@ -566,3 +569,38 @@ def _envelope_tool_result(tool: str, result: object) -> object:
     data = _enrich_facts(parsed)
     meta = _with_deprecation_notices(tool, _success_meta(tool, data_date=_payload_data_date(parsed)), data)
     return json.dumps({"ok": True, "data": data, "meta": meta, "error": None})
+
+
+def _budget_guarded_result(tool: str, result: object, *, refusals: int, exhausted: bool) -> object:
+    """Report a spent subrequest budget on an enveloped tool result (2.11.0), as the Worker does.
+
+    A failed call whose invocation had a budget refusal fails with PROVIDER_BUDGET_EXHAUSTED, retryable,
+    RETRY_LATER, whatever its own error path called it. A response in an invocation where the guard refused a
+    fetch carries one PROVIDER_BUDGET_EXHAUSTED row in meta.warnings. Anything else is returned untouched.
+    """
+    if (refusals <= 0 and not exhausted) or not isinstance(result, str):
+        return result
+    try:
+        value = json.loads(result)
+    except ValueError:
+        return result
+    if not isinstance(value, dict):
+        return result
+    if refusals > 0 and (value.get("ok") is False or value.get("error") is True):
+        value = json.loads(_mcp_failure(
+            tool,
+            ErrorCode.PROVIDER_BUDGET_EXHAUSTED,
+            f"The per-request subrequest budget ({SUBREQUEST_BUDGET} of {SUBREQUEST_LIMIT}) was spent before this request could complete. Retry later.",
+            meta_extra={"retryable": True, "recoveryAction": "RETRY_LATER"},
+        ))
+        if not isinstance(value, dict):
+            return json.dumps(value)
+    if not exhausted:
+        return json.dumps(value)
+    meta = value.get("meta")
+    warnings = meta.get("warnings") if isinstance(meta, dict) else None
+    if not isinstance(warnings, list):
+        return json.dumps(value) if refusals > 0 else result
+    if not any(isinstance(w, dict) and w.get("code") == SUBREQUEST_BUDGET_WARNING["code"] for w in warnings):
+        meta["warnings"] = [*warnings, dict(SUBREQUEST_BUDGET_WARNING)]
+    return json.dumps(value)

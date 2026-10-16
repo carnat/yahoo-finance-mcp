@@ -137,7 +137,7 @@ def _enrich_news_item_for_llm(item: dict) -> dict:
 
 def _build_coverage(source_status: dict, resolved_action: str | None = None) -> dict:
     failed_states = {
-        "UNCONFIGURED", "PROVIDER_ERROR", "AUTH_ERROR", "RATE_LIMITED", "TIMEOUT", "PROVIDER_CHANGED",
+        "UNCONFIGURED", "PROVIDER_ERROR", "AUTH_ERROR", "RATE_LIMITED", "TIMEOUT", "PROVIDER_BUDGET_EXHAUSTED", "PROVIDER_CHANGED",
         "IDENTITY_UNAVAILABLE",
         "WEBSITE_NOT_AVAILABLE", "DISCOVERY_NOT_FOUND", "DISCOVERY_BUDGET_EXHAUSTED", "FEED_NOT_FOUND",
         "PARSE_ERROR", "CANDIDATE_AVAILABLE", "NOT_REGISTERED", "DISABLED", "REVALIDATION_DUE", "SOURCE_VALIDATION_FAILED",
@@ -162,7 +162,7 @@ def _build_coverage(source_status: dict, resolved_action: str | None = None) -> 
             })
     coverage_limiting_skips = [row for row in skipped_sources if row["status"] != "NOT_NEEDED"]
     action = resolved_action or (
-        "RETRY_RETRYABLE_SOURCES" if any(row["status"] in {"RATE_LIMITED", "TIMEOUT"} for row in failed_sources) else (
+        "RETRY_RETRYABLE_SOURCES" if any(row["status"] in {"RATE_LIMITED", "TIMEOUT", "PROVIDER_BUDGET_EXHAUSTED"} for row in failed_sources) else (
             "CHECK_OFFICIAL_RELEASES" if failed_sources or coverage_limiting_skips else (
                 "RETRY_TRUNCATED_SOURCE" if truncated_sources else "USE_RETURNED_CONTEXT"
             )
@@ -1424,7 +1424,7 @@ async def _collect_globenewswire_events(
                     return raw.decode("utf-8", errors="replace")
 
             try:
-                xml_content = await loop.run_in_executor(None, _fetch_rss)
+                xml_content = await loop.run_in_executor(None, _url_policy.in_context(_fetch_rss))
                 _tool_cache.set(cache_key, xml_content, TTL_NEWS)
             except Exception as exc:
                 warnings.append({
@@ -1602,7 +1602,7 @@ async def _collect_finnhub_events(
             return json.loads(resp.read().decode("utf-8", errors="replace"))
 
     try:
-        raw_items = await loop.run_in_executor(None, _fetch)
+        raw_items = await loop.run_in_executor(None, _url_policy.in_context(_fetch))
     except _urlerror.HTTPError as exc:
         if exc.code in (401, 403):
             warnings.append({
@@ -1776,7 +1776,7 @@ async def _collect_marketaux_events(
             return json.loads(resp.read().decode("utf-8", errors="replace"))
 
     try:
-        payload = await loop.run_in_executor(None, _fetch)
+        payload = await loop.run_in_executor(None, _url_policy.in_context(_fetch))
     except _urlerror.HTTPError as exc:
         status = "AUTH_ERROR" if exc.code in (401, 403) else "RATE_LIMITED" if exc.code in (402, 429) else "PROVIDER_ERROR"
         diagnostics["status"] = status
@@ -2015,6 +2015,7 @@ def _compute_source_status(
     items: list[dict],
     selected_sources: list[str] | None = None,
     source_diagnostics: dict | None = None,
+    budget_starved_sources: list[str] | None = None,
 ) -> dict:
     """Build per-source status dict from collection results.
 
@@ -2258,7 +2259,34 @@ def _compute_source_status(
             result["newswire"] = {"status": "PROVIDER_ERROR", "rawCount": 0, "filteredCount": 0}
         else:
             result["newswire"] = {"status": "EMPTY_RESULT", "rawCount": 0, "filteredCount": 0}
-    return result
+    if budget_starved_sources is None:
+        budget_starved_sources = list(getattr(source_diagnostics, "budget_starved", None) or [])
+    return _mark_budget_starved_sources(result, budget_starved_sources)
+
+
+# A source whose collection had a fetch refused for the subrequest budget and did not end OK reports
+# PROVIDER_BUDGET_EXHAUSTED (2.11.0), never PROVIDER_ERROR, EMPTY_RESULT or another absence. Only `status` changes.
+_BUDGET_UNAFFECTED_STATUSES = {"OK", "APPROVED_SOURCE_OK"}
+
+
+def _mark_budget_starved_sources(source_status: dict, budget_starved_sources: list[str]) -> dict:
+    for source in budget_starved_sources:
+        row = source_status.get(source)
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("status") or "") not in _BUDGET_UNAFFECTED_STATUSES:
+            row["status"] = "PROVIDER_BUDGET_EXHAUSTED"
+    return source_status
+
+
+class _SourceDiagnostics(dict):
+    """Per-source diagnostics plus the sources whose collection had a fetch refused for budget (never serialized)."""
+
+    budget_starved: list[str]
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.budget_starved = []
 
 
 def _compute_source_coverage(source_status: dict) -> str:
@@ -2266,8 +2294,8 @@ def _compute_source_coverage(source_status: dict) -> str:
     for info in source_status.values():
         s = info.get("status", "") if isinstance(info, dict) else ""
         if s in (
-            "UNCONFIGURED", "NOT_ELIGIBLE", "PROVIDER_ERROR", "AUTH_ERROR", "RATE_LIMITED", "TIMEOUT", "PROVIDER_CHANGED",
-            "IDENTITY_UNAVAILABLE",
+            "UNCONFIGURED", "NOT_ELIGIBLE", "PROVIDER_ERROR", "AUTH_ERROR", "RATE_LIMITED", "TIMEOUT", "PROVIDER_BUDGET_EXHAUSTED",
+            "PROVIDER_CHANGED", "IDENTITY_UNAVAILABLE",
             "WEBSITE_NOT_AVAILABLE", "DISCOVERY_NOT_FOUND", "DISCOVERY_BUDGET_EXHAUSTED", "FEED_NOT_FOUND", "PARSE_ERROR",
             "CANDIDATE_AVAILABLE", "NOT_REGISTERED", "DISABLED", "REVALIDATION_DUE", "SOURCE_VALIDATION_FAILED",
         ):
@@ -2282,13 +2310,13 @@ def _verify_coverage_failure_mode(source_status: dict, warnings: list[dict]) -> 
         for w in warnings
         if isinstance(w, dict) and w.get("code") == "SOURCE_UNAVAILABLE"
     )
-    if "too many subrequests" in warning_text:
-        return "WORKER_SUBREQUEST_LIMIT"
     source_states = {
         str(info.get("status") or "")
         for info in source_status.values()
         if isinstance(info, dict)
     }
+    if "too many subrequests" in warning_text or "PROVIDER_BUDGET_EXHAUSTED" in source_states:
+        return "WORKER_SUBREQUEST_LIMIT"
     if "RATE_LIMITED" in source_states:
         return "RATE_LIMITED"
     if "TIMEOUT" in source_states:
@@ -2326,9 +2354,20 @@ async def _collect_company_events(
     )
     items: list[dict] = []
     sources_used: list[str] = []
-    source_diagnostics: dict[str, dict] = {}
+    source_diagnostics: dict[str, dict] = _SourceDiagnostics()
     max_cap = _coerce_max_results(max_results, 10)
     lookback = _coerce_lookback_days(lookback_days, 14)
+
+    # Each source is collected inside its own budget watch, so a fetch the subrequest budget refused is
+    # charged to the source that asked for it (2.11.0).
+    budget_starved: set[str] = set()
+
+    async def _watched(charged: list[str], work):
+        with _url_policy.budget_watch() as watch:
+            result = await work
+        if watch.starved:
+            budget_starved.update(charged)
+        return result
 
     # --- Yahoo Finance news ---
     # ``yahoo_finance_news`` fetches the news tab explicitly.
@@ -2358,10 +2397,13 @@ async def _collect_company_events(
         if not (_need_yf_news or _need_yf_pr):
             return None, None, None
         try:
-            info = await asyncio.to_thread(lambda: yf.Ticker(ticker).info)
+            with _url_policy.budget_watch() as identity_watch:
+                info = await asyncio.to_thread(lambda: yf.Ticker(ticker).info)
             identity = _yahoo_news_identity_from_info(ticker, info)
         except Exception:
             identity = _yahoo_news_identity_from_info(ticker, None)
+        if identity_watch.starved:
+            budget_starved.add("yahoo_finance_identity")
 
         def _feed(feed: str):
             # The Yahoo collector calls yfinance synchronously, so each feed
@@ -2371,22 +2413,22 @@ async def _collect_company_events(
             )))
 
         news, press = await asyncio.gather(
-            _feed("news") if _need_yf_news else _skipped(),
-            _feed("press_releases") if _need_yf_pr else _skipped(),
+            _watched(["yahoo_finance_news", "yahoo_finance"], _feed("news")) if _need_yf_news else _skipped(),
+            _watched(["yahoo_finance_press_releases", "yahoo_finance"], _feed("press_releases")) if _need_yf_pr else _skipped(),
         )
         return identity, news, press
 
     # The first-tier sources are independent, so they are fetched together;
     # results are merged below in the fixed source order, as before.
     sec_result, page_result, yahoo_result, finnhub_result = await asyncio.gather(
-        _collect_sec_events(
+        _watched(["sec"], _collect_sec_events(
             ticker,
             filing_types=sec_filing_types or ["8-K", "10-Q", "10-K", "S-3", "DEF14A"],
             **window,
-        ) if "sec" in selected_sources else _skipped(),
-        _collect_company_ir_page_events(ticker, **window) if "company_ir_page" in selected_sources else _skipped(),
+        )) if "sec" in selected_sources else _skipped(),
+        _watched(["company_ir_page"], _collect_company_ir_page_events(ticker, **window)) if "company_ir_page" in selected_sources else _skipped(),
         _yahoo_feeds(),
-        _collect_finnhub_events(ticker, **window) if "finnhub" in selected_sources and finnhub_eligible else _skipped(),
+        _watched(["finnhub"], _collect_finnhub_events(ticker, **window)) if "finnhub" in selected_sources and finnhub_eligible else _skipped(),
     )
 
     if sec_result is not None:
@@ -2496,7 +2538,7 @@ async def _collect_company_events(
             }
         else:
             marketaux_items, marketaux_warnings, used, marketaux_diagnostics = _unpack_provider_result(
-                await _collect_marketaux_events(
+                await _watched(["marketaux"], _collect_marketaux_events(
                     ticker,
                     retrieved_at=retrieved_at,
                     max_results=max_cap,
@@ -2506,7 +2548,7 @@ async def _collect_company_events(
                     fallback_reason=fallback_reason,
                     search_query=search_query,
                     expected_exchange=(yahoo_identity or {}).get("exchange"),
-                )
+                ))
             )
             source_diagnostics["marketaux"] = marketaux_diagnostics
             if used:
@@ -2517,14 +2559,14 @@ async def _collect_company_events(
     # Direct GlobeNewswire RSS is an explicitly selected shallow snapshot and
     # runs after the bounded API sources so its cold latency cannot delay them.
     if "newswire" in selected_sources:
-        gnw_items, gnw_warnings, gnw_used = await _collect_globenewswire_events(
+        gnw_items, gnw_warnings, gnw_used = await _watched(["newswire"], _collect_globenewswire_events(
             ticker,
             retrieved_at=retrieved_at,
             max_results=max_cap,
             start_date=start_date,
             end_date=end_date,
             lookback_days=lookback,
-        )
+        ))
         if gnw_used:
             sources_used.append("newswire")
         items.extend(gnw_items)
@@ -2566,6 +2608,7 @@ async def _collect_company_events(
                 "attempted": True,
                 "completed": all(diagnostic.get("completed") is True for diagnostic in yahoo_diagnostics),
             }
+    source_diagnostics.budget_starved = sorted(budget_starved)
     if include_diagnostics:
         return deduped, sources_used, unique_warnings, retrieved_at, source_diagnostics
     return deduped, sources_used, unique_warnings, retrieved_at
@@ -2828,6 +2871,10 @@ async def get_company_press_releases(
         modified_release_items,
         selected_sources,
         {**primary_diagnostics, **optional_diagnostics},
+        sorted({
+            *getattr(primary_diagnostics, "budget_starved", []),
+            *getattr(optional_diagnostics, "budget_starved", []),
+        }),
     )
     source_coverage = _compute_source_coverage(source_status)
     coverage_status = (
@@ -2916,13 +2963,14 @@ async def get_sec_recent_events(
     if not selected_types:
         return _mcp_failure("get_sec_recent_events", ErrorCode.INPUT_VALIDATION_ERROR, "filing_types must not be empty")
     retrieved_at = _utc_now_iso()
-    items, warnings, used = await _collect_sec_events(
-        ticker,
-        filing_types=selected_types,
-        retrieved_at=retrieved_at,
-        max_results=_coerce_max_results(max_results, 20),
-        lookback_days=_coerce_lookback_days(lookback_days, 90),
-    )
+    with _url_policy.budget_watch() as sec_watch:
+        items, warnings, used = await _collect_sec_events(
+            ticker,
+            filing_types=selected_types,
+            retrieved_at=retrieved_at,
+            max_results=_coerce_max_results(max_results, 20),
+            lookback_days=_coerce_lookback_days(lookback_days, 90),
+        )
     for item in items:
         if not _safe_sec_url(item.get("url")):
             item["confidence"] = "LOW"
@@ -2933,7 +2981,10 @@ async def get_sec_recent_events(
             })
     items = [_enrich_news_item_for_llm(item) for item in items]
     status = _build_collection_status(items, ["sec"] if used else [], warnings)
-    source_status = {"sec": {"status": "OK" if items else "EMPTY_RESULT"} if used else {"status": "PROVIDER_ERROR"}}
+    source_status = _mark_budget_starved_sources(
+        {"sec": {"status": "OK" if items else "EMPTY_RESULT"} if used else {"status": "PROVIDER_ERROR"}},
+        ["sec"] if sec_watch.starved else [],
+    )
     source_coverage = _compute_source_coverage(source_status)
     payload = {
         "ticker": ticker.upper(),

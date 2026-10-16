@@ -5,16 +5,19 @@ spends part of the 45-unit budget first (`consumeSubrequest("fetch")`), standing
 invocation, so the fake upstream needs more fetches than remain. No edge cache is involved (the runner has no
 `caches.default`).
 
-TODO(python-mirror): Python has no budget guard yet (spec §4: a contextvars counter in yfmcp/url_policy.py).
-The two starved cases are pinned with a placeholder Python value; once the mirror lands, give `py` the same
-pre-spent budget (a test hook on the url_policy counter), switch the case to mode="equal" and set
-`expect` to today's `expect_ts`. The batch case drives a Yahoo batch tool, whose Python per-ticker path is
-yfinance (uncounted by §4), so that case also needs a planner choice of a batch tool whose Python fetches are
-counted before it can be equal.
+The Python side (yfmcp/url_policy.py, spec §4) runs each news call inside `invocation_scope(spent=...)`,
+the same pre-spent budget, so both runtimes see the same units left. The news cases are mode "equal". The batch
+case stays pinned: a documented divergence (see BATCH_DECISION).
 """
 
 from __future__ import annotations
 
+import asyncio
+import json
+import types
+from unittest.mock import patch
+
+import server
 from scripts.parity.cases_news_a import (
     FAKE_FINNHUB,
     FAKE_MARKETAUX,
@@ -26,11 +29,13 @@ from scripts.parity.cases_news_a import (
     tool_case,
 )
 from scripts.parity.harness import Case
+from yfmcp import url_policy
 
 CASES: list[Case] = []
 
 DECISION = "R3C-python-mirror"
-PY_PENDING = "TODO(python-mirror): Python budget guard not ported yet"
+BATCH_DECISION = ("Python batch per-ticker work runs through yfinance (uncounted); "
+                  "the subrequest limit is a Worker runtime limit")
 
 # The Worker body: the news cases' frozen clock and fake env, plus a root scope with part of the budget spent.
 _BUDGET_TOOL_JS = """
@@ -54,10 +59,14 @@ try {
 
 def budget_case(name: str, ids: list[str], tool: str, args: list, scn: dict, spent: int, **kw) -> Case:
     """tool_case with the Worker call made inside a root scope whose budget has `spent` units used."""
-    py = kw.pop("py", None)
     case = tool_case(name, ids, tool, args, scn, **kw)
-    if py is not None:
-        case.py = py
+    run_python = case.py
+
+    def py():
+        with url_policy.invocation_scope(spent=spent):
+            return run_python()
+
+    case.py = py
     case.ts = {**case.ts, "js": _BUDGET_TOOL_JS, "fx": {**case.ts["fx"], "spent": spent}}
     return case
 
@@ -91,14 +100,12 @@ CASES += [
     budget_case("budget.news.starved_source_reports_budget_exhausted", ["R3C-BUDGET-001"], "news",
                 ["ACME", 10, 14, FINNHUB_AND_MARKETAUX],
                 {"env": KEYS, "info": ACME_INFO, "routes": {FINNHUB_NEWS: {"json": []}, **MX_EMPTY}},
-                spent=44, mode="pinned", decision=DECISION,
-                py=lambda: PY_PENDING,
-                select=lambda v: v if isinstance(v, str) else {
+                spent=44,
+                select=lambda v: {
                     **_budget_news_view(v),
                     "failedReasonCodes": [f.get("reasonCode") for f in (v.get("coverage") or {}).get("failedSources") or []],
                 },
-                expect_py=PY_PENDING,
-                expect_ts={"status": "SOURCE_LIMITED_NOT_FOUND",
+                expect={"status": "SOURCE_LIMITED_NOT_FOUND",
                            "coverage": {"sourceCoverage": "PARTIAL", "state": "PARTIAL",
                                         "failed": [["marketaux", "PROVIDER_BUDGET_EXHAUSTED"]], "skipped": [], "truncated": [],
                                         "action": "RETRY_RETRYABLE_SOURCES"},
@@ -144,12 +151,30 @@ def _batch_view(v):
     return out
 
 
+class _BatchTicker:
+    """yf.Ticker stand-in for the Python batch: yfinance answers, no urllib fetch is made, nothing is counted."""
+
+    def __init__(self, _symbol: str) -> None:
+        self.fast_info = types.SimpleNamespace(currency="USD")
+        self.info = {"shortName": "Acme Corp", "longName": "Acme Corporation", "currency": "USD", "sector": "Technology",
+                     "industry": "Software"}
+
+
+def _python_batch():
+    # The same pre-spent budget as the Worker run (42 of 45); yfinance does not touch it, so no ticker starves.
+    with url_policy.invocation_scope(spent=42), patch.object(server.yf, "Ticker", _BatchTicker):
+        return json.loads(asyncio.run(server.get_stock_info(["AAPL", "MSFT"])))
+
+
 CASES += [
+    # Documented divergence: BATCH_DECISION. The Worker's per-ticker work is counted fetches, so MSFT starves;
+    # the Python batch reads yfinance, which is not counted (spec §4), so both tickers complete and there is no
+    # __batchMeta. Python batches cannot starve; nothing here invents a way to make them.
     Case(name="budget.batch.stops_partway_with_per_ticker_code", ids=["R3C-BUDGET-002"],
-         py=lambda: PY_PENDING,
+         py=_python_batch,
          ts={"js": _BATCH_JS, "fx": {"spent": 42}, "isolate": True},
-         routes=_PROFILE_ROUTES, mode="pinned", decision=DECISION, select=_batch_view,
-         expect_py=PY_PENDING,
+         routes=_PROFILE_ROUTES, mode="pinned", decision=BATCH_DECISION, select=_batch_view,
+         expect_py={"AAPL": {"failed": False}, "MSFT": {"failed": False}, "batchMeta": None},
          expect_ts={"AAPL": {"failed": False},
                     "MSFT": {"failed": True, "code": "PROVIDER_BUDGET_EXHAUSTED", "retryable": True, "recoveryAction": "RETRY_LATER"},
                     "batchMeta": {"partialSuccess": True, "successCount": 1, "errorCount": 1}}),

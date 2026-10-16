@@ -100,7 +100,7 @@ async def _load_edgar_tickers() -> dict[str, int]:
         return {v["ticker"].upper(): int(v["cik_str"]) for v in data.values()}
 
     try:
-        _EDGAR_TICKERS = await loop.run_in_executor(None, _fetch)
+        _EDGAR_TICKERS = await loop.run_in_executor(None, _url_policy.in_context(_fetch))
         _EDGAR_TICKERS_LOADED_AT = now
     except Exception:
         if _EDGAR_TICKERS is None:
@@ -131,7 +131,7 @@ async def _edgar_get(url: str) -> dict:
         except Exception as e:
             raise EdgarError(f"SEC API connection failed: {e}") from e
 
-    return await loop.run_in_executor(None, _fetch)
+    return await loop.run_in_executor(None, _url_policy.in_context(_fetch))
 
 
 async def _edgar_get_company_facts(cik_padded: str) -> dict | None:
@@ -287,7 +287,7 @@ def _store_edgar_html(key: tuple[str, int], future: concurrent.futures.Future) -
 async def _edgar_get_html(url: str, max_bytes: int = 5_000_000) -> str | None:
     """Fetch an HTML document from EDGAR, reading at most max_bytes uncompressed bytes."""
     if not url.startswith(_EDGAR_ARCHIVE_PREFIX):
-        return await asyncio.get_running_loop().run_in_executor(None, _fetch_edgar_html, url, max_bytes)
+        return await asyncio.get_running_loop().run_in_executor(None, _url_policy.in_context(_fetch_edgar_html, url, max_bytes))
     key = (url, max_bytes)
     with _EDGAR_HTML_LOCK:
         hit = _EDGAR_HTML_CACHE.get(key)
@@ -295,7 +295,7 @@ async def _edgar_get_html(url: str, max_bytes: int = 5_000_000) -> str | None:
             return hit[0]
         future = _EDGAR_HTML_INFLIGHT.get(key)
         if future is None:
-            future = _EDGAR_HTML_EXECUTOR.submit(_fetch_edgar_html, url, max_bytes)
+            future = _EDGAR_HTML_EXECUTOR.submit(_url_policy.in_context(_fetch_edgar_html, url, max_bytes))
             _EDGAR_HTML_INFLIGHT[key] = future
             future.add_done_callback(lambda done, key=key: _store_edgar_html(key, done))
     return await asyncio.wrap_future(future)
@@ -372,7 +372,7 @@ async def _resolve_cik_for_ticker(ticker: str) -> str | None:
                 continue
         return None
 
-    cik_padded = await loop.run_in_executor(None, _fetch_atom)
+    cik_padded = await loop.run_in_executor(None, _url_policy.in_context(_fetch_atom))
     if cik_padded:
         _bounded_set(_FILING_CIK_CACHE, t_upper, cik_padded, _FILING_CIK_CACHE_MAX)
     return cik_padded

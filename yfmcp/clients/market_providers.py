@@ -154,7 +154,7 @@ async def _request_json(
         except Exception as error:  # pragma: no cover - defensive boundary
             return None, None, str(error), None
 
-    payload, http_code, message, retry_after = await loop.run_in_executor(None, _fetch)
+    payload, http_code, message, retry_after = await loop.run_in_executor(None, _url_policy.in_context(_fetch))
     safe_message = (message or "").replace(secret, "REDACTED") or None
     if http_code == -1:
         return ProviderJsonResult(None, "TIMEOUT", public_url, True, "MISS", message=safe_message)

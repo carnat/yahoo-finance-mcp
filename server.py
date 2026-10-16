@@ -7660,7 +7660,7 @@ async def _companies_house_get(path: str, key: str) -> tuple[int, dict | None]:
         except _urlerror.HTTPError as exc:
             return exc.code, None
 
-    return await asyncio.get_event_loop().run_in_executor(None, fetch)
+    return await asyncio.get_event_loop().run_in_executor(None, _url_policy.in_context(fetch))
 
 
 def _companies_house_error(status: int, step: str) -> str:
@@ -8849,11 +8849,19 @@ async def _alpha_vantage_estimates(symbol: str) -> dict:
 
 async def _consensus_providers(ticker: str) -> tuple[list[dict], dict, dict]:
     symbol = ticker.upper()
-    (yahoo, quote), alpha_input, splits = await asyncio.gather(
+    async def alpha_watched() -> tuple[dict, bool]:
+        # Its own budget watch, so a fetch the subrequest budget refused is charged to this provider (2.11.0).
+        with _url_policy.budget_watch() as watch:
+            read = await _alpha_vantage_estimates(symbol)
+        return read, watch.starved
+
+    (yahoo, quote), (alpha_read, alpha_starved), splits = await asyncio.gather(
         asyncio.to_thread(_yahoo_consensus_snapshot, symbol),
-        _alpha_vantage_estimates(symbol),
+        alpha_watched(),
         asyncio.to_thread(_consensus_split_history, symbol),
     )
+    # A provider starved of budget reports PROVIDER_BUDGET_EXHAUSTED, never PROVIDER_ERROR or NO_DATA.
+    alpha_input = {**alpha_read, "status": "PROVIDER_BUDGET_EXHAUSTED"} if alpha_starved and alpha_read.get("status") != "OK" else alpha_read
     return [yahoo, alpha_input], quote, splits
 
 

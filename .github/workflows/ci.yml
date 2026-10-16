@@ -124,6 +124,9 @@ jobs:
       - name: Worker per-invocation subrequest budget guard tests
         run: python scripts/test_worker_budget.py -v
 
+      - name: Python per-invocation subrequest budget guard tests
+        run: python scripts/test_python_budget.py -v
+
       - name: Worker doctrine safety tests
         run: python scripts/test_worker_doctrine_safety.py
 

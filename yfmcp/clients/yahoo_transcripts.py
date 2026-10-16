@@ -538,9 +538,11 @@ async def fetch_yahoo_quartr_transcript(
     """Fetch one structured Yahoo/Quartr transcript with no retry loop."""
     return await asyncio.get_running_loop().run_in_executor(
         None,
-        _blocking_fetch,
-        ticker,
-        event_id,
-        source_url,
-        fiscal_quarter,
+        _url_policy.in_context(
+            _blocking_fetch,
+            ticker,
+            event_id,
+            source_url,
+            fiscal_quarter,
+        ),
     )
