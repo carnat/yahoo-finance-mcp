@@ -12,6 +12,16 @@ import types
 import unittest
 from unittest.mock import AsyncMock, patch
 
+
+def _open_worker_yahoo_news(root):
+    """File-like over yahoo-finance.ts plus news.ts (the news code moved to news.ts in Phase 3; the combined text is unchanged)."""
+    import io
+    parts = []
+    for name in ("yahoo-finance.ts", "news.ts"):
+        with open(os.path.join(root, "worker", "src", name), encoding="utf-8") as handle:
+            parts.append(handle.read())
+    return io.StringIO("\n".join(parts))
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
@@ -2335,7 +2345,7 @@ class TestGlobeNewswireRSS(unittest.TestCase):
     def test_worker_newswire_uses_globenewswire_not_yahoo_backfill(self):
         """Worker newswire path must use GlobeNewswire RSS and not Yahoo backfill."""
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        with open(os.path.join(root, "worker", "src", "yahoo-finance.ts"), encoding="utf-8") as f:
+        with _open_worker_yahoo_news(root) as f:
             worker_text = f.read()
         with open(os.path.join(root, "worker", "src", "tools.ts"), encoding="utf-8") as f:
             tools_text = f.read()
@@ -2356,7 +2366,7 @@ class TestGlobeNewswireRSS(unittest.TestCase):
         """Yahoo retired the press-releases tab endpoint (2.5.33): the Worker no longer posts to it and keeps
         the issuer's own wire releases from the news search feed (behaviour: scripts/test_yahoo_press_releases.py)."""
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        with open(os.path.join(root, "worker", "src", "yahoo-finance.ts"), encoding="utf-8") as f:
+        with _open_worker_yahoo_news(root) as f:
             worker_text = f.read()
 
         self.assertNotIn('"https://finance.yahoo.com/xhr/ncp?queryRef=pressRelease&serviceKey=ncp_fin"', worker_text)
@@ -2368,7 +2378,7 @@ class TestGlobeNewswireRSS(unittest.TestCase):
     def test_worker_company_ir_uses_official_rss_autodiscovery(self):
         """Worker company_ir source must use official RSS/Atom discovery, not Yahoo backfill."""
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        with open(os.path.join(root, "worker", "src", "yahoo-finance.ts"), encoding="utf-8") as f:
+        with _open_worker_yahoo_news(root) as f:
             worker_text = f.read()
         self.assertIn("COMPANY_IR_DISCOVERY_PATHS", worker_text)
         self.assertIn('"/rss.cfm"', worker_text)
@@ -2386,7 +2396,7 @@ class TestGlobeNewswireRSS(unittest.TestCase):
     def test_worker_company_ir_rejects_non_feed_candidates(self):
         """oEmbed/JSON/social links must not be treated as RSS candidates."""
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        with open(os.path.join(root, "worker", "src", "yahoo-finance.ts"), encoding="utf-8") as f:
+        with _open_worker_yahoo_news(root) as f:
             worker_text = f.read()
 
         self.assertIn("rejectedCompanyIrFeedCandidate", worker_text)
@@ -2399,7 +2409,7 @@ class TestGlobeNewswireRSS(unittest.TestCase):
     def test_worker_newswire_ticker_match_checks_exchange(self):
         """Exact ticker matches from newswire RSS should reject incompatible listed exchanges."""
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        with open(os.path.join(root, "worker", "src", "yahoo-finance.ts"), encoding="utf-8") as f:
+        with _open_worker_yahoo_news(root) as f:
             worker_text = f.read()
 
         self.assertIn("function exchangeCompatibleWithStockCategory", worker_text)
@@ -2410,7 +2420,7 @@ class TestGlobeNewswireRSS(unittest.TestCase):
     def test_worker_news_items_expose_decision_use(self):
         """All event providers should label source strength for LLM callers."""
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        with open(os.path.join(root, "worker", "src", "yahoo-finance.ts"), encoding="utf-8") as f:
+        with _open_worker_yahoo_news(root) as f:
             worker_text = f.read()
 
         self.assertIn("function sourceDecisionUse", worker_text)
@@ -2423,7 +2433,7 @@ class TestGlobeNewswireRSS(unittest.TestCase):
     def test_worker_yahoo_news_uses_strict_identity_and_honest_counts(self):
         """Worker Yahoo collection must not regress to generic name-token matching."""
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        with open(os.path.join(root, "worker", "src", "yahoo-finance.ts"), encoding="utf-8") as f:
+        with _open_worker_yahoo_news(root) as f:
             worker_text = f.read()
 
         self.assertIn("function yahooNewsIdentityFor", worker_text)
@@ -2437,7 +2447,7 @@ class TestGlobeNewswireRSS(unittest.TestCase):
     def test_worker_company_ir_status_is_machine_readable(self):
         """Company IR discovery failures must be status-coded for agents."""
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        with open(os.path.join(root, "worker", "src", "yahoo-finance.ts"), encoding="utf-8") as f:
+        with _open_worker_yahoo_news(root) as f:
             worker_text = f.read()
         with open(os.path.join(root, "scripts", "deployed_canaries.json"), encoding="utf-8") as f:
             canary_text = f.read()
@@ -2459,7 +2469,7 @@ class TestGlobeNewswireRSS(unittest.TestCase):
     def test_worker_verify_marks_unavailable_coverage_as_not_confirmed_absence(self):
         """An unavailable provider must not be flattened into a plain NOT_FOUND."""
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        with open(os.path.join(root, "worker", "src", "yahoo-finance.ts"), encoding="utf-8") as f:
+        with _open_worker_yahoo_news(root) as f:
             worker_text = f.read()
         with open(os.path.join(root, "worker", "src", "tools.ts"), encoding="utf-8") as f:
             tools_text = f.read()
@@ -2473,7 +2483,7 @@ class TestGlobeNewswireRSS(unittest.TestCase):
     def test_worker_company_ir_xml_safety_check_relaxed(self):
         """Worker XML safety check should be relaxed to support standard DOCTYPEs but reject ENTITYs."""
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        with open(os.path.join(root, "worker", "src", "yahoo-finance.ts"), encoding="utf-8") as f:
+        with _open_worker_yahoo_news(root) as f:
             worker_text = f.read()
 
         # Confirm safety check is now specific to ENTITY declarations
