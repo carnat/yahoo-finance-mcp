@@ -236,6 +236,7 @@ Every PR follows `CLAUDE.md`: the TS change first, then the `python-mirror` port
 Each R-release is a set of **separately released** behaviour changes that must be live before the move it precedes. All follow the TS → Python mirror → parity flip → docs → version bump → live-verify order.
 
 - **RN: neutrality deprecation release (Q14, N1–N3); ships with or right after R3, before Phase 3.** One cross-cutting release in both runtimes:
+  - *Status 2026-10-16: released as 2.8.0 (#278) and live-verified 8/8 on build 2.8.0+git.13119f9. Wording notes for the Phase 6 removal release: the price-target notice names `referenceTargetPct` as a replacement although it is a ratio, not a direction; the deprecated `tagNote` still says "Use inferredTag", which is itself deprecated.*
   - **Add the universal fields:** `reliabilityClass` on every tool status (Python gains it too, which also closes the Worker-only parity gap), `priceAtOrAboveTarget`, the optional `min_adv_usd` input with `meetsMinimum`, and the four topic-named input groups (Q15a).
   - **Keep the old fields for the window:** `doctrineUse`, the seven null boundary fields, `bracket`, `inferredTag`, the fixed liquidity-gate fields and the four `t*_inputs` groups are still emitted with **identical values**, marked deprecated in the schema descriptions and `docs/provider-runtime-guidance.md`, with a `DEPRECATED_FIELD` notice naming each field's replacement.
   - **Window:** at least **one minor version**. The removal release is in Phase 6.
@@ -286,7 +287,7 @@ Each R-release is a set of **separately released** behaviour changes that must b
 - **Entry criteria:**
   - [x] Phase 2 exit criteria are met. (Phase 1 is no longer a prerequisite: Q16.) *(#276 merged 2026-10-15.)*
   - [x] R3 is released and live-verified. *(2.7.0, #277; live verifier 6/6 PASS on build 2.7.0+git.e420803, 2026-10-15.)*
-  - [ ] The Q7 news rules are in the harness. *(Extraction done: `NEWS_RULES.md`, BR-NWS-101..280; harness cases in progress.)*
+  - [x] The Q7 news rules are in the harness. *(BR-NWS-101..280: 282 cases, 180/180 rules covered; merged in #278.)*
 - **Exit criteria:**
   - [ ] The topology re-run shows 0 NLOC in both `#news` regions.
   - [ ] Harness diff = 0; acceptance suite and canaries green; the live verifier compares structure and coverage before and after.
