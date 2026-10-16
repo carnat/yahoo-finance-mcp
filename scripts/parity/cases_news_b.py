@@ -1395,8 +1395,7 @@ CASES += [
     # runtimes; a valid batch runs per ticker; a lower-case ticker passes the format check (upper-cased in the result).
     _multi_scenario(
         "news.validation.empty_symbols_blank_queries_and_valid_batches_agree", ["BR-NWS-205", "BR-NWS-234", "BR-NWS-279", "BR-NWS-241", "BR-NWS-275"],
-        [("empty_symbol", lambda: server.get_company_news(["AAPL", ""], 10, 14, []), _call_tool("get_company_news", {"ticker": ["AAPL", ""], "sources": []})),
-         ("empty_list", lambda: server.get_company_news([], 10, 14, []), _call_tool("get_company_news", {"ticker": [], "sources": []})),
+        [("empty_list", lambda: server.get_company_news([], 10, 14, []), _call_tool("get_company_news", {"ticker": [], "sources": []})),
          ("valid_batch", lambda: server.get_company_news(["AAPL", "MSFT"], 10, 14, []), _call_tool("get_company_news", {"ticker": ["AAPL", "MSFT"], "sources": []})),
          ("lower_case_ticker", lambda: server.get_company_news("brk.b", 10, 14, []), _call_tool("get_company_news", {"ticker": "brk.b", "sources": []})),
          ("blank_search_query", lambda: server.search_company_news("AAPL", "   ", "", "", []),
@@ -1404,16 +1403,24 @@ CASES += [
          ("blank_verify_query", lambda: server.verify_company_event("AAPL", " ", "", "", []),
           _call_tool("verify_company_event", {"ticker": "AAPL", "event_query": " ", "sources": []}))],
         news=[], info={}, routes=_VALIDATION_ROUTES, select=_tool_outcome,
-        expect={"empty_symbol": ["INPUT_VALIDATION_ERROR", "ticker is required and must not contain empty symbols."],
-                "empty_list": ["INPUT_VALIDATION_ERROR", "ticker is required and must not contain empty symbols."],
+        expect={"empty_list": ["INPUT_VALIDATION_ERROR", "ticker is required and must not contain empty symbols."],
                 "valid_batch": {"batch": {"AAPL": ["AAPL", _NO_NEWS_STATUS], "MSFT": ["MSFT", _NO_NEWS_STATUS]}},
                 "lower_case_ticker": ["ran", "BRK.B"],
                 "blank_search_query": ["INPUT_VALIDATION_ERROR", "query is required"],
                 "blank_verify_query": ["INPUT_VALIDATION_ERROR", "event_query is required"]}),
-    # Cards 240 / 241: the ticker format is checked in Python only (after trim and upper-case; 1-20 characters of A-Z 0-9 . - ^ =),
-    # for all six news and event tools, in the batch path per symbol. The Worker runs the collection and returns a (limited) result.
+    # Card 205 (2.12.0, Q3b): an empty symbol inside a batch now fails the Worker's tool-call gate with the ticker-format
+    # message (the raw value echoed); Python's handler still says "ticker is required ...". TODO(python-mirror): once the
+    # Python gate runs on this path, flip to mode "equal" with expect_ts as `expect`.
     _multi_scenario(
-        "news.validation.ticker_format_is_checked_in_python_only", ["BR-NWS-240", "BR-NWS-241"],
+        "news.validation.empty_symbol_in_a_batch_fails_the_ticker_format_gate", ["BR-NWS-205", "BR-NWS-241"],
+        [("empty_symbol", lambda: server.get_company_news(["AAPL", ""], 10, 14, []), _call_tool("get_company_news", {"ticker": ["AAPL", ""], "sources": []}))],
+        news=[], info={}, routes=_VALIDATION_ROUTES, select=_tool_outcome, mode="pinned", decision="Q3b TODO(python-mirror)",
+        expect_py={"empty_symbol": ["INPUT_VALIDATION_ERROR", "ticker is required and must not contain empty symbols."]},
+        expect_ts={"empty_symbol": ["INPUT_VALIDATION_ERROR", _INVALID_TICKER_MSG.format("")]}),
+    # Cards 240 / 241 (Q3b, 2.12.0): the ticker format (after trim and upper-case; 1-20 characters of A-Z 0-9 . - ^ =) is
+    # checked in both runtimes for all six news and event tools, per symbol in the batch path, echoing the raw value.
+    _multi_scenario(
+        "news.validation.ticker_format_is_checked_in_both_runtimes", ["BR-NWS-240", "BR-NWS-241"],
         [("get_company_news_dollar", lambda: server.get_company_news("AAPL$", 10, 14, []), _call_tool("get_company_news", {"ticker": "AAPL$", "sources": []})),
          ("get_company_news_21_chars", lambda: server.get_company_news("A" * 21, 10, 14, []), _call_tool("get_company_news", {"ticker": "A" * 21, "sources": []})),
          ("search_company_news_space", lambda: server.search_company_news("AAPL US!", "dividend", "", "", []),
@@ -1426,29 +1433,25 @@ CASES += [
           _call_tool("get_public_event_timeline", {"ticker": "AAPL$", "sources": []})),
          ("get_sec_recent_events_dollar", lambda: server.get_sec_recent_events("AAPL$", ["8-K"], 90, 20),
           _call_tool("get_sec_recent_events", {"ticker": "AAPL$", "filing_types": ["8-K"]}))],
-        news=[], info={}, routes=_VALIDATION_ROUTES, select=_tool_outcome, mode="pinned",
-        decision="FINDING: malformed tickers ('AAPL$', 21 characters, 'AAPL US!') are INPUT_VALIDATION_ERROR in Python and run the collection in the Worker",
-        expect_py={"get_company_news_dollar": ["INPUT_VALIDATION_ERROR", _INVALID_TICKER_MSG.format("AAPL$")],
+        news=[], info={}, routes=_VALIDATION_ROUTES, select=_tool_outcome,
+        expect={"get_company_news_dollar": ["INPUT_VALIDATION_ERROR", _INVALID_TICKER_MSG.format("AAPL$")],
                    "get_company_news_21_chars": ["INPUT_VALIDATION_ERROR", _INVALID_TICKER_MSG.format("A" * 21)],
                    "search_company_news_space": ["INPUT_VALIDATION_ERROR", _INVALID_TICKER_MSG.format("AAPL US!")],
                    "verify_company_event_dollar": ["INPUT_VALIDATION_ERROR", _INVALID_TICKER_MSG.format("AAPL$")],
                    "get_company_press_releases_dollar": ["INPUT_VALIDATION_ERROR", _INVALID_TICKER_MSG.format("AAPL$")],
                    "get_public_event_timeline_dollar": ["INPUT_VALIDATION_ERROR", _INVALID_TICKER_MSG.format("AAPL$")],
-                   "get_sec_recent_events_dollar": ["INPUT_VALIDATION_ERROR", _INVALID_TICKER_MSG.format("AAPL$")]},
-        expect_ts={"get_company_news_dollar": ["ran", "AAPL$"], "get_company_news_21_chars": ["ran", "A" * 21],
-                   "search_company_news_space": ["ran", "AAPL US!"], "verify_company_event_dollar": ["ran", "AAPL$"],
-                   "get_company_press_releases_dollar": ["ran", "AAPL$"], "get_public_event_timeline_dollar": ["ran", "AAPL$"],
-                   "get_sec_recent_events_dollar": ["ran", "AAPL$"]}),
-    # Card 204: six tickers. Python fetches all six (three at a time); the Worker refuses with 'Too many tickers: 6. Maximum is 5 per call.'
+                "get_sec_recent_events_dollar": ["INPUT_VALIDATION_ERROR", _INVALID_TICKER_MSG.format("AAPL$")]}),
+    # Card 204 (Q3c, 2.12.0): six tickers is over get_company_news's cap of 5; the Worker's tool-call gate rejects it with
+    # BATCH_LIMIT_EXCEEDED. Python fetches all six (three at a time). TODO(python-mirror): once the Python gate runs on this
+    # path, flip to mode "equal" with expect_ts as `expect`.
     _multi_scenario(
         "news.validation.batch_of_six_tickers_runs_in_python_and_fails_in_the_worker", ["BR-NWS-204", "BR-NWS-275"],
         [("six", lambda: server.get_company_news(_SIX_TICKERS, 10, 14, []), _call_tool("get_company_news", {"ticker": _SIX_TICKERS, "sources": []})),
          ("five", lambda: server.get_company_news(_SIX_TICKERS[:5], 10, 14, []), _call_tool("get_company_news", {"ticker": _SIX_TICKERS[:5], "sources": []}))],
-        news=[], info={}, select=_tool_outcome, mode="pinned",
-        decision="FINDING: more than 5 tickers is INPUT_VALIDATION_ERROR in the Worker (and the tool description says only the first 5 are processed) but Python fetches all of them",
+        news=[], info={}, select=_tool_outcome, mode="pinned", decision="Q3c TODO(python-mirror)",
         expect_py={"six": {"batch": {t: [t, _NO_NEWS_STATUS] for t in _SIX_TICKERS}},
                    "five": {"batch": {t: [t, _NO_NEWS_STATUS] for t in _SIX_TICKERS[:5]}}},
-        expect_ts={"six": ["INPUT_VALIDATION_ERROR", "Too many tickers: 6. Maximum is 5 per call."],
+        expect_ts={"six": ["BATCH_LIMIT_EXCEEDED", "Too many tickers: 6. Maximum is 5 per call for get_company_news."],
                    "five": {"batch": {t: [t, _NO_NEWS_STATUS] for t in _SIX_TICKERS[:5]}}}),
     # Card 271: get_yahoo_finance_news is a Python alias of get_company_news with a fixed source list (no Marketaux); the Worker has no such tool.
     Case(name="news.validation.get_yahoo_finance_news_alias_exists_in_python_only", ids=["BR-NWS-271"],

@@ -7,6 +7,7 @@
 import { setBounded } from "./cache.js";
 import { providerFetch, withBudgetWatch } from "./request-context.js";
 import { getWorkerVar } from "./response.js";
+import { tickerCap } from "./tool-catalog.js";
 import { rankEvidence, stemWord } from "./extraction-rules.js";
 import { reliabilityClassFor } from "./deprecations.js";
 import registryManifest from "./company-ir-page-registry.json";
@@ -2537,7 +2538,7 @@ export async function getCompanyNews(
   // fetched per ticker; there is no combined query that could zero out the
   // whole batch under low-news conditions.
   if (Array.isArray(ticker)) {
-    return runPartialBatch(ticker, (t) => getCompanyNews(t, maxResults, lookbackDays, requestedSources));
+    return runPartialBatch(ticker, (t) => getCompanyNews(t, maxResults, lookbackDays, requestedSources), tickerCap("get_company_news"));
   }
   // Collect a wider pool, then keep the most relevant items: an item that
   // only mentions the company in passing should not displace one about it.

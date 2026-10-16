@@ -1190,14 +1190,19 @@ CASES += [
                  expect_py={"avgVolume10d": 1000, "ratio10d": 1.0, "volumeFlag": "NORMAL"},
                  expect_ts={"avgVolume10d": 1001, "ratio10d": 0.999, "volumeFlag": "NORMAL"}),
 
-    # ── BR-SHR-006 (Q3c): Worker batch truncation at 5, Python unlimited ───────────────────────
-    _series_case("prc.batch.q3c_seven_tickers_python_processes_all_worker_truncates_to_five", ["BR-SHR-006"], "slope",
-                 [["T1", "T2", "T3", "T4", "T5", "T6", "T7"], 5], [100.00] + FLAT_SIX[:4] + [103.25],
-                 select=lambda v: {"tickers": sorted(k for k in v if not k.startswith("_")),
-                                   "remaining": (v.get("_truncated") or {}).get("remaining")},
-                 mode="pinned", decision="Q3c",
-                 expect_py={"tickers": ["T1", "T2", "T3", "T4", "T5", "T6", "T7"], "remaining": None},
-                 expect_ts={"tickers": ["T1", "T2", "T3", "T4", "T5"], "remaining": ["T6", "T7"]}),
+    # ── BR-SHR-006 (Q3c, 2.12.0): seven tickers is over get_price_slope's cap of 5 ──────────────
+    # The Worker's tool-call gate rejects the call with BATCH_LIMIT_EXCEEDED before any fetch (no more truncation
+    # to five with _truncated). TODO(python-mirror): Python has no gate yet and processes all seven; route the
+    # Python side through the gated tool wrapper and flip this case to mode "equal" with expect_ts as `expect`.
+    Case(name="prc.batch.q3c_seven_tickers_python_processes_all_worker_rejects_over_cap", ids=["BR-SHR-006"],
+         py=_series_case("_", ["_"], "slope", [["T1", "T2", "T3", "T4", "T5", "T6", "T7"], 5], [100.00] + FLAT_SIX[:4] + [103.25]).py,
+         ts={"js": _ts_with_clock(SERIES_NOW, 'return JSON.parse(await m.tools.callTool("get_price_slope", { ticker: ["T1", "T2", "T3", "T4", "T5", "T6", "T7"], days: 5 }));'),
+             "isolate": True},
+         select=lambda v: ({"error": v["error"]["code"], "message": v["error"]["message"]} if v.get("ok") is False
+                           else {"tickers": sorted(k for k in v if not k.startswith("_"))}),
+         mode="pinned", decision="Q3c TODO(python-mirror)",
+         expect_py={"tickers": ["T1", "T2", "T3", "T4", "T5", "T6", "T7"]},
+         expect_ts={"error": "BATCH_LIMIT_EXCEEDED", "message": "Too many tickers: 7. Maximum is 5 per call for get_price_slope."}),
     _series_case("prc.batch.five_tickers_are_processed_by_both", ["BR-SHR-006"], "slope",
                  [["T1", "T2", "T3", "T4", "T5"], 5], [100.00] + FLAT_SIX[:4] + [103.25],
                  select=lambda v: {"tickers": sorted(k for k in v if not k.startswith("_")),
