@@ -10,6 +10,7 @@ import json
 import os
 import sys
 import unittest
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -22,6 +23,7 @@ def _patched_tool(self, name=None, output_schema=None, **kwargs):  # type: ignor
 _FastMCP.tool = _patched_tool  # type: ignore[method-assign]
 
 import server as srv
+from yfmcp.clients import edgar
 
 
 class TestTickerValidation(unittest.TestCase):
@@ -191,19 +193,25 @@ class TestHtmlSanitization(unittest.TestCase):
 
 
 class TestSecCikResolutionFallbacks(unittest.TestCase):
-    def test_smoke_fixture_cik_fallback_applies_without_network_sources(self):
-        with patch("server.yf.Ticker") as mock_ticker, patch("server._load_edgar_tickers", new_callable=AsyncMock) as mock_load:
-            mock_ticker.return_value.info = {}
-            mock_load.return_value = {}
-            cik = asyncio.run(srv._resolve_cik_for_ticker("AAPL"))
-        self.assertEqual(cik, "0000320193")
+    """The ticker -> CIK fixtures are empty in production (2.13.0, R4 Q4); tests inject entries with patch.dict."""
 
-    def test_smoke_fixture_cik_fallback_handles_lowercase(self):
-        with patch("server.yf.Ticker") as mock_ticker, patch("server._load_edgar_tickers", new_callable=AsyncMock) as mock_load:
+    FIXTURES = json.loads((Path(__file__).parent / "parity" / "fixtures" / "ticker_cik_fixtures.json").read_text(encoding="utf-8"))
+
+    def _resolve(self, ticker, fixtures):
+        with patch("server.yf.Ticker") as mock_ticker, patch("server._load_edgar_tickers", new_callable=AsyncMock) as mock_load, \
+                patch.dict(edgar._FILING_CIK_CACHE, {}, clear=True), patch.dict(edgar._TEST_TICKER_CIK_FIXTURES, fixtures, clear=True):
             mock_ticker.return_value.info = {}
             mock_load.return_value = {}
-            cik = asyncio.run(srv._resolve_cik_for_ticker("axti"))
-        self.assertEqual(cik, "0001051627")
+            return asyncio.run(srv._resolve_cik_for_ticker(ticker))
+
+    def test_fixture_cik_applies_without_network_sources(self):
+        self.assertEqual(self._resolve("AAPL", self.FIXTURES), "0000320193")
+
+    def test_fixture_cik_handles_lowercase(self):
+        self.assertEqual(self._resolve("axti", self.FIXTURES), "0001051627")
+
+    def test_fixtures_are_empty_in_production(self):
+        self.assertEqual(edgar._TEST_TICKER_CIK_FIXTURES, {})
 
 
 class TestSecDocumentUrlGuard(unittest.TestCase):

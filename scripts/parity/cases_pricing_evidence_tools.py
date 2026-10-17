@@ -16,7 +16,6 @@ Conventions
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import datetime as dt
 import json
 import re
@@ -894,10 +893,17 @@ def _outline_view(v):
     return {"error": True, "code": None, "message": v.get("message")}
 
 
+def _outline_py(ticker: str, accession, document_url):
+    # An accession without document_url resolves through SEC's ticker index and submissions (Yahoo unreachable), as the Worker does.
+    from scripts.parity.cases_accession import _python_sec_state
+    with _python_sec_state():
+        return asyncio.run(server.get_filing_outline(ticker, accession, document_url))
+
+
 def _outline_case(name: str, ids: list[str], ticker: str, accession, document_url, **kw) -> Case:
     return Case(
         name=name, ids=ids,
-        py=lambda: asyncio.run(server.get_filing_outline(ticker, accession, document_url)),
+        py=lambda: _outline_py(ticker, accession, document_url),
         ts={"module": "yahooFinance", "fn": "getFilingOutline", "args": [ticker, accession, document_url], "isolate": True},
         routes=OUTLINE_ROUTES, select=_outline_view, **kw)
 
@@ -927,8 +933,8 @@ CASES += [
     _outline_case("tool.q3b.outline_valid_accession_and_ticker_with_document_url_agree", ["BR-ENV-005", "BR-ENV-007"],
                   "AAPL", VALID_ACCESSION, AAPL_DOC, expect=OUTLINE_OK),
     # Q3a (2.13.0): an accession without document_url is honoured in both runtimes. The Worker resolves it through
-    # resolveSecFiling and reads the primary document. TODO(python-mirror): Python still reads the filing index page,
-    # served here with the same HTML, so this case cannot tell the two apart; cases_accession.py
+    # resolveSecFiling and reads the primary document; Python does the same. The filing index page is served here with
+    # the same HTML, so this case cannot tell a primary-document read from an index-page read; cases_accession.py
     # (q3a.outline.accession_only_hit_reads_the_primary_document) does.
     _outline_case("tool.q3a.outline_accession_only_python_resolves_worker_ignores", ["Q3a"], "AAPL", VALID_ACCESSION, None,
                   expect=OUTLINE_OK),
@@ -955,11 +961,9 @@ def _resolve_cik_py(ticker: str, fixtures: dict | None = None):
     saved = (edgar._EDGAR_TICKERS, edgar._EDGAR_TICKERS_LOADED_AT, dict(edgar._FILING_CIK_CACHE))
     edgar._EDGAR_TICKERS, edgar._EDGAR_TICKERS_LOADED_AT = None, 0.0
     edgar._FILING_CIK_CACHE.clear()
-    # TODO(python-mirror): drop the getattr guard once edgar._TEST_TICKER_CIK_FIXTURES exists.
-    seam = getattr(edgar, "_TEST_TICKER_CIK_FIXTURES", None)
     try:
         with patch.object(edgar.yf, "Ticker", side_effect=RuntimeError("yahoo unavailable")), \
-                (patch.dict(seam, fixtures or {}, clear=True) if seam is not None else contextlib.nullcontext()):
+                patch.dict(edgar._TEST_TICKER_CIK_FIXTURES, fixtures or {}, clear=True):
             return asyncio.run(edgar._resolve_cik_for_ticker(ticker))
     finally:
         edgar._EDGAR_TICKERS, edgar._EDGAR_TICKERS_LOADED_AT = saved[0], saved[1]
@@ -985,22 +989,18 @@ def _cik_case(name: str, ids: list[str], ticker: str, *expect, routes: dict | No
 ATOM_AAPL = "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=AAPL&type=&dateb=&owner=include&count=10&output=atom"
 
 CASES += [
-    # The injected fixture resolves a listed ticker when Yahoo and SEC's index both fail. (Python passes today through
-    # its production smoke table, which holds the same values.)
+    # The injected fixture resolves a listed ticker when Yahoo and SEC's index both fail.
     _cik_case("tool.q4.injected_fixture_resolves_listed_ticker_when_yahoo_and_sec_fail", ["Q4"], "AAPL", "0000320193",
               fixtures=TICKER_CIK_FIXTURES),
     _cik_case("tool.q4.injected_fixture_covers_aaoi", ["Q4"], "AAOI", "0001158114", fixtures=TICKER_CIK_FIXTURES),
-    # The seam itself: a ticker the old table never held. TODO(python-mirror): flip to equal, expect "0000000042".
-    _cik_case("tool.q4.injected_fixture_resolves_a_ticker_outside_the_old_table", ["Q4"], "FIXT", fixtures={"FIXT": "0000000042"},
-              mode="pinned", decision="Q4", expect_py=None, expect_ts="0000000042"),
+    # The seam itself: a ticker the old table never held.
+    _cik_case("tool.q4.injected_fixture_resolves_a_ticker_outside_the_old_table", ["Q4"], "FIXT", "0000000042",
+              fixtures={"FIXT": "0000000042"}),
     # Production lookup without fixtures: no Yahoo, no SEC index, no atom -> unresolved, even for a former table entry.
-    # TODO(python-mirror): flip to equal, expect None (Python's production smoke table still answers).
-    _cik_case("tool.q4.no_fixture_and_no_index_falls_to_atom_and_is_unresolved", ["Q4"], "AAPL",
-              mode="pinned", decision="Q4", expect_py="0000320193", expect_ts=None),
-    # Without fixtures the EDGAR atom answers a former table entry. TODO(python-mirror): flip to equal, expect "0000111111".
-    _cik_case("tool.q4.no_fixture_atom_answers_a_former_table_entry", ["Q4"], "AAPL",
-              routes={ATOM_AAPL: {"body": '<feed><link href="https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&amp;CIK=0000111111"/></feed>'}},
-              mode="pinned", decision="Q4", expect_py="0000320193", expect_ts="0000111111"),
+    _cik_case("tool.q4.no_fixture_and_no_index_falls_to_atom_and_is_unresolved", ["Q4"], "AAPL", None),
+    # Without fixtures the EDGAR atom answers a former table entry.
+    _cik_case("tool.q4.no_fixture_atom_answers_a_former_table_entry", ["Q4"], "AAPL", "0000111111",
+              routes={ATOM_AAPL: {"body": '<feed><link href="https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&amp;CIK=0000111111"/></feed>'}}),
     _cik_case("tool.q4.unlisted_ticker_with_all_lookups_failing_is_unresolved", ["Q4"], "ZZZZ", None),
     _cik_case("tool.q4.sec_ticker_index_wins_over_the_smoke_table", ["Q4"], "AAPL", "0000999999", fixtures=TICKER_CIK_FIXTURES,
               routes={"https://www.sec.gov/files/company_tickers.json": {"json": {"0": {"cik_str": 999999, "ticker": "AAPL", "title": "Fake Co"}}}}),

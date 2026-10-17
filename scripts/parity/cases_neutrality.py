@@ -15,6 +15,7 @@ that drifts in one runtime fails here.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 from unittest.mock import AsyncMock, patch
@@ -24,6 +25,7 @@ import pandas as pd
 from scripts.parity.cases_pricing_evidence_tools import (
     BRACKET_NOW, QUOTE_TIME, YAHOO_AUTH_ROUTES, _bracket_case, _gate_case, _ts_with_clock,
 )
+from scripts.parity.cases_accession import _python_sec_state
 from scripts.parity.harness import Case
 
 import server  # noqa: F401,E402
@@ -332,7 +334,8 @@ def _tool_case(name: str, tool: str, args: dict, py_call, select, *, routes: dic
         async def call():
             return _envelope_tool_result(tool, await py_call())
         with patch.object(server.yf, "Ticker", side_effect=RuntimeError("offline")), \
-                patch.object(news_tools, "_yahoo_search_news", return_value=[]):
+                patch.object(news_tools, "_yahoo_search_news", return_value=[]), \
+                (_python_sec_state() if routes else contextlib.nullcontext()):
             return asyncio.run(call())
 
     body = f'const r = await m.tools.callToolResult({json.dumps(tool)}, {json.dumps(args)}); return r.value;'

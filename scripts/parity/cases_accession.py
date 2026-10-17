@@ -11,10 +11,6 @@ with no fallback to the latest filing or to another form (the 20-F fallback). A 
 Worker side: the action functions in worker/src/yahoo-finance.ts (one shared miss branch in resolveSecFiling).
 Python side: the matching server.py functions (one shared miss branch in _resolve_sec_filing).
 
-TODO(python-mirror): every case here with mode "pinned" and decision "Q3a" records today's Python behaviour (the miss
-reads as NO_FILING_DATA / FILING_NOT_FOUND_TRY_OTHER_TYPE, the outline reads the filing index page). When Python
-ports the rule, flip each to mode "equal" with `expect` = its `expect_ts`.
-
 Each case serves the same canned SEC responses to both runtimes: SEC's ticker index (the CIK; Yahoo is unreachable in
 both) and one submissions list holding a 10-Q, an 8-K and an older 10-K.
 """
@@ -149,61 +145,52 @@ def _case(name: str, py, ts: dict, select, **kw) -> Case:
     return Case(name=name, ids=["Q3a"], py=py, ts=ts, routes=ROUTES, select=select, **kw)
 
 
-def _pending(name: str, py, ts: dict, expect_py, expect_ts=None, select=miss_view) -> Case:
-    """Worker has the 2.13.0 rule; Python's value today is pinned until it ports it. TODO(python-mirror)."""
-    return _case(name, py, ts, select, mode="pinned", decision="Q3a", expect_py=expect_py,
-                 expect_ts=expect_ts if expect_ts is not None else not_found())
+def _miss_case(name: str, py, ts: dict, expect_ts=None, select=miss_view) -> Case:
+    """A miss or outline case both runtimes answer with the 2.13.0 rule (mode equal)."""
+    return _case(name, py, ts, select, expect=expect_ts if expect_ts is not None else not_found())
 
-
-# Python's values today for a miss (TODO(python-mirror): each becomes not_found()).
-PY_INDEX_MISS = {"ok": False, "error": {"code": "NO_FILING_DATA", "message": "No 10-K filing found for 'AAPL'"}}
-PY_SEARCH_MISS = {"ok": None, "code": "FILING_NOT_FOUND_TRY_OTHER_TYPE", "status": "FILING_NOT_FOUND_TRY_OTHER_TYPE",
-                  "accessionNumber": MISSING_ACC}
-PY_PERIODIC_MISS = {"ok": None, "code": "FILING_NOT_FOUND_TRY_OTHER_TYPE", "status": "FILING_NOT_FOUND_TRY_OTHER_TYPE",
-                    "accessionNumber": None}
 
 SCENARIOS = [{"name": "base", "price": 100}]
 
 # ── ACCESSION_NOT_FOUND for each listed action; the submissions hold a 10-K, which is never answered instead ─────
 CASES += [
-    _pending("q3a.miss.get_sec_filing_index",
+    _miss_case("q3a.miss.get_sec_filing_index",
              _py(server.get_sec_filing_index, "AAPL", "10-K", "latest", MISSING_ACC),
-             _ts("getSecFilingIndex", "AAPL", "10-K", "latest", MISSING_ACC), PY_INDEX_MISS),
-    _pending("q3a.miss.search_sec_filing_text",
+             _ts("getSecFilingIndex", "AAPL", "10-K", "latest", MISSING_ACC)),
+    _miss_case("q3a.miss.search_sec_filing_text",
              _py(server.search_filing_text, "AAPL", ["revenue"], None, "10-K", MISSING_ACC),
-             _ts("searchFilingText", "AAPL", ["revenue"], None, "10-K", MISSING_ACC), PY_SEARCH_MISS),
-    _pending("q3a.miss.extract_sec_filing_fact_fact_name_path",
+             _ts("searchFilingText", "AAPL", ["revenue"], None, "10-K", MISSING_ACC)),
+    _miss_case("q3a.miss.extract_sec_filing_fact_fact_name_path",
              _py(server.extract_filing_fact, "AAPL", "revenue", None, MISSING_ACC),
-             _ts("extractFilingFact", "AAPL", "revenue", None, MISSING_ACC), PY_SEARCH_MISS),
-    _pending("q3a.miss.extract_dilution_bridge",
+             _ts("extractFilingFact", "AAPL", "revenue", None, MISSING_ACC)),
+    _miss_case("q3a.miss.extract_dilution_bridge",
              _py(server.extract_dilution_bridge, "AAPL", 100.0, None, "USD", "latest", MISSING_ACC, True),
-             _ts("extractDilutionBridge", "AAPL", 100, None, "USD", "latest", MISSING_ACC, True), PY_PERIODIC_MISS),
-    _pending("q3a.miss.get_share_count_scenarios",
+             _ts("extractDilutionBridge", "AAPL", 100, None, "USD", "latest", MISSING_ACC, True)),
+    _miss_case("q3a.miss.get_share_count_scenarios",
              _py(server.get_share_count_scenarios, "AAPL", SCENARIOS, "latest", MISSING_ACC, "USD"),
-             _ts("getShareCountScenarios", "AAPL", SCENARIOS, "latest", MISSING_ACC, "USD"), PY_PERIODIC_MISS),
-    _pending("q3a.miss.extract_capital_structure",
+             _ts("getShareCountScenarios", "AAPL", SCENARIOS, "latest", MISSING_ACC, "USD")),
+    _miss_case("q3a.miss.extract_capital_structure",
              _py(server.extract_capital_structure, "AAPL", "latest", MISSING_ACC, True),
-             _ts("extractCapitalStructure", "AAPL", "latest", MISSING_ACC, True), PY_PERIODIC_MISS),
-    _pending("q3a.miss.extract_funding_capex_schedule",
+             _ts("extractCapitalStructure", "AAPL", "latest", MISSING_ACC, True)),
+    _miss_case("q3a.miss.extract_funding_capex_schedule",
              _py(server.extract_funding_capex_schedule, "AAPL", "latest", MISSING_ACC),
-             _ts("extractFundingCapexSchedule", "AAPL", "latest", MISSING_ACC), PY_PERIODIC_MISS),
-    _pending("q3a.miss.extract_operating_driver_ledger",
+             _ts("extractFundingCapexSchedule", "AAPL", "latest", MISSING_ACC)),
+    _miss_case("q3a.miss.extract_operating_driver_ledger",
              _py(server.extract_operating_driver_ledger, "AAPL", "latest", MISSING_ACC),
-             _ts("extractOperatingDriverLedger", "AAPL", "latest", MISSING_ACC), PY_PERIODIC_MISS),
+             _ts("extractOperatingDriverLedger", "AAPL", "latest", MISSING_ACC)),
     # A named periodic form with a miss: still no fallback to that form's latest filing.
-    _pending("q3a.miss.extract_capital_structure_named_10k",
+    _miss_case("q3a.miss.extract_capital_structure_named_10k",
              _py(server.extract_capital_structure, "AAPL", "10-K", MISSING_ACC, True),
-             _ts("extractCapitalStructure", "AAPL", "10-K", MISSING_ACC, True), PY_PERIODIC_MISS),
+             _ts("extractCapitalStructure", "AAPL", "10-K", MISSING_ACC, True)),
     # No 20-F fallback when an accession was supplied: a 20-F filer asked for a 10-K with a missing accession.
-    _pending("q3a.miss.no_20f_fallback_when_accession_given",
+    _miss_case("q3a.miss.no_20f_fallback_when_accession_given",
              _py(server.search_filing_text, "FPI", ["revenue"], None, "10-K", "0000999001-25-000999"),
              _ts("searchFilingText", "FPI", ["revenue"], None, "10-K", "0000999001-25-000999"),
-             {**PY_SEARCH_MISS, "accessionNumber": "0000999001-25-000999"},
              not_found("0000999001-25-000999", "FPI")),
     # The message names the ticker in upper case, whatever case the caller sent.
-    _pending("q3a.miss.message_names_ticker_upper_case",
+    _miss_case("q3a.miss.message_names_ticker_upper_case",
              _py(server.search_filing_text, "aapl", ["revenue"], None, "10-K", MISSING_ACC),
-             _ts("searchFilingText", "aapl", ["revenue"], None, "10-K", MISSING_ACC), PY_SEARCH_MISS),
+             _ts("searchFilingText", "aapl", ["revenue"], None, "10-K", MISSING_ACC)),
 ]
 
 # ── A found accession is unchanged: the older 10-K is answered, not the newer 10-Q ─────────────────────────────────
@@ -226,20 +213,16 @@ CASES += [
 ]
 
 # ── get_filing_outline with an accession and no document_url ────────────────────────────────────────────────────
-# The Worker resolves the accession through resolveSecFiling and reads that filing's primary document. Python today
-# reads the filing index page (<acc>-index.htm), served here with different headings so the two are told apart.
+# Both runtimes resolve the accession through the resolver and read that filing's primary document. The filing index
+# page (<acc>-index.htm) is served here with different headings so a read of it would be told apart.
 CASES += [
-    _pending("q3a.outline.accession_only_hit_reads_the_primary_document",
+    _miss_case("q3a.outline.accession_only_hit_reads_the_primary_document",
              _py(server.get_filing_outline, "AAPL", TEN_K_ACC, None),
              _ts("getFilingOutline", "AAPL", TEN_K_ACC, None),
-             {"outline": ["Filing Index Page"]},
              {"outline": ["Item 1. Business", "Item 1A. Risk Factors"]}, select=outline_view),
-    # Python today builds the index-page URL for any accession and fails reading it (unstubbed here).
-    _pending("q3a.outline.accession_only_miss",
+    _miss_case("q3a.outline.accession_only_miss",
              _py(server.get_filing_outline, "AAPL", MISSING_ACC, None),
              _ts("getFilingOutline", "AAPL", MISSING_ACC, None),
-             {"ok": False, "error": {"code": "PROVIDER_ERROR",
-                                     "message": f"UNSTUBBED_FETCH {BASE}/000032019399999999/{MISSING_ACC}-index.htm"}},
              select=outline_view),
     # document_url wins when given, as before.
     _case("q3a.outline.document_url_wins_over_accession",

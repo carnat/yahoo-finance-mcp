@@ -72,7 +72,7 @@ from yfmcp.deprecations import MIN_ADV_USD_DESCRIPTION, TOOL_RELIABILITY_CLASS a
 from yfmcp.fiscal_calendar import document_fiscal_year_focus, filing_fiscal_year_label, fiscal_year_naming
 from yfmcp import valuation_history as _vh
 from yfmcp.clients.edgar import (
-    _SEC_REQUIRED_UA, _SMOKE_TICKER_CIK_FALLBACKS,
+    _SEC_REQUIRED_UA,
     _resolve_cik_for_ticker, _get_submissions_for_ticker,
     _EDGAR_TICKERS, _EDGAR_TICKERS_LOADED_AT, _EDGAR_TTL,
     _load_edgar_tickers, _edgar_get, EdgarError,
@@ -900,18 +900,15 @@ async def get_filing_outline(ticker: str, accession_number: str | None = None, d
     try:
         import urllib.request
         if not document_url and accession_number:
-            cik = None
-            tickers_url = "https://www.sec.gov/files/company_tickers.json"
-            req = urllib.request.Request(tickers_url, headers={"User-Agent": "yahoo-finance-mcp/1.0 admin@example.com"})
-            with _url_policy.urlopen(req, timeout=10) as resp:
-                tickers_data = json.loads(resp.read())
-            for _entry in tickers_data.values():
-                if _entry.get("ticker", "").upper() == ticker.upper():
-                    cik = int(_entry["cik_str"])
-                    break
-            if cik:
-                acc_clean = accession_number.replace("-", "")
-                document_url = f"https://www.sec.gov/Archives/edgar/data/{cik}/{acc_clean}/{accession_number}-index.htm"
+            # An explicit accession without document_url: the outline of that filing's primary document, found by the
+            # same resolver as the filing index; a miss is ACCESSION_NOT_FOUND (2.13.0, R4 Q3a). document_url wins.
+            resolved_filing, resolve_error = await _resolve_sec_filing(ticker, "10-K", accession_number)
+            if resolved_filing is None:
+                resolve_error = resolve_error or {}
+                if _is_accession_not_found(resolve_error):
+                    return _accession_not_found_envelope(resolve_error)
+                return json.dumps({"ok": False, "error": resolve_error, **resolve_error})
+            document_url = resolved_filing["documentUrl"]
 
         if not document_url:
             return _mcp_failure("get_filing_outline", ErrorCode.INPUT_VALIDATION_ERROR,
@@ -1181,6 +1178,8 @@ async def extract_filing_fact(
             return_tables=True,
         )
         result = json.loads(result_str)
+        if isinstance(result, dict) and result.get("ok") is False and _is_accession_not_found(result.get("error")):
+            return _accession_not_found_envelope(result["error"])
         return json.dumps({
             "ticker": ticker,
             "factName": fact_name,
@@ -2080,6 +2079,34 @@ def _js_json_numbers(value: Any) -> Any:
     return value
 
 
+def _accession_not_found_error(ticker: str, accession_number: str) -> dict:
+    """The Worker's accessionNotFoundError: an explicit accession missing from recent filings fails closed (2.13.0, R4 Q3a)."""
+    return {
+        "code": ErrorCode.ACCESSION_NOT_FOUND,
+        "message": f"Accession {accession_number} was not found in {ticker.upper()}'s recent SEC filings.",
+        "requestedAccession": accession_number,
+        "retryable": False,
+    }
+
+
+def _is_accession_not_found(error: dict | None) -> bool:
+    return isinstance(error, dict) and error.get("code") == ErrorCode.ACCESSION_NOT_FOUND
+
+
+def _accession_not_found_envelope(error: dict) -> str:
+    """The ACCESSION_NOT_FOUND error envelope a public action returns."""
+    return json.dumps({"ok": False, "error": error})
+
+
+async def _legacy_accession_miss_payload(ticker: str, filing_type: str) -> dict:
+    """The Worker's legacyAccessionMissPayload: the filing-not-found payload the out-of-scope readers returned before 2.13.0."""
+    _cik, subs = await _get_submissions_for_ticker(ticker)
+    recent = ((subs or {}).get("filings") or {}).get("recent") or {}
+    forms = [str(f) for f in (recent.get("form") or [])]
+    available = list(dict.fromkeys(f.upper() for f in forms if f))[:12]
+    return _filing_not_found(ticker, (filing_type or "10-K").upper(), available)
+
+
 async def _resolve_sec_filing(ticker: str, requested_filing_type: str = "10-K", accession_number: str | None = None) -> tuple[dict | None, dict | None]:
     """The Worker's resolveSecFiling: (filing, None), or (None, error) with the Worker's error payloads.
 
@@ -2113,6 +2140,8 @@ async def _resolve_sec_filing(ticker: str, requested_filing_type: str = "10-K", 
                     "message": "Filing type automatically adapted from 10-K to 20-F (foreign private issuer detected).",
                     "severity": "info",
                 })
+    if accession_number and target is None:
+        return None, _accession_not_found_error(ticker, accession_number)
     if target is None or target >= len(accessions) or not accessions[target]:
         return None, _filing_not_found(ticker, requested, available)
 
@@ -2751,6 +2780,9 @@ async def _get_filing_data_unchecked(
             filing, resolve_error = await _resolve_sec_filing(ticker, filing_type, pinned_accession)
             if filing is None:
                 resolve_error = resolve_error or {}
+                if _is_accession_not_found(resolve_error):
+                    # Not an action 2.13.0 fails closed on a miss: the structured fact path reads as before.
+                    resolve_error = await _legacy_accession_miss_payload(ticker, filing_type)
                 return _geo_shape({
                     **resolve_error,
                     "factType": fact_type.value,
@@ -3251,7 +3283,10 @@ async def search_filing_text(
 
         if accession_number:
             index = next((i for i, acc in enumerate(accessions) if acc == accession_number), None)
-            first = filing_at(index) if index is not None else None
+            if index is None:
+                # An explicit accession missing from recent filings fails closed (2.13.0, R4 Q3a).
+                return _accession_not_found_envelope(_accession_not_found_error(ticker, accession_number))
+            first = filing_at(index)
             if first and (count > 1 or since_date):
                 warnings.append({"code": "FILING_COUNT_IGNORED", "message": "accession_number selects one filing; filing_count and since were ignored.", "severity": "info"})
             filings = [first] if first else []
@@ -5661,6 +5696,9 @@ async def _get_sec_filing_index_impl(
                 accession_number = accessions[i] if i < len(accessions) else None
                 break
 
+    if target_idx is None and accession_number:
+        # An explicit accession missing from recent filings fails closed, never the latest filing (2.13.0, R4 Q3a).
+        return _accession_not_found_envelope(_accession_not_found_error(ticker, accession_number))
     if target_idx is None or not accession_number:
         return _mcp_failure("get_sec_filing_index", ErrorCode.NO_FILING_DATA,
                             f"No {filing_type} filing found for '{ticker}'")
@@ -6854,6 +6892,13 @@ def _clamp_int(value: Any, fallback: int, low: int, high: int) -> int:
     return min(high, max(low, n))
 
 
+def _resolve_failure(error: dict, ticker: str) -> str:
+    """The Worker's resolveFailure: ACCESSION_NOT_FOUND as its error envelope, any other resolver error with the ticker."""
+    if _is_accession_not_found(error):
+        return _accession_not_found_envelope(error)
+    return json.dumps({"ticker": ticker, **error})
+
+
 def _filing_not_found(ticker: str, requested: str, available: list[str]) -> dict:
     return {
         "status": "FILING_NOT_FOUND_TRY_OTHER_TYPE",
@@ -6901,7 +6946,9 @@ async def _resolve_periodic_filings(ticker: str, filing_type: str, accession_num
     requested = (filing_type or "latest").upper()
     if accession_number:
         index = next((i for i, acc in enumerate(accessions) if acc == accession_number), None)
-        one = row(index) if index is not None else None
+        if index is None:
+            return [], _accession_not_found_error(ticker, accession_number)
+        one = row(index)
         return ([("primary", one)], None) if one else ([], _filing_not_found(ticker, "10-K" if requested == "LATEST" else requested, available))
     if requested not in ("LATEST", "10-Q"):
         one = annual() if requested == "10-K" else first(requested)
@@ -7027,7 +7074,7 @@ async def extract_dilution_bridge(
         return json.dumps({"error": True, "code": "INPUT_VALIDATION_ERROR", "message": "price is required and must be a positive number: the bridge is evaluated at the price you supply."})
     filings, error = await _resolve_periodic_filings(ticker, filing_type, accession_number)
     if error:
-        return json.dumps({"ticker": ticker, **error})
+        return _resolve_failure(error, ticker)
     loaded = [await _ixbrl_source(role, filing) for role, filing in filings]
     sources = [item[0] for item in loaded if item is not None]
     if not sources:
@@ -7089,7 +7136,7 @@ async def extract_capital_structure(
 ) -> str:
     filings, error = await _resolve_periodic_filings(ticker, filing_type, accession_number)
     if error:
-        return json.dumps({"ticker": ticker, **error})
+        return _resolve_failure(error, ticker)
     _, primary = filings[0]
     loaded = await _ixbrl_source("primary", primary)
     if loaded is None:
@@ -7147,7 +7194,7 @@ _SCHEDULE_SEARCH_TERMS = [
 async def extract_funding_capex_schedule(ticker: str, filing_type: str = "latest", accession_number: str | None = None) -> str:
     filings, error = await _resolve_periodic_filings(ticker, filing_type, accession_number)
     if error:
-        return json.dumps({"ticker": ticker, **error})
+        return _resolve_failure(error, ticker)
     _, primary = filings[0]
     loaded = await _ixbrl_source("primary", primary)
     if loaded is None:
@@ -7227,7 +7274,7 @@ async def _read_release_text(cik_int: int, accession_number: str, primary_url: s
 async def extract_operating_driver_ledger(ticker: str, filing_type: str = "latest", accession_number: str | None = None) -> str:
     filings, error = await _resolve_periodic_filings(ticker, filing_type, accession_number)
     if error:
-        return json.dumps({"ticker": ticker, **error})
+        return _resolve_failure(error, ticker)
     _, primary = filings[0]
     cik_padded, subs = await _get_submissions_for_ticker(ticker)
 
@@ -7959,6 +8006,9 @@ async def extract_china_exposure(
         resolved_filing, resolve_error = await _resolve_sec_filing(ticker, filing_type, accession_number)
     except Exception:
         pass
+    if _is_accession_not_found(resolve_error):
+        # Not an action 2.13.0 fails closed on a miss: it reads FILING_NOT_FOUND_TRY_OTHER_TYPE, as before.
+        resolve_error = await _legacy_accession_miss_payload(ticker, filing_type)
     if resolve_error and resolve_error.get("status") == "FILING_NOT_FOUND_TRY_OTHER_TYPE":
         return _china_filing_not_found(ticker, filing_type, resolve_error)
 
