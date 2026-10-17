@@ -53,20 +53,9 @@ def _bounded_set(cache: dict, key, value, max_entries: int) -> None:
     while len(cache) > max_entries:
         del cache[next(iter(cache))]
 
-# Stable fixture fallback map for smoke/regression-critical tickers.
-_SMOKE_TICKER_CIK_FALLBACKS: dict[str, str] = {
-    "AAPL": "0000320193",
-    "MSFT": "0000789019",
-    "AMZN": "0001018724",
-    "GOOGL": "0001652044",
-    "GOOG": "0001652044",
-    "NVDA": "0001045810",
-    "TSLA": "0001318605",
-    "META": "0001326801",
-    "VRT": "0001674101",
-    "AAOI": "0001158114",
-    "AXTI": "0001051627",
-}
+# Ticker -> CIK fixtures, read after SEC's ticker index and before the EDGAR atom lookup. Empty in production:
+# only tests fill it (patch.dict), 2.13.0 R4 Q4. The smoke table it replaces was a production fallback.
+_TEST_TICKER_CIK_FIXTURES: dict[str, str] = {}
 
 # ---------------------------------------------------------------------------
 # EDGAR API helpers
@@ -331,8 +320,8 @@ async def _resolve_cik_for_ticker(ticker: str) -> str | None:
     except Exception:
         pass
 
-    # Stable fixture fallback map for smoke/regression-critical tickers.
-    fixture_cik = _SMOKE_TICKER_CIK_FALLBACKS.get(t_upper)
+    # Test fixtures (empty in production); keys are upper-cased.
+    fixture_cik = {k.upper(): v for k, v in _TEST_TICKER_CIK_FIXTURES.items()}.get(t_upper)
     if fixture_cik:
         _bounded_set(_FILING_CIK_CACHE, t_upper, fixture_cik, _FILING_CIK_CACHE_MAX)
         return fixture_cik

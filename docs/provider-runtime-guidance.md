@@ -2835,6 +2835,28 @@ F-024, F-026, F-029). Both runtimes change alike.
 - **Batches:** a comma-separated string is still one symbol. Batches need an array.
 - **Rollback:** revert the release.
 
+## Exact Accession and CIK Lookup (2.13.0)
+
+- **Why:** R4 Q3a (exact accession lookup) and Q4 (smoke CIK table out of production). Release type: minor. Both
+  runtimes.
+- **Q3a rule:** an explicit accession that is not in the company's recent SEC filings (`submissions.filings.recent`)
+  returns `{ok:false, error:{code:"ACCESSION_NOT_FOUND", message:"Accession <acc> was not found in <TICKER>'s recent
+  SEC filings.", requestedAccession, retryable:false}}`. There is no fallback to the latest filing or to the 20-F.
+- **Applies to:** `get_sec_filing_index`, `search_sec_filing_text`, `extract_sec_filing_fact` (`fact_name` path),
+  `extract_dilution_bridge`, `get_share_count_scenarios`, `extract_capital_structure`,
+  `extract_funding_capex_schedule`, `extract_operating_driver_ledger` and `get_sec_filing_outline`.
+- **Outline:** `get_sec_filing_outline` now honours an accession when `document_url` is absent. `document_url` still
+  wins.
+- **Unchanged:** structured `extract_sec_filing_fact` keeps `NO_FACT_FOR_ACCESSION`. `extract_china_exposure`
+  (including the `query_sec_filing_index` china route), the `geographic_revenue` HTML fallback and
+  `get_sec_filing_table` keep their previous not-found output (R4 triage items).
+- **Known limit:** only recent filings are searched, so an older real accession reports `ACCESSION_NOT_FOUND`.
+- **Q4:** the 11-ticker smoke CIK table is out of the production lookup, which is now cache, Yahoo `cik`, SEC
+  `company_tickers.json`, then the EDGAR atom feed. The table lives as a test fixture,
+  `scripts/parity/fixtures/ticker_cik_fixtures.json`, injected through `edgar._TEST_TICKER_CIK_FIXTURES` (Python) and
+  `setTickerCikFixturesForTests` (Worker). Production effect only during a combined Yahoo and SEC-index outage.
+- **Rollback:** revert the release.
+
 ## Non-US Primary Filings
 
 - `get_uk_company_filings` reads Companies House, the UK statutory registry:

@@ -412,19 +412,15 @@ export const COMPANY_IR_DISCOVERY_TTL_MS = 24 * 60 * 60 * 1000;
 const COMPANY_IR_IDENTITY_CACHE_MAX = 500;
 const companyIrIdentityCache = new Map<string, { value: NewsCompanyIdentity; storedAt: number }>();
 
-const SMOKE_TICKER_CIK_FALLBACKS: Record<string, string> = {
-  AAPL: "0000320193",
-  MSFT: "0000789019",
-  AMZN: "0001018724",
-  GOOGL: "0001652044",
-  GOOG: "0001652044",
-  NVDA: "0001045810",
-  TSLA: "0001318605",
-  META: "0001326801",
-  VRT: "0001674101",
-  AAOI: "0001158114",
-  AXTI: "0001051627",
-};
+// Ticker -> CIK fixtures, read after SEC's ticker index and before the EDGAR atom lookup. Empty in production:
+// only tests fill it, through setTickerCikFixturesForTests (2.13.0, R4 Q4; the smoke table it replaces was a
+// production fallback).
+let tickerCikFixtures: ReadonlyMap<string, string> = new Map();
+
+/** Tests only: replace the ticker -> padded CIK fixtures (null or undefined empties them). */
+export function setTickerCikFixturesForTests(map: ReadonlyMap<string, string> | null | undefined): void {
+  tickerCikFixtures = new Map([...(map ?? new Map<string, string>())].map(([ticker, cik]) => [ticker.toUpperCase(), cik]));
+}
 
 /**
  * Returns the last trading date as a YYYY-MM-DD string.
@@ -5313,7 +5309,7 @@ async function resolveCikForTicker(ticker: string): Promise<string | null> {
     return cik;
   }
 
-  const fixtureCik = SMOKE_TICKER_CIK_FALLBACKS[key];
+  const fixtureCik = tickerCikFixtures.get(key);
   if (fixtureCik) {
     filingCikCache.set(key, fixtureCik, FILING_CIK_TTL_MS);
     return fixtureCik;
@@ -5427,6 +5423,38 @@ function filingNotFoundPayload(ticker: string, requestedFilingType: string, avai
   };
 }
 
+/**
+ * An explicit accession that is not among the company's recent SEC filings (submissions filings.recent, about the
+ * last 1,000): the action fails closed, never falling back to the latest filing or another form (2.13.0, R4 Q3a).
+ */
+function accessionNotFoundError(ticker: string, accessionNumber: string): Record<string, unknown> {
+  return {
+    code: ErrorCode.ACCESSION_NOT_FOUND,
+    message: `Accession ${accessionNumber} was not found in ${ticker.toUpperCase()}'s recent SEC filings.`,
+    requestedAccession: accessionNumber,
+    retryable: false,
+  };
+}
+
+function isAccessionNotFound(error: Record<string, unknown>): boolean {
+  return error.code === ErrorCode.ACCESSION_NOT_FOUND;
+}
+
+/** The ACCESSION_NOT_FOUND error envelope a public action returns. */
+function accessionNotFoundEnvelope(error: Record<string, unknown>): string {
+  return JSON.stringify({ ok: false, error });
+}
+
+/**
+ * For the readers 2.13.0 does not fail closed on an accession miss (extract_china_exposure, the structured
+ * geographic_revenue HTML fallback): the filing-not-found payload they read before, unchanged.
+ */
+async function legacyAccessionMissPayload(ticker: string, filingType: string): Promise<Record<string, unknown>> {
+  const { submissions } = await getSubmissionsForTicker(ticker);
+  const recent = ((submissions?.filings as Record<string, unknown>)?.recent as Record<string, unknown[]>) ?? {};
+  return filingNotFoundPayload(ticker, (filingType || "10-K").toUpperCase(), uniqueRecentForms((recent.form as string[]) ?? []));
+}
+
 function isLikelyXbrlDocumentUrl(url: string): boolean {
   const lower = url.split("?", 1)[0].toLowerCase();
   return lower.endsWith(".xml") || /\/xbrl\//.test(lower) || /(_htm|xbrl|cal|def|lab|pre)\.xml$/.test(lower);
@@ -5471,6 +5499,9 @@ async function resolveSecFiling(
     }
   }
 
+  if (accessionNumber && targetIdx < 0) {
+    return { ok: false, error: accessionNotFoundError(ticker, accessionNumber) };
+  }
   if (targetIdx < 0 || !accessions[targetIdx]) {
     return { ok: false, error: filingNotFoundPayload(ticker, requested, availableFilingTypes) };
   }
@@ -6587,8 +6618,10 @@ async function getFilingDataUnchecked(
       // A pinned read falls back to that filing's tables, never to the latest filing's (2.5.18).
       const resolved = await resolveSecFiling(ticker, filingType, pinnedAccession);
       if (!resolved.ok) {
+        // An accession miss reads as before here: the structured fact path is not one 2.13.0 fails closed.
+        const error = isAccessionNotFound(resolved.error) ? await legacyAccessionMissPayload(ticker, filingType) : resolved.error;
         return withGeoShape({
-          ...resolved.error,
+          ...error,
           factType,
           region,
           value: null,
@@ -6596,8 +6629,8 @@ async function getFilingDataUnchecked(
           valueRatio: null,
           valuePct: null,
           extractionMethod: "NONE",
-          source: resolved.error.code,
-          confidence: resolved.error.code,
+          source: error.code,
+          confidence: error.code,
           filingType,
           evidence: {},
         });
@@ -7129,6 +7162,7 @@ export async function searchFilingText(
       warnings.push({ code: "DOCUMENT_URL_REPLACED_WITH_PRIMARY_HTML", message: "Provided document_url was XBRL/XML; resolved the accession primary HTML document instead.", severity: "warning" });
     }
     const resolved = await resolveSecFiling(ticker, filingType, accessionNumber);
+    if (!resolved.ok && isAccessionNotFound(resolved.error)) return accessionNotFoundEnvelope(resolved.error);
     if (!resolved.ok) {
       return emptyResult({
         ...resolved.error,
@@ -8457,8 +8491,16 @@ export async function listSecCompanyFilings(ticker: string, filingType: string =
 
 // ── get_filing_outline ────────────────────────────────────────────────────────
 
-export async function getFilingOutline(ticker: string, _accessionNumber: string | null, documentUrl: string | null): Promise<string> {
+export async function getFilingOutline(ticker: string, accessionNumber: string | null, documentUrl: string | null): Promise<string> {
   try {
+    if (!documentUrl && accessionNumber) {
+      // An explicit accession without document_url: the outline of that filing's primary document, found by the
+      // same resolver as the filing index; a miss is ACCESSION_NOT_FOUND (2.13.0, R4 Q3a). document_url wins when given.
+      const resolved = await resolveSecFiling(ticker, "10-K", accessionNumber);
+      if (!resolved.ok && isAccessionNotFound(resolved.error)) return accessionNotFoundEnvelope(resolved.error);
+      if (!resolved.ok) return JSON.stringify({ ok: false, error: resolved.error, ...resolved.error });
+      documentUrl = resolved.filing.documentUrl;
+    }
     if (!documentUrl) return JSON.stringify({ error: true, message: "document_url is required" });
     if (!documentUrl.startsWith("https://www.sec.gov/Archives/")) {
       return JSON.stringify({ error: true, message: "Invalid SEC URL" });
@@ -8898,6 +8940,8 @@ export async function extractFilingFact(ticker: string, factName: string, _docum
       1000,
       true,
     )) as Record<string, unknown>;
+    const searchError = searchResult.ok === false ? searchResult.error as Record<string, unknown> | undefined : undefined;
+    if (searchError && isAccessionNotFound(searchError)) return accessionNotFoundEnvelope(searchError);
     return JSON.stringify({
       ticker, factName,
       extractionMethod: "text_search",
@@ -9253,6 +9297,7 @@ async function _getSecFilingIndexImpl(
   accessionNumber: string | null,
 ): Promise<string> {
   const resolved = await resolveSecFiling(ticker, filingType, accessionNumber);
+  if (!resolved.ok && isAccessionNotFound(resolved.error)) return accessionNotFoundEnvelope(resolved.error);
   if (!resolved.ok) {
     return JSON.stringify({ ok: false, error: resolved.error, ...resolved.error });
   }
@@ -11993,6 +12038,7 @@ async function searchedMatches(ticker: string, filings: { filing: ResolvedSecFil
 }
 
 function resolveFailure(error: Record<string, unknown>, ticker: string): string {
+  if (isAccessionNotFound(error)) return accessionNotFoundEnvelope(error);
   return JSON.stringify({ ticker, ...error });
 }
 
@@ -12687,8 +12733,14 @@ export async function extractChinaExposure(
   accessionNumber: string | null = null,
   detailLevel = "compact",
 ): Promise<string> {
-  const idx = parseObjectJson(await getSecFilingIndex(ticker, filingType, period, accessionNumber));
+  let idx = parseObjectJson(await getSecFilingIndex(ticker, filingType, period, accessionNumber));
   const revenue = parseObjectJson(await extractRevenueExposure(ticker, "China", filingType, period, "compact"));
+  if (idx.ok === false && idx.error && typeof idx.error === "object" && isAccessionNotFound(idx.error as Record<string, unknown>)) {
+    // Not one of the actions 2.13.0 fails closed on an accession miss: it reads as FILING_NOT_FOUND_TRY_OTHER_TYPE,
+    // as before (the index's payload for a filing not found), rather than falling through to the latest filing.
+    const notFound = await legacyAccessionMissPayload(ticker, filingType);
+    idx = { ok: false, error: notFound, ...notFound };
+  }
   const idxError = idx.error && typeof idx.error === "object" ? idx.error as Record<string, unknown> : {};
   const idxStatus = String(idx.status ?? idx.code ?? idxError.code ?? "").toUpperCase();
   const revenueStatus = String(revenue.status ?? revenue.code ?? "").toUpperCase();
