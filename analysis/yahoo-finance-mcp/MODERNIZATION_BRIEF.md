@@ -326,6 +326,19 @@ Each R-release is a set of **separately released** behaviour changes that must b
   - Q3h: `sources` omitted or null means the defaults; `sources=[]` means attempt none; requested, attempted, skipped and defaulted metadata kept separate; `sourceStatus` describes what actually happened.
   - **Q7:** targeted rule extraction for News (`/modernize-extract-rules` with a news `modulePattern`), with the new rules folded into Phase 2's harness.
 - **R4 (before Phase 4):**
+  - *Status 2026-10-17:*
+    - **Q10 telemetry (2.11.1, #285):** merged. Its first deploy failed at upload because Analytics Engine was not enabled on the account (code 10089). The owner enabled it and created the `yfmcp_telemetry` dataset; the enable took effect only after a delay of several hours.
+    - **Q3b and Q3c (2.12.0, #286):** merged and deployed together with 2.11.1 (run #265, attempt 5, canaries green).
+    - **Live-verified 2026-10-17 18:08Z:**
+      - 10 quotes are served;
+      - 11 tickers get `BATCH_LIMIT_EXCEEDED`;
+      - `get_company_news` with 2 tickers and `company_ir` gets `BATCH_LIMIT_EXCEEDED` (cap 1);
+      - ticker `BRK/B` gets `INPUT_VALIDATION_ERROR` before any fetch;
+      - `health_check` reports 2.12.0.
+    - **Telemetry export:** the `CLOUDFLARE_TELEMETRY_TOKEN` secret was added. The first manual export (run 39057113176) authenticated against both Cloudflare APIs. It recorded 0 requests, because its window ended at 18:00Z, before the deploy.
+    - **Still to do:**
+      - confirm non-zero data and the `$workers.outcome` / `$workers.scriptName` field names on the next export;
+      - the 7-day Phase 4 baseline counts from the first export with data.
   - Q3a: the Worker honours exact `accession_number` with fail-closed semantics.
   - Q3b: central ticker and accession validation in both runtimes, on every relevant action, including the Python paths that skip it.
   - Q3c + Q12: the per-tool ticker caps from the §7 Q12 table, advertised as schema `maxItems` and rejected with `BATCH_LIMIT_EXCEEDED` in both runtimes. Measure `get_market_snapshot` first and set its cap. Correct the stale comment at `yahoo-finance.ts:58–64`.
