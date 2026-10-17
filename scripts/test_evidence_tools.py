@@ -243,35 +243,7 @@ class TestWorkerEvidenceTools(_PackAssertions, unittest.TestCase):
 
 # ── Python runtime ───────────────────────────────────────────────────────────
 
-def _ensure_mcp_available() -> None:
-    try:
-        import mcp.server  # noqa: F401
-        return
-    except ModuleNotFoundError:
-        pass
-
-    class _FastMCPStub:
-        def __init__(self, *a: object, **kw: object) -> None:
-            pass
-
-        def tool(self, *a: object, **kw: object):  # type: ignore[return]
-            if a and callable(a[0]):
-                return a[0]
-            return lambda fn: fn
-
-    mcp_mod = types.ModuleType("mcp")
-    server_mod = types.ModuleType("mcp.server")
-    fastmcp_mod = types.ModuleType("mcp.server.fastmcp")
-    fastmcp_mod.FastMCP = _FastMCPStub  # type: ignore[attr-defined]
-    mcp_mod.server = server_mod  # type: ignore[attr-defined]
-    server_mod.fastmcp = fastmcp_mod  # type: ignore[attr-defined]
-    sys.modules.setdefault("mcp", mcp_mod)
-    sys.modules.setdefault("mcp.server", server_mod)
-    sys.modules.setdefault("mcp.server.fastmcp", fastmcp_mod)
-
-
 def _python_outputs() -> dict:
-    _ensure_mcp_available()
     import datetime as dt
 
     import server as srv
@@ -364,7 +336,6 @@ class TestPythonEvidenceTools(_PackAssertions, unittest.TestCase):
             def get(self, key: str) -> str | None:
                 raise RuntimeError("bucket offline")
 
-        _ensure_mcp_available()
         import server as srv
 
         es.set_store_for_tests(_Failing())

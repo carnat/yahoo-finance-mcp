@@ -24,9 +24,9 @@ import pandas as pd
 import yfinance as yf
 from pydantic import Field
 
-# Phase 2b: yfmcp.app owns the FastMCP compat shim, yfinance_server instance, and
-# build_handler_registry.  Import first so the compat shim fires before any decorator runs.
-from yfmcp.app import apply_ticker_caps, create_server, yfinance_server, build_handler_registry, reseat_tool_registration
+# Phase 2b: yfmcp.app owns the YfmcpServer class, the yfinance_server instance, and
+# build_handler_registry.
+from yfmcp.app import create_server, yfinance_server, build_handler_registry
 from yfmcp.schemas import (
     FinancialType, HolderType, RecommendationType, FilingFactType,
     _TOOL_OUTPUT_SCHEMAS, _MARKET_SNAPSHOT_OUTPUT_SCHEMA,
@@ -316,7 +316,6 @@ def _limit_corporate_actions(rows: list[dict], start_date: str, limit: int) -> l
 
 @yfinance_server.tool(
     name="get_financial_statement",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["get_financial_statement"],
     description="""Get financial statement for a given ticker symbol from yahoo finance.
 
 Financial statement types:
@@ -462,7 +461,6 @@ async def get_holder_info(ticker: str, holder_type: str) -> str:
 
 @yfinance_server.tool(
     name="get_option_expiration_dates",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["get_option_expiration_dates"],
     description="""Fetch the available options expiration dates for a given ticker symbol.
 
 Args:
@@ -486,7 +484,6 @@ async def get_option_expiration_dates(ticker: str) -> str:
 
 @yfinance_server.tool(
     name="get_option_chain",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["get_option_chain"],
     description="""Fetch the option chain for a given ticker symbol, expiration date, and option type.
 
 Use optional filters to narrow results — a full chain can have 200+ rows; filtering near-the-money and/or
@@ -1264,7 +1261,6 @@ def _target_analyst_count(company) -> int | None:
 
 @yfinance_server.tool(
     name="get_analyst_consensus",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["get_analyst_consensus"],
     description="""Get a compact analyst consensus summary for one or more tickers.
 
 Returns pre-aggregated data so you do NOT need to call get_recommendations separately.
@@ -1427,7 +1423,6 @@ async def get_analyst_consensus(ticker: str | list[str]) -> str:
 
 @yfinance_server.tool(
     name="get_earnings_analysis",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["get_earnings_analysis"],
     description="""Get all analyst forward-looking data in a single call — replaces 5 separate tool calls.
 
 Returns:
@@ -1668,7 +1663,6 @@ async def get_financial_ratios(
 
 @yfinance_server.tool(
     name="analyze_share_count_trend",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["analyze_share_count_trend"],
     description="""Analyze historical shares outstanding for dilution, issuance, or buyback questions.
 
 Use this tool whenever the user asks whether a company diluted shareholders, issued shares,
@@ -1828,7 +1822,6 @@ async def get_calendar(ticker: str, mode: Literal["upcoming", "history"] = "upco
 
 @yfinance_server.tool(
     name="get_market_calendar",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["get_market_calendar"],
     description="""Get a market-wide Yahoo calendar for earnings, economic events, IPOs, or stock splits.
 
 Use this tool when the user asks which companies report this week, what macro releases are due,
@@ -1897,7 +1890,6 @@ async def get_market_calendar(
 
 @yfinance_server.tool(
     name="search_ticker",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["search_ticker"],
     description="""Search for ticker symbols by company name, partial name, or ISIN.
 
 Use this tool to resolve a company name to a ticker symbol before calling other tools.
@@ -1952,7 +1944,6 @@ async def search_ticker(query: str, max_results: int = 8, exchange: str | None =
 
 @yfinance_server.tool(
     name="screen_stocks",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["screen_stocks"],
     description="""Screen the market for stocks matching predefined criteria.
 
 Use this tool to discover stocks without iterating over individual tickers.
@@ -5034,7 +5025,6 @@ async def get_position_score_inputs(ticker: str) -> str:
 
 @yfinance_server.tool(
     name="get_market_quote",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["get_fast_info"],
     description=(
         "Get a lightweight Yahoo regular-market price observation for one or more tickers. "
         "lastPrice uses priceBasis=REGULAR_MARKET_PRICE and includes priceTimestamp. "
@@ -5045,27 +5035,27 @@ async def get_market_quote(ticker: str | list[str]) -> str:
     return await get_fast_info(ticker)
 
 
-@yfinance_server.tool(name="get_historical_prices", output_schema=_TOOL_OUTPUT_SCHEMAS["get_historical_stock_prices"], description="Canonical alias for get_historical_stock_prices.")
+@yfinance_server.tool(name="get_historical_prices", description="Canonical alias for get_historical_stock_prices.")
 async def get_historical_prices(ticker: str, period: HistoricalPeriod = "1mo", interval: HistoricalInterval = "1d", prepost: bool = False) -> str:
     return await get_historical_stock_prices(ticker=ticker, period=period, interval=interval, prepost=prepost)
 
 
-@yfinance_server.tool(name="analyze_price_performance", output_schema=_TOOL_OUTPUT_SCHEMAS["get_price_stats"], description="Canonical alias for get_price_stats.")
+@yfinance_server.tool(name="analyze_price_performance", description="Canonical alias for get_price_stats.")
 async def analyze_price_performance(ticker: str | list[str]) -> str:
     return await get_price_stats(ticker)
 
 
-@yfinance_server.tool(name="analyze_moving_average_position", output_schema=_TOOL_OUTPUT_SCHEMAS["get_ma_position"], description="Canonical alias for get_ma_position.")
+@yfinance_server.tool(name="analyze_moving_average_position", description="Canonical alias for get_ma_position.")
 async def analyze_moving_average_position(ticker: str | list[str]) -> str:
     return await get_ma_position(ticker)
 
 
-@yfinance_server.tool(name="analyze_volume_ratio", output_schema=_TOOL_OUTPUT_SCHEMAS["get_volume_ratio"], description="Canonical alias for get_volume_ratio.")
+@yfinance_server.tool(name="analyze_volume_ratio", description="Canonical alias for get_volume_ratio.")
 async def analyze_volume_ratio(ticker: str | list[str], period: int = 10) -> str:
     return await get_volume_ratio(ticker, period)
 
 
-@yfinance_server.tool(name="check_volume_liquidity_threshold", output_schema=_TOOL_OUTPUT_SCHEMAS["get_volume_gate"], description="Canonical alias for get_volume_gate. Pass min_adv_usd for a caller-chosen threshold; meetsMinimum reports adv20dTradedValueUsd >= min_adv_usd.")
+@yfinance_server.tool(name="check_volume_liquidity_threshold", description="Canonical alias for get_volume_gate. Pass min_adv_usd for a caller-chosen threshold; meetsMinimum reports adv20dTradedValueUsd >= min_adv_usd.")
 async def check_volume_liquidity_threshold(
     ticker: str,
     foreign_exchange: bool = False,
@@ -5077,27 +5067,27 @@ async def check_volume_liquidity_threshold(
     return await get_volume_gate(ticker, foreign_exchange, min_adv_usd)
 
 
-@yfinance_server.tool(name="get_company_profile", output_schema=_TOOL_OUTPUT_SCHEMAS["get_stock_info"], description="Canonical alias for get_stock_info.")
+@yfinance_server.tool(name="get_company_profile", description="Canonical alias for get_stock_info.")
 async def get_company_profile(ticker: str | list[str], include_all: bool = False) -> str:
     return await get_stock_info(ticker, include_all=include_all)
 
 
-@yfinance_server.tool(name="get_fund_profile", output_schema=_TOOL_OUTPUT_SCHEMAS["get_etf_info"], description="Get a fund/ETF profile with section status and as-of-date limitations. Valuation characteristics are conventional multiples; provider inverse yields are retained separately. Use sections to request overview, holdings, allocation, operations, or fixed-income detail.")
+@yfinance_server.tool(name="get_fund_profile", description="Get a fund/ETF profile with section status and as-of-date limitations. Valuation characteristics are conventional multiples; provider inverse yields are retained separately. Use sections to request overview, holdings, allocation, operations, or fixed-income detail.")
 async def get_fund_profile(ticker: str | list[str], sections: list[str] | None = None) -> str:
     return await get_etf_info(ticker, sections)
 
 
-@yfinance_server.tool(name="analyze_financial_ratios", output_schema=_TOOL_OUTPUT_SCHEMAS["get_financial_ratios"], description="Analyze current financial ratios with explicit unitSemantics and optionally historical Yahoo valuation measures.")
+@yfinance_server.tool(name="analyze_financial_ratios", description="Analyze current financial ratios with explicit unitSemantics and optionally historical Yahoo valuation measures.")
 async def analyze_financial_ratios(ticker: str | list[str], history_periods: int = 0, frequency: Literal["quarterly", "monthly", "yearly", "trailing"] = "quarterly") -> str:
     return await get_financial_ratios(ticker, history_periods, frequency)
 
 
-@yfinance_server.tool(name="analyze_credit_health", output_schema=_TOOL_OUTPUT_SCHEMAS["get_credit_health"], description="Canonical alias for get_credit_health.")
+@yfinance_server.tool(name="analyze_credit_health", description="Canonical alias for get_credit_health.")
 async def analyze_credit_health(ticker: str | list[str]) -> str:
     return await get_credit_health(ticker)
 
 
-@yfinance_server.tool(name="get_corporate_actions", output_schema=_TOOL_OUTPUT_SCHEMAS["get_stock_actions"], description="Get stock splits, dividends, and fund capital-gain distributions from Yahoo Finance, oldest first. Every split is returned; dividends and capital gains are limited to the most recent `limit` on or after `start_date`.")
+@yfinance_server.tool(name="get_corporate_actions", description="Get stock splits, dividends, and fund capital-gain distributions from Yahoo Finance, oldest first. Every split is returned; dividends and capital gains are limited to the most recent `limit` on or after `start_date`.")
 async def get_corporate_actions(
     ticker: str,
     start_date: str | None = None,
@@ -5106,52 +5096,51 @@ async def get_corporate_actions(
     return await get_stock_actions(ticker, start_date or "", limit)
 
 
-@yfinance_server.tool(name="get_ownership_holders", output_schema=_TOOL_OUTPUT_SCHEMAS["get_holder_info"], description="Canonical alias for get_holder_info.")
+@yfinance_server.tool(name="get_ownership_holders", description="Canonical alias for get_holder_info.")
 async def get_ownership_holders(ticker: str, holder_type: HolderType) -> str:
     return await get_holder_info(ticker, holder_type)
 
 
-@yfinance_server.tool(name="get_analyst_recommendations", output_schema=_TOOL_OUTPUT_SCHEMAS["get_recommendations"], description="Canonical alias for get_recommendations.")
+@yfinance_server.tool(name="get_analyst_recommendations", description="Canonical alias for get_recommendations.")
 async def get_analyst_recommendations(ticker: str, recommendation_type: RecommendationType, months_back: int = 12) -> str:
     return await get_recommendations(ticker, recommendation_type, months_back)
 
 
-@yfinance_server.tool(name="get_analyst_rating_changes", output_schema=_TOOL_OUTPUT_SCHEMAS["get_analyst_upgrade_radar"], description="Canonical alias for get_analyst_upgrade_radar.")
+@yfinance_server.tool(name="get_analyst_rating_changes", description="Canonical alias for get_analyst_upgrade_radar.")
 async def get_analyst_rating_changes(ticker: str | list[str], days_back: int = 30) -> str:
     return await get_analyst_upgrade_radar(ticker, days_back)
 
 
-@yfinance_server.tool(name="analyze_earnings_momentum", output_schema=_TOOL_OUTPUT_SCHEMAS["get_earnings_momentum"], description="Canonical alias for get_earnings_momentum.")
+@yfinance_server.tool(name="analyze_earnings_momentum", description="Canonical alias for get_earnings_momentum.")
 async def analyze_earnings_momentum(ticker: str | list[str]) -> str:
     return await get_earnings_momentum(ticker)
 
 
-@yfinance_server.tool(name="get_company_events_calendar", output_schema=_TOOL_OUTPUT_SCHEMAS["get_calendar"], description="Get a ticker's upcoming Yahoo calendar estimates or paginated earnings history. Yahoo dates are UNVERIFIED provider data; confirm material dates with official releases.")
+@yfinance_server.tool(name="get_company_events_calendar", description="Get a ticker's upcoming Yahoo calendar estimates or paginated earnings history. Yahoo dates are UNVERIFIED provider data; confirm material dates with official releases.")
 async def get_company_events_calendar(ticker: str, mode: Literal["upcoming", "history"] = "upcoming", limit: int = 12, offset: int = 0) -> str:
     return await get_calendar(ticker, mode, limit, offset)
 
 
-# get_company_news is registered by yfmcp.tools.news (imported above, next to the
-# other news tools). Re-seat it here, its original position in the tool listing.
-reseat_tool_registration(yfinance_server, "get_company_news", after="get_company_events_calendar")
+# get_company_news is registered by yfmcp.tools.news (imported above, next to the other news tools) with
+# after="get_company_events_calendar", which keeps its original position in the tool listing.
 
 
-@yfinance_server.tool(name="summarize_options_flow", output_schema=_TOOL_OUTPUT_SCHEMAS["get_options_summary"], description="Canonical alias for get_options_summary/get_options_flow_summary.")
+@yfinance_server.tool(name="summarize_options_flow", description="Canonical alias for get_options_summary/get_options_flow_summary.")
 async def summarize_options_flow(ticker: str, expiry_hint: str | None = None) -> str:
     return await get_options_summary(ticker=ticker, expiry_hint=expiry_hint)
 
 
-@yfinance_server.tool(name="analyze_options_flow_window", output_schema=_TOOL_OUTPUT_SCHEMAS["get_options_flow_scan"], description="Analyze an event-window options flow reading. LOW chain quality returns RETRY and must not support derivative conclusions.")
+@yfinance_server.tool(name="analyze_options_flow_window", description="Analyze an event-window options flow reading. LOW chain quality returns RETRY and must not support derivative conclusions.")
 async def analyze_options_flow_window(ticker: str, window_label: str) -> str:
     return await get_options_flow_scan(ticker, window_label)
 
 
-@yfinance_server.tool(name="find_put_hedge_candidates", output_schema=_TOOL_OUTPUT_SCHEMAS["get_put_hedge_candidates"], description="Find OTM put hedge candidates using executable ask cost. Contracts require a two-sided quote plus liquidity evidence; PARTIAL means retry and do not use budgetFeasible as a decision.")
+@yfinance_server.tool(name="find_put_hedge_candidates", description="Find OTM put hedge candidates using executable ask cost. Contracts require a two-sided quote plus liquidity evidence; PARTIAL means retry and do not use budgetFeasible as a decision.")
 async def find_put_hedge_candidates(ticker: str, otm_pct_min: float = 8, otm_pct_max: float = 12, budget_usd: float = 500, expiry_after: str = "") -> str:
     return await get_put_hedge_candidates(ticker, otm_pct_min, otm_pct_max, budget_usd, expiry_after)
 
 
-@yfinance_server.tool(name="calculate_price_target_distance", output_schema=_TOOL_OUTPUT_SCHEMAS["get_price_target_bracket"], description="Compare current price to a user-supplied reference price target with both the legacy ratio and directional percent distance.")
+@yfinance_server.tool(name="calculate_price_target_distance", description="Compare current price to a user-supplied reference price target with both the legacy ratio and directional percent distance.")
 async def calculate_price_target_distance(
     ticker: str,
     reference_target_price: float | None = None,
@@ -5162,12 +5151,12 @@ async def calculate_price_target_distance(
     )
 
 
-@yfinance_server.tool(name="analyze_position_signals", output_schema=_TOOL_OUTPUT_SCHEMAS["get_position_score_inputs"], description="Canonical alias for get_position_score_inputs.")
+@yfinance_server.tool(name="analyze_position_signals", description="Canonical alias for get_position_score_inputs.")
 async def analyze_position_signals(ticker: str) -> str:
     return await get_position_score_inputs(ticker)
 
 
-@yfinance_server.tool(name="list_sec_company_filings", output_schema=_TOOL_OUTPUT_SCHEMAS["list_sec_filings"], description="""List SEC filings for a company from EDGAR submissions.
+@yfinance_server.tool(name="list_sec_company_filings", description="""List SEC filings for a company from EDGAR submissions.
 
 Returns compact metadata for each filing including accession number, filing date, accepted timestamp, and a direct document URL.
 
@@ -5243,13 +5232,13 @@ async def _resolve_latest_sec_doc_url(ticker: str, filing_type: str = "10-K") ->
     return None
 
 
-@yfinance_server.tool(name="get_sec_filing_outline", output_schema=_TOOL_OUTPUT_SCHEMAS["get_filing_outline"], description="Canonical alias for get_filing_outline.")
+@yfinance_server.tool(name="get_sec_filing_outline", description="Canonical alias for get_filing_outline.")
 async def get_sec_filing_outline(ticker: str, filing_type: str = "10-K", period: str = "latest", accession_number: str | None = None, document_url: str | None = None) -> str:
     resolved_doc_url = document_url or (await _resolve_latest_sec_doc_url(ticker, filing_type) if period == "latest" else None)
     return await get_filing_outline(ticker, accession_number, resolved_doc_url)
 
 
-@yfinance_server.tool(name="get_sec_filing_section", output_schema=_TOOL_OUTPUT_SCHEMAS["get_filing_section"], description="Get structurally resolved SEC filing section text; Item requests fail closed when structure is unresolved.")
+@yfinance_server.tool(name="get_sec_filing_section", description="Get structurally resolved SEC filing section text; Item requests fail closed when structure is unresolved.")
 async def get_sec_filing_section(
     ticker: str,
     filing_type: str = "10-K",
@@ -5263,7 +5252,7 @@ async def get_sec_filing_section(
     return await get_filing_section(ticker, str(section), str(resolved_doc_url), context_chars)
 
 
-@yfinance_server.tool(name="list_sec_filing_tables", output_schema=_TOOL_OUTPUT_SCHEMAS["list_filing_tables"], description="List usable SEC filing tables with original indexes and excluded-table counts.")
+@yfinance_server.tool(name="list_sec_filing_tables", description="List usable SEC filing tables with original indexes and excluded-table counts.")
 async def list_sec_filing_tables(
     ticker: str,
     filing_type: str = "10-K",
@@ -5275,7 +5264,7 @@ async def list_sec_filing_tables(
     return await list_filing_tables(ticker, str(resolved_doc_url), offset, limit)
 
 
-@yfinance_server.tool(name="get_sec_filing_table", output_schema=_TOOL_OUTPUT_SCHEMAS["get_filing_table"], description="Get a selected SEC table; unusable layout tables return an explicit recovery action.")
+@yfinance_server.tool(name="get_sec_filing_table", description="Get a selected SEC table; unusable layout tables return an explicit recovery action.")
 async def get_sec_filing_table(ticker: str, table_index: int, filing_type: str = "10-K", document_url: str | None = None, max_rows: int = 30) -> str:
     resolved_doc_url = document_url or await _resolve_latest_sec_doc_url(ticker, filing_type)
     return await get_filing_table(ticker, str(resolved_doc_url), table_index, max_rows)
@@ -5391,7 +5380,7 @@ _REVENUE_FACT_ALIASES = {
 }
 
 
-@yfinance_server.tool(name="extract_sec_filing_fact", output_schema=_TOOL_OUTPUT_SCHEMAS["extract_filing_fact"], description="Canonical SEC fact extractor (routes to get_filing_data or extract_filing_fact).")
+@yfinance_server.tool(name="extract_sec_filing_fact", description="Canonical SEC fact extractor (routes to get_filing_data or extract_filing_fact).")
 async def extract_sec_filing_fact(
     ticker: str,
     fact: str | None = None,
@@ -5480,7 +5469,7 @@ async def extract_sec_filing_fact(
     return await extract_filing_fact(ticker=ticker, fact_name=fact_name, document_url=document_url, accession_number=accession_number)
 
 
-@yfinance_server.tool(name="search_sec_filing_text", output_schema=_TOOL_OUTPUT_SCHEMAS["search_filing_text"], description="Canonical alias for search_filing_text.")
+@yfinance_server.tool(name="search_sec_filing_text", description="Canonical alias for search_filing_text.")
 async def search_sec_filing_text(
     ticker: str,
     search_terms: list[str] | None = None,
@@ -5750,7 +5739,6 @@ async def _get_sec_filing_index_impl(
 
 @yfinance_server.tool(
     name="get_sec_filing_index",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["get_sec_filing_index"],
     description="""Build or retrieve the cached section/table index for an SEC filing.
 Identifies headings, tables, row labels, and units without a duplicate indexing action.
 
@@ -5797,7 +5785,6 @@ _SEC_MATERIAL_FILINGS_MAX = 20
 
 @yfinance_server.tool(
     name="list_sec_material_filings",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["list_sec_material_filings"],
     description="""List latest material SEC filings for a ticker, filtering out noise (Form 4, 144, SC 13G, etc.).
 Returns only significant filings (10-K, 10-Q, 8-K, S-1, 424B, DEF 14A, 20-F, 6-K by default).
 
@@ -5913,7 +5900,6 @@ _XBRL_INTELLIGENCE_CONCEPTS: dict[str, list[str]] = {
 
 @yfinance_server.tool(
     name="get_sec_filing_intelligence",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["get_sec_filing_intelligence"],
     description="""Get a comprehensive intelligence map of a company's SEC filing — XBRL facts snapshot, section/table index summary, and recommended queries — in a single call.
 Gives the LLM a filing "map" so it knows what data is available and can make targeted follow-up calls.
 
@@ -6172,7 +6158,6 @@ def _find_section_bounds(html: str, section: str, max_chars: int = 50000) -> tup
 
 @yfinance_server.tool(
     name="get_sec_filing_section_markdown",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["get_sec_filing_section_markdown"],
     description="""Return a specific SEC filing section as LLM-ready Markdown.
 Converts filing HTML to clean Markdown with preserved section headers and pipe-delimited tables.
 Use after get_sec_filing_intelligence to drill into a specific section.
@@ -6338,7 +6323,6 @@ async def _may_be_20f_filer(ticker: str) -> bool:
 
 @yfinance_server.tool(
     name="extract_geographic_revenue",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["extract_geographic_revenue"],
     description="Extract geographic revenue exposure from official SEC data and indexed filing tables, returning explicit parser/provider limitation statuses when no decision-grade value is available.",
 )
 async def extract_geographic_revenue(
@@ -6483,7 +6467,7 @@ async def extract_geographic_revenue(
     return json.dumps(shaped)
 
 
-@yfinance_server.tool(name="extract_segment_revenue", output_schema=_TOOL_OUTPUT_SCHEMAS["extract_segment_revenue"], description="Extract segment revenue rows from official SEC facts and filing tables, returning explicit limitation statuses when no parseable segment data is found.")
+@yfinance_server.tool(name="extract_segment_revenue", description="Extract segment revenue rows from official SEC facts and filing tables, returning explicit limitation statuses when no parseable segment data is found.")
 async def extract_segment_revenue(
     ticker: str,
     filing_type: str = "10-K",
@@ -6552,7 +6536,7 @@ async def extract_segment_revenue(
     return json.dumps(out)
 
 
-@yfinance_server.tool(name="extract_total_revenue", output_schema=_TOOL_OUTPUT_SCHEMAS["extract_total_revenue"], description="Extract total revenue from official SEC facts or filing tables with evidence metadata.")
+@yfinance_server.tool(name="extract_total_revenue", description="Extract total revenue from official SEC facts or filing tables with evidence metadata.")
 async def extract_total_revenue(
     ticker: str,
     filing_type: str = "10-K",
@@ -6601,7 +6585,7 @@ async def extract_total_revenue(
     })
 
 
-@yfinance_server.tool(name="extract_revenue_exposure", output_schema=_TOOL_OUTPUT_SCHEMAS["extract_revenue_exposure"], description="Extract revenue exposure for a region/customer/segment query, returning explicit parser/provider limitation statuses when no decision-grade value is available.")
+@yfinance_server.tool(name="extract_revenue_exposure", description="Extract revenue exposure for a region/customer/segment query, returning explicit parser/provider limitation statuses when no decision-grade value is available.")
 async def extract_revenue_exposure(
     ticker: str,
     exposure_query: str,
@@ -6724,7 +6708,7 @@ def _contextual_entity_excerpt(value: object, entity: str, *, max_len: int = 240
     return excerpt if _EXPOSURE_RELATIONSHIP_RE.search(excerpt) else ""
 
 
-@yfinance_server.tool(name="extract_risk_factor_mentions", output_schema=_TOOL_OUTPUT_SCHEMAS["extract_risk_factor_mentions"], description="Extract concise risk-factor mentions for explicit terms from a filing.")
+@yfinance_server.tool(name="extract_risk_factor_mentions", description="Extract concise risk-factor mentions for explicit terms from a filing.")
 async def extract_risk_factor_mentions(
     ticker: str,
     terms: list[str],
@@ -6788,7 +6772,7 @@ async def extract_risk_factor_mentions(
 _CUSTOMER_TABLE_ROW_TERMS = ["Customer A", "Customer B", "Customer C", "Customer 1", "Distributor A", "Distributor B"]
 
 
-@yfinance_server.tool(name="extract_customer_concentration", output_schema=_TOOL_OUTPUT_SCHEMAS["extract_customer_concentration"], description="Extract customer concentration percentages from SEC filing text evidence.")
+@yfinance_server.tool(name="extract_customer_concentration", description="Extract customer concentration percentages from SEC filing text evidence.")
 async def extract_customer_concentration(
     ticker: str,
     filing_type: str = "10-K",
@@ -7054,7 +7038,6 @@ def _first_present(*values: Any) -> Any:
 
 @yfinance_server.tool(
     name="extract_dilution_bridge",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["extract_dilution_bridge"],
     description="Basic-to-diluted share bridge at a price you supply, from the filing's inline XBRL: cover-page basic shares, options (treasury-stock method, by exercise-price range when tagged), unvested RSUs/PSUs (gross), warrants per class (treasury stock), convertibles and convertible preferred (if-converted when in the money) and ATM remaining capacity from filing text. Mechanical and company-disclosed, not a consensus diluted share count; never back-solve it into one. status covers tagged instruments only, never a full claim inventory: share claims stated only in filing text (price protection, anti-dilution rights, forward sales, contingent or share-settled obligations, exchangeable interests, SAFEs, equity lines, post-period warrants) are quoted in unquantifiedShareClaims and never counted. filing_type latest uses the newest 10-Q with the last 10-K as fallback.",
 )
 async def extract_dilution_bridge(
@@ -7125,7 +7108,6 @@ async def extract_dilution_bridge(
 
 @yfinance_server.tool(
     name="extract_capital_structure",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["extract_capital_structure"],
     description="Company-disclosed capital structure at the filing's period end: cash, short-term investments, total debt and net cash; each debt instrument's face amount, carrying amount, coupon, maturity and conversion terms from dimensional inline XBRL (which companyfacts omits); the tagged maturity ladder; and the company's own funding, runway, going-concern and ATM statements quoted from the filing. Disclosed, not forecast.",
 )
 async def extract_capital_structure(
@@ -7158,7 +7140,6 @@ from yfmcp import funding_schedule as _fsched  # noqa: E402
 
 @yfinance_server.tool(
     name="get_share_count_scenarios",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["get_share_count_scenarios"],
     description="Share counts under scenarios you define: for each scenario's price and treatments (options treasury-stock/gross/exclude, unvested awards gross/exclude, warrants treasury-stock/gross/exclude on vested or all, convertibles if-converted when in the money/all/net-share settlement where the filing states principal is settled in cash/exclude, ATM remaining capacity include/exclude, capped calls ignored or offset where the filing states their strike, cap and covered shares, and known issuance you supply), every instrument from the filing's inline XBRL is listed as included or excluded with its treasury-stock or if-converted mechanics and threshold price; unresolved instruments are listed and left out. Scenarios are reported side by side; no denominator is selected. Evidence only.",
 )
 async def get_share_count_scenarios(
@@ -7188,7 +7169,6 @@ _SCHEDULE_SEARCH_TERMS = [
 
 @yfinance_server.tool(
     name="extract_funding_capex_schedule",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["extract_funding_capex_schedule"],
     description="Funding and capex schedule from the latest periodic filing: tagged contractual schedules (debt principal, operating and finance lease payments, purchase and contractual obligations by due period; purchase commitments) and funding or capex statements from the text, each classified CONTRACTUAL, COMPANY_DISCLOSED_COMMITTED, COMPANY_GUIDED, AWARDED_CONTINGENT or UNRESOLVED with amount, timing and the quoted source; plus liquidity sources (cash, undrawn facilities, ATM capacity). Nothing is netted or forecast. Evidence only.",
 )
 async def extract_funding_capex_schedule(ticker: str, filing_type: str = "latest", accession_number: str | None = None) -> str:
@@ -7268,7 +7248,6 @@ async def _read_release_text(cik_int: int, accession_number: str, primary_url: s
 
 @yfinance_server.tool(
     name="extract_operating_driver_ledger",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["extract_operating_driver_ledger"],
     description="Operating drivers as the company discloses them: SEC XBRL series (revenue, gross profit, R&D, capex, remaining performance obligations, contract liabilities; newest filing per period, year-to-date periods kept as filed), the filer's own tagged KPIs from its latest periodic filing, and filing and earnings-release statements with figures by category (capacity, production, deliveries, launches and deployments, customers, backlog and bookings, utilization, pricing, yield, headcount), each marked REPORTED_ACTUAL, TARGET_OR_PLAN or UNCLEAR with timing and the quoted source. Untagged drivers are listed as not reported and unread sources as not read; nothing is derived or annualized. Evidence only.",
 )
 async def extract_operating_driver_ledger(ticker: str, filing_type: str = "latest", accession_number: str | None = None) -> str:
@@ -7337,7 +7316,6 @@ async def extract_operating_driver_ledger(ticker: str, filing_type: str = "lates
 
 @yfinance_server.tool(
     name="get_guidance_history",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["get_guidance_history"],
     description="Company guidance across recent earnings releases (SEC 8-K Item 2.02, EX-99.1): each revenue, gross-margin and EPS range with its stated target period and source; revisions between consecutive releases for the same metric and period (INITIATED, RAISED, LOWERED, NARROWED, WIDENED, REAFFIRMED, WITHDRAWN); and outcomes comparing the later reported SEC XBRL actual with the first and last range (BELOW, WITHIN, ABOVE). Ranges without a stated period are listed but not compared; unread releases are reported, never treated as withdrawn. Evidence only.",
 )
 async def get_guidance_history(ticker: str, max_releases: int = 8) -> str:
@@ -7511,7 +7489,6 @@ async def _valuation_history_for(ticker: str, dates: list[str] | None, from_date
 
 @yfinance_server.tool(
     name="get_historical_valuation_context",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["get_historical_valuation_context"],
     description="Market cap, enterprise value and EV/Revenue, EV/EBITDA, P/E and P/S as they stood at each date, for a ticker and caller-named peers on the same dates. Point in time: SEC companyfacts filed on or before each date; the close on or before it with later split adjustments undone; balances at the latest balance date then filed; LTM (LFY + YTD - prior YTD) and LFY denominators with their periods, concepts and filings; reporting currency converted at that date's FX close; ADR share counts divided by ordinary shares per ADS. Shares are point in time: the cover-page or balance-sheet count, else the filing's per-class cover counts summed; a weighted-average count never sets market cap (POINT_IN_TIME_SHARES_UNRESOLVED). EBITDA is computed (operating income + D&A). Untagged or unfiled figures leave their multiples null with a status; status is OK only when all eight multiples are usable (coreStatus covers market cap and EV, coverage lists the rest); peer medians are unweighted. No multiple is selected. Evidence only.",
 )
 async def get_historical_valuation_context(ticker: str, dates: list[str] | None = None, peers: list[str] | None = None) -> str:
@@ -7573,7 +7550,6 @@ def _yahoo_statement_rows_sync(ticker: str, annual: bool, balance: bool) -> list
 
 @yfinance_server.tool(
     name="reconcile_metric_sources",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["reconcile_metric_sources"],
     description="One metric for one period as each source states it: SEC XBRL as first filed and as latest filed (a difference is a restatement), the issuer's earnings release (only sentences naming the metric, an amount and the period's scope) and Yahoo's statement row, each compared with the latest SEC value with difference, percentage and tolerance (the larger of tolerance_pct and half the release's last stated digit). Status AGREED requires latest SEC plus at least one independent matching provider; PARTIAL covers a missing SEC baseline or only one provider; otherwise CONFLICT or NOT_FOUND, with source evidence. Metrics: revenue, net_income, operating_income, eps_diluted, cash_and_equivalents. Evidence only.",
 )
 async def reconcile_metric_sources(ticker: str, metric: str, period: str = "latest_quarter", tolerance_pct: float = _mr.DEFAULT_TOLERANCE_PCT) -> str:
@@ -7652,7 +7628,6 @@ async def reconcile_metric_sources(ticker: str, metric: str, period: str = "late
 
 @yfinance_server.tool(
     name="extract_analyst_valuation_methods",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["extract_analyst_valuation_methods"],
     description="Valuation methods analysts name in recent news headlines and summaries: multiples with metric and period (e.g. 41x 2H27 EV/EBITDA), DCF with WACC, discount rate and terminal growth, sum-of-the-parts and rNPV, with firm, price target and source link. Lists firms whose targets carry no disclosed method. Context only: not consensus inputs.",
 )
 async def extract_analyst_valuation_methods(ticker: str, days_back: int = 30) -> str:
@@ -7748,7 +7723,6 @@ async def _issuer_name(ticker: str) -> str | None:
 
 @yfinance_server.tool(
     name="get_uk_company_filings",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["get_uk_company_filings"],
     description="UK Companies House filing history for a UK-registered issuer (e.g. IQE.L): accounts, share allotments (SH01), charges (MR01, secured lending) and resolutions, with document links; include_charges adds the charge register. Resolves by company_number, company_name, or the ticker's issuer name. Official statutory filings; RNS market announcements are not held here. Needs the COMPANIES_HOUSE_API_KEY secret.",
 )
 async def get_uk_company_filings(
@@ -7877,7 +7851,6 @@ _SEC_UNAVAILABLE_STATUSES = {"TICKER_NOT_FOUND", "FILING_NOT_FOUND_TRY_OTHER_TYP
 
 @yfinance_server.tool(
     name="get_valuation_snapshot",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["get_valuation_snapshot"],
     description="Valuation context for one ticker at the current price or one you supply: diluted shares from the SEC dilution bridge at that price, the filing's period-end cash and debt, equity and enterprise value (in-the-money convertibles leave the debt), EV/Revenue, EV/EBITDA and P/E on trailing results and Yahoo's current and next fiscal-year consensus with analyst counts, and ATM capacity. Falls back to Yahoo figures for non-USD or non-SEC listings. Mechanical context, not a price target; nothing is back-solved.",
 )
 async def get_valuation_snapshot(
@@ -7927,7 +7900,6 @@ _PEER_VALUATION_MAX_TICKERS = 10
 
 @yfinance_server.tool(
     name="compare_peer_valuations",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["compare_peer_valuations"],
     description="The same multiples for a peer set on one Yahoo basis: price x shares outstanding + total debt - total cash, over trailing results and current and next fiscal-year consensus (EV/Revenue, EV/EBITDA, P/E, revenue growth, gross margin). Returns peer medians, min and max excluding the subject, and the subject's premium or discount to each median. Context, not a signal.",
 )
 async def compare_peer_valuations(tickers: list[str], subject: str | None = None) -> str:
@@ -7983,7 +7955,7 @@ def _china_filing_not_found(ticker: str, filing_type: str, source: dict) -> str:
     })
 
 
-@yfinance_server.tool(name="extract_china_exposure", output_schema=_TOOL_OUTPUT_SCHEMAS["extract_china_exposure"], description="Extract China exposure with separate revenue and non-revenue classifications; revenue values are decision-grade only when evidence and status support them.")
+@yfinance_server.tool(name="extract_china_exposure", description="Extract China exposure with separate revenue and non-revenue classifications; revenue values are decision-grade only when evidence and status support them.")
 async def extract_china_exposure(
     ticker: str,
     filing_type: str = "10-K",
@@ -8185,7 +8157,6 @@ async def extract_china_exposure(
 
 @yfinance_server.tool(
     name="extract_exposure",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["extract_exposure"],
     description="Extract multi-dimensional SEC exposure for a geographic region or named entity/topic. Returns revenue, operational, named-entity, and risk evidence with explicit non-decision-grade statuses when parser/provider limits prevent a value.",
 )
 async def extract_exposure(
@@ -8422,7 +8393,6 @@ async def extract_exposure(
 
 @yfinance_server.tool(
     name="query_sec_filing_index",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["query_sec_filing_index"],
     description="Deterministically route supported SEC filing index query types to extractor tools.",
 )
 async def query_sec_filing_index(
@@ -8993,7 +8963,6 @@ def _read_consensus_observation(ticker: str, observation_date: str) -> str:
 
 @yfinance_server.tool(
     name="get_consensus_forecast_curve",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["get_consensus_forecast_curve"],
     description="Street consensus by fiscal year, FY0 to FY+horizon, for EPS and revenue from Yahoo Finance and Alpha Vantage, each provider reported separately with fiscal year end, currency, mean/high/low, analyst count and retrieval time. Each metric and period states its coverage: PROVIDER_COVERED, PROVIDER_NOT_COVERED, INSUFFICIENT_ANALYST_COUNT or PROVIDER_CONFLICT (with the cross-provider difference). Years and metrics no provider covers stay PROVIDER_NOT_COVERED; nothing is interpolated, extended by growth rates, or derived. crossCheck states whether the providers were actually compared: a failed provider (CROSS_CHECK_DEGRADED) or figures identical to the last digit (IDENTICAL, PROVIDERS_NOT_INDEPENDENT) are flagged. A provider row whose mean falls outside its own high-low range is PROVIDER_INCONSISTENT and left out of the comparison; an EPS gap between providers that matches a recent stock split is NOT_SPLIT_ADJUSTED, not a conflict. When Alpha Vantage refuses a request for quota, a timeout or an upstream error, its figures stored up to 7 days earlier stand in, marked with their retrieval time, staleFallback and PROVIDER_DATA_STALE. With observation_date, returns the curve stored that day. Evidence only.",
 )
 async def get_consensus_forecast_curve(
@@ -9018,7 +8987,6 @@ async def get_consensus_forecast_curve(
 
 @yfinance_server.tool(
     name="get_eps_revisions",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["get_eps_revisions"],
     description="EPS estimate revision windows for FY0 and FY+1 as each provider reports them: the mean now and 7, 30, 60 and 90 days ago with change and percent change, and up/down revision counts over 7 and 30 days. A window spanning a stock split carries no change (SPLIT_IN_WINDOW), nor does a row whose mean falls outside its own range (PROVIDER_INCONSISTENT). Stored figures standing in for a refused provider request (PROVIDER_DATA_STALE) have windows ending at their retrieval time. Revenue revisions and analyst adds/drops are PROVIDER_NOT_COVERED. Lists the dates of stored daily consensus observations. Evidence only.",
 )
 async def get_eps_revisions(ticker: str) -> str:
@@ -9071,7 +9039,6 @@ async def _sec_filing_rows(ticker: str) -> tuple[list[dict] | None, str]:
 
 @yfinance_server.tool(
     name="get_evidence_quality",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["get_evidence_quality"],
     description="Preflight before a valuation evidence pack: status, freshness and coverage per evidence family (quote, latest SEC periodic filing, capital structure and dilution readiness, earnings-release guidance, material 8-Ks, FY0/FY+1 consensus cells, durable storage) and the blockers, from light requests only. Evidence only.",
 )
 async def get_evidence_quality(ticker: str) -> str:
@@ -9096,7 +9063,6 @@ def _not_applicable(source_tool: str, code: str, message: str, retrieved_at: str
 
 @yfinance_server.tool(
     name="build_valuation_evidence_pack",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["build_valuation_evidence_pack"],
     description="One evidence cut for valuation work: quote, evidence quality, consensus curve, EPS revisions, current capital structure, dilution bridge at the current price, latest guidance and material filings, each with its source tool, status, warnings and failure, plus a provenance receipt hashing every component. decisionUse is EVIDENCE_ONLY; selectedMethod, selectedMultiple, scenarioWeights, priceTarget, g2, opportunity and action are always null. Stored immutably under a content-addressed evidenceCutId when storage is available; the full payload is returned either way.",
 )
 async def build_valuation_evidence_pack(ticker: str, horizon_years: int = 5, persist: bool = True) -> str:
@@ -9173,7 +9139,6 @@ async def build_valuation_evidence_pack(ticker: str, horizon_years: int = 5, per
 
 @yfinance_server.tool(
     name="get_evidence_cut",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["get_evidence_cut"],
     description="Retrieve a stored evidence cut by evidenceCutId and verify its integrity: the SHA-256 of the stored canonical JSON must equal the hash in the id (integrity VERIFIED or MISMATCH).",
 )
 async def get_evidence_cut(evidence_cut_id: str) -> str:
@@ -9206,7 +9171,6 @@ async def get_evidence_cut(evidence_cut_id: str) -> str:
 
 @yfinance_server.tool(
     name="list_evidence_cuts",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["list_evidence_cuts"],
     description="Stored evidence cuts for a ticker, newest first, with their ids and cutoff times.",
 )
 async def list_evidence_cuts(ticker: str, limit: int = 20) -> str:
@@ -9240,12 +9204,11 @@ async def list_evidence_cuts(ticker: str, limit: int = 20) -> str:
 # ---------------------------------------------------------------------------
 _TOOL_MODE = os.environ.get("TOOL_MODE", "grouped").lower().strip()
 
-# Every expanded tool is registered by here: advertise tool_catalog.json tickerCaps as maxItems (2.12.0, Q3c).
-apply_ticker_caps(yfinance_server)
+# tool_catalog.json tickerCaps are advertised as maxItems by YfmcpServer.list_tools (2.12.0, Q3c).
 
 
 def _build_grouped_server():
-    """Create a FastMCP server with grouped meta-tools for token efficiency."""
+    """Create a YfmcpServer with grouped meta-tools for token efficiency."""
     from tool_groups import TOOL_GROUPS, register_grouped_tools
     from yfmcp.app import build_tool_contract_registry
 
@@ -9283,7 +9246,7 @@ Input: {"action": "get_market_quote", "params": {"ticker": "AAPL"}}
 """,
     )
 
-    # Resolve handlers from the shared FastMCP instance (single source of truth)
+    # Resolve handlers from the shared server's registry (single source of truth)
     # rather than this module's globals, so the mapping holds as handlers move
     # into yfmcp.tools.* during the Phase 2 split.
     handler_registry = build_handler_registry(yfinance_server)

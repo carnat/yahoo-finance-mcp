@@ -24,7 +24,6 @@ class TestVersionContract(unittest.TestCase):
         app_source = (ROOT / "yfmcp" / "app.py").read_text(encoding="utf-8")
         self.assertIn("from yfmcp.build_info import BUILD_VERSION", app_source)
         self.assertIn("version=BUILD_VERSION", app_source)
-        self.assertIn("low_level.version = BUILD_VERSION", app_source)
         self.assertIn("yfinance_server = create_server(", app_source)
         server_source = (ROOT / "server.py").read_text(encoding="utf-8")
         self.assertIn("grouped = create_server(", server_source)

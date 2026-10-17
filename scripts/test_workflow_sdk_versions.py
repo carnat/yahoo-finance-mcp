@@ -38,8 +38,9 @@ class TestWorkflowSdkVersions(unittest.TestCase):
             if dependency.startswith("mcp[cli]")
         ]
         self.assertEqual(len(mcp_dependencies), 1, "expected exactly one mcp[cli] dependency")
-        # yfmcp.app imports MCPServer (2.x) or FastMCP (1.x); 3.x is untested.
-        self.assertIn("<3", mcp_dependencies[0], "yfmcp.app supports MCP Python SDK 1.x and 2.x only")
+        # yfmcp.app subclasses mcp.server.mcpserver.MCPServer (2.x public API only, Q8); 1.x and 3.x are unsupported.
+        self.assertIn(">=2.2", mcp_dependencies[0], "yfmcp.app needs the MCP Python SDK 2.2 or newer")
+        self.assertIn("<3", mcp_dependencies[0], "yfmcp.app supports MCP Python SDK 2.x only")
 
     def test_required_actions_use_current_major(self) -> None:
         workflows = sorted(WORKFLOWS_DIR.glob("*.yml"))

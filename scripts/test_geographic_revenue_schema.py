@@ -9,7 +9,7 @@ Mode selection:
 Remote mode: calls deployed Worker JSON-RPC tools/call; does not import
 server.py and does not require the Python mcp package.
 
-Local mode: imports server.py; stubs FastMCP when mcp package is absent.
+Local mode: imports server.py.
 """
 
 from __future__ import annotations
@@ -44,55 +44,7 @@ URL = _MCP_URL if _MODE == "remote" else ""
 UA = "Mozilla/5.0 (compatible; yahoo-finance-mcp-geo-schema/1.0)"
 
 
-def _ensure_mcp_available() -> None:
-    """Install a minimal FastMCP stub into sys.modules when the real mcp package is absent."""
-    try:
-        import mcp.server  # noqa: F401
-        return
-    except ModuleNotFoundError:
-        pass
-
-    class _FastMCPStub:
-        def __init__(self, *a: object, **kw: object) -> None:
-            pass
-
-        def tool(self, *a: object, **kw: object):  # type: ignore[return]
-            if a and callable(a[0]):
-                return a[0]
-
-            def _decorator(fn):  # type: ignore[return]
-                return fn
-
-            return _decorator
-
-    mcp_mod = types.ModuleType("mcp")
-    server_mod = types.ModuleType("mcp.server")
-    fastmcp_mod = types.ModuleType("mcp.server.fastmcp")
-    fastmcp_mod.FastMCP = _FastMCPStub  # type: ignore[attr-defined]
-    mcp_mod.server = server_mod  # type: ignore[attr-defined]
-    server_mod.fastmcp = fastmcp_mod  # type: ignore[attr-defined]
-    sys.modules.setdefault("mcp", mcp_mod)
-    sys.modules.setdefault("mcp.server", server_mod)
-    sys.modules.setdefault("mcp.server.fastmcp", fastmcp_mod)
-
-
-def _patch_fastmcp_tool() -> None:
-    from yfmcp.app import FastMCP as _FastMCP  # noqa: E402
-
-    if getattr(_FastMCP, "_output_schema_patched", False):
-        return
-    orig_tool = _FastMCP.tool
-
-    def _patched_tool(self, name=None, output_schema=None, **kwargs):  # type: ignore[override]
-        return orig_tool(self, name=name, **kwargs)
-
-    _FastMCP.tool = _patched_tool  # type: ignore[method-assign]
-    _FastMCP._output_schema_patched = True  # type: ignore[attr-defined]
-
-
 def _call_local(name: str, args: dict) -> dict:
-    _ensure_mcp_available()
-    _patch_fastmcp_tool()
     import importlib  # noqa: E402
     import sys  # noqa: E402
     import server as srv  # noqa: E402, F401 (may be first import)

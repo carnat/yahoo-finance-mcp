@@ -15,14 +15,8 @@ from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# Patch FastMCP.tool to accept output_schema (not in mcp>=1.9)
-from yfmcp.app import FastMCP as _FastMCP  # noqa: E402
-_orig_tool = _FastMCP.tool
-def _patched_tool(self, name=None, output_schema=None, **kwargs):  # type: ignore[override]
-    return _orig_tool(self, name=name, **kwargs)
-_FastMCP.tool = _patched_tool  # type: ignore[method-assign]
-
 import server as srv
+from yfmcp.app import registered_tool_fn
 from yfmcp.clients import edgar
 
 
@@ -64,7 +58,7 @@ class TestToolCallGate(unittest.TestCase):
 
     @staticmethod
     def _expanded(name, **args):
-        fn = srv.yfinance_server._tool_manager._tools[name].fn
+        fn = registered_tool_fn(name)
         with patch.object(srv.yf, "Ticker", side_effect=AssertionError("fetched")) as ticker:
             out = json.loads(asyncio.run(fn(**args)))
         return out, ticker

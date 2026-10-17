@@ -2633,7 +2633,6 @@ def _rank_news_items_by_relevance(items: list[dict]) -> list[dict]:
 
 @yfinance_server.tool(
     name="search_company_news",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["search_company_news"],
     description="""Search public company news/events for a ticker and query string.
 
 Defaults use Yahoo Finance, eligible Finnhub, then one quota-bounded Marketaux
@@ -2708,7 +2707,6 @@ async def search_company_news(
 
 @yfinance_server.tool(
     name="get_company_press_releases",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["get_company_press_releases"],
     description="""Get company press releases and official release-style public events.
 
 Defaults resolve SEC 8-K/EX-99 evidence first, then registry-backed
@@ -2944,7 +2942,6 @@ async def get_company_press_releases(
 
 @yfinance_server.tool(
     name="get_sec_recent_events",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["get_sec_recent_events"],
     description="""Get recent SEC filing events with filing metadata and SEC archive URLs.
 
 Uses SEC submissions as the primary source and returns structured event records for requested filing types.
@@ -3002,7 +2999,6 @@ async def get_sec_recent_events(
 
 @yfinance_server.tool(
     name="get_public_event_timeline",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["get_public_event_timeline"],
 description="""Get a deduplicated chronological timeline of public company events.
 
 Defaults combine SEC and reviewed/RSS company IR with Yahoo, eligible Finnhub,
@@ -3076,7 +3072,6 @@ async def get_public_event_timeline(
 
 @yfinance_server.tool(
     name="verify_company_event",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["verify_company_event"],
     description="""Verify whether a public company event has source-backed evidence.
 
 Returns CONFIRMED, PARTIAL, NOT_FOUND, SOURCE_LIMITED_NOT_FOUND, STALE, or CONFLICTING.
@@ -3349,7 +3344,7 @@ async def verify_company_event(
 
 @yfinance_server.tool(
     name="get_company_news",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["get_yahoo_finance_news"],
+    after="get_company_events_calendar",  # its position in the published listing (server.py registers the calendar)
     description="""Get recent public company news and press releases from selected public sources.
 
 Accepts a single ticker or an array of up to 5 symbols (one symbol when sources
