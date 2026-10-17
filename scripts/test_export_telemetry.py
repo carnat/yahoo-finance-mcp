@@ -7,8 +7,11 @@ Analytics Engine SQL and Workers Observability payloads.
 - Requests: the SQL API and telemetry query endpoints, bearer auth, the
   24-hour window, `_sample_interval` weighting, the dataset and log filters.
 - Aggregation: per-action and total counts, outcome counts, weighted means,
-  sums, size-bucket histogram, error codes, hourly rows and day percentiles;
-  invocation outcomes joined to the action from the dispatch log line.
+  sums, the size-bucket histogram, error codes, hourly rows and day percentiles.
+  Invocation outcomes are joined to the action from the dispatch log line
+  (2.13.1: the `events` view in its documented shape, where the line is a JSON
+  string in `source` or `$metadata.message` and the outcome comes from the
+  `cf-worker-event` with the same request id), and pages follow the cursor.
 - Output: telemetry/<date>.json with aggregates only, no raw rows, no token;
   unsafe strings are counted as "invalid".
 - Failure modes: missing secrets, an SQL failure, a Workers Logs failure.
@@ -76,36 +79,89 @@ BREAKDOWN = {"meta": [], "data": [
     {"action": PRICE, "outcome": "tool_error", "error_code": "RATE_LIMIT", "size_bucket": "<1K", "requests": "1"},
     {"action": "rejected:auth", "outcome": "rejected", "error_code": "AUTH_REQUIRED", "size_bucket": "<1K", "requests": "5"},
 ], "rows": 4}
-OBSERVABILITY = {
-    "success": True,
-    "errors": [],
-    "messages": [{"message": "Successful request"}],
-    "result": {
-        "run": {"id": "run-1"},
-        "calculations": [{
-            "calculation": "count",
-            "alias": "invocations",
-            "aggregates": [
-                {"count": 39, "interval": 1, "sampleInterval": 1, "value": 39, "groups": [
-                    {"key": "action", "value": PRICE}, {"key": "domain", "value": "stock_pricing"},
-                    {"key": "build", "value": "0123456"}, {"key": "$workers.outcome", "value": "ok"}]},
-                {"count": 1, "interval": 1, "sampleInterval": 1, "value": 1, "groups": [
-                    {"key": "action", "value": PRICE}, {"key": "domain", "value": "stock_pricing"},
-                    {"key": "build", "value": "0123456"}, {"key": "$workers.outcome", "value": "exceededCpu"}]},
-                {"count": 2, "interval": 1, "sampleInterval": 1, "value": 2, "groups": [
-                    {"key": "action", "value": "tools/list"}, {"key": "domain", "value": "-"},
-                    {"key": "build", "value": "0123456"}, {"key": "$workers.outcome", "value": "ok"},
-                    {"key": "$workers.event.request.url", "value": "https://x/mcp/LEAKED"}]},
-            ],
-            "series": [],
-        }],
-    },
-}
+# Workers Observability `events` view, in the documented response shape
+# (result.events.events[] of {"$metadata", dataset, source, timestamp, "$workers"}).
+# The Worker logs a JSON string, so `source` is a string. The outcome is on the
+# invocation log ($metadata.type "cf-worker-event"), joined by $metadata.requestId.
+TS = START_S * 1000 + 3_600_000
+
+
+def log_event(n: int, request_id: str, line: object, *, as_message: bool = False, outcome: str | None = None) -> dict:
+    """A console.log event. `line` is the logged value (a JSON string or a dict)."""
+    workers = {"eventType": "fetch", "scriptName": "yahoo-finance-mcp", "requestId": request_id}
+    if outcome is not None:
+        workers["outcome"] = outcome
+    event = {
+        "$metadata": {"id": f"log-{n:05d}", "requestId": request_id, "type": "cf-worker-log", "level": "log",
+                      "service": "yahoo-finance-mcp"},
+        "dataset": "cloudflare-workers",
+        "timestamp": TS + n,
+        "$workers": workers,
+    }
+    if as_message:
+        event["$metadata"]["message"] = line
+    else:
+        event["source"] = line
+    return event
+
+
+def invocation_event(n: int, request_id: str, outcome: str, url: str = "https://x/mcp/LEAKED") -> dict:
+    return {
+        "$metadata": {"id": f"inv-{n:05d}", "requestId": request_id, "type": "cf-worker-event",
+                      "message": f"POST {url}", "service": "yahoo-finance-mcp", "url": url,
+                      "trigger": "POST /mcp/LEAKED", "statusCode": 200},
+        "dataset": "cloudflare-workers",
+        "source": {"message": f"POST {url}"},
+        "timestamp": TS + n,
+        "$workers": {"eventType": "fetch", "scriptName": "yahoo-finance-mcp", "outcome": outcome,
+                     "cpuTimeMs": 3, "wallTimeMs": 40, "requestId": request_id,
+                     "event": {"request": {"url": url, "method": "POST"}}},
+    }
+
+
+def dispatch(action: str, domain: str, build: str = "0123456") -> str:
+    return json.dumps({"t": "yfmcp", "v": 1, "action": action, "domain": domain, "build": build})
+
+
+def _events() -> list[dict]:
+    events: list[dict] = []
+    for i in range(40):  # 39 ok, 1 killed for CPU
+        rid = f"req-price-{i}"
+        events.append(log_event(len(events), rid, dispatch(PRICE, "stock_pricing")))
+        events.append(invocation_event(len(events), rid, "exceededCpu" if i == 0 else "ok"))
+    # Two tools/list calls: one whose line arrives as a structured `source`, and one
+    # whose line is only in $metadata.message (both shapes are documented).
+    events.append(log_event(len(events), "req-list-0", json.loads(dispatch("tools/list", "-"))))
+    events.append(invocation_event(len(events), "req-list-0", "ok"))
+    events.append(log_event(len(events), "req-list-1", dispatch("tools/list", "-"), as_message=True))
+    events.append(invocation_event(len(events), "req-list-1", "ok"))
+    # Not a dispatch line: another console.log, and a GET / with no /mcp dispatch.
+    events.append(log_event(len(events), "req-list-1", "AAPL some other message"))
+    events.append(log_event(len(events), "req-other", json.dumps({"t": "other", "action": "x"})))
+    events.append(invocation_event(len(events), "req-other", "ok", url="https://x/"))
+    return events
+
+
+def events_payload(events: list[dict]) -> dict:
+    return {
+        "success": True,
+        "errors": [],
+        "messages": [{"message": "Successful request"}],
+        "result": {
+            "run": {"id": "run-1", "accountId": ACCOUNT, "dry": True, "granularity": 0},
+            "statistics": {"bytes_read": 1, "elapsed": 1, "rows_read": 1},
+            "events": {"count": len(events), "events": events, "fields": [], "series": []},
+        },
+    }
+
+
+OBSERVABILITY = events_payload(_events())
 
 
 class FakeTransport:
     def __init__(self, observability: object = OBSERVABILITY, fail_sql: bool = False, fail_logs: bool = False):
         self.calls: list[tuple[str, dict, bytes]] = []
+        # A payload, or a callable from the request body to a payload (for paging).
         self.observability = observability
         self.fail_sql = fail_sql
         self.fail_logs = fail_logs
@@ -124,7 +180,8 @@ class FakeTransport:
         if url.endswith("/workers/observability/telemetry/query"):
             if self.fail_logs:
                 raise et.ExportError("HTTP 403 from https://api.cloudflare.com/client/v4/accounts/…")
-            return json.dumps(self.observability).encode()
+            payload = self.observability(json.loads(body)) if callable(self.observability) else self.observability
+            return json.dumps(payload).encode()
         raise AssertionError(f"unexpected URL {url}")
 
 
@@ -164,15 +221,52 @@ class TestRequests(unittest.TestCase):
     def test_observability_query_shape(self):
         _, _, t = _export()
         body = json.loads(t.calls[3][2])
-        self.assertEqual(body["view"], "calculations")
-        self.assertEqual(body["timeframe"], {"from": START_S * 1000, "to": END_S * 1000})
-        self.assertTrue(body["dry"])
+        self.assertEqual(body["view"], "events")
+        self.assertEqual(body["timeframe"], {"from": START_S * 1000, "to": END_S * 1000})  # epoch ms
+        self.assertTrue(body["dry"])  # documented: executes, does not persist the results
+        self.assertEqual(body["limit"], 2000)
+        self.assertNotIn("offset", body)
         params = body["parameters"]
-        self.assertIn({"key": "t", "operation": "eq", "type": "string", "value": "yfmcp"}, params["filters"])
-        self.assertIn({"key": "$workers.scriptName", "operation": "eq", "type": "string", "value": "yahoo-finance-mcp"},
-                      params["filters"])
-        self.assertEqual([g["value"] for g in params["groupBys"]], ["action", "domain", "build", "$workers.outcome"])
-        self.assertEqual(params["calculations"], [{"operator": "count", "alias": "invocations"}])
+        # Only the script filter. The dispatch line is a JSON string, so `t`, `action`
+        # and the rest are not filterable fields; they are parsed client-side.
+        self.assertEqual(params["filters"], [
+            {"key": "$workers.scriptName", "operation": "eq", "type": "string", "value": "yahoo-finance-mcp"}])
+        self.assertNotIn("groupBys", params)
+        self.assertNotIn("calculations", params)
+
+    def test_events_are_paged_with_the_last_metadata_id(self):
+        full: list[dict] = []
+        while len(full) < et.EVENTS_PAGE_LIMIT:  # a full first page: 1000 requests
+            rid = f"page1-{len(full)}"
+            full.append(log_event(len(full), rid, dispatch(PRICE, "stock_pricing")))
+            full.append(invocation_event(len(full), rid, "ok"))
+        tail = [log_event(90_000, "req-tail", dispatch(PRICE, "stock_pricing")),
+                invocation_event(90_001, "req-tail", "exceededResources")]
+        bodies: list[dict] = []
+
+        def pages(body: dict) -> dict:
+            bodies.append(body)
+            return events_payload(full if "offset" not in body else tail)
+
+        doc, problems, t = _export(FakeTransport(observability=pages))
+        self.assertEqual(problems, [])
+        self.assertEqual(len(bodies), 2)
+        self.assertEqual(bodies[1]["offset"], full[-1]["$metadata"]["id"])
+        self.assertEqual(bodies[1]["offsetDirection"], "next")
+        self.assertEqual(doc["workersLogs"]["outcomes"], {"exceededResources": 1, "ok": 1000})
+        self.assertEqual(doc["workersLogs"]["invocations"], 1001)
+
+    def test_runaway_paging_fails_loudly(self):
+        def endless(body: dict) -> dict:
+            n = int(body.get("offset", "e-0").split("-")[1])
+            return events_payload([log_event(0, f"r{n + i}", "x") | {"$metadata": {"id": f"e-{n + i + 1}"}}
+                                   for i in range(et.EVENTS_PAGE_LIMIT)])
+
+        with mock.patch.object(et, "MAX_EVENT_PAGES", 3):
+            doc, problems, t = _export(FakeTransport(observability=endless))
+        self.assertFalse(doc["workersLogs"]["available"])
+        self.assertEqual(len(t.calls), 3 + 3)
+        self.assertTrue(problems and "more than 6000" in problems[0])
 
 
 class TestAggregation(unittest.TestCase):
@@ -226,7 +320,53 @@ class TestAggregation(unittest.TestCase):
         self.assertEqual(logs["builds"], {"0123456": 42})
         self.assertEqual(logs["actions"][PRICE], {"domain": "stock_pricing", "invocations": 40,
                                                   "outcomes": {"ok": 39, "exceededCpu": 1}})
-        self.assertNotIn("LEAKED", json.dumps(doc))  # only action, domain, build and outcome are read
+        self.assertEqual(logs["actions"]["tools/list"], {"domain": "-", "invocations": 2, "outcomes": {"ok": 2}})
+        self.assertEqual(sorted(logs["actions"]), [PRICE, "tools/list"])  # other logs and GET / are not counted
+        text = json.dumps(doc)
+        for leaked in ("LEAKED", "AAPL", "req-", "log-0", "inv-0"):  # only action, domain, build, outcome
+            self.assertNotIn(leaked, text)
+
+    def _logs(self, events: list[dict]) -> dict:
+        doc, problems, _ = _export(FakeTransport(observability=events_payload(events)))
+        self.assertEqual(problems, [])
+        return doc["workersLogs"]
+
+    def test_outcome_falls_back_to_the_log_event_then_unknown(self):
+        logs = self._logs([
+            log_event(0, "r-own", dispatch(PRICE, "stock_pricing"), outcome="exception"),
+            log_event(1, "r-none", dispatch(PRICE, "stock_pricing")),
+            log_event(2, "", dispatch(PRICE, "stock_pricing")),  # no request id at all
+        ])
+        self.assertEqual(logs["outcomes"], {"exception": 1, "unknown": 2})
+        self.assertEqual(logs["invocations"], 3)
+
+    def test_invocation_log_outcome_wins_over_the_log_event(self):
+        logs = self._logs([
+            log_event(0, "r1", dispatch(PRICE, "stock_pricing"), outcome="ok"),
+            invocation_event(1, "r1", "exceededCpu"),
+        ])
+        self.assertEqual(logs["outcomes"], {"exceededCpu": 1})
+
+    def test_extracted_fields_at_top_level_are_read_too(self):
+        # If Cloudflare extracts the JSON string's fields onto the event, still count it.
+        event = invocation_event(0, "r1", "ok")
+        extracted = {"$metadata": {"id": "x1", "requestId": "r1", "type": "cf-worker-log"},
+                     "$workers": {"scriptName": "yahoo-finance-mcp"},
+                     "t": "yfmcp", "v": 1, "action": "tools/list", "domain": "-", "build": "abc1234"}
+        logs = self._logs([extracted, event])
+        self.assertEqual(logs["actions"], {"tools/list": {"domain": "-", "invocations": 1, "outcomes": {"ok": 1}}})
+        self.assertEqual(logs["builds"], {"abc1234": 1})
+
+    def test_unsafe_log_values_are_counted_not_copied(self):
+        logs = self._logs([log_event(0, "r1", json.dumps({"t": "yfmcp", "action": "AAPL secret'; x",
+                                                           "domain": "d", "build": "b"})),
+                           invocation_event(1, "r1", "weird outcome!")])
+        self.assertEqual(logs["actions"], {"invalid": {"domain": "d", "invocations": 1, "outcomes": {"invalid": 1}}})
+
+    def test_response_without_events_object_is_a_logs_failure(self):
+        doc, problems, _ = _export(FakeTransport(observability={"success": True, "result": {"calculations": []}}))
+        self.assertFalse(doc["workersLogs"]["available"])
+        self.assertIn("no events object", problems[0])
 
 
 class TestOutput(unittest.TestCase):
@@ -294,7 +434,7 @@ class TestOutput(unittest.TestCase):
         def transport(url: str, headers: dict, body: bytes) -> bytes:
             if url.endswith("/sql"):
                 return json.dumps(empty).encode()
-            return json.dumps({"success": True, "result": {"calculations": []}}).encode()
+            return json.dumps(events_payload([])).encode()
 
         doc, problems = et.build_export(transport, ACCOUNT, TOKEN, END)
         self.assertEqual(problems, [])

@@ -12,11 +12,12 @@ telemetry/<end date>.json:
    providerTimeouts and providerRetries; per action for the day the latency
    percentiles, the sizeBucket histogram and the error-code counts. Every
    count and sum is weighted by `_sample_interval`.
-2. Workers Observability telemetry query API: invocation outcome counts
-   (ok, exceededCpu, exceededResources, exception, ...) joined to the action
-   through the Worker's dispatch-start log line
-   {"t":"yfmcp","v":1,"action":...,"domain":...,"build":...}. Only action,
-   domain, build and the outcome are read.
+2. Workers Observability telemetry query API (`events` view, paged): invocation
+   outcome counts (ok, exceededCpu, exceededResources, exception, ...). Each
+   count is joined to the action through the Worker's dispatch-start log line
+   {"t":"yfmcp","v":1,"action":...,"domain":...,"build":...}, which is parsed
+   client-side, and the outcome comes from the invocation log with the same
+   request id. Only action, domain, build and the outcome are read.
 
 Environment: CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_TELEMETRY_TOKEN, a token with
 Account Analytics: Read plus Workers Observability access (the API reference
@@ -36,13 +37,19 @@ API references (checked 2026-10-16):
   https://developers.cloudflare.com/analytics/analytics-engine/sql-reference/date-time-functions/
 - Sampling and _sample_interval:
   https://developers.cloudflare.com/analytics/analytics-engine/sampling/
-- Workers Observability telemetry query (POST
-  /accounts/{account_id}/workers/observability/telemetry/query; timeframe in
-  epoch ms; view "calculations" with groupBys; result.calculations[].aggregates[]
-  with count, value and groups[{key, value}]):
+- Workers Observability telemetry query, checked 2026-10-17 (POST
+  /accounts/{account_id}/workers/observability/telemetry/query):
+  - timeframe is in epoch ms.
+  - `dry` "executes the query without persisting the results".
+  - view "events" returns result.events.events[], each with $metadata {id,
+    requestId, type, message, ...}, `source` (a string or an object) and
+    $workers {scriptName, outcome, ...}.
+  - `limit` is at most 2000. `offset` is the $metadata.id of the last event.
   https://developers.cloudflare.com/api/resources/workers/subresources/observability/subresources/telemetry/methods/query/
-- Workers Logs (structured JSON log fields are indexed and filterable; 3-day
-  retention on Free, hence the daily export):
+- Workers Logs: logged objects have their fields extracted, while a logged
+  string becomes a message. Invocation logs have
+  $metadata.type "cf-worker-event". Retention is 3 days on Free, hence the
+  daily export.
   https://developers.cloudflare.com/workers/observability/logs/workers-logs/
 """
 
@@ -300,28 +307,55 @@ def _round_tree(value: Any) -> Any:
 
 # ── Workers Observability ────────────────────────────────────────────────────
 
-LOG_GROUP_KEYS = ("action", "domain", "build", "$workers.outcome")
+#
+# Why the `events` view and not a `calculations` count grouped by `action`
+# (2.13.1). The 2.11.1 query returned `invocations: 0` on the first live export,
+# while Analytics Engine counted 68 requests in the same window:
+#
+# - The Worker logs a JSON *string*: console.log(JSON.stringify({t: "yfmcp", ...})).
+#   Workers Logs documents field extraction only for logged *objects*
+#   (`console.log({user_id: 123})` gives `{user_id: 123}`, filterable by key). It
+#   shows a logged string as `{message: "..."}`, and the API says an event's
+#   `source` "may be a string or a structured object depending on how the log
+#   was emitted". A filter on `t`, or a group-by on `action`, has no field to match.
+# - The outcome is on the invocation log (`$metadata.type` "cf-worker-event", whose
+#   `$workers` variant has `outcome: string`). It is not on the console-log event,
+#   whose `$workers` variant has `outcome: optional string`.
+#
+# So the script lists the Worker's events, filtered by `$workers.scriptName`
+# (both `$workers` variants carry it). It reads the dispatch line from each
+# event's `source` (an object or a JSON string) or from `$metadata.message`, and
+# takes the outcome from the invocation log with the same `$metadata.requestId`.
+# This works whether or not Cloudflare extracts fields from a JSON string.
+
+LOG_TAG = "yfmcp"
+LOG_FIELDS = ("action", "domain", "build")
+INVOCATION_EVENT_TYPE = "cf-worker-event"
+EVENTS_PAGE_LIMIT = 2000  # the API maximum for the events view
+# Allows 100,000 requests/day (the Free cap) at about 2 events each, with
+# headroom. Past this the export fails loudly instead of reporting a partial count.
+MAX_EVENT_PAGES = 200
 
 
-def observability_query(script_name: str, start: datetime, end: datetime) -> dict[str, Any]:
-    return {
+def observability_query(script_name: str, start: datetime, end: datetime, offset: str | None = None) -> dict[str, Any]:
+    body: dict[str, Any] = {
         "queryId": "yfmcp-telemetry-export",
         "timeframe": {"from": int(start.timestamp() * 1000), "to": int(end.timestamp() * 1000)},
-        "view": "calculations",
+        "view": "events",
         "dry": True,
-        "limit": 2000,
+        "limit": EVENTS_PAGE_LIMIT,
         "parameters": {
             "datasets": [],
             "filterCombination": "and",
             "filters": [
-                {"key": "t", "operation": "eq", "type": "string", "value": "yfmcp"},
                 {"key": "$workers.scriptName", "operation": "eq", "type": "string", "value": script_name},
             ],
-            "calculations": [{"operator": "count", "alias": "invocations"}],
-            "groupBys": [{"type": "string", "value": key} for key in LOG_GROUP_KEYS],
-            "limit": 2000,
         },
     }
+    if offset is not None:
+        body["offset"] = offset
+        body["offsetDirection"] = "next"
+    return body
 
 
 def run_observability(transport: Transport, account_id: str, token: str, body: dict[str, Any]) -> dict[str, Any]:
@@ -338,30 +372,110 @@ def run_observability(transport: Transport, account_id: str, token: str, body: d
     return result if isinstance(result, dict) else {}
 
 
-def aggregate_invocations(result: dict[str, Any]) -> dict[str, Any]:
+def fetch_events(transport: Transport, account_id: str, token: str, script_name: str,
+                 start: datetime, end: datetime) -> list[dict[str, Any]]:
+    """Every event of the Worker in the window, following the `$metadata.id` cursor."""
+    events: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    offset: str | None = None
+    for _ in range(MAX_EVENT_PAGES):
+        result = run_observability(transport, account_id, token,
+                                   observability_query(script_name, start, end, offset))
+        block = result.get("events")
+        if not isinstance(block, dict):
+            raise ExportError("Workers Observability API response has no events object")
+        page = [e for e in block.get("events") or [] if isinstance(e, dict)]
+        fresh = 0
+        for event in page:
+            event_id = _event_metadata(event).get("id")
+            key = event_id if isinstance(event_id, str) and event_id else f"#{len(events)}"
+            if key in seen:
+                continue
+            seen.add(key)
+            events.append(event)
+            fresh += 1
+        last_id = _event_metadata(page[-1]).get("id") if page else None
+        if len(page) < EVENTS_PAGE_LIMIT or not fresh or not isinstance(last_id, str) or not last_id:
+            return events
+        offset = last_id
+    raise ExportError(f"more than {MAX_EVENT_PAGES * EVENTS_PAGE_LIMIT} Workers Logs events in the window")
+
+
+def _event_metadata(event: dict[str, Any]) -> dict[str, Any]:
+    metadata = event.get("$metadata")
+    return metadata if isinstance(metadata, dict) else {}
+
+
+def _event_workers(event: dict[str, Any]) -> dict[str, Any]:
+    workers = event.get("$workers")
+    return workers if isinstance(workers, dict) else {}
+
+
+def _as_object(value: Any) -> dict[str, Any] | None:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str) and value.lstrip().startswith("{"):
+        try:
+            parsed = json.loads(value)
+        except ValueError:
+            return None
+        return parsed if isinstance(parsed, dict) else None
+    return None
+
+
+def dispatch_line(event: dict[str, Any]) -> dict[str, str] | None:
+    """The action, domain and build of the Worker's dispatch log line, or None for any other event.
+
+    The line can arrive as a structured `source`, as a JSON-string `source`, as
+    `$metadata.message`, or with its fields extracted to the top level of the
+    event. Only those three fields are read.
+    """
+    for candidate in (event.get("source"), _event_metadata(event).get("message"), event):
+        line = _as_object(candidate)
+        if line is not None and line.get("t") == LOG_TAG:
+            return {field: _safe(line.get(field)) for field in LOG_FIELDS}
+    return None
+
+
+def _request_id(event: dict[str, Any]) -> str | None:
+    for value in (_event_metadata(event).get("requestId"), _event_workers(event).get("requestId")):
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def aggregate_invocations(events: list[dict[str, Any]]) -> dict[str, Any]:
+    """Count each dispatch log line once, under the outcome of its invocation.
+
+    The outcome comes from the invocation log (`cf-worker-event`) with the same
+    request id. Failing that, it comes from the log event's own `$workers.outcome`,
+    and otherwise it is "unknown".
+    """
+    outcome_by_request: dict[str, str] = {}
+    lines: list[tuple[dict[str, str], str | None, Any]] = []
+    for event in events:
+        request_id = _request_id(event)
+        line = dispatch_line(event)
+        if line is not None:
+            lines.append((line, request_id, _event_workers(event).get("outcome")))
+        elif _event_metadata(event).get("type") == INVOCATION_EVENT_TYPE and request_id:
+            outcome = _event_workers(event).get("outcome")
+            if isinstance(outcome, str) and outcome:
+                outcome_by_request[request_id] = outcome
+
     outcomes: dict[str, float] = {}
     actions: dict[str, dict[str, Any]] = {}
     builds: dict[str, float] = {}
-    calculations = result.get("calculations")
-    for calculation in calculations if isinstance(calculations, list) else []:
-        aggregates = calculation.get("aggregates") if isinstance(calculation, dict) else None
-        for aggregate in aggregates if isinstance(aggregates, list) else []:
-            if not isinstance(aggregate, dict):
-                continue
-            groups = {
-                g.get("key"): g.get("value")
-                for g in aggregate.get("groups") or []
-                if isinstance(g, dict) and g.get("key") in LOG_GROUP_KEYS
-            }
-            count = _num(aggregate.get("count", aggregate.get("value")))
-            action = _safe(groups.get("action"))
-            outcome = _safe(groups.get("$workers.outcome")) or "unknown"
-            build = _safe(groups.get("build"))
-            entry = actions.setdefault(action, {"domain": _safe(groups.get("domain")), "invocations": 0.0, "outcomes": {}})
-            entry["invocations"] += count
-            entry["outcomes"][outcome] = entry["outcomes"].get(outcome, 0.0) + count
-            outcomes[outcome] = outcomes.get(outcome, 0.0) + count
-            builds[build] = builds.get(build, 0.0) + count
+    for line, request_id, own_outcome in lines:
+        raw = outcome_by_request.get(request_id) if request_id else None
+        if raw is None and isinstance(own_outcome, str) and own_outcome:
+            raw = own_outcome
+        outcome = _safe(raw) or "unknown"
+        entry = actions.setdefault(line["action"], {"domain": line["domain"], "invocations": 0.0, "outcomes": {}})
+        entry["invocations"] += 1
+        entry["outcomes"][outcome] = entry["outcomes"].get(outcome, 0.0) + 1
+        outcomes[outcome] = outcomes.get(outcome, 0.0) + 1
+        builds[line["build"]] = builds.get(line["build"], 0.0) + 1
     return _round_tree({
         "invocations": sum(outcomes.values()),
         "outcomes": dict(sorted(outcomes.items())),
@@ -392,7 +506,7 @@ def build_export(
     problems: list[str] = []
     try:
         logs: dict[str, Any] = {"available": True, **aggregate_invocations(
-            run_observability(transport, account_id, token, observability_query(script_name, start, stop)))}
+            fetch_events(transport, account_id, token, script_name, start, stop))}
     except ExportError as error:
         problems.append(f"workersLogs: {error}")
         logs = {"available": False, "error": str(error)}
