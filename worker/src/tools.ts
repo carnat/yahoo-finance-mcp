@@ -1,6 +1,6 @@
 import { mcpSuccessFromValue, mcpSuccessResult, mcpFailure, mcpFailureResult, type McpSuccessOptions, type ToolResult, ErrorCode, envelopeV2Enabled, getBuildVersion, getServerVersion, getWorkerVar } from "./response.js";
 import { FILING_PERIOD_HELP, parseFilingPeriod } from "./sec-facts.js";
-import { GROUPED_TOOL_DEFS } from "./tool-catalog.js";
+import { GROUPED_TOOL_DEFS, TICKER_CAPS } from "./tool-catalog.js";
 import { withCacheScope, currentRequestFacts, budgetRefusalCount, SUBREQUEST_BUDGET, SUBREQUEST_LIMIT } from "./request-context.js";
 import {
   getAnalystConsensus,
@@ -105,7 +105,7 @@ import {
   getThaiFundNav,
   getThaiFundNavBatch,
 } from "./sec-thailand.js";
-import { validateTicker } from "./validate.js";
+import { validateAccession, validateTicker } from "./validate.js";
 import { buildValuationEvidencePack, getConsensusForecastCurve, getEpsRevisions, getEvidenceCut, getEvidenceQuality, listEvidenceCuts } from "./evidence-pack.js";
 import { EVIDENCE_ONLY_ACTIONS, withAuthorityBoundary } from "./evidence.js";
 import { deprecationWarningsFor, parseMinAdvUsd, reliabilityClassFor } from "./deprecations.js";
@@ -347,10 +347,10 @@ export const TOOLS: Tool[] = [
       type: "object",
       properties: {
         ticker: {
-          description: "Stock ticker symbol (e.g. 'AAPL') or an array of up to 5 symbols (e.g. ['AAPL', 'MSFT']). If more than 5 are provided, only the first 5 are processed — split larger lists into multiple calls.",
+          description: "Stock ticker symbol (e.g. 'AAPL') or an array of up to 5 symbols (e.g. ['AAPL', 'MSFT']). A longer array is rejected with BATCH_LIMIT_EXCEEDED; split larger lists into multiple calls.",
           oneOf: [
             { type: "string" },
-            { type: "array", items: { type: "string" }, maxItems: 5 },
+            { type: "array", items: { type: "string" } },
           ],
         },
       },
@@ -436,7 +436,7 @@ export const TOOLS: Tool[] = [
           description: "Stock ticker symbol or array of up to 5 symbols. Split larger lists into multiple calls.",
           oneOf: [
             { type: "string" },
-            { type: "array", items: { type: "string" }, maxItems: 5 },
+            { type: "array", items: { type: "string" } },
           ],
         },
         period: {
@@ -460,7 +460,7 @@ export const TOOLS: Tool[] = [
           description: "Stock ticker symbol or array of up to 5 symbols. Split larger lists into multiple calls.",
           oneOf: [
             { type: "string" },
-            { type: "array", items: { type: "string" }, maxItems: 5 },
+            { type: "array", items: { type: "string" } },
           ],
         },
         days: {
@@ -485,7 +485,7 @@ export const TOOLS: Tool[] = [
           description: "Stock ticker symbol or array of up to 5 symbols. Split larger lists into multiple calls.",
           oneOf: [
             { type: "string" },
-            { type: "array", items: { type: "string" }, maxItems: 5 },
+            { type: "array", items: { type: "string" } },
           ],
         },
       },
@@ -495,23 +495,23 @@ export const TOOLS: Tool[] = [
 ];
 
 const CANONICAL_ADDITIONS: Tool[] = [
-  { name: "get_market_quote", description: "Get a lightweight Yahoo regular-market price observation for one or more tickers. lastPrice uses priceBasis=REGULAR_MARKET_PRICE and includes priceTimestamp; use get_price_slope for adjusted daily-bar analytics.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }] } }, required: ["ticker"] } },
+  { name: "get_market_quote", description: "Get a lightweight Yahoo regular-market price observation for one or more tickers. lastPrice uses priceBasis=REGULAR_MARKET_PRICE and includes priceTimestamp; use get_price_slope for adjusted daily-bar analytics.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" } }] } }, required: ["ticker"] } },
   { name: "get_historical_prices", description: "Get raw historical OHLCV. Daily rows without a usable close are INCOMPLETE/isFinal=false.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, period: { type: "string", enum: [...HISTORICAL_PERIODS], default: "1mo" }, interval: { type: "string", enum: [...HISTORICAL_INTERVALS], default: "1d" }, prepost: { type: "boolean", default: false } }, required: ["ticker"] } },
-  { name: "analyze_price_performance", description: "Analyze price performance metrics.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }] } }, required: ["ticker"] } },
-  { name: "analyze_moving_average_position", description: "Analyze moving-average position.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }] } }, required: ["ticker"] } },
-  { name: "analyze_volume_ratio", description: "Analyze the latest completed-session volume ratio. PARTIAL/INCOMPLETE means retry; do not use a volume signal.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }] }, period: { type: "number", default: 10 } }, required: ["ticker"] } },
+  { name: "analyze_price_performance", description: "Analyze price performance metrics.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" } }] } }, required: ["ticker"] } },
+  { name: "analyze_moving_average_position", description: "Analyze moving-average position.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" } }] } }, required: ["ticker"] } },
+  { name: "analyze_volume_ratio", description: "Analyze the latest completed-session volume ratio. PARTIAL/INCOMPLETE means retry; do not use a volume signal.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" } }] }, period: { type: "number", default: 10 } }, required: ["ticker"] } },
   { name: "check_volume_liquidity_threshold", description: "Check completed-session traded value against public liquidity thresholds: passes when the average daily traded value (volume x close) of the 20 sessions before the latest completed one is at least $10M, converted to USD for non-USD listings. ratio20d compares the latest session with that average. PARTIAL/INCOMPLETE means retry; gatePass is unknown. Pass min_adv_usd for a caller-chosen threshold; meetsMinimum reports adv20dTradedValueUsd >= min_adv_usd.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, foreign_exchange: { type: "boolean", default: false, description: "Accepted for compatibility; non-USD listings are always converted to USD." }, min_adv_usd: { type: "number", exclusiveMinimum: 0, description: "Optional caller-chosen minimum 20-day average daily traded value in USD; when supplied, meetsMinimum compares adv20dTradedValueUsd against it." } }, required: ["ticker"] } },
-  { name: "get_company_profile", description: "Get company profile/fundamentals.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }] }, include_all: { type: "boolean" } }, required: ["ticker"] } },
-  { name: "get_fund_profile", description: "Get ETF/fund profile with per-section status and as-of-date limitations. Valuation characteristics are conventional multiples; provider inverse yields are retained separately. Request overview, holdings, allocation, operations, or fixed-income sections.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }] }, sections: { type: "array", items: { type: "string", enum: ["overview", "holdings", "allocation", "operations", "fixed_income"] }, uniqueItems: true } }, required: ["ticker"] } },
-  { name: "analyze_financial_ratios", description: "Analyze current financial ratios with explicit unitSemantics and optional historical Yahoo valuation measures.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }] }, history_periods: { type: "integer", minimum: 0, maximum: 20, default: 0 }, frequency: { type: "string", enum: ["quarterly", "monthly", "yearly", "trailing"], default: "quarterly" } }, required: ["ticker"] } },
+  { name: "get_company_profile", description: "Get company profile/fundamentals.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" } }] }, include_all: { type: "boolean" } }, required: ["ticker"] } },
+  { name: "get_fund_profile", description: "Get ETF/fund profile with per-section status and as-of-date limitations. Valuation characteristics are conventional multiples; provider inverse yields are retained separately. Request overview, holdings, allocation, operations, or fixed-income sections.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" } }] }, sections: { type: "array", items: { type: "string", enum: ["overview", "holdings", "allocation", "operations", "fixed_income"] }, uniqueItems: true } }, required: ["ticker"] } },
+  { name: "analyze_financial_ratios", description: "Analyze current financial ratios with explicit unitSemantics and optional historical Yahoo valuation measures.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" } }] }, history_periods: { type: "integer", minimum: 0, maximum: 20, default: 0 }, frequency: { type: "string", enum: ["quarterly", "monthly", "yearly", "trailing"], default: "quarterly" } }, required: ["ticker"] } },
   { name: "analyze_share_count_trend", description: "Use for dilution, issuance, buyback, or historical shares-outstanding questions. Returns contextual Yahoo data and directs material changes to SEC confirmation.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, start_date: { type: "string" }, end_date: { type: "string" } }, required: ["ticker"] } },
-  { name: "analyze_credit_health", description: "Analyze credit health metrics.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }] } }, required: ["ticker"] } },
+  { name: "analyze_credit_health", description: "Analyze credit health metrics.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" } }] } }, required: ["ticker"] } },
   { name: "get_corporate_actions", description: "Get stock splits, dividends, and fund capital-gain distributions from Yahoo Finance, oldest first. Every split is returned; dividends and capital gains are limited to the most recent `limit` on or after `start_date`.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, start_date: { type: "string", pattern: "^\\d{4}-\\d{2}-\\d{2}$", description: "Earliest dividend/capital-gain date (YYYY-MM-DD)." }, limit: { type: "integer", minimum: 1, maximum: 1000, default: 40, description: "Most recent dividends/capital gains to return." } }, required: ["ticker"] } },
   { name: "get_ownership_holders", description: "Get ownership/holder data. Supported holder_type values: major_holders, institutional_holders, mutualfund_holders, insider_transactions, insider_purchases, insider_roster_holders.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, holder_type: { type: "string", enum: SUPPORTED_HOLDER_TYPES, description: "One of: major_holders, institutional_holders, mutualfund_holders, insider_transactions, insider_purchases, insider_roster_holders." } }, required: ["ticker", "holder_type"] } },
   { name: "get_expanded_institutional_ownership", description: "Use only when Yahoo's ordinary top-holder view is insufficient. Tries eligible Finnhub coverage first and never spends scarce Alpha quota unless allow_scarce_fallback=true. Results are contextual; verify material ownership claims against SEC 13F filings.", inputSchema: { type: "object", properties: { ticker: { type: "string", minLength: 1 }, allow_scarce_fallback: { type: "boolean", default: false, description: "Explicitly permit one Alpha Vantage call if Finnhub is unavailable, ineligible, or returns no usable holders." }, max_holders: { type: "integer", minimum: 1, maximum: 100, default: 50 } }, required: ["ticker"] } },
   { name: "get_analyst_recommendations", description: "Get analyst recommendations or upgrade/downgrade history. Supported recommendation_type values: recommendations, upgrades_downgrades.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, recommendation_type: { type: "string", enum: SUPPORTED_RECOMMENDATION_TYPES, description: "One of: recommendations, upgrades_downgrades." }, months_back: { type: "number", default: 12 } }, required: ["ticker", "recommendation_type"] } },
-  { name: "get_analyst_rating_changes", description: "Get analyst rating changes radar.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }] }, days_back: { type: "number", default: 30 } }, required: ["ticker"] } },
-  { name: "analyze_earnings_momentum", description: "Analyze earnings momentum.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }] } }, required: ["ticker"] } },
+  { name: "get_analyst_rating_changes", description: "Get analyst rating changes radar.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" } }] }, days_back: { type: "number", default: 30 } }, required: ["ticker"] } },
+  { name: "analyze_earnings_momentum", description: "Analyze earnings momentum.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" } }] } }, required: ["ticker"] } },
   { name: "get_company_events_calendar", description: "Get a ticker's upcoming Yahoo calendar estimates or paginated earnings-date history. Yahoo dates are always marked UNVERIFIED and material dates should be confirmed with official releases.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, mode: { type: "string", enum: ["upcoming", "history"], default: "upcoming" }, limit: { type: "integer", minimum: 1, maximum: 100, default: 12 }, offset: { type: "integer", minimum: 0, default: 0 } }, required: ["ticker"] } },
   { name: "get_market_calendar", description: "Use for market-wide earnings, economic-event, IPO, or stock-split calendar questions. Results are paginated Yahoo provider data, not official confirmation.", inputSchema: { type: "object", properties: { event_type: { type: "string", enum: ["earnings", "economic", "ipo", "splits"], default: "earnings" }, start_date: { type: "string" }, end_date: { type: "string" }, limit: { type: "integer", minimum: 1, maximum: 100, default: 25 }, offset: { type: "integer", minimum: 0, default: 0 } } } },
   { name: "summarize_options_flow", description: "Summarize options flow.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, expiry_hint: { type: "string" } }, required: ["ticker"] } },
@@ -531,7 +531,7 @@ const CANONICAL_ADDITIONS: Tool[] = [
   { name: "get_sec_filing_section_markdown", description: "Return a specific SEC filing section as unverified Markdown from a degraded Worker HTML fallback. Payloads are blocked from decision-grade use and include source offsets/warnings.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, section: { type: "string", default: "Item 1A" }, filing_type: { type: "string", default: "10-K" }, filing_index: { type: "number", default: 0 }, max_chars: { type: "number", default: 50000 } }, required: ["ticker"] } },
   { name: "analyze_position_signals", description: "Aggregate public market, analyst, earnings, and technical inputs that may be useful for a caller-defined scoring model. This tool does not access holdings, cost basis, position size, or private scoring rules.", inputSchema: { type: "object", properties: { ticker: { type: "string" } }, required: ["ticker"] } },
   { name: "calculate_price_target_distance", description: "Compare current price to a user-supplied reference price target. Returns both the legacy current/target ratio and directional percent distance to target.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, reference_target_price: { type: "number", description: "Preferred: user-supplied reference target price." }, io_pt: { type: "number", description: "Backward-compatible alias for reference_target_price." } }, required: ["ticker"] } },
-  { name: "get_company_news", description: "Get recent public company news and press releases with compact coverage guidance. The default priority is Yahoo Finance, eligible Finnhub, then one quota-bounded Marketaux wire-domain fallback only when higher-priority coverage is empty or limited. Marketaux never paginates automatically and is contextual evidence only. Yahoo primary items are emitted only for an exact ticker token or canonical issuer identity; inspect tickerMatch=EXPLICIT and matchBasis before use. Read coverage.state, failedSources, skippedSources, recommendedNextAction, and per-source diagnostics before treating an empty result as absence. decisionUse=CHECK_OFFICIAL_RELEASES means escalate the item to get_company_press_releases or verify_company_event. Direct newswire RSS is an explicit shallow snapshot, not a default. Accepts a ticker or array of up to 5 symbols.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }], description: "Ticker symbol (e.g. 'AAPL') or an array of up to 5 symbols (e.g. ['AAPL', 'MSFT']). If more than 5 are provided, only the first 5 are processed; split larger lists into multiple calls." }, max_results: { type: "number", default: 10 }, lookback_days: { type: "number", default: 14 }, sources: { type: "array", items: { type: "string" }, default: ["yahoo_finance_news", "yahoo_finance_press_releases", "finnhub", "marketaux"], description: "Allowed sources: yahoo_finance_news, yahoo_finance_press_releases, finnhub, marketaux, sec, newswire, company_ir, company_ir_page, or legacy yahoo_finance. Marketaux is quota-aware fallback by default; explicit sources=['marketaux'] forces one bounded request. Omit for the default set; an explicit list is used as given, and [] attempts no source. requestedSources, defaultSourcesApplied and attemptedSources report what was asked for and tried." } }, required: ["ticker"] } },
+  { name: "get_company_news", description: "Get recent public company news and press releases with compact coverage guidance. The default priority is Yahoo Finance, eligible Finnhub, then one quota-bounded Marketaux wire-domain fallback only when higher-priority coverage is empty or limited. Marketaux never paginates automatically and is contextual evidence only. Yahoo primary items are emitted only for an exact ticker token or canonical issuer identity; inspect tickerMatch=EXPLICIT and matchBasis before use. Read coverage.state, failedSources, skippedSources, recommendedNextAction, and per-source diagnostics before treating an empty result as absence. decisionUse=CHECK_OFFICIAL_RELEASES means escalate the item to get_company_press_releases or verify_company_event. Direct newswire RSS is an explicit shallow snapshot, not a default. Accepts a ticker or array of up to 5 symbols.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" } }], description: "Ticker symbol (e.g. 'AAPL') or an array of up to 5 symbols (e.g. ['AAPL', 'MSFT']); only one symbol when sources includes company_ir, company_ir_page or newswire. A longer array is rejected with BATCH_LIMIT_EXCEEDED; split larger lists into multiple calls." }, max_results: { type: "number", default: 10 }, lookback_days: { type: "number", default: 14 }, sources: { type: "array", items: { type: "string" }, default: ["yahoo_finance_news", "yahoo_finance_press_releases", "finnhub", "marketaux"], description: "Allowed sources: yahoo_finance_news, yahoo_finance_press_releases, finnhub, marketaux, sec, newswire, company_ir, company_ir_page, or legacy yahoo_finance. Marketaux is quota-aware fallback by default; explicit sources=['marketaux'] forces one bounded request. Omit for the default set; an explicit list is used as given, and [] attempts no source. requestedSources, defaultSourcesApplied and attemptedSources report what was asked for and tried." } }, required: ["ticker"] } },
   { name: "search_company_news", description: "Search public company news/events for a ticker and query across selected source metadata and short snippets. Defaults use Yahoo, eligible Finnhub, then a single Marketaux wire-domain fallback only for empty or limited higher-priority coverage. Include company_ir or company_ir_page for official-source evidence; inspect sourceStatus/sourceCoverage before relying on absence.", inputSchema: { type: "object", properties: { ticker: { type: "string", description: "Ticker symbol, e.g. 'AAPL'" }, query: { type: "string", description: "Required search query string." }, start_date: { type: "string", default: "" }, end_date: { type: "string", default: "" }, sources: { type: "array", items: { type: "string" }, default: ["yahoo_finance_news", "yahoo_finance_press_releases", "finnhub", "marketaux"], description: "Omit for the default set; an explicit list is used as given, and [] attempts no source. requestedSources, defaultSourcesApplied and attemptedSources report what was asked for and tried." }, max_results: { type: "number", default: 10 } }, required: ["ticker", "query"] } },
   { name: "get_company_press_releases", description: "Get company press releases and official release-style events. Defaults resolve SEC 8-K/EX-99 evidence first, then registry-backed company_ir_page, then Yahoo press-release context. Explicit sources can also include company_ir RSS/Atom, quota-bounded Marketaux, and direct newswire RSS. Gate use is payload-level: decisionGrade:true is allowed only for coverageStatus=SEC_EX99_RESOLVED or APPROVED_IR_PAGE_RESOLVED with evidence fields; candidates/RSS/Marketaux/newswire/Yahoo remain verification/context evidence.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, lookback_days: { type: "number", default: 90 }, max_results: { type: "number", default: 20 }, sources: { type: "array", items: { type: "string" }, default: ["sec", "company_ir_page", "yahoo_finance_press_releases"], description: "Omit for the default set; an explicit list is used as given, and [] attempts no source. requestedSources, defaultSourcesApplied and attemptedSources report what was asked for and tried." } }, required: ["ticker"] } },
   { name: "get_sec_recent_events", description: "Get recent SEC filing events with filing type, filing date, accepted timestamp, accession number, SEC archive URL, and event metadata.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, filing_types: { type: "array", items: { type: "string" }, default: ["8-K", "10-Q", "10-K"] }, lookback_days: { type: "number", default: 90 }, max_results: { type: "number", default: 20 } }, required: ["ticker"] } },
@@ -574,11 +574,28 @@ const CANONICAL_ADDITIONS: Tool[] = [
   { name: "get_sec_filing_exhibit_content", description: "Fetch and return the text content of a specific exhibit from an SEC filing. Supports topic-based paragraph filtering to reduce token usage.", inputSchema: { type: "object", properties: { ticker: { type: "string", description: "Stock ticker symbol" }, accessionNumber: { type: "string", description: "SEC filing accession number" }, fileName: { type: "string", description: "Exhibit filename from the filing index" }, topics: { type: "array", items: { type: "string" }, description: "Optional list of keywords/topics to filter paragraphs by" } }, required: ["ticker", "accessionNumber", "fileName"] } },
   { name: "parse_public_transcript", description: "Fetch and parse a public transcript page (Motley Fool, company IR, etc.). Supports topic-based paragraph filtering to reduce token usage. Provide raw_text to skip URL fetching.", inputSchema: { type: "object", properties: { url: { type: "string", description: "Public https URL of the transcript page" }, topics: { type: "array", items: { type: "string" }, description: "Optional list of keywords/topics to filter paragraphs by" }, raw_text: { type: "string", description: "Raw HTML or text content to parse directly (bypasses URL fetching)" } } } },
   { name: "get_earnings_call_transcript", description: "Retrieve an earnings-call transcript from a content-validated SEC exhibit, then Yahoo/Quartr, then optional Alpha Vantage. Yahoo results are structured and paragraph-paginated for LLM use and include the human-readable sourceUrl. Preview-only Yahoo payloads are reported as INCOMPLETE_TRANSCRIPT and continue to the alternate-source fallback. Inspect contentCompleteness rather than treating cursor exhaustion as proof of a full call. Yahoo contentSha256 identifies the canonical transcript text and speaker projection declared by contentHashBasis, so it remains stable across pages and runtimes. Provide source_url or event_id to target a known Yahoo call. Yahoo and Alpha transcripts are contextual and never decision-grade; filing dates are never treated as fiscal periods.", inputSchema: { type: "object", properties: { ticker: { type: "string", description: "Stock ticker symbol" }, period: { type: "string", enum: ["latest"], default: "latest", description: "Event selector. Only the latest release is supported; this is not a fiscal-quarter value." }, fiscal_quarter: { type: "string", pattern: "^[0-9]{4}Q[1-4]$", description: "Optional issuer fiscal quarter, e.g. 2026Q4. Do not derive this from the filing or publication date." }, event_id: { type: "string", pattern: "^[0-9]+$", description: "Optional Yahoo earnings-event ID. Use only to continue a previously returned Yahoo transcript." }, source_url: { type: "string", format: "uri", description: "Optional canonical finance.yahoo.com transcript URL returned by this tool. Other hosts and ticker mismatches are rejected." }, paragraph_limit: { type: "integer", minimum: 1, maximum: 50, default: 20, description: "Maximum structured Yahoo transcript paragraphs to return." }, paragraph_cursor: { type: "string", pattern: "^[0-9]+$", description: "Opaque nextCursor from a prior Yahoo transcript response." }, topics: { type: "array", items: { type: "string" }, description: "Optional list of keywords/topics to filter transcript paragraphs by" } }, required: ["ticker"] } },
-  { name: "get_market_snapshot", description: "Compact market-state packet composing quote, price performance, moving-average trend, volume ratios, liquidity gate, and technical indicators in one call. Supports compact (default) and full modes, and optional batch of tickers. Pass min_adv_usd for a caller-chosen threshold; meetsMinimum reports adv20dTradedValueUsd >= min_adv_usd.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }] }, mode: { type: "string", enum: ["compact", "full"], default: "compact" }, foreign_exchange: { type: "boolean", default: false }, min_adv_usd: { type: "number", exclusiveMinimum: 0, description: "Optional caller-chosen minimum 20-day average daily traded value in USD; when supplied, meetsMinimum compares adv20dTradedValueUsd against it." } }, required: ["ticker"] } },
+  { name: "get_market_snapshot", description: "Compact market-state packet composing quote, price performance, moving-average trend, volume ratios, liquidity gate, and technical indicators in one call. Supports compact (default) and full modes, and optional batch of tickers. Pass min_adv_usd for a caller-chosen threshold; meetsMinimum reports adv20dTradedValueUsd >= min_adv_usd.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" } }] }, mode: { type: "string", enum: ["compact", "full"], default: "compact" }, foreign_exchange: { type: "boolean", default: false }, min_adv_usd: { type: "number", exclusiveMinimum: 0, description: "Optional caller-chosen minimum 20-day average daily traded value in USD; when supplied, meetsMinimum compares adv20dTradedValueUsd against it." } }, required: ["ticker"] } },
   { name: "health_check", description: "Return public-safe MCP availability, release/build identity, schema identity, tool mode, and connector-freshness metadata. authorizationHeaderPresent reports whether the request carried an Authorization header (never its value). credentialTransport reports how the calling request presented its credential (header, path or none), never the credential itself.", inputSchema: { type: "object", properties: {} } },
 ];
 
 TOOLS.push(...CANONICAL_ADDITIONS);
+
+/**
+ * Each capped action's ticker array branch advertises its tool_catalog.json
+ * tickerCaps entry as maxItems (2.12.0). get_market_snapshot advertises its
+ * compact cap; the smaller full-mode cap is enforced by the tool-call gate.
+ */
+function applyTickerCaps(tools: Tool[]): void {
+  for (const [key, cap] of Object.entries(TICKER_CAPS)) {
+    if (key.includes(".")) continue;
+    const tool = tools.find((candidate) => candidate.name === key);
+    const branches = (tool?.inputSchema.properties.ticker as { oneOf?: Array<Record<string, unknown>> } | undefined)?.oneOf;
+    const arrayBranch = branches?.find((branch) => branch.type === "array");
+    if (!arrayBranch) throw new Error(`tickerCaps names '${key}', which has no ticker array schema`);
+    arrayBranch.maxItems = cap;
+  }
+}
+applyTickerCaps(TOOLS);
 
 const SIMPLE_OBJECT_SCHEMA: Tool["outputSchema"] = {
   type: "object",
@@ -2023,6 +2040,8 @@ async function callVisibleToolResultInScope(name: string, args: Record<string, u
     return mcpFailureResult(name, ErrorCode.INPUT_VALIDATION_ERROR, "params must be an object when provided");
   }
   const actionParams = (params as Record<string, unknown> | undefined) ?? {};
+  const capFailure = tickerCapFailure(action, actionParams);
+  if (capFailure) return { text: capFailure };
   const validationFailure = validateGroupedActionParams(action, actionParams);
   if (validationFailure) return { text: validationFailure };
   return callToolResult(action, actionParams);
@@ -2051,6 +2070,74 @@ function compactFilingIndexPayload(raw: string): string {
   return JSON.stringify(parsed);
 }
 
+// ── Tool-call gate (2.12.0, Q3b/Q3c) ─────────────────────────────────────────
+// One check at the tool-call boundary, before any handler code or fetch, for
+// every public action in both tool modes (grouped dispatch reaches it through
+// callToolResult). Absent or null arguments, empty or whitespace-only ticker
+// values (and an empty accession) are skipped; they and non-string values are
+// left to the handler, as before.
+
+const TICKER_ARGS = ["ticker", "tickers", "subject", "peers"] as const;
+const ACCESSION_ARGS = ["accession_number", "accessionNumber"] as const;
+// get_company_news sources that read one issuer's own pages: one ticker per call.
+const SINGLE_TICKER_NEWS_SOURCES = new Set(["company_ir", "company_ir_page", "newswire"]);
+const SINGLE_TICKER_NEWS_CAP = 1;
+
+/** The tickerCaps entry that applies to this call, or null when the action is uncapped. */
+function tickerCapFor(name: string, args: Record<string, unknown>): number | null {
+  if (name === "get_company_news" && Array.isArray(args.sources)
+    && args.sources.some((source) => SINGLE_TICKER_NEWS_SOURCES.has(String(source).toLowerCase().trim()))) {
+    return SINGLE_TICKER_NEWS_CAP;
+  }
+  // Mirrors the handler: only mode "full" selects full mode.
+  const key = name === "get_market_snapshot" && str(args.mode, "compact") === "full" ? "get_market_snapshot.full" : name;
+  return TICKER_CAPS[key] ?? null;
+}
+
+/** BATCH_LIMIT_EXCEEDED when the ticker array is longer than the action's cap. */
+function tickerCapFailure(name: string, args: Record<string, unknown>): string | null {
+  const ticker = args.ticker;
+  if (!Array.isArray(ticker)) return null;
+  const cap = tickerCapFor(name, args);
+  if (cap == null || ticker.length <= cap) return null;
+  return mcpFailure(
+    name,
+    ErrorCode.BATCH_LIMIT_EXCEEDED,
+    `Too many tickers: ${ticker.length}. Maximum is ${cap} per call for ${name}.`,
+    { metaExtra: { retryable: false } },
+  );
+}
+
+const PUBLIC_ACTIONS = new Set(TOOLS.map((tool) => tool.name));
+
+/**
+ * INPUT_VALIDATION_ERROR (echoing the caller's raw value) or BATCH_LIMIT_EXCEEDED, else null.
+ * An unknown tool name is left to the dispatcher ("Unknown tool name.").
+ */
+export function validateToolArgs(name: string, args: Record<string, unknown>): string | null {
+  if (!PUBLIC_ACTIONS.has(name)) return null;
+  const capFailure = tickerCapFailure(name, args);
+  if (capFailure) return capFailure;
+  for (const arg of TICKER_ARGS) {
+    const value = args[arg];
+    const values = Array.isArray(value) ? value : [value];
+    for (const item of values) {
+      // Empty or whitespace-only values read as absent: the handler keeps its own empty-value behaviour.
+      if (typeof item !== "string" || item.trim() === "") continue;
+      const error = validateTicker(item);
+      if (error) return mcpFailure(name, ErrorCode.INPUT_VALIDATION_ERROR, error);
+    }
+  }
+  for (const arg of ACCESSION_ARGS) {
+    const value = args[arg];
+    // An empty accession reads as absent, as Python's `if accession_number:` call sites do today.
+    if (typeof value !== "string" || value === "") continue;
+    const error = validateAccession(value);
+    if (error) return mcpFailure(name, ErrorCode.INPUT_VALIDATION_ERROR, error);
+  }
+  return null;
+}
+
 // SEC fact tools whose `period` selects the fact: "latest" or a fiscal year, never an unread string (2.5.16).
 const FILING_PERIOD_TOOLS = new Set([
   "extract_sec_filing_fact",
@@ -2064,6 +2151,8 @@ const FILING_PERIOD_TOOLS = new Set([
 ]);
 
 async function _dispatchTool(name: string, args: Record<string, unknown>): Promise<string> {
+  const gateFailure = validateToolArgs(name, args);
+  if (gateFailure) return gateFailure;
   if (FILING_PERIOD_TOOLS.has(name) && args.period != null && !parseFilingPeriod(String(args.period))) {
     return mcpFailure(name, ErrorCode.INPUT_VALIDATION_ERROR, `${FILING_PERIOD_HELP} Got '${String(args.period)}'.`);
   }

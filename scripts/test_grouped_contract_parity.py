@@ -39,9 +39,11 @@ const out = {};
 for (const tool of (await response.json()).result.tools) {
   for (const branch of tool.inputSchema.oneOf ?? []) {
     const params = branch.properties.params;
+    const tickerArray = (params.properties?.ticker?.oneOf ?? []).find((b) => b.type === "array");
     out[`${tool.name}.${branch.properties.action.const}`] = {
       params: Object.keys(params.properties ?? {}).sort(),
       required: [...(params.required ?? [])].sort(),
+      tickerMaxItems: tickerArray?.maxItems ?? null,
     };
   }
 }
@@ -81,9 +83,12 @@ def _python_grouped_schemas() -> dict[str, dict[str, list[str]]]:
         schema = getattr(tool, "input_schema", None) or getattr(tool, "inputSchema", None) or {}
         for branch in schema.get("oneOf", []):
             params = branch["properties"]["params"]
+            ticker = params.get("properties", {}).get("ticker") or {}
+            ticker_array = next((b for b in ticker.get("anyOf", []) + ticker.get("oneOf", []) if b.get("type") == "array"), {})
             out[f'{tool.name}.{branch["properties"]["action"]["const"]}'] = {
                 "params": sorted(params.get("properties", {})),
                 "required": sorted(params.get("required", [])),
+                "tickerMaxItems": ticker_array.get("maxItems"),
             }
     return out
 
@@ -93,10 +98,27 @@ class TestGroupedContractParity(unittest.TestCase):
         worker = _worker_grouped_schemas()
         local = _python_grouped_schemas()
         self.assertEqual(sorted(worker), sorted(local), "grouped action sets differ")
+        keys = ("params", "required")
         mismatches = {
-            action: {"worker": worker[action], "local": local[action]}
+            action: {"worker": {k: worker[action][k] for k in keys}, "local": {k: local[action][k] for k in keys}}
             for action in worker
-            if worker[action] != local[action]
+            if any(worker[action][k] != local[action][k] for k in keys)
+        }
+        self.assertEqual(mismatches, {}, json.dumps(mismatches, indent=2))
+
+    def test_worker_ticker_max_items_come_from_ticker_caps(self) -> None:
+        caps = json.loads((ROOT / "tool_catalog.json").read_text(encoding="utf-8"))["tickerCaps"]
+        worker = _worker_grouped_schemas()
+        advertised = {action.split(".", 1)[1]: v["tickerMaxItems"] for action, v in worker.items() if v["tickerMaxItems"] is not None}
+        self.assertEqual(advertised, {k: v for k, v in caps.items() if "." not in k})
+
+    def test_every_grouped_action_has_the_same_ticker_max_items(self) -> None:
+        worker = _worker_grouped_schemas()
+        local = _python_grouped_schemas()
+        mismatches = {
+            action: {"worker": worker[action]["tickerMaxItems"], "local": local[action]["tickerMaxItems"]}
+            for action in worker
+            if worker[action]["tickerMaxItems"] != local[action]["tickerMaxItems"]
         }
         self.assertEqual(mismatches, {}, json.dumps(mismatches, indent=2))
 

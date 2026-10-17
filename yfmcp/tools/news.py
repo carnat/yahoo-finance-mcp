@@ -3352,7 +3352,9 @@ async def verify_company_event(
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_yahoo_finance_news"],
     description="""Get recent public company news and press releases from selected public sources.
 
-Accepts a single ticker or an array of up to 5 symbols. For an array, each
+Accepts a single ticker or an array of up to 5 symbols (one symbol when sources
+include company_ir, company_ir_page or newswire; a longer array is rejected with
+BATCH_LIMIT_EXCEEDED). For an array, each
 ticker is fetched independently and results are returned as a per-ticker keyed
 object (a union of per-ticker results), so low-news conditions for one ticker
 never zero out the others.

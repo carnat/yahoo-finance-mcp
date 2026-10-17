@@ -2792,6 +2792,49 @@ F-024, F-026, F-029). Both runtimes change alike.
 - **Note:** `latencyMs` can read 0 for a request with no I/O.
 - **Rollback:** revert the release.
 
+## Central Validation and Ticker Caps (2.12.0)
+
+- **Why:** R4 Q3b (central ticker and accession validation) and Q3c/Q12 (per-tool ticker caps). Release type:
+  minor. Deliberate behaviour changes: requests that were accepted before can now be rejected. Both runtimes.
+- **Gate:** one per runtime, at the tool-call boundary, before any handler code or fetch. It runs in grouped and
+  expanded mode alike (Worker: `tools.ts`; Python: the shared tool-call wrapper in `yfmcp/app.py`).
+- **Checked:** `ticker` (a string, or each element of an array), `tickers` (each element), `subject` and `peers`
+  (each element), with the unchanged grammar: 1 to 20 characters of `A-Z 0-9 . - ^ =` after trim and upper-case.
+  `accession_number` and `accessionNumber` must be ASCII-only `NNNNNNNNNN-NN-NNNNNN` after trim (Python no longer
+  accepts other Unicode digits).
+- **Skipped:** empty or whitespace-only values and array elements are skipped and keep each tool's existing
+  behaviour. Absent or null optional arguments are skipped, so "missing parameter" behaviour is unchanged.
+- **Failure:** `INPUT_VALIDATION_ERROR` with the existing messages. The message echoes the raw caller value and
+  names the public action. The Worker `get_historical_prices` used to echo the normalised value and now echoes the
+  raw one. Python paths that resolved a document URL from the ticker before validating now reject before any fetch.
+- **Newly validated in the Worker:** about 25 SEC, news, earnings and provider actions skipped ticker validation,
+  and the Worker never validated accessions.
+- **Not supported:** symbols containing `&`, such as `M&M.NS`, stay rejected (grammar unchanged; adding `&` needs
+  an audit that every URL build encodes it, tracked as an R4 triage item).
+- **Excluded:** arguments with their own grammars (Thai `fund_class_name` and `proj_id`, UK `company_number`,
+  `document_url`, cut ids).
+- **Caps:** one table, `tickerCaps` in `tool_catalog.json`, read by both runtimes and advertised as schema
+  `maxItems`. Grouped-mode checkers enforce the length in both runtimes.
+  - 10: `get_market_quote`, `get_company_profile`, `get_fund_profile`, `analyze_moving_average_position`,
+    `analyze_volume_ratio`, `analyze_price_performance`, `get_analyst_rating_changes`,
+    `analyze_earnings_momentum`.
+  - 5: `analyze_financial_ratios`, `analyze_credit_health`, `get_company_news`, `get_analyst_consensus`,
+    `get_technical_indicators`, `get_price_slope`, `get_short_momentum`, `get_market_snapshot` (compact and full).
+  - `get_company_news` is 1 when `sources` includes `company_ir`, `company_ir_page` or `newswire` (names matched
+    after trim and lower-case). The gate enforces it and the action description states it.
+  - Peer tools keep their own limits: `compare_peer_valuations` 2 to 10, `get_historical_valuation_context` peers
+    at most 5, `get_thai_fund_nav_batch` at most 20.
+- **Oversize:** an array longer than the cap is rejected before any fetch with `BATCH_LIMIT_EXCEEDED`, "Too many
+  tickers: N. Maximum is M per call for <action>.", `retryable` false. The cap is checked before the ticker
+  format, so an oversize array gets this error whatever its contents. `BATCH_LIMIT_EXCEEDED` is now also a
+  tool-level error code, with the same meaning as at HTTP level.
+- **Snapshot cost (measured):** `get_market_snapshot` costs about 2 + 5n subrequests cold, in both modes: n=2 12 to
+  13, n=5 27 to 28, n=10 52 to 53, n=20 103. The cap is therefore 5. Full mode goes from 2 to 5.
+- **Truncation removed:** `_truncated` (`get_technical_indicators`, `get_price_slope`) and `truncated` and
+  `droppedTickers` (`get_market_snapshot`) no longer appear, for in-cap requests too. Oversize is an error instead.
+- **Batches:** a comma-separated string is still one symbol. Batches need an array.
+- **Rollback:** revert the release.
+
 ## Non-US Primary Filings
 
 - `get_uk_company_filings` reads Companies House, the UK statutory registry:

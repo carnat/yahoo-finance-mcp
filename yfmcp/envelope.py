@@ -48,6 +48,8 @@ class ErrorCode:
     AMBIGUOUS_CONTEXT = "AMBIGUOUS_CONTEXT"
     # The per-request subrequest budget was spent before this work could run (2.11.0).
     PROVIDER_BUDGET_EXHAUSTED = "PROVIDER_BUDGET_EXHAUSTED"
+    # A batch array longer than the action's tool_catalog.json tickerCaps entry, rejected before any fetch (2.12.0).
+    BATCH_LIMIT_EXCEEDED = "BATCH_LIMIT_EXCEEDED"
 
 
 # ---------------------------------------------------------------------------

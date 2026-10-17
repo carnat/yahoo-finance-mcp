@@ -127,6 +127,9 @@ jobs:
       - name: Worker telemetry data point, dispatch log line and privacy tests
         run: python scripts/test_worker_telemetry.py -v
 
+      - name: Worker tool-call gate (central validation and ticker caps) tests
+        run: python scripts/test_worker_validation_caps.py -v
+
       - name: Telemetry export aggregation tests (canned API responses)
         run: python scripts/test_export_telemetry.py -v
 

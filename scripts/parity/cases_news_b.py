@@ -1385,6 +1385,11 @@ _SIX_TICKERS = ["AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOG"]
 _VALIDATION_ROUTES = {SEC_TICKERS_URL: {"json": {}}}
 
 
+async def _gated_tool(name, args):
+    """The registered Python tool, i.e. through the tool-call gate (yfmcp.app wrapper); returns the envelope text."""
+    return await server.yfinance_server._tool_manager._tools[name].fn(**args)
+
+
 def _alias_py():
     with _py_news_env(news=[], info={}):
         return json.loads(asyncio.run(server.get_yahoo_finance_news("AAPL")))
@@ -1410,10 +1415,10 @@ CASES += [
                 "lower_case_ticker": ["ran", "BRK.B"],
                 "blank_search_query": ["INPUT_VALIDATION_ERROR", "query is required"],
                 "blank_verify_query": ["INPUT_VALIDATION_ERROR", "event_query is required"]}),
-    # Cards 240 / 241: the ticker format is checked in Python only (after trim and upper-case; 1-20 characters of A-Z 0-9 . - ^ =),
-    # for all six news and event tools, in the batch path per symbol. The Worker runs the collection and returns a (limited) result.
+    # Cards 240 / 241 (Q3b, 2.12.0): the ticker format (after trim and upper-case; 1-20 characters of A-Z 0-9 . - ^ =) is
+    # checked in both runtimes for all six news and event tools, per symbol in the batch path, echoing the raw value.
     _multi_scenario(
-        "news.validation.ticker_format_is_checked_in_python_only", ["BR-NWS-240", "BR-NWS-241"],
+        "news.validation.ticker_format_is_checked_in_both_runtimes", ["BR-NWS-240", "BR-NWS-241"],
         [("get_company_news_dollar", lambda: server.get_company_news("AAPL$", 10, 14, []), _call_tool("get_company_news", {"ticker": "AAPL$", "sources": []})),
          ("get_company_news_21_chars", lambda: server.get_company_news("A" * 21, 10, 14, []), _call_tool("get_company_news", {"ticker": "A" * 21, "sources": []})),
          ("search_company_news_space", lambda: server.search_company_news("AAPL US!", "dividend", "", "", []),
@@ -1426,30 +1431,23 @@ CASES += [
           _call_tool("get_public_event_timeline", {"ticker": "AAPL$", "sources": []})),
          ("get_sec_recent_events_dollar", lambda: server.get_sec_recent_events("AAPL$", ["8-K"], 90, 20),
           _call_tool("get_sec_recent_events", {"ticker": "AAPL$", "filing_types": ["8-K"]}))],
-        news=[], info={}, routes=_VALIDATION_ROUTES, select=_tool_outcome, mode="pinned",
-        decision="FINDING: malformed tickers ('AAPL$', 21 characters, 'AAPL US!') are INPUT_VALIDATION_ERROR in Python and run the collection in the Worker",
-        expect_py={"get_company_news_dollar": ["INPUT_VALIDATION_ERROR", _INVALID_TICKER_MSG.format("AAPL$")],
+        news=[], info={}, routes=_VALIDATION_ROUTES, select=_tool_outcome,
+        expect={"get_company_news_dollar": ["INPUT_VALIDATION_ERROR", _INVALID_TICKER_MSG.format("AAPL$")],
                    "get_company_news_21_chars": ["INPUT_VALIDATION_ERROR", _INVALID_TICKER_MSG.format("A" * 21)],
                    "search_company_news_space": ["INPUT_VALIDATION_ERROR", _INVALID_TICKER_MSG.format("AAPL US!")],
                    "verify_company_event_dollar": ["INPUT_VALIDATION_ERROR", _INVALID_TICKER_MSG.format("AAPL$")],
                    "get_company_press_releases_dollar": ["INPUT_VALIDATION_ERROR", _INVALID_TICKER_MSG.format("AAPL$")],
                    "get_public_event_timeline_dollar": ["INPUT_VALIDATION_ERROR", _INVALID_TICKER_MSG.format("AAPL$")],
-                   "get_sec_recent_events_dollar": ["INPUT_VALIDATION_ERROR", _INVALID_TICKER_MSG.format("AAPL$")]},
-        expect_ts={"get_company_news_dollar": ["ran", "AAPL$"], "get_company_news_21_chars": ["ran", "A" * 21],
-                   "search_company_news_space": ["ran", "AAPL US!"], "verify_company_event_dollar": ["ran", "AAPL$"],
-                   "get_company_press_releases_dollar": ["ran", "AAPL$"], "get_public_event_timeline_dollar": ["ran", "AAPL$"],
-                   "get_sec_recent_events_dollar": ["ran", "AAPL$"]}),
-    # Card 204: six tickers. Python fetches all six (three at a time); the Worker refuses with 'Too many tickers: 6. Maximum is 5 per call.'
+                "get_sec_recent_events_dollar": ["INPUT_VALIDATION_ERROR", _INVALID_TICKER_MSG.format("AAPL$")]}),
+    # Card 204 (Q3c, 2.12.0): six tickers is over get_company_news's cap of 5; the tool-call gate rejects it with
+    # BATCH_LIMIT_EXCEEDED in both runtimes (Python through the registered, gated tool wrapper), before any fetch.
     _multi_scenario(
-        "news.validation.batch_of_six_tickers_runs_in_python_and_fails_in_the_worker", ["BR-NWS-204", "BR-NWS-275"],
-        [("six", lambda: server.get_company_news(_SIX_TICKERS, 10, 14, []), _call_tool("get_company_news", {"ticker": _SIX_TICKERS, "sources": []})),
-         ("five", lambda: server.get_company_news(_SIX_TICKERS[:5], 10, 14, []), _call_tool("get_company_news", {"ticker": _SIX_TICKERS[:5], "sources": []}))],
-        news=[], info={}, select=_tool_outcome, mode="pinned",
-        decision="FINDING: more than 5 tickers is INPUT_VALIDATION_ERROR in the Worker (and the tool description says only the first 5 are processed) but Python fetches all of them",
-        expect_py={"six": {"batch": {t: [t, _NO_NEWS_STATUS] for t in _SIX_TICKERS}},
-                   "five": {"batch": {t: [t, _NO_NEWS_STATUS] for t in _SIX_TICKERS[:5]}}},
-        expect_ts={"six": ["INPUT_VALIDATION_ERROR", "Too many tickers: 6. Maximum is 5 per call."],
-                   "five": {"batch": {t: [t, _NO_NEWS_STATUS] for t in _SIX_TICKERS[:5]}}}),
+        "news.validation.batch_of_six_tickers_is_rejected_over_the_cap_in_both_runtimes", ["BR-NWS-204", "BR-NWS-275"],
+        [("six", lambda: _gated_tool("get_company_news", {"ticker": _SIX_TICKERS, "sources": []}), _call_tool("get_company_news", {"ticker": _SIX_TICKERS, "sources": []})),
+         ("five", lambda: _gated_tool("get_company_news", {"ticker": _SIX_TICKERS[:5], "sources": []}), _call_tool("get_company_news", {"ticker": _SIX_TICKERS[:5], "sources": []}))],
+        news=[], info={}, select=_tool_outcome,
+        expect={"six": ["BATCH_LIMIT_EXCEEDED", "Too many tickers: 6. Maximum is 5 per call for get_company_news."],
+                "five": {"batch": {t: [t, _NO_NEWS_STATUS] for t in _SIX_TICKERS[:5]}}}),
     # Card 271: get_yahoo_finance_news is a Python alias of get_company_news with a fixed source list (no Marketaux); the Worker has no such tool.
     Case(name="news.validation.get_yahoo_finance_news_alias_exists_in_python_only", ids=["BR-NWS-271"],
          py=lambda: _alias_py(),

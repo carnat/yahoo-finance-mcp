@@ -1115,6 +1115,15 @@ def _pick(*keys):
     return lambda v: {k: v.get(k) for k in keys}
 
 
+def _gated_slope_seven() -> str:
+    """get_price_slope for seven tickers through the registered Python tool, i.e. through the tool-call gate."""
+    closes = [100.00] + [100.0] * 4 + [103.25]
+    tool = server.yfinance_server._tool_manager._tools["get_price_slope"].fn
+    with patch.object(pricing.yf, "Ticker", MagicMock()), \
+            patch.object(pricing, "_load_completed_daily_history", AsyncMock(return_value=_series_prepared(closes, [1000] * len(closes)))):
+        return asyncio.run(tool(ticker=["T1", "T2", "T3", "T4", "T5", "T6", "T7"], days=5))
+
+
 SLOPE_KEYS = ("status", "slopePct", "direction", "observationCount", "priceBasis", "startClose", "endClose", "fallbackUsed")
 FLAT_SIX = [100.0, 100.0, 100.0, 100.0, 100.0]
 
@@ -1190,14 +1199,16 @@ CASES += [
                  expect_py={"avgVolume10d": 1000, "ratio10d": 1.0, "volumeFlag": "NORMAL"},
                  expect_ts={"avgVolume10d": 1001, "ratio10d": 0.999, "volumeFlag": "NORMAL"}),
 
-    # ── BR-SHR-006 (Q3c): Worker batch truncation at 5, Python unlimited ───────────────────────
-    _series_case("prc.batch.q3c_seven_tickers_python_processes_all_worker_truncates_to_five", ["BR-SHR-006"], "slope",
-                 [["T1", "T2", "T3", "T4", "T5", "T6", "T7"], 5], [100.00] + FLAT_SIX[:4] + [103.25],
-                 select=lambda v: {"tickers": sorted(k for k in v if not k.startswith("_")),
-                                   "remaining": (v.get("_truncated") or {}).get("remaining")},
-                 mode="pinned", decision="Q3c",
-                 expect_py={"tickers": ["T1", "T2", "T3", "T4", "T5", "T6", "T7"], "remaining": None},
-                 expect_ts={"tickers": ["T1", "T2", "T3", "T4", "T5"], "remaining": ["T6", "T7"]}),
+    # ── BR-SHR-006 (Q3c, 2.12.0): seven tickers is over get_price_slope's cap of 5 ──────────────
+    # Both runtimes' tool-call gate rejects the call with BATCH_LIMIT_EXCEEDED before any fetch (no more truncation
+    # to five with _truncated). Python goes through the registered, gated tool wrapper.
+    Case(name="prc.batch.q3c_seven_tickers_are_rejected_over_the_cap_in_both_runtimes", ids=["BR-SHR-006"],
+         py=lambda: _gated_slope_seven(),
+         ts={"js": _ts_with_clock(SERIES_NOW, 'return JSON.parse(await m.tools.callTool("get_price_slope", { ticker: ["T1", "T2", "T3", "T4", "T5", "T6", "T7"], days: 5 }));'),
+             "isolate": True},
+         select=lambda v: ({"error": v["error"]["code"], "message": v["error"]["message"]} if v.get("ok") is False
+                           else {"tickers": sorted(k for k in v if not k.startswith("_"))}),
+         expect={"error": "BATCH_LIMIT_EXCEEDED", "message": "Too many tickers: 7. Maximum is 5 per call for get_price_slope."}),
     _series_case("prc.batch.five_tickers_are_processed_by_both", ["BR-SHR-006"], "slope",
                  [["T1", "T2", "T3", "T4", "T5"], 5], [100.00] + FLAT_SIX[:4] + [103.25],
                  select=lambda v: {"tickers": sorted(k for k in v if not k.startswith("_")),

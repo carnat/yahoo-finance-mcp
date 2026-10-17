@@ -651,7 +651,7 @@ Args:
     ticker: str | list[str]
         A single ticker symbol (e.g. "AAPL") or a list of up to 5 symbols.
         When a list is provided, returns a dict keyed by symbol.
-        Max 5 tickers per call; split larger lists into multiple calls.
+        A longer list is rejected with BATCH_LIMIT_EXCEEDED; split larger lists into multiple calls.
     period: str
         History fed to the indicators (default "1y"). Periods shorter than a year
         are widened to "1y" so RSI and MACD settle. Valid: 1y, 2y, 5y.
@@ -1376,7 +1376,7 @@ Args:
     ticker: str | list[str]
         A single ticker symbol (e.g. "AAPL") or a list of up to 5 symbols.
         When a list is provided, returns a dict keyed by symbol.
-        Max 5 tickers per call; split larger lists into multiple calls.
+        A longer list is rejected with BATCH_LIMIT_EXCEEDED; split larger lists into multiple calls.
 """,
 )
 async def get_short_momentum(ticker: str | list[str]) -> str:
@@ -1764,11 +1764,10 @@ async def get_market_snapshot(
     if min_adv_error:
         return _mcp_failure("get_market_snapshot", ErrorCode.INPUT_VALIDATION_ERROR, min_adv_error)
     if isinstance(ticker, list):
-        cap = 2 if mode == "full" else 5
-        limited = ticker[:cap]
-        outcomes = await _run_ticker_batch(limited, lambda t: get_market_snapshot(t, mode, foreign_exchange, min_adv_usd))
+        # The per-mode caps (tickerCaps get_market_snapshot / get_market_snapshot.full) are enforced by the tool-call gate.
+        outcomes = await _run_ticker_batch(ticker, lambda t: get_market_snapshot(t, mode, foreign_exchange, min_adv_usd))
         results = {}
-        for t, outcome in zip(limited, outcomes):
+        for t, outcome in zip(ticker, outcomes):
             if isinstance(outcome, Exception):
                 results[t] = {"error": True, "message": str(outcome)}
                 continue
@@ -1776,11 +1775,7 @@ async def get_market_snapshot(
                 results[t] = json.loads(outcome)
             except Exception as e:
                 results[t] = {"error": True, "message": str(e)}
-        return json.dumps({
-            "tickers": results,
-            "truncated": len(ticker) > cap,
-            **({"droppedTickers": ticker[cap:]} if len(ticker) > cap else {}),
-        })
+        return json.dumps({"tickers": results})
 
     retrieved_at = datetime.datetime.utcnow().isoformat() + "Z"
 

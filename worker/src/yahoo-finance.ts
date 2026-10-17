@@ -1,6 +1,7 @@
 import { BoundedTtlCache, setBounded } from "./cache.js";
 import { awaitNotingBudget, budgetRefusalCount, consumeSubrequest, countCacheEvent, countProviderRetry, countProviderTimeout, emptyCacheUsage, isBudgetExhaustedError, providerFetch, withBudgetWatch, type CacheEvent, type CacheUsage } from "./request-context.js";
 import { classifyErrorMessage, ErrorCode, getWorkerVar, mcpFailure } from "./response.js";
+import { tickerCap } from "./tool-catalog.js";
 import { yahooTranscriptContentSha256 } from "./transcript-contract.js";
 import { allowedHostKind, approvedRegistryUrlAllowed, checkFetchUrl } from "./url-policy.js";
 import {
@@ -80,10 +81,14 @@ export const UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
 /**
- * Maximum number of tickers allowed in a single batch call.
- * Cloudflare Workers have a subrequest limit (50 on free, 1000 on paid).
- * Each ticker requires 1-3 subrequests (crumb + API call + possible retry),
- * so capping at 5 keeps a single tool invocation well within limits.
+ * Batch ticker caps. Cloudflare Workers Free allows 50 subrequests per
+ * invocation (Cache API calls and redirect hops included), and since 2.11.0 new
+ * upstream work stops at a budget of 45 (request-context.ts). The per-tool caps
+ * live in tool_catalog.json `tickerCaps` (2.12.0): each action's schema
+ * maxItems is generated from them, and the tool-call gate in tools.ts rejects a
+ * longer array with BATCH_LIMIT_EXCEEDED before any fetch. Nothing is truncated.
+ * MAX_TICKERS is only the default for runPartialBatch callers without a catalog
+ * cap (analyze_position_signals).
  */
 const MAX_TICKERS = 5;
 
@@ -420,37 +425,6 @@ const SMOKE_TICKER_CIK_FALLBACKS: Record<string, string> = {
   AAOI: "0001158114",
   AXTI: "0001051627",
 };
-
-interface LimitResult {
-  tickers: string[];
-  truncatedFrom?: number;
-  dropped?: string[];
-}
-
-function limitTickers(tickers: string[]): LimitResult {
-  if (tickers.length <= MAX_TICKERS) return { tickers };
-  return {
-    tickers: tickers.slice(0, MAX_TICKERS),
-    truncatedFrom: tickers.length,
-    dropped: tickers.slice(MAX_TICKERS),
-  };
-}
-
-/** Adds a _truncated warning to the batch response object when tickers were dropped. */
-function wrapBatchResult(
-  result: Record<string, unknown>,
-  limit: LimitResult
-): string {
-  if (!limit.truncatedFrom) return JSON.stringify(result);
-  return JSON.stringify({
-    ...result,
-    _truncated: {
-      message: `Only the first ${MAX_TICKERS} of ${limit.truncatedFrom} tickers were processed. Call again with the remaining tickers: ${limit.dropped!.join(", ")}`,
-      processed: limit.tickers,
-      remaining: limit.dropped,
-    },
-  });
-}
 
 /**
  * Returns the last trading date as a YYYY-MM-DD string.
@@ -1175,13 +1149,16 @@ async function mapWithConcurrency<T, R>(
 
 export async function runPartialBatch(
   tickers: string[],
-  perTicker: (ticker: string) => Promise<string>
+  perTicker: (ticker: string) => Promise<string>,
+  maxTickers: number = MAX_TICKERS,
 ): Promise<string> {
-  if (tickers.length > MAX_TICKERS) {
+  // Capped actions are rejected earlier, by the tool-call gate (tools.ts), with
+  // BATCH_LIMIT_EXCEEDED; this check only guards direct callers.
+  if (tickers.length > maxTickers) {
     return JSON.stringify({
       error: true,
       code: "INPUT_VALIDATION_ERROR",
-      message: `Too many tickers: ${tickers.length}. Maximum is ${MAX_TICKERS} per call.`,
+      message: `Too many tickers: ${tickers.length}. Maximum is ${maxTickers} per call.`,
     });
   }
   const out: Record<string, unknown> = {};
@@ -1302,7 +1279,7 @@ function normalizeFundEquityHoldings(
 
 export async function getEtfInfo(ticker: string | string[], sections?: string[] | null): Promise<string> {
   if (Array.isArray(ticker)) {
-    return runPartialBatch(ticker, (t) => getEtfInfo(t, sections));
+    return runPartialBatch(ticker, (t) => getEtfInfo(t, sections), tickerCap("get_fund_profile"));
   }
 
   try {
@@ -1573,7 +1550,7 @@ export async function getHistoricalPrices(
 
 export async function getStockInfo(ticker: string | string[], includeAll = false): Promise<string> {
   if (Array.isArray(ticker)) {
-    return runPartialBatch(ticker, (t) => getStockInfo(t, includeAll));
+    return runPartialBatch(ticker, (t) => getStockInfo(t, includeAll), tickerCap("get_company_profile"));
   }
   const modules = [
     "assetProfile",
@@ -2413,7 +2390,7 @@ export const SUPPORTED_RECOMMENDATION_TYPES = Object.keys(REC_MOD);
 
 export async function getFastInfo(ticker: string | string[]): Promise<string> {
   if (Array.isArray(ticker)) {
-    return runPartialBatch(ticker, (t) => getFastInfo(t));
+    return runPartialBatch(ticker, (t) => getFastInfo(t), tickerCap("get_market_quote"));
   }
   const d = (await yGet(
     `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${enc(ticker)}?modules=price,summaryDetail,defaultKeyStatistics`
@@ -2483,7 +2460,7 @@ export async function getFastInfo(ticker: string | string[]): Promise<string> {
 
 export async function getPriceStats(ticker: string | string[]): Promise<string> {
   if (Array.isArray(ticker)) {
-    return runPartialBatch(ticker, (t) => getPriceStats(t));
+    return runPartialBatch(ticker, (t) => getPriceStats(t), tickerCap("analyze_price_performance"));
   }
   const [metaRaw, initialHistRaw] = await Promise.all([
     yGet(
@@ -2654,7 +2631,7 @@ export async function getPriceStats(ticker: string | string[]): Promise<string> 
 
 export async function getAnalystConsensus(ticker: string | string[]): Promise<string> {
   if (Array.isArray(ticker)) {
-    return runPartialBatch(ticker, (t) => getAnalystConsensus(t));
+    return runPartialBatch(ticker, (t) => getAnalystConsensus(t), tickerCap("get_analyst_consensus"));
   }
   const modules = "financialData,recommendationTrend,price,upgradeDowngradeHistory";
   const d = (await yGet(
@@ -2872,7 +2849,7 @@ export async function getFinancialRatios(
   frequency: string = "quarterly",
 ): Promise<string> {
   if (Array.isArray(ticker)) {
-    return runPartialBatch(ticker, (t) => getFinancialRatios(t, historyPeriods, frequency));
+    return runPartialBatch(ticker, (t) => getFinancialRatios(t, historyPeriods, frequency), tickerCap("analyze_financial_ratios"));
   }
   historyPeriods = Math.max(0, Math.min(20, Math.trunc(historyPeriods)));
   if (!["quarterly", "monthly", "yearly", "trailing"].includes(frequency)) {
@@ -3486,10 +3463,8 @@ export async function getTechnicalIndicators(
   period: string
 ): Promise<string> {
   if (Array.isArray(ticker)) {
-    const limit = limitTickers(ticker);
-    const results: string[] = [];
-    results.push(...await mapWithConcurrency(limit.tickers, BATCH_TICKER_CONCURRENCY, (t) => getTechnicalIndicators(t, period)));
-    return wrapBatchResult(Object.fromEntries(limit.tickers.map((t, i) => [t, safeJsonParse(results[i], t)])), limit);
+    const results = await mapWithConcurrency(ticker, BATCH_TICKER_CONCURRENCY, (t) => getTechnicalIndicators(t, period));
+    return JSON.stringify(Object.fromEntries(ticker.map((t, i) => [t, safeJsonParse(results[i], t)])));
   }
   const lookback = indicatorLookback(period);
   const fetchChart = async (retry: boolean): Promise<Record<string, unknown> | undefined> => {
@@ -3807,10 +3782,8 @@ function selectCompletedPriceSeries(completedRows: DailyBarObservation[]): {
 
 export async function getPriceSlope(ticker: string | string[], days: number): Promise<string> {
   if (Array.isArray(ticker)) {
-    const limit = limitTickers(ticker);
-    const results: string[] = [];
-    results.push(...await mapWithConcurrency(limit.tickers, BATCH_TICKER_CONCURRENCY, (t) => getPriceSlope(t, days)));
-    return wrapBatchResult(Object.fromEntries(limit.tickers.map((t, i) => [t, JSON.parse(results[i])])), limit);
+    const results = await mapWithConcurrency(ticker, BATCH_TICKER_CONCURRENCY, (t) => getPriceSlope(t, days));
+    return JSON.stringify(Object.fromEntries(ticker.map((t, i) => [t, JSON.parse(results[i])])));
   }
 
   const normalizedDays = clampInt(days, 5, 1, 500);
@@ -3941,7 +3914,7 @@ export async function getPriceSlope(ticker: string | string[], days: number): Pr
 
 export async function getVolumeRatio(ticker: string | string[], _period: number): Promise<string> {
   if (Array.isArray(ticker)) {
-    return runPartialBatch(ticker, (t) => getVolumeRatio(t, _period));
+    return runPartialBatch(ticker, (t) => getVolumeRatio(t, _period), tickerCap("analyze_volume_ratio"));
   }
 
   try {
@@ -4073,7 +4046,7 @@ export async function getVolumeRatio(ticker: string | string[], _period: number)
 
 export async function getMaPosition(ticker: string | string[]): Promise<string> {
   if (Array.isArray(ticker)) {
-    return runPartialBatch(ticker, (t) => getMaPosition(t));
+    return runPartialBatch(ticker, (t) => getMaPosition(t), tickerCap("analyze_moving_average_position"));
   }
 
   try {
@@ -4124,7 +4097,7 @@ export async function getMaPosition(ticker: string | string[]): Promise<string> 
 
 export async function getCreditHealth(ticker: string | string[]): Promise<string> {
   if (Array.isArray(ticker)) {
-    return runPartialBatch(ticker, (t) => getCreditHealth(t));
+    return runPartialBatch(ticker, (t) => getCreditHealth(t), tickerCap("analyze_credit_health"));
   }
   try {
     // One row per quarter, newest first (fetchTimeseries itself returns one
@@ -4328,7 +4301,7 @@ export async function getCreditHealth(ticker: string | string[]): Promise<string
 
 export async function getShortMomentum(ticker: string | string[]): Promise<string> {
   if (Array.isArray(ticker)) {
-    return runPartialBatch(ticker, (t) => getShortMomentum(t));
+    return runPartialBatch(ticker, (t) => getShortMomentum(t), tickerCap("get_short_momentum"));
   }
   try {
     const si = JSON.parse(await getShortInterest(ticker));
@@ -4399,7 +4372,7 @@ export async function getShortMomentum(ticker: string | string[]): Promise<strin
 
 export async function getEarningsMomentum(ticker: string | string[]): Promise<string> {
   if (Array.isArray(ticker)) {
-    return runPartialBatch(ticker, (t) => getEarningsMomentum(t));
+    return runPartialBatch(ticker, (t) => getEarningsMomentum(t), tickerCap("analyze_earnings_momentum"));
   }
   try {
     const ea = JSON.parse(await getEarningsAnalysis(ticker));
@@ -4831,7 +4804,7 @@ export function analystPriceTargetChange(
 
 export async function getAnalystUpgradeRadar(ticker: string | string[], daysBack: number): Promise<string> {
   if (Array.isArray(ticker)) {
-    return runPartialBatch(ticker, (t) => getAnalystUpgradeRadar(t, daysBack));
+    return runPartialBatch(ticker, (t) => getAnalystUpgradeRadar(t, daysBack), tickerCap("get_analyst_rating_changes"));
   }
 
   try {
@@ -8132,21 +8105,16 @@ export async function getMarketSnapshot(
   minAdvUsd: number | null = null,
 ): Promise<string> {
   if (Array.isArray(ticker)) {
-    const cap = mode === "full" ? 2 : 5;
-    const limited = ticker.slice(0, cap);
-    const snapshots = await mapWithConcurrency(limited, BATCH_TICKER_CONCURRENCY, async (t) => {
+    // The per-mode caps (tickerCaps get_market_snapshot / get_market_snapshot.full) are enforced by the tool-call gate.
+    const snapshots = await mapWithConcurrency(ticker, BATCH_TICKER_CONCURRENCY, async (t) => {
       try {
         return JSON.parse(await getMarketSnapshot(t, mode, foreignExchange, minAdvUsd)) as unknown;
       } catch (e) {
         return { error: true, message: e instanceof Error ? e.message : String(e) };
       }
     });
-    const results: Record<string, unknown> = Object.fromEntries(limited.map((t, i) => [t, snapshots[i]]));
-    return JSON.stringify({
-      tickers: results,
-      truncated: ticker.length > cap,
-      ...(ticker.length > cap ? { droppedTickers: ticker.slice(cap) } : {}),
-    });
+    const results: Record<string, unknown> = Object.fromEntries(ticker.map((t, i) => [t, snapshots[i]]));
+    return JSON.stringify({ tickers: results });
   }
 
   const retrievedAt = new Date().toISOString();
