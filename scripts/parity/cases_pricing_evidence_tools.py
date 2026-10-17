@@ -16,6 +16,7 @@ Conventions
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import datetime as dt
 import json
 import re
@@ -858,8 +859,8 @@ CASES += [
 # ═══════════════════════════════════════════════════════════════════════════════════════════════
 # BR-ENV-005 / BR-ENV-007 (Q3b) and Q3a: ticker / accession validation and accession resolution
 # in get_filing_outline. Python validates the ticker and accession and resolves an accession to a filing
-# index; the Worker validates neither (it validates tickers only in get_historical_prices) and ignores the
-# accession (Q3a). Both are scheduled to change; today's behaviour is pinned.
+# index; the Worker validates neither (it validates tickers only in get_historical_prices). Q3b's pinned cases record
+# that. Q3a (2.13.0): both honour an accession without document_url.
 # ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 from yfmcp.validation import _validate_ticker  # noqa: E402
@@ -869,6 +870,11 @@ AAPL_DOC = "https://www.sec.gov/Archives/edgar/data/320193/000032019324000123/aa
 AAPL_INDEX = "https://www.sec.gov/Archives/edgar/data/320193/000032019324000123/0000320193-24-000123-index.htm"
 OUTLINE_ROUTES = {
     "https://www.sec.gov/files/company_tickers.json": {"json": {"0": {"cik_str": 320193, "ticker": "AAPL", "title": "Apple Inc."}}},
+    # The Worker resolves an accession through SEC submissions (2.13.0, Q3a).
+    "https://data.sec.gov/submissions/CIK0000320193.json": {"json": {"cik": "320193", "filings": {"recent": {
+        "form": ["10-K"], "accessionNumber": ["0000320193-24-000123"], "primaryDocument": ["aapl-20240928.htm"],
+        "filingDate": ["2024-11-01"], "reportDate": ["2024-09-28"], "acceptanceDateTime": ["2024-11-01T16:30:00.000Z"],
+    }}}},
     AAPL_DOC: {"body": OUTLINE_HTML},
     AAPL_INDEX: {"body": OUTLINE_HTML},
 }
@@ -920,28 +926,40 @@ CASES += [
                   expect_ts=OUTLINE_OK),
     _outline_case("tool.q3b.outline_valid_accession_and_ticker_with_document_url_agree", ["BR-ENV-005", "BR-ENV-007"],
                   "AAPL", VALID_ACCESSION, AAPL_DOC, expect=OUTLINE_OK),
-    # Q3a: Python resolves the accession to the filing index; the Worker ignores accession_number.
+    # Q3a (2.13.0): an accession without document_url is honoured in both runtimes. The Worker resolves it through
+    # resolveSecFiling and reads the primary document. TODO(python-mirror): Python still reads the filing index page,
+    # served here with the same HTML, so this case cannot tell the two apart; cases_accession.py
+    # (q3a.outline.accession_only_hit_reads_the_primary_document) does.
     _outline_case("tool.q3a.outline_accession_only_python_resolves_worker_ignores", ["Q3a"], "AAPL", VALID_ACCESSION, None,
-                  mode="pinned", decision="Q3a", expect_py=OUTLINE_OK,
-                  expect_ts={"error": True, "code": None, "message": "document_url is required"}),
+                  expect=OUTLINE_OK),
 ]
 
 
 # ═══════════════════════════════════════════════════════════════════════════════════════════════
-# Q4: SMOKE_TICKER_CIK_FALLBACKS resolves a listed ticker's CIK when the Yahoo and SEC lookups fail.
-# Python: edgar._resolve_cik_for_ticker with yfinance failing. Worker: getSubmissionsForTicker (cikPadded).
-# The repair removes the table from production lookup; today both runtimes still use it.
+# Q4 (2.13.0): the smoke ticker -> CIK table is out of production lookup. The order is cache -> Yahoo -> SEC
+# company_tickers.json -> EDGAR atom; the 11 former entries are a test fixture
+# (scripts/parity/fixtures/ticker_cik_fixtures.json) injected at the old position.
+# Python: edgar._resolve_cik_for_ticker with yfinance failing, fixtures through edgar._TEST_TICKER_CIK_FIXTURES.
+# Worker: getSubmissionsForTicker (cikPadded), fixtures through setTickerCikFixturesForTests.
 # ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+from pathlib import Path  # noqa: E402
 
 from yfmcp.clients import edgar  # noqa: E402
 
+TICKER_CIK_FIXTURES: dict[str, str] = json.loads(
+    (Path(__file__).with_name("fixtures") / "ticker_cik_fixtures.json").read_text(encoding="utf-8"))
 
-def _resolve_cik_py(ticker: str):
+
+def _resolve_cik_py(ticker: str, fixtures: dict | None = None):
     saved = (edgar._EDGAR_TICKERS, edgar._EDGAR_TICKERS_LOADED_AT, dict(edgar._FILING_CIK_CACHE))
     edgar._EDGAR_TICKERS, edgar._EDGAR_TICKERS_LOADED_AT = None, 0.0
     edgar._FILING_CIK_CACHE.clear()
+    # TODO(python-mirror): drop the getattr guard once edgar._TEST_TICKER_CIK_FIXTURES exists.
+    seam = getattr(edgar, "_TEST_TICKER_CIK_FIXTURES", None)
     try:
-        with patch.object(edgar.yf, "Ticker", side_effect=RuntimeError("yahoo unavailable")):
+        with patch.object(edgar.yf, "Ticker", side_effect=RuntimeError("yahoo unavailable")), \
+                (patch.dict(seam, fixtures or {}, clear=True) if seam is not None else contextlib.nullcontext()):
             return asyncio.run(edgar._resolve_cik_for_ticker(ticker))
     finally:
         edgar._EDGAR_TICKERS, edgar._EDGAR_TICKERS_LOADED_AT = saved[0], saved[1]
@@ -949,19 +967,42 @@ def _resolve_cik_py(ticker: str):
         edgar._FILING_CIK_CACHE.update(saved[2])
 
 
-def _cik_case(name: str, ids: list[str], ticker: str, expect, routes: dict | None = None, **kw) -> Case:
-    return Case(
-        name=name, ids=ids, py=lambda: _resolve_cik_py(ticker),
-        ts={"js": "return (await m.yahooFinance.getSubmissionsForTicker(args[0])).cikPadded", "args": [ticker], "isolate": True},
-        routes=routes or {}, expect=expect, **kw)
+_CIK_JS = """
+if (args[1]) m.yahooFinance.setTickerCikFixturesForTests(new Map(Object.entries(args[1])));
+return (await m.yahooFinance.getSubmissionsForTicker(args[0])).cikPadded;
+"""
 
+
+def _cik_case(name: str, ids: list[str], ticker: str, *expect, routes: dict | None = None,
+              fixtures: dict | None = None, **kw) -> Case:
+    """`expect` (positional, optional: a pinned case gives expect_py / expect_ts instead)."""
+    return Case(
+        name=name, ids=ids, py=lambda: _resolve_cik_py(ticker, fixtures),
+        ts={"js": _CIK_JS, "args": [ticker, fixtures], "isolate": True},
+        routes=routes or {}, **({"expect": expect[0]} if expect else {}), **kw)
+
+
+ATOM_AAPL = "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=AAPL&type=&dateb=&owner=include&count=10&output=atom"
 
 CASES += [
-    _cik_case("tool.q4.smoke_table_resolves_listed_ticker_when_yahoo_and_sec_fail", ["Q4"], "AAPL", "0000320193",
-              mode="pinned", decision="Q4"),
-    _cik_case("tool.q4.smoke_table_covers_aaoi", ["Q4"], "AAOI", "0001158114", mode="pinned", decision="Q4"),
+    # The injected fixture resolves a listed ticker when Yahoo and SEC's index both fail. (Python passes today through
+    # its production smoke table, which holds the same values.)
+    _cik_case("tool.q4.injected_fixture_resolves_listed_ticker_when_yahoo_and_sec_fail", ["Q4"], "AAPL", "0000320193",
+              fixtures=TICKER_CIK_FIXTURES),
+    _cik_case("tool.q4.injected_fixture_covers_aaoi", ["Q4"], "AAOI", "0001158114", fixtures=TICKER_CIK_FIXTURES),
+    # The seam itself: a ticker the old table never held. TODO(python-mirror): flip to equal, expect "0000000042".
+    _cik_case("tool.q4.injected_fixture_resolves_a_ticker_outside_the_old_table", ["Q4"], "FIXT", fixtures={"FIXT": "0000000042"},
+              mode="pinned", decision="Q4", expect_py=None, expect_ts="0000000042"),
+    # Production lookup without fixtures: no Yahoo, no SEC index, no atom -> unresolved, even for a former table entry.
+    # TODO(python-mirror): flip to equal, expect None (Python's production smoke table still answers).
+    _cik_case("tool.q4.no_fixture_and_no_index_falls_to_atom_and_is_unresolved", ["Q4"], "AAPL",
+              mode="pinned", decision="Q4", expect_py="0000320193", expect_ts=None),
+    # Without fixtures the EDGAR atom answers a former table entry. TODO(python-mirror): flip to equal, expect "0000111111".
+    _cik_case("tool.q4.no_fixture_atom_answers_a_former_table_entry", ["Q4"], "AAPL",
+              routes={ATOM_AAPL: {"body": '<feed><link href="https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&amp;CIK=0000111111"/></feed>'}},
+              mode="pinned", decision="Q4", expect_py="0000320193", expect_ts="0000111111"),
     _cik_case("tool.q4.unlisted_ticker_with_all_lookups_failing_is_unresolved", ["Q4"], "ZZZZ", None),
-    _cik_case("tool.q4.sec_ticker_index_wins_over_the_smoke_table", ["Q4"], "AAPL", "0000999999",
+    _cik_case("tool.q4.sec_ticker_index_wins_over_the_smoke_table", ["Q4"], "AAPL", "0000999999", fixtures=TICKER_CIK_FIXTURES,
               routes={"https://www.sec.gov/files/company_tickers.json": {"json": {"0": {"cik_str": 999999, "ticker": "AAPL", "title": "Fake Co"}}}}),
 ]
 
