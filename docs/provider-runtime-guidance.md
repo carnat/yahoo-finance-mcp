@@ -2857,6 +2857,38 @@ F-024, F-026, F-029). Both runtimes change alike.
   `setTickerCikFixturesForTests` (Worker). Production effect only during a combined Yahoo and SEC-index outage.
 - **Rollback:** revert the release.
 
+## MCP SDK Pin (2.13.1)
+
+- **Why:** R4 Q8 (MCP SDK pin and public APIs only). Release type: patch. Python only. The Worker has no MCP SDK
+  (hand-rolled JSON-RPC) and redeploys unchanged apart from the version.
+- **Pin:** `pyproject.toml` pins `mcp[cli]>=2.2,<3`. `scripts/test_workflow_sdk_versions.py` asserts both bounds. A
+  major SDK uplift is out of scope for modernisation.
+- **Public-API rule:** `yfmcp/app.py` defines `YfmcpServer(MCPServer)`, which overrides the public `tool()` and
+  `list_tools()` methods and keeps its own ordered tool registry (with an `after=` position, used once, for
+  `get_company_news`). Ticker `maxItems` (from `tickerCaps`) and the grouped input schemas are applied in the
+  `list_tools()` override.
+- **Removed:** the 1.x `fastmcp` import fallback, the `FastMCP.tool` monkey-patch, `reseat_tool_registration`, and
+  all reads of `_tool_manager._tools`. Tests use the public seams `yfmcp.app.registered_handler(name)` and
+  `registered_tool_fn(name)`.
+- **Guard test:** `scripts/test_mcp_sdk_public_api.py` (in CI) fails if `yfmcp/`, `server.py`, `tool_groups.py` or
+  `scripts/` access `_tool_manager`, `_mcp_server` or `_lowlevel_server`, or patch `MCPServer` or `FastMCP`
+  attributes.
+- **outputSchema:** the 97 `output_schema=` arguments were removed. The 2.x decorator silently dropped them, so the
+  Python listing's outputSchema is still the SDK's auto-derived one. Python `tools/list` (expanded and grouped) was
+  verified byte-identical before and after. Declaring explicit Python output schemas is a Q3i triage item, not done
+  here.
+- **Telemetry export fix (same release, script only):** `scripts/export_telemetry.py` now reads Workers Logs through
+  the observability query `view:"events"` filtered on `$workers.scriptName eq "yahoo-finance-mcp"`, paging by offset
+  (de-duplicated, 200-page cap).
+  - The dispatch line is parsed from a structured or JSON-string `source`, from `$metadata.message`, or from
+    top-level fields.
+  - The invocation outcome is joined through the same `$metadata.requestId` from the `cf-worker-event`, falling back
+    to `$workers.outcome`, then `unknown`.
+  - A response without `result.events` gives `available:false` and exit code 1.
+  - Reason: the 2.11.1 query returned 0 invocations because the JSON-string log line is not field-indexed and the
+    outcome lives on the invocation event.
+- **Rollback:** revert the release.
+
 ## Non-US Primary Filings
 
 - `get_uk_company_filings` reads Companies House, the UK statutory registry:

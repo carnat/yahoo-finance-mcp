@@ -49,6 +49,7 @@ from scripts.parity.cases_news_a import _REGISTRY_BUNDLE_JS
 # Registers the tools (server.py imports the yfmcp modules) the way the existing suites do.
 import server  # noqa: F401,E402
 from yfmcp import url_policy  # noqa: E402
+from yfmcp.app import registered_tool_fn  # noqa: E402
 from yfmcp import capital_structure as cs  # noqa: E402
 from yfmcp import cache as pycache  # noqa: E402
 from yfmcp.clients import edgar  # noqa: E402
@@ -1387,7 +1388,7 @@ _VALIDATION_ROUTES = {SEC_TICKERS_URL: {"json": {}}}
 
 async def _gated_tool(name, args):
     """The registered Python tool, i.e. through the tool-call gate (yfmcp.app wrapper); returns the envelope text."""
-    return await server.yfinance_server._tool_manager._tools[name].fn(**args)
+    return await registered_tool_fn(name)(**args)
 
 
 def _alias_py():

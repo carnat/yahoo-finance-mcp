@@ -17,50 +17,6 @@ from unittest.mock import AsyncMock, patch
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
-def _ensure_mcp_available() -> None:
-    try:
-        import mcp.server  # noqa: F401
-        return
-    except ModuleNotFoundError:
-        pass
-
-    class _FastMCPStub:
-        def __init__(self, *args: object, **kwargs: object) -> None:
-            pass
-
-        def tool(self, *args: object, **kwargs: object):  # type: ignore[return]
-            if args and callable(args[0]):
-                return args[0]
-
-            def _decorator(fn):  # type: ignore[return]
-                return fn
-
-            return _decorator
-
-    mcp_mod = types.ModuleType("mcp")
-    server_mod = types.ModuleType("mcp.server")
-    fastmcp_mod = types.ModuleType("mcp.server.fastmcp")
-    fastmcp_mod.FastMCP = _FastMCPStub  # type: ignore[attr-defined]
-    mcp_mod.server = server_mod  # type: ignore[attr-defined]
-    server_mod.fastmcp = fastmcp_mod  # type: ignore[attr-defined]
-    sys.modules.setdefault("mcp", mcp_mod)
-    sys.modules.setdefault("mcp.server", server_mod)
-    sys.modules.setdefault("mcp.server.fastmcp", fastmcp_mod)
-
-
-_ensure_mcp_available()
-
-from yfmcp.app import FastMCP as _FastMCP  # noqa: E402
-
-if not getattr(_FastMCP, "_output_schema_patched", False):
-    _original_tool = _FastMCP.tool
-
-    def _patched_tool(self, name=None, output_schema=None, **kwargs):  # type: ignore[override]
-        return _original_tool(self, name=name, **kwargs)
-
-    _FastMCP.tool = _patched_tool  # type: ignore[method-assign]
-    _FastMCP._output_schema_patched = True  # type: ignore[attr-defined]
-
 import server as srv  # noqa: E402
 
 

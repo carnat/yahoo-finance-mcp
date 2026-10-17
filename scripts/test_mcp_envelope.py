@@ -16,13 +16,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # Activate the envelope for these tests
 os.environ["MCP_ENVELOPE_V2"] = "true"
 
-# Patch FastMCP.tool to accept output_schema (not in mcp>=1.9)
-from yfmcp.app import FastMCP as _FastMCP  # noqa: E402
-_orig_tool = _FastMCP.tool
-def _patched_tool(self, name=None, output_schema=None, **kwargs):  # type: ignore[override]
-    return _orig_tool(self, name=name, **kwargs)
-_FastMCP.tool = _patched_tool  # type: ignore[method-assign]
-
 
 def _reload_server():
     """Reload server module so the env var is picked up."""

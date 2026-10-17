@@ -1,9 +1,13 @@
-"""Central FastMCP application instance.
+"""Central MCP application instance.
 
 This module is the single source of truth for:
-- The FastMCP compat shim (strips unsupported output_schema kwarg on older SDKs)
-- The shared ``yfinance_server`` FastMCP instance that all domain modules register on
-- ``build_handler_registry``: derives the handler map from the live tool manager for grouped mode
+- ``YfmcpServer``: the ``MCPServer`` subclass every tool is registered on. It overrides the public ``tool()`` and
+  ``list_tools()`` methods only (read-only annotations, thread offload, tool-call gate and envelope; own ordered
+  registry; ticker-cap and grouped schemas applied to the listing). No SDK class is patched and no SDK
+  private attribute is read (Q8, 2.13.1).
+- The shared ``yfinance_server`` instance that all domain modules register on
+- ``build_handler_registry`` / ``build_tool_contract_registry``: derive the handler and input-schema maps from the
+  registry for grouped mode
 
 All ``yfmcp/tools/*.py`` domain modules import ``yfinance_server`` from here.
 ``server.py`` also imports it from here (never the reverse) to avoid circular imports.
@@ -12,24 +16,26 @@ All ``yfmcp/tools/*.py`` domain modules import ``yfinance_server`` from here.
 from __future__ import annotations
 
 import asyncio
+import copy
+import dataclasses
 import functools
 import inspect
 from typing import Any, Callable
 
-try:  # mcp>=2 renamed FastMCP to MCPServer; the decorator API is unchanged.
-    from mcp.server.mcpserver import MCPServer as FastMCP
-except ImportError:  # mcp 1.x
-    from mcp.server.fastmcp import FastMCP
+try:
+    from mcp.server.mcpserver import MCPServer
+    from mcp.server.mcpserver.tools import Tool as _SdkTool
+    from mcp.types import Tool as MCPTool, ToolAnnotations
+except ImportError as exc:  # Q8: no 1.x fallback; fail loudly with the supported range.
+    raise ImportError(
+        "yahoo-finance-mcp requires the MCP Python SDK in the range mcp[cli]>=2.2,<3 "
+        "(mcp.server.mcpserver.MCPServer); install it with: pip install 'mcp[cli]>=2.2,<3'"
+    ) from exc
 
 from yfmcp.build_info import BUILD_VERSION
 from yfmcp import url_policy
 from yfmcp.envelope import _budget_guarded_result, _envelope_tool_result
-from yfmcp.validation import validate_tool_args
-
-try:
-    from mcp.types import ToolAnnotations
-except (ImportError, ModuleNotFoundError):  # pragma: no cover - legacy test shim
-    ToolAnnotations = None  # type: ignore[assignment,misc]
+from yfmcp.validation import TICKER_CAPS, validate_tool_args
 
 _READ_ONLY_ANNOTATION_VALUES = {
     "readOnlyHint": True,
@@ -37,72 +43,16 @@ _READ_ONLY_ANNOTATION_VALUES = {
     "idempotentHint": True,
     "openWorldHint": True,
 }
-READ_ONLY_TOOL_ANNOTATIONS = (
-    ToolAnnotations(**_READ_ONLY_ANNOTATION_VALUES)
-    if ToolAnnotations is not None
-    else _READ_ONLY_ANNOTATION_VALUES
-)
+READ_ONLY_TOOL_ANNOTATIONS = ToolAnnotations(**_READ_ONLY_ANNOTATION_VALUES)
 _CLOSED_WORLD_ANNOTATION_VALUES = {
     **_READ_ONLY_ANNOTATION_VALUES,
     "openWorldHint": False,
 }
-CLOSED_WORLD_TOOL_ANNOTATIONS = (
-    ToolAnnotations(**_CLOSED_WORLD_ANNOTATION_VALUES)
-    if ToolAnnotations is not None
-    else _CLOSED_WORLD_ANNOTATION_VALUES
-)
+CLOSED_WORLD_TOOL_ANNOTATIONS = ToolAnnotations(**_CLOSED_WORLD_ANNOTATION_VALUES)
 _CLOSED_WORLD_TOOL_NAMES = {
     "system",
     "health_check",
 }
-
-
-# ---------------------------------------------------------------------------
-# Backward-compatible FastMCP decorator shim
-# ---------------------------------------------------------------------------
-# Older FastMCP SDK versions do not accept an ``output_schema`` kwarg on
-# ``@server.tool()``.  This shim silently drops the kwarg so the codebase can
-# annotate decorators with output schemas without breaking older runtimes.
-# ---------------------------------------------------------------------------
-_ORIGINAL_FASTMCP_TOOL = getattr(
-    FastMCP,
-    "_yfmcp_original_tool",
-    FastMCP.tool,
-)
-if not hasattr(FastMCP, "_yfmcp_original_tool"):
-    FastMCP._yfmcp_original_tool = _ORIGINAL_FASTMCP_TOOL  # type: ignore[attr-defined]
-_FASTMCP_TOOL_PARAMS = inspect.signature(_ORIGINAL_FASTMCP_TOOL).parameters
-_FASTMCP_TOOL_SUPPORTS_OUTPUT_SCHEMA = "output_schema" in _FASTMCP_TOOL_PARAMS or any(
-    _param.kind == inspect.Parameter.VAR_KEYWORD
-    for _param in _FASTMCP_TOOL_PARAMS.values()
-)
-_FASTMCP_TOOL_SUPPORTS_ANNOTATIONS = "annotations" in _FASTMCP_TOOL_PARAMS or any(
-    _param.kind == inspect.Parameter.VAR_KEYWORD
-    for _param in _FASTMCP_TOOL_PARAMS.values()
-)
-
-
-def _fastmcp_tool_compat(self: FastMCP, *args: Any, **kwargs: Any) -> Any:
-    """Apply read-only metadata and preserve older FastMCP compatibility."""
-    if _FASTMCP_TOOL_SUPPORTS_ANNOTATIONS:
-        annotations = (
-            CLOSED_WORLD_TOOL_ANNOTATIONS
-            if kwargs.get("name") in _CLOSED_WORLD_TOOL_NAMES
-            else READ_ONLY_TOOL_ANNOTATIONS
-        )
-        kwargs.setdefault("annotations", annotations)
-    else:
-        kwargs.pop("annotations", None)
-    if not _FASTMCP_TOOL_SUPPORTS_OUTPUT_SCHEMA:
-        kwargs.pop("output_schema", None)
-    register = _ORIGINAL_FASTMCP_TOOL(self, *args, **kwargs)
-
-    def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
-        tool_name = kwargs.get("name") or fn.__name__
-        register(_offload_to_thread(fn, tool_name) if inspect.iscoroutinefunction(fn) else fn)
-        return fn
-
-    return decorator
 
 
 def _call_arguments(fn: Callable[..., Any], args: tuple, kwargs: dict[str, Any]) -> dict[str, Any]:
@@ -150,30 +100,175 @@ def _offload_to_thread(fn: Callable[..., Any], tool_name: str) -> Callable[..., 
     async def wrapper(*args: Any, **kwargs: Any) -> Any:
         return await asyncio.to_thread(run, *args, **kwargs)
 
-    wrapper._yfmcp_handler = fn  # type: ignore[attr-defined]
     return wrapper
 
 
-if FastMCP.tool is not _fastmcp_tool_compat:
-    FastMCP.tool = _fastmcp_tool_compat
+# ---------------------------------------------------------------------------
+# Server subclass: public tool()/list_tools() overrides and our own tool registry
+# ---------------------------------------------------------------------------
+@dataclasses.dataclass(frozen=True)
+class ToolRegistration:
+    """One tool registered through ``YfmcpServer.tool``."""
+
+    name: str
+    fn: Callable[..., Any]  # the handler as written in the domain module (grouped routing calls this)
+    registered: Callable[..., Any]  # what the SDK invokes: ``fn`` wrapped for thread offload, gate and envelope
+    sdk_kwargs: dict[str, Any]  # the keyword arguments passed on to ``MCPServer.tool``
+    after: str | None  # list this tool directly after the named tool (see ``YfmcpServer.tool``)
+
+
+class YfmcpServer(MCPServer):
+    """``MCPServer`` with the project's registration and listing rules, built only on public SDK methods."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        self._yfmcp_tools: dict[str, ToolRegistration] = {}
+        self._yfmcp_schema_overrides: dict[str, dict[str, Any]] = {}
+        super().__init__(*args, **kwargs)
+
+    # -- registration -------------------------------------------------------
+    def tool(  # type: ignore[override]
+        self,
+        name: str | None = None,
+        title: str | None = None,
+        description: str | None = None,
+        annotations: ToolAnnotations | None = None,
+        icons: list[Any] | None = None,
+        meta: dict[str, Any] | None = None,
+        structured_output: bool | None = None,
+        *,
+        after: str | None = None,
+    ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+        """Register a tool: read-only metadata, thread offload for async handlers, entry in our registry.
+
+        ``after`` places the tool directly after another registered tool in ``tools/list`` (resolved when
+        listing, so registration order across modules does not matter). The decorator returns the
+        original function, so module-level names and grouped routing keep the un-wrapped handler.
+        """
+        if annotations is None:
+            annotations = (
+                CLOSED_WORLD_TOOL_ANNOTATIONS if name in _CLOSED_WORLD_TOOL_NAMES else READ_ONLY_TOOL_ANNOTATIONS
+            )
+        sdk_kwargs: dict[str, Any] = {
+            "name": name,
+            "title": title,
+            "description": description,
+            "annotations": annotations,
+            "icons": icons,
+            "meta": meta,
+            "structured_output": structured_output,
+        }
+        register = super().tool(**sdk_kwargs)  # also rejects a bare ``@server.tool`` (no call)
+
+        def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
+            tool_name = name or fn.__name__
+            registered = _offload_to_thread(fn, tool_name) if inspect.iscoroutinefunction(fn) else fn
+            register(registered)
+            # The SDK keeps the first registration of a name; so does the registry.
+            if tool_name not in self._yfmcp_tools:
+                self._yfmcp_tools[tool_name] = ToolRegistration(tool_name, fn, registered, sdk_kwargs, after)
+            return fn
+
+        return decorator
+
+    def set_input_schema(self, name: str, schema: dict[str, Any]) -> None:
+        """Advertise ``schema`` as the listed ``inputSchema`` of a registered tool (grouped meta-tools)."""
+        if name not in self._yfmcp_tools:
+            raise RuntimeError(f"Cannot set the input schema of '{name}': tool is not registered")
+        self._yfmcp_schema_overrides[name] = copy.deepcopy(schema)
+
+    # -- registry reads (sync; fail loudly) ---------------------------------
+    def registrations(self) -> list[ToolRegistration]:
+        """Registered tools in listing order. Raises when nothing is registered or an ``after`` target is missing."""
+        if not self._yfmcp_tools:
+            raise RuntimeError("No tools are registered on this server")
+        return self._ordered_registrations()
+
+    def _ordered_registrations(self) -> list[ToolRegistration]:
+        names = list(self._yfmcp_tools)
+        for name, registration in self._yfmcp_tools.items():
+            if registration.after is None:
+                continue
+            if registration.after not in self._yfmcp_tools:
+                raise RuntimeError(f"Tool '{name}' is to be listed after '{registration.after}', which is not registered")
+            names.remove(name)
+            names.insert(names.index(registration.after) + 1, name)
+        return [self._yfmcp_tools[name] for name in names]
+
+    def registration(self, name: str) -> ToolRegistration:
+        try:
+            return self._yfmcp_tools[name]
+        except KeyError:
+            raise RuntimeError(f"Tool '{name}' is not registered") from None
+
+    def tool_specs(self) -> list[dict[str, Any]]:
+        """Listing-order specs (name, description, parameters, output_schema) as ``tools/list`` advertises them."""
+        specs: list[dict[str, Any]] = []
+        for registration in self.registrations():
+            sdk_tool = _SdkTool.from_function(registration.registered, **registration.sdk_kwargs)
+            spec: dict[str, Any] = {
+                "name": registration.name,
+                "description": str(sdk_tool.description or ""),
+                "parameters": self._listing_schema(registration.name, sdk_tool.parameters),
+            }
+            if sdk_tool.output_schema is not None:
+                spec["output_schema"] = copy.deepcopy(sdk_tool.output_schema)
+            specs.append(spec)
+        return specs
+
+    # -- listing ------------------------------------------------------------
+    def _listing_schema(self, name: str, schema: dict[str, Any]) -> dict[str, Any]:
+        """The ``inputSchema`` advertised for ``name``: a grouped override, else the schema with tickerCaps applied.
+
+        Listing only: the argument model is untouched, so an oversize array still reaches the tool-call gate and
+        gets BATCH_LIMIT_EXCEEDED (2.12.0, Q3c). get_market_snapshot advertises its compact cap; the full-mode cap
+        is enforced by the gate (as in the Worker).
+        """
+        override = self._yfmcp_schema_overrides.get(name)
+        if override is not None:
+            return copy.deepcopy(override)
+        cap = TICKER_CAPS.get(name) if "." not in name else None
+        patched = copy.deepcopy(schema)
+        if cap is None:
+            return patched
+        ticker = patched.get("properties", {}).get("ticker")
+        array_branch = next(
+            (b for b in (ticker or {}).get("anyOf", []) + (ticker or {}).get("oneOf", []) if b.get("type") == "array"),
+            None,
+        )
+        if array_branch is None:
+            raise RuntimeError(f"tickerCaps names '{name}', which has no ticker array schema")
+        array_branch["maxItems"] = cap
+        return patched
+
+    async def list_tools(self) -> list[MCPTool]:
+        """``tools/list`` in registry order, with ticker caps and grouped schemas applied to ``inputSchema``."""
+        listed = await super().list_tools()
+        by_name = {tool.name: tool for tool in listed}
+        ordered = [by_name[r.name] for r in self._ordered_registrations() if r.name in by_name]
+        ordered += [tool for tool in listed if tool.name not in self._yfmcp_tools]
+        return [
+            tool.model_copy(update={"input_schema": self._listing_schema(tool.name, tool.input_schema)})
+            for tool in ordered
+        ]
+
+
+def registered_handler(name: str, server: YfmcpServer | None = None) -> Callable[..., Any]:
+    """The handler function as written (no thread offload, gate or envelope); ``server`` defaults to ``yfinance_server``."""
+    return (server or yfinance_server).registration(name).fn
+
+
+def registered_tool_fn(name: str, server: YfmcpServer | None = None) -> Callable[..., Any]:
+    """The callable the SDK invokes for ``name`` (thread offload, gate, envelope); ``server`` defaults to ``yfinance_server``."""
+    return (server or yfinance_server).registration(name).registered
+
 
 
 # ---------------------------------------------------------------------------
-# Shared FastMCP server instance
+# Shared server instance
 # ---------------------------------------------------------------------------
-def create_server(name: str, instructions: str) -> FastMCP:
-    """Build a server whose MCP ``initialize`` reports this build's version.
-
-    mcp 2.x accepts ``version``; 1.x has no argument for it, so set the
-    low-level implementation version directly instead of reporting the SDK's.
-    """
-    if "version" in inspect.signature(FastMCP.__init__).parameters:
-        return FastMCP(name, instructions=instructions, version=BUILD_VERSION)
-    server = FastMCP(name, instructions=instructions)
-    low_level = getattr(server, "_mcp_server", None)
-    if low_level is not None:
-        low_level.version = BUILD_VERSION
-    return server
+def create_server(name: str, instructions: str) -> YfmcpServer:
+    """Build a server whose MCP ``initialize`` reports this build's version."""
+    return YfmcpServer(name, instructions=instructions, version=BUILD_VERSION)
 
 
 yfinance_server = create_server(
@@ -316,93 +411,27 @@ This server provides financial market data from Yahoo Finance and SEC EDGAR via 
 )
 
 
-def build_handler_registry(*servers: FastMCP) -> dict[str, Callable[..., Any]]:
+def build_handler_registry(*servers: YfmcpServer) -> dict[str, Callable[..., Any]]:
     """Map handler function name -> function for every tool registered on ``servers``.
 
-    Reads the FastMCP tool manager so the mapping always reflects the live set
-    of registered tools, independent of where the handlers are defined. Used by
-    grouped mode to route each action name (e.g. "get_market_quote") to the
-    canonical tool function of the same name.
+    Reads the server's own registry so the mapping always reflects the live set
+    of registered tools, independent of where the handlers are defined, and fails
+    loudly (RuntimeError) when a server has none. Used by grouped mode to route
+    each action name (e.g. "get_market_quote") to the canonical tool function of
+    the same name. The original handler is returned, not the thread-offloaded
+    wrapper, so an action call does not hop threads twice.
     """
     registry: dict[str, Callable[..., Any]] = {}
     for server in servers:
-        manager = getattr(server, "_tool_manager", None)
-        tools = getattr(manager, "_tools", None) if manager is not None else None
-        for tool in (tools or {}).values():
-            fn = getattr(tool, "fn", None)
-            if fn is not None:
-                # Grouped tools are already offloaded; route to the original
-                # handler so an action call does not hop threads twice.
-                fn = getattr(fn, "_yfmcp_handler", fn)
-                registry[fn.__name__] = fn
+        for registration in server.registrations():
+            registry[registration.fn.__name__] = registration.fn
     return registry
 
 
-def build_tool_contract_registry(*servers: FastMCP) -> dict[str, dict[str, Any]]:
-    """Map handler function name to its FastMCP-generated input schema."""
+def build_tool_contract_registry(*servers: YfmcpServer) -> dict[str, dict[str, Any]]:
+    """Map handler function name to its listed input schema (tickerCaps ``maxItems`` included)."""
     registry: dict[str, dict[str, Any]] = {}
     for server in servers:
-        manager = getattr(server, "_tool_manager", None)
-        tools = getattr(manager, "_tools", None) if manager is not None else None
-        for tool in (tools or {}).values():
-            fn = getattr(tool, "fn", None)
-            parameters = getattr(tool, "parameters", None)
-            if fn is not None and isinstance(parameters, dict):
-                registry[fn.__name__] = parameters
+        for registration, spec in zip(server.registrations(), server.tool_specs()):
+            registry[registration.fn.__name__] = spec["parameters"]
     return registry
-
-
-def reseat_tool_registration(server: FastMCP, name: str, after: str) -> None:
-    """Move an already registered tool to sit directly after tool ``after`` in the registry.
-
-    A tool's position in ``tools/list`` is its registration order. When a handler
-    moves out of ``server.py`` into a ``yfmcp.tools.*`` module its decorator runs
-    at that module's import, which can change the order the listing had when the
-    handler sat between ``server.py`` registrations. Calling this at the
-    handler's old position in ``server.py`` restores the original order, so the
-    published listing (names, order, schemas) stays byte-identical. Idempotent,
-    so re-executing ``server.py`` (``importlib.reload``) keeps the same order.
-    """
-    manager = getattr(server, "_tool_manager", None)
-    tools = getattr(manager, "_tools", None) if manager is not None else None
-    if not isinstance(tools, dict):
-        # Fail loudly (brief Q8): a silent no-op would reorder the published listing.
-        raise RuntimeError("FastMCP tool registry (_tool_manager._tools) not found; cannot keep tool order")
-    if name not in tools or after not in tools:
-        return
-    moved = tools[name]
-    ordered = [(key, tool) for key, tool in tools.items() if key != name]
-    position = next(i for i, (key, _tool) in enumerate(ordered) if key == after) + 1
-    ordered.insert(position, (name, moved))
-    tools.clear()
-    tools.update(ordered)
-
-
-def apply_ticker_caps(*servers: FastMCP) -> None:
-    """Advertise each capped action's tool_catalog.json tickerCaps entry as ``maxItems`` on its ticker array branch.
-
-    The listing schema only: the pydantic argument model is untouched, so an oversize array still reaches the
-    tool-call gate and gets BATCH_LIMIT_EXCEEDED. get_market_snapshot advertises its compact cap; the full-mode
-    cap is enforced by the gate (as in the Worker). Call once every tool is registered and before the grouped
-    contract registry is built.
-    """
-    from yfmcp.validation import TICKER_CAPS
-
-    for key, cap in TICKER_CAPS.items():
-        if "." in key:
-            continue
-        for server in servers:
-            manager = getattr(server, "_tool_manager", None)
-            tools = getattr(manager, "_tools", None) if manager is not None else None
-            tool = (tools or {}).get(key)
-            if tool is None:  # not registered on this server (a partially re-imported module set)
-                continue
-            parameters = getattr(tool, "parameters", None)
-            ticker = parameters.get("properties", {}).get("ticker") if isinstance(parameters, dict) else None
-            array_branch = next(
-                (b for b in (ticker or {}).get("anyOf", []) + (ticker or {}).get("oneOf", []) if b.get("type") == "array"),
-                None,
-            )
-            if array_branch is None:
-                raise RuntimeError(f"tickerCaps names '{key}', which has no ticker array schema")
-            array_branch["maxItems"] = cap

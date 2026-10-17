@@ -50,7 +50,7 @@ CASES += [
 
 
 def _py_contract() -> dict:
-    # The registered schema, not the listing's: FastMCP wraps a listed output schema in a {"result": string} object.
+    # The registered schema, not the listing's: the SDK wraps a listed output schema in a {"result": string} object.
     tool = next(t for t in asyncio.run(server.yfinance_server.list_tools()) if t.name == "health_check")
     return {
         "schema": _MANIFEST_DIAGNOSTICS_OUTPUT_SCHEMA["properties"]["credentialTransport"],

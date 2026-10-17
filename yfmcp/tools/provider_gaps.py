@@ -107,7 +107,6 @@ def _validate_historical_date(value: str) -> datetime.date:
 
 @yfinance_server.tool(
     name="get_historical_put_call_ratio",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["get_historical_put_call_ratio"],
     description="""Return Alpha Vantage's historical put/call ratio for one ticker and one explicit date.
 
 Use this only when the user needs a historical dated ratio. For a current
@@ -278,7 +277,6 @@ def _ownership_data_date(payload: dict[str, object], rows: list[dict[str, object
 
 @yfinance_server.tool(
     name="get_expanded_institutional_ownership",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["get_expanded_institutional_ownership"],
     description="""Return a deeper institutional-holder list than Yahoo's ordinary top-holder view.
 
 Use get_ownership_holders first for normal holder questions. This action tries

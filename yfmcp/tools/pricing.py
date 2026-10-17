@@ -323,7 +323,6 @@ async def get_fast_info(ticker: str | list[str]) -> str:
 
 @yfinance_server.tool(
     name="get_short_interest",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["get_short_interest"],
     description="""Get short interest data for a ticker symbol.
 
 Returns structured short-selling metrics sourced from yfinance .info, including the
@@ -631,7 +630,6 @@ def _annualized_volatility(closes: list[float], window: int = 30) -> float | Non
 
 @yfinance_server.tool(
     name="get_technical_indicators",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["get_technical_indicators"],
     description="""Get pre-computed technical / momentum indicators for one or more tickers.
 
 Computes indicators server-side from completed daily closes only. An unfinished
@@ -1031,7 +1029,6 @@ async def _load_completed_daily_history(
 
 @yfinance_server.tool(
     name="get_price_slope",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["get_price_slope"],
     description="""Get completed-session N-day close-to-close price change and direction for one or more tickers. Pre-computed server-side.
 
 days=N uses N+1 completed daily bars. An unfinished current-session bar is
@@ -1369,7 +1366,6 @@ async def get_ma_position(ticker: str | list[str]) -> str:
 # ---------------------------------------------------------------------------
 @yfinance_server.tool(
     name="get_short_momentum",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["get_short_momentum"],
     description="""Get short interest with pre-computed momentum: MoM delta, direction, squeeze risk, and flag. dataDate is the short-interest observation date, not today's market date.
 
 Args:
@@ -1752,7 +1748,7 @@ def _classify_quote_freshness(
         return "UNKNOWN"
 
 
-@yfinance_server.tool(name="get_market_snapshot", output_schema=_MARKET_SNAPSHOT_OUTPUT_SCHEMA, description="Compact market-state packet with separate live-quote and completed-bar dates, component status, price/range, moving-average trend, completed-session volume/liquidity, and technical indicators. Supports compact/full modes and ticker batches. Pass min_adv_usd for a caller-chosen threshold; meetsMinimum reports adv20dTradedValueUsd >= min_adv_usd.")
+@yfinance_server.tool(name="get_market_snapshot", description="Compact market-state packet with separate live-quote and completed-bar dates, component status, price/range, moving-average trend, completed-session volume/liquidity, and technical indicators. Supports compact/full modes and ticker batches. Pass min_adv_usd for a caller-chosen threshold; meetsMinimum reports adv20dTradedValueUsd >= min_adv_usd.")
 async def get_market_snapshot(
     ticker: str | list[str],
     mode: str = "compact",

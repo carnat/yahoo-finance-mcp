@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Tests for grouped-mode handler resolution via the FastMCP-derived registry.
+"""Tests for grouped-mode handler resolution via the YfmcpServer-derived registry.
 
 Phase 2 moved grouped-mode handler resolution off ``server.py`` module globals
-and onto ``yfmcp.app.build_handler_registry``, which reads the live FastMCP tool
-manager. These tests guard the plan's top risk for the split: that grouped mode
+and onto ``yfmcp.app.build_handler_registry``, which reads the live registry
+of the server. These tests guard the plan's top risk for the split: that grouped mode
 silently loses handlers as tools migrate into yfmcp.tools.* modules.
 
 Offline — no network calls required.
@@ -27,82 +27,9 @@ from unittest.mock import patch
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
-def _ensure_mcp_available() -> None:
-    try:
-        import mcp.server  # noqa: F401
-        return
-    except ModuleNotFoundError:
-        pass
-
-    class _ToolEntry:
-        def __init__(self, fn, name, annotations=None):
-            self.fn = fn
-            self.name = name
-            self.annotations = annotations
-            signature = inspect.signature(fn)
-            properties = {param_name: {} for param_name in signature.parameters}
-            required = [
-                param_name
-                for param_name, parameter in signature.parameters.items()
-                if parameter.default is inspect.Parameter.empty
-            ]
-            self.parameters = {
-                "type": "object",
-                "properties": properties,
-                "required": required,
-            }
-
-    class _ToolManager:
-        def __init__(self):
-            self._tools: dict[str, _ToolEntry] = {}
-
-    class _FastMCPStub:
-        def __init__(self, *a: object, **kw: object) -> None:
-            self._tool_manager = _ToolManager()
-
-        def tool(self, *a: object, name: str | None = None, **kw: object):
-            def _decorator(fn):
-                tool_name = name or fn.__name__
-                self._tool_manager._tools[tool_name] = _ToolEntry(
-                    fn,
-                    tool_name,
-                    kw.get("annotations"),
-                )
-                return fn
-            if a and callable(a[0]):
-                return _decorator(a[0])
-            return _decorator
-
-        async def list_tools(self):
-            return list(self._tool_manager._tools.values())
-
-    mcp_mod = types.ModuleType("mcp")
-    server_mod = types.ModuleType("mcp.server")
-    fastmcp_mod = types.ModuleType("mcp.server.fastmcp")
-    fastmcp_mod.FastMCP = _FastMCPStub  # type: ignore[attr-defined]
-    mcp_mod.server = server_mod  # type: ignore[attr-defined]
-    server_mod.fastmcp = fastmcp_mod  # type: ignore[attr-defined]
-    sys.modules.setdefault("mcp", mcp_mod)
-    sys.modules.setdefault("mcp.server", server_mod)
-    sys.modules.setdefault("mcp.server.fastmcp", fastmcp_mod)
-
-
-_ensure_mcp_available()
-
-from yfmcp.app import FastMCP as _FastMCP  # noqa: E402
-
-if not getattr(_FastMCP, "_output_schema_patched", False):
-    _orig_tool = _FastMCP.tool
-
-    def _patched_tool(self, name=None, output_schema=None, **kwargs):  # type: ignore[override]
-        return _orig_tool(self, name=name, **kwargs)
-
-    _FastMCP.tool = _patched_tool  # type: ignore[method-assign]
-    _FastMCP._output_schema_patched = True  # type: ignore[attr-defined]
-
 import server as srv  # noqa: E402
 import tool_groups  # noqa: E402
-from yfmcp.app import build_handler_registry, yfinance_server  # noqa: E402
+from yfmcp.app import build_handler_registry, registered_tool_fn, yfinance_server  # noqa: E402
 from yfmcp.tools.system import _public_metadata  # noqa: E402
 
 
@@ -174,12 +101,7 @@ class TestGroupedServer(unittest.TestCase):
         from yfmcp.build_info import BUILD_VERSION
 
         grouped = srv._build_grouped_server()
-        # mcp 1.x keeps the low-level server on _mcp_server, 2.x on _lowlevel_server.
-        low_level = getattr(grouped, "_mcp_server", None) or getattr(grouped, "_lowlevel_server", None)
-        if low_level is None:
-            self.skipTest("MCP SDK stub has no low-level server")
-        initialization = low_level.create_initialization_options()
-        self.assertEqual(initialization.server_version, BUILD_VERSION)
+        self.assertEqual(grouped.version, BUILD_VERSION)
 
     def test_grouped_discovery_is_typed_and_read_only(self):
         grouped = srv._build_grouped_server()
@@ -257,9 +179,9 @@ class TestGroupedRouting(unittest.TestCase):
 
     def test_registered_grouped_handler_invokes_router(self):
         grouped = srv._build_grouped_server()
-        entry = grouped._tool_manager._tools["system"]
+        system_fn = registered_tool_fn("system", grouped)
         with patch.dict(os.environ, {"MCP_ENVELOPE_V2": "true"}):
-            payload = json.loads(asyncio.run(entry.fn("health_check", {})))
+            payload = json.loads(asyncio.run(system_fn("health_check", {})))
         # Same V2 envelope the Worker returns for health_check.
         self.assertIs(payload["ok"], True)
         self.assertEqual(payload["meta"]["tool"], "health_check")

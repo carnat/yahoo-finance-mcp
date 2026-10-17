@@ -296,7 +296,6 @@ async def _resolve_latest_earnings_release(ticker: str) -> dict:
 
 @yfinance_server.tool(
     name="get_latest_earnings_release",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["get_latest_earnings_release"],
     description="Find the latest public earnings release evidence. Fiscal period is returned only when explicit release text resolves it; otherwise it remains unresolved.",
 )
 async def get_latest_earnings_release(ticker: str, period: str = "latest") -> str:
@@ -314,7 +313,6 @@ async def get_latest_earnings_release(ticker: str, period: str = "latest") -> st
 
 @yfinance_server.tool(
     name="index_earnings_release",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["index_earnings_release"],
     description="Build a compact section/table index for the latest public earnings release to support deterministic extraction.",
 )
 async def index_earnings_release(ticker: str, period: str = "latest", source_url: str | None = None) -> str:
@@ -382,7 +380,6 @@ async def index_earnings_release(ticker: str, period: str = "latest", source_url
 
 @yfinance_server.tool(
     name="extract_earnings_metrics",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["extract_earnings_metrics"],
     description="Extract reported earnings metrics from public earnings sources. EX-99 prose or unscoped iXBRL values remain non-decision-grade until their period is structurally matched.",
 )
 async def extract_earnings_metrics(
@@ -494,7 +491,6 @@ async def extract_earnings_metrics(
     }, warnings=warnings)
 @yfinance_server.tool(
     name="extract_guidance",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["extract_guidance"],
     description="Extract company-provided guidance ranges from the resolved official SEC earnings exhibit, including 'between X and Y' wording.",
 )
 async def extract_guidance(ticker: str, period: str = "latest") -> str:
@@ -616,7 +612,6 @@ async def extract_guidance(ticker: str, period: str = "latest") -> str:
 
 @yfinance_server.tool(
     name="extract_management_commentary",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["extract_management_commentary"],
     description="Extract neutral, topic-specific management commentary snippets from public earnings release sources.",
 )
 async def extract_management_commentary(ticker: str, period: str = "latest", topics: list[str] | None = None) -> str:
@@ -661,7 +656,6 @@ async def extract_management_commentary(ticker: str, period: str = "latest", top
 
 @yfinance_server.tool(
     name="compare_earnings_actual_vs_estimate",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["compare_earnings_actual_vs_estimate"],
     description="Compare official-release actuals with Yahoo's historical estimate row. The official fiscal label remains period/reportedPeriod; estimatePeriod and reportedDate identify the Yahoo row; releaseDate is the earnings release date. Read periodAlignmentStatus before using cross-source revenue comparisons. Returns epsDelta and omits percentage surprise for near-zero estimates.",
 )
 async def compare_earnings_actual_vs_estimate(ticker: str, period: str = "latest") -> str:
@@ -855,7 +849,6 @@ async def compare_earnings_actual_vs_estimate(ticker: str, period: str = "latest
 
 @yfinance_server.tool(
     name="list_sec_filing_exhibits",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["list_sec_filing_exhibits"],
     description="List all exhibits/documents attached to a specific SEC filing by accession number.",
 )
 async def list_sec_filing_exhibits(ticker: str, accessionNumber: str) -> str:
@@ -886,7 +879,6 @@ async def list_sec_filing_exhibits(ticker: str, accessionNumber: str) -> str:
 
 @yfinance_server.tool(
     name="get_sec_filing_exhibit_content",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["get_sec_filing_exhibit_content"],
     description="Fetch and return the text content of a specific exhibit from an SEC filing. Supports topic-based paragraph filtering to reduce token usage.",
 )
 async def get_sec_filing_exhibit_content(ticker: str, accessionNumber: str, fileName: str, topics: list[str] | None = None) -> str:
@@ -1043,7 +1035,6 @@ async def _yahoo_transcript_text_for_url(url: str) -> str | None:
 
 @yfinance_server.tool(
     name="parse_public_transcript",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["parse_public_transcript"],
     description="Parse a public transcript from an https URL or caller-supplied raw_text, with optional topic filtering.",
 )
 async def parse_public_transcript(url: str = "", topics: list[str] | None = None, raw_text: str | None = None) -> str:
@@ -1694,7 +1685,6 @@ async def _fetch_alpha_vantage_transcript(ticker: str, quarter: str, topics: lis
 
 @yfinance_server.tool(
     name="get_earnings_call_transcript",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["get_earnings_call_transcript"],
     description="Retrieve an earnings-call transcript from a content-validated SEC exhibit, then Yahoo/Quartr, then optional Alpha Vantage. Yahoo results are structured and paragraph-paginated for LLM use and include the human-readable sourceUrl. Preview-only Yahoo payloads are reported as INCOMPLETE_TRANSCRIPT and continue to the alternate-source fallback. Inspect contentCompleteness rather than treating cursor exhaustion as proof of a full call. Yahoo contentSha256 identifies the canonical transcript text and speaker projection declared by contentHashBasis, so it remains stable across pages and runtimes. Provide source_url or event_id to target a known Yahoo call. Yahoo and Alpha transcripts are contextual and never decision-grade; filing dates are never treated as fiscal periods.",
 )
 async def get_earnings_call_transcript(

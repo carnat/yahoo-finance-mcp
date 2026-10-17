@@ -28,6 +28,7 @@ from scripts.parity.harness import Case
 
 # Registers the tools (server.py imports the yfmcp modules) the way the existing suites do.
 import server  # noqa: F401,E402
+from yfmcp.app import registered_tool_fn  # noqa: E402
 from yfmcp.tools import news as news_tools  # noqa: E402
 from yfmcp.tools import pricing  # noqa: E402
 
@@ -1159,7 +1160,7 @@ def _pick(*keys):
 def _gated_slope_seven() -> str:
     """get_price_slope for seven tickers through the registered Python tool, i.e. through the tool-call gate."""
     closes = [100.00] + [100.0] * 4 + [103.25]
-    tool = server.yfinance_server._tool_manager._tools["get_price_slope"].fn
+    tool = registered_tool_fn("get_price_slope")
     with patch.object(pricing.yf, "Ticker", MagicMock()), \
             patch.object(pricing, "_load_completed_daily_history", AsyncMock(return_value=_series_prepared(closes, [1000] * len(closes)))):
         return asyncio.run(tool(ticker=["T1", "T2", "T3", "T4", "T5", "T6", "T7"], days=5))

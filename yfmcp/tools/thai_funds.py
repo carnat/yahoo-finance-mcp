@@ -409,7 +409,6 @@ async def _resolve_or_response(
 
 @yfinance_server.tool(
     name="search_thai_funds",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["search_thai_funds"],
     description="""Search the official Thai SEC active fund-profile catalogue for candidate identities.
 
 Provide at least one of project_info (official project name or abbreviation),
@@ -647,7 +646,6 @@ async def _explicit_project_nav_payload(
 
 @yfinance_server.tool(
     name="get_thai_fund_nav",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["get_thai_fund_nav"],
     description="""Return the latest Thai SEC daily NAV in a bounded Bangkok-time window.
 
 Without proj_id, fund_class_name must be an exact SEC share-class code and is
@@ -786,7 +784,6 @@ def _nav_batch_item_failure(
 
 @yfinance_server.tool(
     name="get_thai_fund_nav_batch",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["get_thai_fund_nav_batch"],
     description="""Refresh up to 20 Thai SEC fund NAVs using explicit project identities.
 
 Each funds entry requires fund_class_name and proj_id; reference is an optional
@@ -968,7 +965,6 @@ async def _factsheet_urls(identity: FundIdentity) -> dict[str, object]:
 
 @yfinance_server.tool(
     name="get_thai_fund_factsheet",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["get_thai_fund_factsheet"],
     description="""Return dated official Thai SEC factsheet evidence for one exact share class.
 
 Choose sections from statistics, top_holdings, and urls (all by default). Each
@@ -1026,7 +1022,6 @@ async def get_thai_fund_factsheet(
 
 @yfinance_server.tool(
     name="get_thai_fund_dividend_history",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["get_thai_fund_dividend_history"],
     description="""Return one page of official Thai SEC mutual-fund dividend history.
 
 The requested fund_class_name is resolved exactly, but payout history is

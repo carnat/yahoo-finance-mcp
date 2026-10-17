@@ -332,7 +332,7 @@ def register_grouped_tools(
     handler_registry: dict,
     contract_registry: dict[str, dict[str, Any]],
 ) -> None:
-    """Register domain-grouped meta-tools on the FastMCP server.
+    """Register domain-grouped meta-tools on a ``yfmcp.app.YfmcpServer``.
 
     Each meta-tool accepts:
       - action: str (required) โ€” which sub-action to invoke
@@ -356,16 +356,11 @@ def register_grouped_tools(
             name=group_name,
             description=group_def["description"],
         )(handler)
-        manager = getattr(server, "_tool_manager", None)
-        registered = (
-            manager.get_tool(group_name)
-            if manager is not None and hasattr(manager, "get_tool")
-            else getattr(manager, "_tools", {}).get(group_name)
-        )
-        if registered is None:
-            raise RuntimeError(f"Grouped tool '{group_name}' was not registered")
-        registered.parameters = _grouped_input_schema(
+        server.set_input_schema(
             group_name,
-            group_def,
-            contract_registry,
+            _grouped_input_schema(
+                group_name,
+                group_def,
+                contract_registry,
+            ),
         )

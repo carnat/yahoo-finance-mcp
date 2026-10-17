@@ -22,24 +22,9 @@ def _tool_inventory(tool_mode: str) -> tuple[list[str], list[dict]]:
             for name in names
         ]
         return names, specs
-    try:
-        tools = yfinance_server._tool_manager._tools
-    except Exception:
-        tools = {}
-    names = sorted(tools.keys())
-    specs: list[dict] = []
-    for name in names:
-        tool = tools[name]
-        entry: dict = {"name": name, "description": str(getattr(tool, "description", "") or "")}
-        for attr in ("parameters", "input_schema", "output_schema"):
-            value = getattr(tool, attr, None)
-            if value is None:
-                continue
-            if hasattr(value, "model_dump"):
-                value = value.model_dump()
-            if isinstance(value, (dict, list, str, int, float, bool)):
-                entry[attr] = value
-        specs.append(entry)
+    # Our own registry (fails loudly when empty); specs are the listed schemas, tickerCaps included.
+    specs = sorted(yfinance_server.tool_specs(), key=lambda spec: spec["name"])
+    names = [spec["name"] for spec in specs]
     return names, specs
 
 
@@ -71,7 +56,6 @@ def _public_metadata() -> dict:
 
 @yfinance_server.tool(
     name="health_check",
-    output_schema=_MANIFEST_DIAGNOSTICS_OUTPUT_SCHEMA,
     description="Return public-safe MCP availability, release/build identity, schema identity, tool mode, and connector-freshness metadata. authorizationHeaderPresent reports whether the request carried an Authorization header (never its value). credentialTransport reports how the calling request presented its credential (header, path or none), never the credential itself.",
 )
 async def health_check() -> str:
