@@ -2469,15 +2469,15 @@ _EVENT_TYPES_SHARED = {
 _EVENT_TYPES_WHOLE_WORD = {
     **_EVENT_TYPES_SHARED,
     "Acme steps up hiring": "other", "Acme dealer network grows": "other", "Acme will denote changes": "other",
-    "Acme corporates surge": "other", "Acme sector rotation": "other", "Acme introduces chip": "other", "Acme issues notes": "other",
+    "Acme corporates surge": "other", "Acme sector rotation": "other",
 }
 
 CASES += [
     # Card 253: keyword classification (first matching group wins: 'quarterly' beats 'raises'/'outlook'). Substring matching (Python
     # today) causes false hits: 'steps' -> eps -> earnings, 'dealer' -> deal -> contract, 'denote' -> note -> financing,
     # 'corporates' -> rates -> macro, 'sector' -> sec -> regulatory. Whole-word matching (the Worker since 2.17.0, A-G1 / B-G13 /
-    # call #6) types those 'other'; it also no longer matches inflections of a keyword ('introduces' is not 'introduce', 'notes' is
-    # not 'note'), so those two headlines are 'other' too.
+    # call #6) types those 'other'. An s/es/d/ed/ing suffix on a keyword still matches (planner decision 1), so 'introduces' and
+    # 'notes' keep their types.
     # TODO(python-mirror): flip to equal with expect=_EVENT_TYPES_WHOLE_WORD (rename to ...keyword_groups_match_whole_words).
     _scenario(
         "news.classification.keyword_groups_and_substring_false_hits_agree", ["BR-NWS-253"],

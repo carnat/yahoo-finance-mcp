@@ -60,7 +60,7 @@ export function shortText(value: unknown, maxLen = 220): string | null {
 }
 /**
  * Event-type keyword table, shared with Python (yfmcp/news/shared.py): Python's list, the superset (2.17.0).
- * Groups are tested in order and the first group with a whole-word match wins.
+ * Groups are tested in order and the first group with a whole-word match (optional s/es/d/ed/ing suffix) wins.
  */
 const EVENT_TYPE_KEYWORDS: Array<[string, string[]]> = [
   ["earnings", ["earnings", "eps", "quarterly", "10-q", "10-k", "annual report"]],
@@ -76,7 +76,9 @@ const EVENT_TYPE_KEYWORDS: Array<[string, string[]]> = [
 ];
 const EVENT_TYPE_PATTERNS: Array<[string, RegExp]> = EVENT_TYPE_KEYWORDS.map(([eventType, keywords]) => [
   eventType,
-  new RegExp(`\\b(?:${keywords.map(k => k.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})\\b`),
+  // Whole words with an optional inflection on the last word (planner decision 1, 2.17.0): 'launches', 'notes' and
+  // 'announced' match; 'sector', 'dealer' and 'steps' do not hit 'sec', 'deal' and 'eps'.
+  new RegExp(`\\b(?:${keywords.map(k => k.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})(?:s|es|d|ed|ing)?\\b`),
 ]);
 export function eventTypeFromKeywords(title: string, summary: string): string {
   const text = `${title} ${summary}`.toLowerCase();

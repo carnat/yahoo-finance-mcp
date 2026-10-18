@@ -534,6 +534,13 @@ CASES += [
                        ["Acme announces new CEO", "Acme files annual report", "Acme closes $50M credit facility"], _event_types,
                        expect={"Acme announces new CEO": "product", "Acme files annual report": "earnings",
                                "Acme closes $50M credit facility": "financing"}),
+    # 2.17.0 (planner decision 1): a keyword with an s/es/d/ed/ing suffix (on the last word of a phrase) still matches, so these
+    # headlines type as they did with substring matching, in both runtimes.
+    _yahoo_titles_case("news.event_type.inflected_keywords_type_as_before", ["BR-NWS-120", "BR-NWS-130", "BR-NWS-253"],
+                       ["Acme launches chip", "Acme introduces platform", "Acme issues notes", "Acme files annual reports",
+                        "Acme rating upgraded", "Acme deals signed"], _event_types,
+                       expect={"Acme launches chip": "product", "Acme introduces platform": "product", "Acme issues notes": "financing",
+                               "Acme files annual reports": "earnings", "Acme rating upgraded": "analyst", "Acme deals signed": "contract"}),
     # 2.17.0: whole-word keywords still match on their own, in either case and next to punctuation.
     _yahoo_titles_case("news.event_type.whole_word_keywords_still_match", ["BR-NWS-120", "BR-NWS-130", "BR-NWS-253"],
                        ["Acme SEC probe widens", "Acme deal closes", "Acme EPS beat", "Acme (8-K) filed", "Acme rates review"], _event_types,
