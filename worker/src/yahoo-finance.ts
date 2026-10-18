@@ -4858,9 +4858,10 @@ export async function getAnalystUpgradeRadar(ticker: string | string[], daysBack
       const mixedSignal = (signal === "UPGRADE" && ptDirection === "LOWERED") || (signal === "DOWNGRADE" && ptDirection === "RAISED");
 
       let strengthFlag: string;
-      if (signal === "UPGRADE" && !mixedSignal) strengthFlag = "BULLISH";
+      // A mixed signal wins over the rating direction in both directions (2.14.0).
+      if (mixedSignal) strengthFlag = "MIXED";
+      else if (signal === "UPGRADE") strengthFlag = "BULLISH";
       else if (signal === "DOWNGRADE") strengthFlag = "BEARISH";
-      else if (mixedSignal) strengthFlag = "MIXED";
       else strengthFlag = "NEUTRAL";
 
       changes.push({
@@ -6686,6 +6687,11 @@ async function getFilingDataUnchecked(
               sourceTableId: 1,
               sourceRows: geo.sourceRows,
               sourceColumns: geo.sourceColumns.length > 0 ? geo.sourceColumns : [fiscalYear],
+              // The filing the table came from, so the standardised evidence row names its document (2.14.0).
+              documentUrl: filing.documentUrl,
+              filingType: filing.filingType,
+              accessionNumber: filing.accessionNumber,
+              filingDate: filing.filingDate,
             },
             calculation: geo.denominator != null
               ? {
@@ -7752,7 +7758,7 @@ export async function getPriceTargetBracket(ticker: string, ioPt: number): Promi
       bracket,
       inferredTag,
       tag: inferredTag,
-      tagNote: "Deprecated: tag is inferred from currentPrice/referenceTargetPrice distance. Use inferredTag.",
+      tagNote: "Deprecated: tag is inferred from currentPrice/referenceTargetPrice distance. Use priceAtOrAboveTarget.",
       invertedFlag: referenceTargetPct >= 100,
       // From the raw prices, not the rounded referenceTargetPct (2.8.0).
       priceAtOrAboveTarget: currentPrice > 0 && ioPt > 0 ? currentPrice >= ioPt : null,
@@ -11684,7 +11690,7 @@ export function isDecisionGradeXbrlFact(
 ): boolean {
   if (parsed.value == null || String(status).toUpperCase() !== "FOUND") return false;
   if (!String(parsed.extractionMethod ?? "").toUpperCase().includes("XBRL")) return false;
-  if (!parsed.xbrlContext || typeof parsed.xbrlContext !== "object" || !sourceEvidence) return false;
+  if (!parsed.xbrlContext || typeof parsed.xbrlContext !== "object" || Array.isArray(parsed.xbrlContext) || !sourceEvidence) return false;
   return ["sourceType", "concept", "accessionNumber", "periodEnd"]
     .every((field) => sourceEvidence[field] != null && String(sourceEvidence[field]).trim() !== "");
 }
@@ -13568,12 +13574,12 @@ export async function resolveEx991Url(cikInt: number, accessionNumber: string): 
   const { edgarIndexUrl: indexUrl } = edgarBuildFilingUrls(cikInt, accessionNumber, null);
   const exhibits = await edgarListExhibitsFromIndex(indexUrl);
   const ex991 = exhibits.find((exhibit) => {
+    // One rule in both runtimes (2.14.0): the type names exhibit 99.1 (EX-99.1, EX-99.01 or the bare 99.1 alias),
+    // or an EX-99 type carries release wording. A file name alone is not accepted.
     const type = String(exhibit.type ?? "").toUpperCase().replace(/\s+/g, "");
     const description = String(exhibit.description ?? "").toUpperCase();
-    const document = String(exhibit.document ?? "").toLowerCase();
-    if (/^EX-99\.0?1\b/.test(type)) return true;
-    if (type.startsWith("EX-99") && /PRESS RELEASE|EARNINGS RELEASE|RESULTS RELEASE/.test(description)) return true;
-    return /(?:^|[-_])ex(?:hibit)?[-_]?99[-_.]?0?1\b/.test(document);
+    if (/^EX-99\.0?1$/.test(type) || /^99\.0?1$/.test(type)) return true;
+    return type.startsWith("EX-99") && /PRESS RELEASE|EARNINGS RELEASE|RESULTS RELEASE/.test(description);
   });
   if (ex991?.document) {
     const { edgarPrimaryDocumentUrl } = edgarBuildFilingUrls(cikInt, accessionNumber, String(ex991.document));
@@ -13583,7 +13589,7 @@ export async function resolveEx991Url(cikInt: number, accessionNumber: string): 
   const html = await edgarGetHtml(indexUrl, 100_000);
   if (!html) return null;
   // Match an EX-99.1 row in the filing index and capture its document link
-  const re = /EX-99\.1[^<]{0,300}<[^>]+href="(\/Archives\/edgar\/data\/[^"]+\.(?:htm|html))"/i;
+  const re = /EX-99\.0?1\b[^<]{0,300}<[^>]+href="(\/Archives\/edgar\/data\/[^"]+\.(?:htm|html))"/i;
   const m = re.exec(html);
   if (m) return `https://www.sec.gov${m[1]}`;
   return null;

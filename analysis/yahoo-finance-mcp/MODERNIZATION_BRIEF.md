@@ -336,9 +336,20 @@ Each R-release is a set of **separately released** behaviour changes that must b
       - ticker `BRK/B` gets `INPUT_VALIDATION_ERROR` before any fetch;
       - `health_check` reports 2.12.0.
     - **Telemetry export:** the `CLOUDFLARE_TELEMETRY_TOKEN` secret was added. The first manual export (run 39057113176) authenticated against both Cloudflare APIs. It recorded 0 requests, because its window ended at 18:00Z, before the deploy.
-    - **Still to do:**
-      - confirm non-zero data and the `$workers.outcome` / `$workers.scriptName` field names on the next export;
-      - the 7-day Phase 4 baseline counts from the first export with data.
+    - **Q3a and Q4 (2.13.0, #287):** merged, deployed (run #266, canaries green) and live-verified 2026-10-17 19:15Z:
+      - a fake accession `0000320193-99-999999` gets `ACCESSION_NOT_FOUND`;
+      - `get_sec_filing_outline` with only a real AAPL accession returns that filing's outline;
+      - `list_sec_company_filings` still resolves CIKs without the smoke table.
+    - **Q8 (2.13.1, #288):** merged, deployed (run #267, canaries green) and live-verified 2026-10-17 19:29Z. `health_check` reports 2.13.1, and `manifestHash`/`schemaHash` are identical to 2.13.0. Python `tools/list` is byte-identical before and after.
+    - **Telemetry export:** confirmed working end to end.
+      - The first export with data was manual run 39061323142 (68 requests).
+      - 2.13.1 fixed the Workers Logs query, which had read 0 invocations. Run 39062644642 read 45 invocations by action: 42 `ok`, 3 `unknown`.
+      - `$workers.scriptName` is confirmed. The outcome comes from the invocation event joined on `$metadata.requestId`.
+      - **The 7-day Phase 4 baseline counts from 2026-10-17**, the first export with data; the first eligible day is 2026-10-24.
+    - **Q3i triage: APPROVED 2026-10-18** (`Q3I_TRIAGE.md`; owner: "agree, add it to R-news and approve Q3i triage").
+      - 152 rows: 80 repair, 28 preserve align-free, 14 preserve document, 30 planner calls (decided in §2 of that file).
+      - Releases: R4b before Phase 4; R-news (provider adapters, then the source registry and the `NEWS_SOURCES_DISABLED` off switch, then the news repairs); R5-shared (the BR-ENV-001 confidence default); and R5-‹unit›.
+    - **Remaining in R4:** R4b. Implement the R4b rows of `Q3I_TRIAGE.md` §3.
   - Q3a: the Worker honours exact `accession_number` with fail-closed semantics.
   - Q3b: central ticker and accession validation in both runtimes, on every relevant action, including the Python paths that skip it.
   - Q3c + Q12: the per-tool ticker caps from the §7 Q12 table, advertised as schema `maxItems` and rejected with `BATCH_LIMIT_EXCEEDED` in both runtimes. Measure `get_market_snapshot` first and set its cap. Correct the stale comment at `yahoo-finance.ts:58–64`.
@@ -351,6 +362,16 @@ Each R-release is a set of **separately released** behaviour changes that must b
     - `get_company_news` reports coverage `FULL` while a source is truncated;
     - `tool_catalog.json` omits `sources` for `get_company_press_releases`;
     - two RN deprecation wording notes (see RN status).
+  - **Triage inputs added 2026-10-17 (from 2.12.0 to 2.13.1):**
+    - **Ticker grammar:** real Yahoo symbols containing `&` (e.g. `M&M.NS`) are rejected in both runtimes. Admitting them needs an audit that every URL build encodes `&`.
+    - **Accession readers:** `extract_geographic_revenue`, `query_sec_filing_index` and the exhibit tools use an accession without the Q3a existence check. Both runtimes behave the same.
+    - **Outline shape:** `get_sec_filing_outline` output still diverges; `OUTLINE_NOT_PARSED` and `tableCount` exist in the Worker only.
+    - **Python `outputSchema`:** the Python listing carries the SDK's auto-derived output schema, not the declared one. The 97 declarations were silently dropped on SDK 2.x and were removed in 2.13.1.
+    - **Telemetry follow-ups:**
+      - The Worker could log the dispatch line as an object rather than a JSON string, so it is field-indexed. This is a Worker change.
+      - A coverage guard could flag when Analytics Engine counts requests but Workers Logs counts 0.
+      - `wrangler.toml` sets `[observability] enabled = false` alongside `[observability.logs] enabled = true`.
+      - Logged invocations (45) are fewer than Analytics Engine requests (68), and 3 outcomes are `unknown`.
 - **R-news (after the R4 triage; gates no move):** the news divergences triaged as "repair" ship as one release, each flipping its pinned case to equal.
 - **Phase 4 inner release:** Q3g, the `MarketInputs` contract. It ships right after the Yahoo-client move PR and before any valuation work.
 - **R5-‹unit› (before each Phase 5 unit), the repairs tagged for that unit's domain in `BUSINESS_RULES.md` §3:**
@@ -575,6 +596,7 @@ All 9 Q7 news P0 rules were confirmed by the extraction's P0 panel and are cover
 - [x] **Q3g.** CHANGE: replace `.info` vs raw quoteSummary divergence with one normalized shared-client `MarketInputs` contract consumed by both runtimes.
 - [x] **Q3h.** CHANGE: omitted/null `sources` uses defaults; explicit `sources=[]` means attempt none. Preserve requested/attempted/skipped/defaulted metadata separately.
 - [x] **Q3i.** CHANGE confirmed semantic/data-integrity defects. Preserve only cosmetic/intentional compatibility differences. Doctrine-critical defects are repaired before or in the same governed release as the phase touching their domain.
+  - **Triage result (2026-10-18, approved):** `Q3I_TRIAGE.md`, with per-row detail in `q3i/`. It is the binding repair/preserve classification for every pinned `FINDING` case and every untagged §3 defect, including the release each fix ships in.
 - [x] **Q4.** Remove `SMOKE_TICKER_CIK_FALLBACKS` from production lookup; retain only as injected test fixtures. — *Scheduled in R4 (before Phase 4), not Phase 6: see R1 below.*
 - [x] **Q5 (Phase 5/6).** Generalise `extract_china_exposure` into a governed preset over `extract_exposure`; move issuer-specific aliases to data/config. Keep the public compatibility action for now.
 - [x] **Q6 (whole plan).** Keep both runtimes: Python local/stdio + hosted Worker. Runtime retirement is a separate rearchitecture decision.

@@ -386,8 +386,10 @@ class TestOutput(unittest.TestCase):
             # Aggregates only: no raw API rows or SQL column names are copied.
             for raw_key in ('"data"', '"meta"', "upstream_requests_sum", "outcome_ok", "groups"):
                 self.assertNotIn(raw_key, text)
-            self.assertEqual(sorted(doc), ["analyticsEngine", "dataset", "date", "schemaVersion", "scriptName",
+            self.assertEqual(sorted(doc), ["analyticsEngine", "coverage", "dataset", "date", "schemaVersion", "scriptName",
                                            "window", "workersLogs"])
+            self.assertEqual(doc["coverage"], {"warnings": []})
+            self.assertNotIn("coverage warning", out.getvalue())
 
     def test_missing_secrets(self):
         with mock.patch.dict(os.environ, {"CLOUDFLARE_ACCOUNT_ID": "", "CLOUDFLARE_TELEMETRY_TOKEN": ""}):
@@ -441,6 +443,55 @@ class TestOutput(unittest.TestCase):
         self.assertEqual(doc["analyticsEngine"]["actions"], {})
         self.assertEqual(doc["analyticsEngine"]["totals"]["requests"], 0)
         self.assertEqual(doc["workersLogs"]["invocations"], 0)
+
+
+class TestCoverage(unittest.TestCase):
+    """OPS-TEL-2 (2.14.0): Analytics Engine requests with zero logged invocations is an ops signal, not a failure."""
+
+    ZERO_LOGS = events_payload([invocation_event(0, "req-x", "ok")])
+
+    def test_requests_with_zero_logged_invocations_warns(self):
+        doc, problems, _ = _export(FakeTransport(observability=self.ZERO_LOGS))
+        self.assertEqual(problems, [])
+        self.assertEqual(doc["workersLogs"]["invocations"], 0)
+        self.assertEqual(doc["coverage"]["warnings"], [{
+            "code": "LOGS_ZERO_WITH_REQUESTS",
+            "message": "Analytics Engine counted 46 requests but Workers Logs counted 0 invocations.",
+        }])
+
+    def test_main_reports_the_warning_and_exits_zero(self):
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.dict(os.environ, {"CLOUDFLARE_ACCOUNT_ID": ACCOUNT, "CLOUDFLARE_TELEMETRY_TOKEN": TOKEN}):
+            out, err = io.StringIO(), io.StringIO()
+            with redirect_stdout(out), redirect_stderr(err):
+                code = et.main(["--out-dir", tmp, "--end", "2026-10-16T02:00:00Z"],
+                               transport=FakeTransport(observability=self.ZERO_LOGS))
+            self.assertEqual(code, 0, err.getvalue())
+            self.assertIn("LOGS_ZERO_WITH_REQUESTS", out.getvalue())
+            doc = json.loads((Path(tmp) / "2026-10-16.json").read_text(encoding="utf-8"))
+            self.assertEqual([w["code"] for w in doc["coverage"]["warnings"]], ["LOGS_ZERO_WITH_REQUESTS"])
+
+    def test_no_warning_when_logs_were_read(self):
+        doc, _, _ = _export()
+        self.assertGreater(doc["workersLogs"]["invocations"], 0)
+        self.assertEqual(doc["coverage"]["warnings"], [])
+
+    def test_no_warning_when_logs_could_not_be_read(self):
+        """An unreadable Workers Logs is already a problem (exit 1), not a zero count."""
+        doc, problems, _ = _export(FakeTransport(fail_logs=True))
+        self.assertEqual(len(problems), 1)
+        self.assertEqual(doc["coverage"]["warnings"], [])
+
+    def test_no_warning_on_an_empty_day(self):
+        empty = {"meta": [], "data": [], "rows": 0}
+
+        def transport(url: str, headers: dict, body: bytes) -> bytes:
+            if url.endswith("/sql"):
+                return json.dumps(empty).encode()
+            return json.dumps(events_payload([])).encode()
+
+        doc, _ = et.build_export(transport, ACCOUNT, TOKEN, END)
+        self.assertEqual(doc["coverage"]["warnings"], [])
 
 
 if __name__ == "__main__":

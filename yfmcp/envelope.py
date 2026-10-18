@@ -214,6 +214,21 @@ def _is_price_bar(val: dict) -> bool:
     return "open" in val and "high" in val and "low" in val and "close" in val
 
 
+def _source_rows_as_cells(source_rows: object) -> list[list[str]]:
+    """Table evidence rows as cell strings (the Worker's sourceRowsAsCells): a flat list of strings is one row, a list of lists is several rows, other shapes give none."""
+    if not isinstance(source_rows, list) or not source_rows:
+        return []
+
+    def cell(c: object) -> str:
+        return "" if c is None else str(c)
+
+    if all(isinstance(r, str) for r in source_rows):
+        return [[cell(c) for c in source_rows]]
+    if all(isinstance(r, list) for r in source_rows):
+        return [[cell(c) for c in r] for r in source_rows]
+    return []
+
+
 def _enrich_facts(val, parent_source_type=None, parent_confidence=None, is_metric=False):
     if isinstance(val, dict):
         # OHLC price bars carry high/low keys but are raw exchange prices, not
@@ -270,6 +285,11 @@ def _enrich_facts(val, parent_source_type=None, parent_confidence=None, is_metri
                         url = ev.get("url") or ev.get("documentUrl") or None
                         if url:
                             urls.append(str(url))
+                        # sourceRows is one flat row of cells or a list of rows; rowLabel is the first
+                        # cell of the first row and rawRow joins cells with " | " and rows with "; ".
+                        table_rows = _source_rows_as_cells(ev.get("sourceRows"))
+                        first_source_row = table_rows[0][0] if table_rows and table_rows[0] and table_rows[0][0] else None
+                        joined_source_rows = "; ".join(" | ".join(row) for row in table_rows) if table_rows else None
                         standardised_ev.append({
                             "url": url,
                             "sourceType": ev.get("sourceType") or None,
@@ -281,10 +301,10 @@ def _enrich_facts(val, parent_source_type=None, parent_confidence=None, is_metri
                             "excerpt": ev.get("excerpt") or None,
                             "concept": ev.get("concept") or None,
                             "periodEnd": ev.get("periodEnd") or None,
-                            "tableIndex": ev.get("tableIndex") or None,
-                            "rowLabel": ev.get("rowLabel") or None,
+                            "tableIndex": ev.get("tableIndex") or ev.get("sourceTableId") or None,
+                            "rowLabel": ev.get("rowLabel") or first_source_row or None,
                             "columnLabel": ev.get("columnLabel") or None,
-                            "rawRow": ev.get("rawRow") or None,
+                            "rawRow": ev.get("rawRow") or joined_source_rows or None,
                         })
                     elif isinstance(ev, str):
                         if ev.startswith("http"):

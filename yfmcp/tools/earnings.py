@@ -187,12 +187,26 @@ async def _resolve_ex991_url(accession_number: str, cik: int | None) -> str | No
     index_url, _ = _edgar_build_filing_urls(cik, accession_number, None)
     exhibits = await _edgar_list_exhibits_from_index(index_url)
     for ex in exhibits:
-        doc_type = str(ex.get("type") or "").upper()
-        if doc_type in ("EX-99.1", "EX-99", "99.1"):
+        # One rule in both runtimes (2.14.0): the type names exhibit 99.1
+        # (EX-99.1, EX-99.01 or the bare 99.1 alias), or an EX-99 type carries
+        # release wording. A file name alone is not accepted.
+        doc_type = _re.sub(r"\s+", "", str(ex.get("type") or "").upper())
+        description = str(ex.get("description") or "").upper()
+        matched = bool(_re.match(r"^EX-99\.0?1$", doc_type) or _re.match(r"^99\.0?1$", doc_type)) or (
+            doc_type.startswith("EX-99")
+            and bool(_re.search(r"PRESS RELEASE|EARNINGS RELEASE|RESULTS RELEASE", description))
+        )
+        if matched:
             doc_name = ex.get("document")
             if doc_name:
                 accession_nodash = accession_number.replace("-", "")
                 return f"https://www.sec.gov/Archives/edgar/data/{cik}/{accession_nodash}/{doc_name}"
+    html = await _edgar_get_html(index_url, 100_000)
+    if not html:
+        return None
+    m = _re.search(r'EX-99\.0?1\b[^<]{0,300}<[^>]+href="(/Archives/edgar/data/[^"]+\.(?:htm|html))"', html, _re.IGNORECASE)
+    if m:
+        return f"https://www.sec.gov{m.group(1)}"
     return None
 
 

@@ -48,7 +48,8 @@ N2_NOTICE = _notice(
     "decisionUse=EVIDENCE_ONLY marks the evidence boundary.")
 PRICE_TARGET_NOTICE = _notice(
     ["bracket", "inferredTag", "tag", "tagNote"], "priceAtOrAboveTarget",
-    f"bracket, inferredTag, tag, tagNote are deprecated and {REMOVAL}; use priceAtOrAboveTarget and referenceTargetPct.")
+    f"bracket, inferredTag, tag, tagNote are deprecated and {REMOVAL}; "
+    "use priceAtOrAboveTarget (direction); referenceTargetPct gives the price/target ratio.")
 VOLUME_GATE_NOTICE = _notice(
     ["gatePass", "gateThresholdUsd"], "meetsMinimum",
     f"gatePass, gateThresholdUsd are deprecated and {REMOVAL}; use meetsMinimum and pass min_adv_usd for a caller-chosen threshold.")
@@ -238,15 +239,21 @@ def _bracket_envelope_view(v: dict) -> dict:
             "inferredTag": data.get("inferredTag"), "tag": data.get("tag"), "warnings": v["meta"]["warnings"]}
 
 
+_N3A_LONG = {"ok": True, "priceAtOrAboveTarget": False, "bracket": "STRONG_BUY", "inferredTag": "LONG", "tag": "LONG"}
+_N3A_AT_TARGET = {"ok": True, "priceAtOrAboveTarget": True, "bracket": "CAUTION", "inferredTag": "INVERTED", "tag": "INVERTED"}
+_TAG_NOTE = "Deprecated: tag is inferred from currentPrice/referenceTargetPrice distance. Use priceAtOrAboveTarget."
+
 CASES += [
     _bracket_case("neutral.n3a.envelope_keeps_the_labels_and_adds_the_flag_and_the_notice", ["BR-PRC-022", "Q14-N3"], 70.0, 100.0,
                   market_time=QUOTE_TIME, via="envelope", select=_bracket_envelope_view,
-                  expect={"ok": True, "priceAtOrAboveTarget": False, "bracket": "STRONG_BUY", "inferredTag": "LONG", "tag": "LONG",
-                          "warnings": [PRICE_TARGET_NOTICE]}),
+                  expect={**_N3A_LONG, "warnings": [PRICE_TARGET_NOTICE]}),
     _bracket_case("neutral.n3a.envelope_flag_true_at_the_target", ["BR-PRC-022", "Q14-N3"], 100.0, 100.0,
                   market_time=QUOTE_TIME, via="envelope", select=_bracket_envelope_view,
-                  expect={"ok": True, "priceAtOrAboveTarget": True, "bracket": "CAUTION", "inferredTag": "INVERTED", "tag": "INVERTED",
-                          "warnings": [PRICE_TARGET_NOTICE]}),
+                  expect={**_N3A_AT_TARGET, "warnings": [PRICE_TARGET_NOTICE]}),
+    # The tagNote text points at the neutral replacement (2.14.0, R4B1_SPEC section 7).
+    _bracket_case("neutral.n3a.tag_note_points_to_price_at_or_above_target", ["BR-PRC-022", "Q14-N3"], 70.0, 100.0,
+                  market_time=QUOTE_TIME, keys=("tagNote",),
+                  expect={"tagNote": _TAG_NOTE}),
     # A failure carries no data and no notice.
     _bracket_case("neutral.n3a.envelope_failure_carries_no_notice", ["BR-PRC-022", "Q14-N3"], None, 100.0,
                   market_time=QUOTE_TIME, via="envelope",
@@ -392,16 +399,13 @@ def _section_view(v: dict) -> dict:
             "hasWarnings": "warnings" in data, "source": data.get("source"), "section": data.get("matchedHeading")}
 
 
-# Out of scope for RN (spec section 1): the other section-markdown differences, recorded as a FINDING.
+# 2.14.0 (R4B1_SPEC section 3): Python marks section markdown as the Worker does; only doctrineUse stays Worker-only (pinned above).
 CASES.append(_tool_case(
     "neutral.n1.finding_section_markdown_status_decision_grade_and_warning_differ", SECTION[0], SECTION[1], SECTION[2],
-    _section_view, routes=SECTION_ROUTES, mode="pinned",
-    decision="FINDING Q14-N1: Python section markdown has no status, decisionGrade or warning; the Worker marks it SECTION_MARKDOWN_UNVERIFIED, decisionGrade false",
-    expect_py={"status": None, "decisionGrade": None, "confidence": "MEDIUM", "warningCodes": None, "hasWarnings": False,
-               "source": "html_parser_fallback", "section": "Item 1A. Risk Factors"},
-    expect_ts={"status": "SECTION_MARKDOWN_UNVERIFIED", "decisionGrade": False, "confidence": "NOT_DECISION_GRADE",
-               "warningCodes": ["LIVE_SECTION_EXTRACTION_UNRELIABLE"], "hasWarnings": True,
-               "source": "html_parser_fallback", "section": "Item 1A. Risk Factors"}))
+    _section_view, routes=SECTION_ROUTES,
+    expect={"status": "SECTION_MARKDOWN_UNVERIFIED", "decisionGrade": False, "confidence": "NOT_DECISION_GRADE",
+            "warningCodes": ["LIVE_SECTION_EXTRACTION_UNRELIABLE"], "hasWarnings": True,
+            "source": "html_parser_fallback", "section": "Item 1A. Risk Factors"}))
 
 
 # ═══════════════════════════════════════════════════════════════════════════════════════════════

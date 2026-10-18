@@ -2859,6 +2859,11 @@ async def _get_filing_data_unchecked(
                             "sourceTableId": 1,
                             "sourceRows": geo_evidence.get("sourceRows"),
                             "sourceColumns": source_cols,
+                            # The filing the table came from, so the standardised evidence row names its document (2.14.0).
+                            "documentUrl": filing["documentUrl"],
+                            "filingType": filing["filingType"],
+                            "accessionNumber": filing["accessionNumber"],
+                            "filingDate": filing["filingDate"],
                         },
                         "calculation": (
                             {
@@ -4333,12 +4338,13 @@ async def get_analyst_upgrade_radar(ticker: str | list[str], days_back: int = 30
         mixed_signal = (signal == "UPGRADE" and pt_direction == "LOWERED") or (signal == "DOWNGRADE" and pt_direction == "RAISED")
 
         # Strength flag
-        if signal == "UPGRADE" and not mixed_signal:
+        # A mixed signal wins over the rating direction in both directions (2.14.0).
+        if mixed_signal:
+            strength_flag = "MIXED"
+        elif signal == "UPGRADE":
             strength_flag = "BULLISH"
         elif signal == "DOWNGRADE":
             strength_flag = "BEARISH"
-        elif mixed_signal:
-            strength_flag = "MIXED"
         else:
             strength_flag = "NEUTRAL"
 
@@ -4889,7 +4895,7 @@ async def get_price_target_bracket(
         "bracket": bracket,
         "inferredTag": inferred_tag,
         "tag": inferred_tag,
-        "tagNote": "Deprecated: tag is inferred from currentPrice/referenceTargetPrice distance. Use inferredTag.",
+        "tagNote": "Deprecated: tag is inferred from currentPrice/referenceTargetPrice distance. Use priceAtOrAboveTarget.",
         "invertedFlag": inverted_flag,
         # From the raw prices, not the rounded referenceTargetPct (2.8.0).
         "priceAtOrAboveTarget": current_price >= target_price if current_price > 0 and target_price > 0 else None,
@@ -5352,7 +5358,7 @@ def _is_decision_grade_sec_xbrl_fact(
         and "XBRL" in str(payload.get("extractionMethod") or "").upper()
         and isinstance(payload.get("xbrlContext"), dict)
         and isinstance(source_evidence, dict)
-        and all(source_evidence.get(field) not in (None, "") for field in (
+        and all(source_evidence.get(field) is not None and str(source_evidence.get(field)).strip() != "" for field in (
             "sourceType", "concept", "accessionNumber", "periodEnd",
         ))
     )
@@ -6246,6 +6252,17 @@ async def get_sec_filing_section_markdown(
         truncated = True
 
     word_count = len(markdown.split())
+    warnings: list[dict] = [{
+        "code": "LIVE_SECTION_EXTRACTION_UNRELIABLE",
+        "message": "Section markdown is produced by a lossy Worker HTML fallback and is blocked from decision-grade use.",
+        "severity": "warning",
+    }]
+    if word_count < 50:
+        warnings.append({
+            "code": "SECTION_MARKDOWN_LOW_CONTENT",
+            "message": "Extracted section markdown is unusually short; verify with the source filing.",
+            "severity": "warning",
+        })
 
     return json.dumps({
         "ticker": ticker,
@@ -6255,8 +6272,11 @@ async def get_sec_filing_section_markdown(
         "markdown": markdown,
         "tables_in_section": tables_in_section,
         "word_count": word_count,
-        "confidence": "MEDIUM",
+        "status": "SECTION_MARKDOWN_UNVERIFIED",
+        "confidence": "NOT_DECISION_GRADE",
+        "decisionGrade": False,
         "reliabilityClass": _TOOL_RELIABILITY_CLASS["get_sec_filing_section_markdown"],
+        "warnings": warnings,
         "source": parser_source,
         "truncated": truncated,
         "sectionStartOffset": start_idx,

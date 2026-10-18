@@ -49,7 +49,7 @@ _NEWS_EVENT_OUTPUT_SCHEMA: dict = {
     "type": "object",
     "properties": {
         "ticker": {"type": "string"},
-        "status": {"type": "string", "enum": ["OK", "PARTIAL"]},
+        "status": {"type": "string"},
         "items": {
             "type": "array",
             "items": {
@@ -580,10 +580,10 @@ _TOOL_OUTPUT_SCHEMAS: dict[str, dict] = {
                         'distanceConvention': {'type': 'string'},
                         'ioPt': {'type': ['number', 'null']},
                         'eqfPct': {'type': ['number', 'null']},
-                        'bracket': {'type': ['string', 'null'], 'description': 'Deprecated: use priceAtOrAboveTarget and referenceTargetPct; removed in the next major version.'},
-                        'inferredTag': {'type': ['string', 'null'], 'description': 'Deprecated: use priceAtOrAboveTarget and referenceTargetPct; removed in the next major version.'},
-                        'tag': {'type': ['string', 'null'], 'description': 'Deprecated: use priceAtOrAboveTarget and referenceTargetPct; removed in the next major version.'},
-                        'tagNote': {'type': ['string', 'null'], 'description': 'Deprecated: use priceAtOrAboveTarget and referenceTargetPct; removed in the next major version.'},
+                        'bracket': {'type': ['string', 'null'], 'description': 'Deprecated: use priceAtOrAboveTarget (direction); referenceTargetPct gives the price/target ratio. Removed in the next major version.'},
+                        'inferredTag': {'type': ['string', 'null'], 'description': 'Deprecated: use priceAtOrAboveTarget (direction); referenceTargetPct gives the price/target ratio. Removed in the next major version.'},
+                        'tag': {'type': ['string', 'null'], 'description': 'Deprecated: use priceAtOrAboveTarget (direction); referenceTargetPct gives the price/target ratio. Removed in the next major version.'},
+                        'tagNote': {'type': ['string', 'null'], 'description': 'Deprecated: use priceAtOrAboveTarget (direction); referenceTargetPct gives the price/target ratio. Removed in the next major version.'},
                         'invertedFlag': {'type': ['boolean', 'null']},
                         'priceAtOrAboveTarget': {'type': ['boolean', 'null'], 'description': 'currentPrice >= referenceTargetPrice on the unrounded prices; null when either price is missing or not positive.'},
                         'recommendedNextAction': {'type': 'string', 'enum': ['NONE']},

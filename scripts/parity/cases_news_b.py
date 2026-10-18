@@ -2372,8 +2372,8 @@ def _declared_status_py():
 
 
 CASES += [
-    # Card 214: every source succeeds and returns nothing -> status NOT_FOUND, which is outside the enum [OK, PARTIAL] that Python's
-    # output schemas declare for the news and event tools. The Worker declares no status property (an open object schema).
+    # Card 214: every source succeeds and returns nothing -> status NOT_FOUND. Since 2.14.0 (R4B1_SPEC section 6) Python no longer
+    # declares the stale [OK, PARTIAL] enum; neither runtime declares one.
     Case(name="news.schema.python_declares_a_status_enum_that_runtime_statuses_leave", ids=["BR-NWS-214"],
          py=_declared_status_py,
          ts={"js": _worker_js(f"""
@@ -2385,10 +2385,8 @@ for (const t of {json.dumps(_NEWS_TOOL_NAMES)}) {{
 }}
 const payload = JSON.parse(await m.yahooFinance.getCompanyNews("VOD.L", 10, 14, ["yahoo_finance_news"]));
 return {{declared: out, runtimeStatus: payload.status ?? null}};"""), "isolate": True},
-         routes=_yahoo_routes([], _VOD_INFO), mode="pinned",
-         decision="FINDING: the declared output schema allows status OK/PARTIAL in Python only; both runtimes emit NOT_FOUND (and other values) at runtime",
-         expect_py={"declared": {t: ["OK", "PARTIAL"] for t in _NEWS_TOOL_NAMES}, "runtimeStatus": "NOT_FOUND"},
-         expect_ts={"declared": {t: None for t in _NEWS_TOOL_NAMES}, "runtimeStatus": "NOT_FOUND"}),
+         routes=_yahoo_routes([], _VOD_INFO),
+         expect={"declared": {t: None for t in _NEWS_TOOL_NAMES}, "runtimeStatus": "NOT_FOUND"}),
 ]
 
 

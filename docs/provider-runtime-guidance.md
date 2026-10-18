@@ -2889,6 +2889,46 @@ F-024, F-026, F-029). Both runtimes change alike.
     outcome lives on the invocation event.
 - **Rollback:** revert the release.
 
+## Evidence and Decision-Grade Repairs (2.14.0)
+
+- **Why:** R4b-1 of the approved Q3i triage (`analysis/yahoo-finance-mcp/Q3I_TRIAGE.md`). Release type: minor. Some
+  results lose `decisionGrade`, and Worker evidence rows gain 6 keys. Both runtimes unless stated.
+- **EX-99.1 exhibit rule:** over the filing-index exhibit rows, in index order, accept a type of `EX-99.1` or
+  `EX-99.01` (also `99.1` and `99.01`), or a type starting `EX-99` whose description says PRESS RELEASE, EARNINGS
+  RELEASE or RESULTS RELEASE. A bare `EX-99` without that wording is not accepted, and a match on the file name alone
+  is not accepted. The index-HTML fallback is `EX-99\.0?1\b` in both runtimes.
+- **Decision-grade predicate:** `xbrlContext` must be a plain object (an array does not qualify), and every required
+  evidence field must be non-blank after trimming.
+- **Section markdown (Python):** `get_sec_filing_section_markdown` is now marked as the Worker already marks it:
+  `status: "SECTION_MARKDOWN_UNVERIFIED"`, `confidence: "NOT_DECISION_GRADE"`, `decisionGrade: false`, and warning
+  `LIVE_SECTION_EXTRACTION_UNRELIABLE`, plus `SECTION_MARKDOWN_LOW_CONTENT` when the text is under 50 words.
+  `doctrineUse` stays Worker-only until Phase 6.
+- **Evidence row:** both runtimes emit 14 keys in this order: `url`, `sourceType`, `filingType`, `accessionNumber`,
+  `filingDate`, `publishedAt`, `retrievedAt`, `excerpt`, `concept`, `periodEnd`, `tableIndex`, `rowLabel`,
+  `columnLabel`, `rawRow`. The Worker gains `sourceType`, `publishedAt`, `retrievedAt`, `excerpt`, `concept` and
+  `periodEnd`. String evidence gets the same 14 keys, with nulls. Falsy semantics are unchanged.
+- **Table evidence:** `tableIndex` comes from `sourceTableId`, `rowLabel` from the first cell of the first row, and
+  `rawRow` from the cells joined with `" | "` and the rows joined with `"; "`. `sourceRows` may be one flat row or a
+  list of rows.
+- **Geographic evidence:** `extract_sec_filing_fact` PARSED_TABLE evidence now names its filing (`documentUrl`,
+  `filingType`, `accessionNumber`, `filingDate`), so a HIGH table figure carries evidence (the AAOI `evidence:null`
+  case).
+- **Analyst radar:** a mixed signal (a downgrade with a raised target, or an upgrade with a cut target) is `MIXED`.
+  It is checked before `BULLISH` and `BEARISH`.
+- **Wording:** the price-target deprecation message and the deprecated-field descriptions now read "use
+  priceAtOrAboveTarget (direction); referenceTargetPct gives the price/target ratio". `tagNote` ends "Use
+  priceAtOrAboveTarget."
+- **Python news schema:** the stale status enum `[OK, PARTIAL]` was removed from the internal output schema. It is not
+  advertised, so output does not change.
+- **Telemetry:** the dispatch log line is logged as an object (field-indexed) instead of a JSON string. The export
+  adds `coverage.warnings` code `LOGS_ZERO_WITH_REQUESTS` when Analytics Engine counts requests but Workers Logs
+  counts 0 (exit code 0). `wrangler.toml` carries a comment on the observability flags.
+- **Telemetry finding:** Analytics Engine counts about 15 pre-promotion preview-canary requests per deploy that never
+  appear in the Workers Logs query, plus 3 `rejected:auth` requests per window that never log. A few long SEC and
+  transcript invocations occasionally lack one of their log events, which shows as a missing invocation or
+  `unknown`. The Phase 4 baseline should discount preview-canary requests.
+- **Rollback:** revert the release.
+
 ## Non-US Primary Filings
 
 - `get_uk_company_filings` reads Companies House, the UK statutory registry:
