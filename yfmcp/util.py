@@ -260,6 +260,14 @@ def _to_iso_utc(raw: object) -> str | None:
     try:
         return datetime.datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
     except Exception:
+        pass
+    # RFC 2822 provider dates ("Tue, 13 Oct 2026 10:00:00 GMT"), which the Worker's Date parser reads (2.17.0).
+    try:
+        parsed = _email_utils.parsedate_to_datetime(value)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=datetime.timezone.utc)
+        return parsed.astimezone(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+    except Exception:
         return None
 
 

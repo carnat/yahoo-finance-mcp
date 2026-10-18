@@ -523,12 +523,9 @@ WHOLE_WORD_EVENT_TITLES = {
     "Acme notebook line launch": "product",
 }
 CASES += [
-    # TODO(python-mirror): flip to equal with expect=WHOLE_WORD_EVENT_TITLES once Python matches whole words (and rename
-    # the case to ...keyword_priority_and_whole_word_matching_agree).
-    _yahoo_titles_case("news.event_type.keyword_priority_and_substring_matching_agree", ["BR-NWS-130", "BR-NWS-120", "BR-NWS-253"],
+    _yahoo_titles_case("news.event_type.keyword_priority_and_whole_word_matching_agree", ["BR-NWS-130", "BR-NWS-120", "BR-NWS-253"],
                        list(AGREED_EVENT_TITLES), _event_types,
-                       mode="pinned", decision="FINDING: 2.17.0 Worker side landed: event-type keywords match whole words in the Worker; Python still matches substrings (port pending)",
-                       expect_py=AGREED_EVENT_TITLES, expect_ts=WHOLE_WORD_EVENT_TITLES),
+                       expect=WHOLE_WORD_EVENT_TITLES),
     # 2.17.0: one keyword table, Python's superset, so 'announces new', 'annual report' and 'credit facility' type in both runtimes.
     _yahoo_titles_case("news.event_type.python_superset_phrases_type_in_both", ["BR-NWS-120", "BR-NWS-130"],
                        ["Acme announces new CEO", "Acme files annual report", "Acme closes $50M credit facility"], _event_types,
@@ -598,18 +595,14 @@ CASES += [
                       "warnings": ["SOURCE_IDENTITY_UNAVAILABLE"], "identity": IDENTITY_UNAVAILABLE_ROW, "status": "PARTIAL",
                       "coverage": {"sourceCoverage": "PARTIAL", "state": "PARTIAL", "failed": [["yahoo_finance_identity", "IDENTITY_UNAVAILABLE"]],
                                    "skipped": [], "truncated": [], "action": "CHECK_OFFICIAL_RELEASES"}}),
-    # Card 139: a Yahoo shortName that is just the ticker. Python takes it as an issuer alias (RESOLVED); the Worker
-    # drops an alias equal to the ticker, so its identity is UNAVAILABLE, a warning is raised and coverage is PARTIAL.
-    # TODO(python-mirror): R-news Batch A (A-G2) ports the Worker rule to Python; flip to equal with expect=<the expect_ts below>
-    # and rename to news.identity.ticker_only_short_name_is_not_issuer_identity.
-    tool_case("news.identity.ticker_only_short_name_resolves_in_python_not_in_worker", ["BR-NWS-139"], "news",
+    # Card 139: a Yahoo shortName that is just the ticker. Both runtimes drop an alias equal to the ticker (2.17.0, A-G2;
+    # before, Python took it as an issuer alias), so the identity is UNAVAILABLE, a warning is raised and coverage is PARTIAL.
+    tool_case("news.identity.ticker_only_short_name_is_not_issuer_identity", ["BR-NWS-139"], "news",
               ["TSTX", 10, 14, ["yahoo_finance_news"]],
               {"info": {"shortName": "TSTX"}, "news": [yahoo_row("TSTX wins order", "2026-10-14T09:00:00Z")]},
               select=lambda v: {"identityStatus": _yahoo_state(v)["identityStatus"], "warnings": codes(v), "status": v.get("status"),
                                 "coverageState": v["coverage"]["state"], "titles": [it["title"] for it in v["items"]]},
-              mode="pinned", decision="FINDING: Worker excludes a ticker-equal Yahoo shortName from issuer aliases (identity UNAVAILABLE); Python accepts it (RESOLVED)",
-              expect_py={"identityStatus": "RESOLVED", "warnings": [], "status": None, "coverageState": "FULL", "titles": ["TSTX wins order"]},
-              expect_ts={"identityStatus": "UNAVAILABLE", "warnings": ["SOURCE_IDENTITY_UNAVAILABLE"], "status": "PARTIAL",
+              expect={"identityStatus": "UNAVAILABLE", "warnings": ["SOURCE_IDENTITY_UNAVAILABLE"], "status": "PARTIAL",
                          "coverageState": "PARTIAL", "titles": ["TSTX wins order"]}),
 ]
 
@@ -941,7 +934,7 @@ CASES += [
 # Card 121: unknown exchanges ('LSE') and a missing exchange skip the check. Until 2.17.0 'NYSE American' normalised to NYSE in
 # both runtimes (the NYSE test ran first), so an 'AMEX' entity was a mismatch and a 'NYSE' entity was not. R-news Batch A
 # (B-G4 / A-G11): the shared normaliser tests NYSE American / AMEX / exact ASE before NYSE, so the AMEX row is kept and the
-# NYSE row rejected (Worker side landed; Python port pending).
+# NYSE row rejected (both runtimes).
 _NYSEA_ROWS = [mx_row("Row with NYSE entity", "2026-10-12T09:00:00Z", symbol="NYSA", exchange="NYSE", uuid="b1"),
                mx_row("Row with AMEX entity", "2026-10-12T10:00:00Z", symbol="NYSA", exchange="AMEX", uuid="b2"),
                mx_row("Row with LSE entity", "2026-10-12T11:00:00Z", symbol="NYSA", exchange="LSE", uuid="b3"),
@@ -953,12 +946,7 @@ CASES += [
                "news": [], "routes": {mx_url(symbol="NYSA"): {"json": {"data": _NYSEA_ROWS}}}},
               select=lambda v: {"accepted": sorted(it["title"] for it in v["items"]),
                                 "marketaux": status_row(v["sourceStatus"]["marketaux"], "acceptedCount", "rejectedCount", "rejectionCounts", "fallbackReason")},
-              # TODO(python-mirror): flip to equal with expect=<the expect_ts below> once Python uses the fixed normaliser.
-              mode="pinned", decision="FINDING: 2.17.0 Worker side landed: 'NYSE American' normalises to NYSE American (not NYSE) in the Worker; Python port pending",
-              expect_py={"accepted": ["Row with LSE entity", "Row with NYSE entity", "Row with no exchange"],
-                         "marketaux": {"acceptedCount": 3, "rejectedCount": 1, "rejectionCounts": {"ENTITY_EXCHANGE_MISMATCH": 1},
-                                       "fallbackReason": "HIGHER_PRIORITY_EMPTY"}},
-              expect_ts={"accepted": ["Row with AMEX entity", "Row with LSE entity", "Row with no exchange"],
+              expect={"accepted": ["Row with AMEX entity", "Row with LSE entity", "Row with no exchange"],
                          "marketaux": {"acceptedCount": 3, "rejectedCount": 1, "rejectionCounts": {"ENTITY_EXCHANGE_MISMATCH": 1},
                                        "fallbackReason": "HIGHER_PRIORITY_EMPTY"}}),
 ]
@@ -1033,16 +1021,12 @@ CASES += [
                                for n, f in enumerate(["S-3", "424B", "424B5", "DEF14A", "10-K"], start=1)]),
               select=lambda v: {it["filingType"]: it["eventType"] for it in v["items"]},
               expect={"S-3": "financing", "424B": "financing", "424B5": "other", "DEF14A": "regulatory", "10-K": "earnings"}),
-    # An item with no accession/document has no archive URL: confidence LOW. In the news path the Worker also warns
-    # SEC_URL_INVALID and Python does not (get_sec_recent_events warns in both).
-    # TODO(python-mirror): R-news Batch A (A-G4) adds SEC_URL_INVALID to the Python news path; flip to equal with
-    # expect=<the expect_ts below> and rename to news.sec.filing_without_url_warns_in_both_runtimes_from_the_news_path.
-    tool_case("news.sec.filing_without_url_warns_only_in_the_worker_news_path", ["BR-NWS-133"], "news",
+    # An item with no accession/document has no archive URL: confidence LOW. Both runtimes warn SEC_URL_INVALID, in the news path
+    # (2.17.0, A-G4; before, Python did not) and in get_sec_recent_events.
+    tool_case("news.sec.filing_without_url_warns_in_both_runtimes_from_the_news_path", ["BR-NWS-133"], "news",
               ["SECD", 10, 30, ["sec"]], sec_scn(910104, [sec_filing("8-K", "", "", accepted=None)]),
               select=lambda v: {"items": [{"url": it["url"], "confidence": it["confidence"]} for it in v["items"]], "warnings": codes(v)},
-              mode="pinned", decision="FINDING: the Worker raises SEC_URL_INVALID for an SEC event without an archive URL in the news path; Python does not",
-              expect_py={"items": [{"url": None, "confidence": "LOW"}], "warnings": ["PUBLISHED_AT_ESTIMATED"]},
-              expect_ts={"items": [{"url": None, "confidence": "LOW"}], "warnings": ["PUBLISHED_AT_ESTIMATED", "SEC_URL_INVALID"]}),
+              expect={"items": [{"url": None, "confidence": "LOW"}], "warnings": ["PUBLISHED_AT_ESTIMATED", "SEC_URL_INVALID"]}),
     tool_case("news.sec.filing_without_url_warns_in_both_runtimes_from_get_sec_recent_events", ["BR-NWS-133"], "sec",
               ["SECE", ["8-K"], 30, 10], sec_scn(910105, [sec_filing("8-K", "", "", accepted=None)]),
               select=lambda v: {"items": [{"url": it["url"], "confidence": it["confidence"]} for it in v["items"]], "warnings": codes(v)},
@@ -1151,25 +1135,18 @@ CASES += [
                         "tx": tx(code="A", label="Grant/Award", shares=500, price=0, value=0)},
                        {"title": "Form 4: Sale by Doe Jane", "summary": "Sale by Doe Jane: 1,500 shares, value $18,518.",
                         "tx": tx(code="S", label="Sale", shares=1500, price=12.345, value=18517.5)}]),
-    # Card 128 defect: on an exact half-cent product Python's round() goes to even (0.12), the Worker's Math.round goes up (0.13).
+    # Card 128: on an exact half-cent product Python's round() went to even (0.12), the Worker's Math.round up (0.13).
     # R-news Batch A (A-G5a): both round half away from zero, decimal-safe; the Worker value is unchanged (0.13).
-    # TODO(python-mirror): flip to equal with expect=[0.13] and rename to news.form4.half_cent_value_rounds_half_away_from_zero.
-    form4_case("news.form4.half_cent_value_rounds_differently", ["BR-NWS-128"], 910206, [f4_xml(rows=f4_row("S", "1", "0.125"))],
+    form4_case("news.form4.half_cent_value_rounds_half_away_from_zero", ["BR-NWS-128"], 910206, [f4_xml(rows=f4_row("S", "1", "0.125"))],
                select=lambda v: [it["insiderTransaction"]["value"] for it in v["items"]],
-               mode="pinned", decision="FINDING: Python round() takes 0.125 to 0.12 (half-even); the Worker's Math.round takes it to 0.13",
-               expect_py=[0.12], expect_ts=[0.13]),
+               expect=[0.13]),
     # 2.17.0 (A-G5a/b, B-G9): the value rounds half away from zero to cents from the product's shortest decimal form, so the float
     # 1.005 rounds to 1.01 (Math.round(x*100)/100 gave 1.00) and -0.125 to -0.13; the summary rounds with the same helper
     # ($-3 for -2.5, where Python's :,.0f gives $-2).
-    # TODO(python-mirror): flip to equal with expect=<the expect_ts below>. Note: Python must print a value that rounds to zero
-    # as "$0" (f"{-0.13:,.0f}" gives "-0").
     form4_case("news.form4.value_and_summary_round_half_away_from_zero_decimal_safe", ["BR-NWS-128", "BR-NWS-255"], 910210,
                [f4_xml(rows=f4_row("S", "1", "1.005")), f4_xml(rows=f4_row("S", "-1", "0.125")), f4_xml(rows=f4_row("S", "-1", "2.5"))],
                select=lambda v: [[it["insiderTransaction"]["value"], it["summary"]] for it in v["items"]],
-               mode="pinned", decision="FINDING: 2.17.0 Worker side landed: Form 4 value and summary round half away from zero (decimal-safe) in the Worker; Python port pending",
-               expect_py=[[1.0, "Sale by Doe Jane: 1 shares, value $1."], [-0.12, "Sale by Doe Jane: -1 shares, value $-0."],
-                          [-2.5, "Sale by Doe Jane: -1 shares, value $-2."]],
-               expect_ts=[[1.01, "Sale by Doe Jane: 1 shares, value $1."], [-0.13, "Sale by Doe Jane: -1 shares, value $0."],
+               expect=[[1.01, "Sale by Doe Jane: 1 shares, value $1."], [-0.13, "Sale by Doe Jane: -1 shares, value $0."],
                           [-2.5, "Sale by Doe Jane: -1 shares, value $-3."]]),
 ]
 
@@ -1201,16 +1178,12 @@ CASES += [
                         "tx": tx(role="director", code="P", label="Purchase", shares=12, price=1234.5, value=14814)},
                        {"title": "Form 4: Sale by Doe Jane", "summary": "Sale by Doe Jane: -500 shares, value $-5,000.",
                         "tx": tx(role="director", code="S", label="Sale", shares=-500, price=10, value=-5000)}]),
-    # Card 123 defect: a well-formed XHTML primary document with no <nonDerivativeTransaction> node. Python falls back to the
-    # HTML parser only when XML parsing raises, so it reports nothing; the Worker falls back whenever the XML node is missing.
-    # TODO(python-mirror): R-news Batch A (A-G5c) gives Python the Worker's fallback; flip to equal with expect=<the expect_ts below>
-    # and rename to news.form4.well_formed_xhtml_document_is_parsed_in_both.
-    form4_case("news.form4.well_formed_xhtml_document_is_parsed_only_by_the_worker", ["BR-NWS-123"], 910209, [_XHTML_FORM4],
+    # Card 123: a well-formed XHTML primary document with no <nonDerivativeTransaction> node. Both runtimes fall back to the
+    # HTML parser whenever the XML node is missing (2.17.0, A-G5c; Python used to fall back only when XML parsing raised).
+    form4_case("news.form4.well_formed_xhtml_document_is_parsed_in_both", ["BR-NWS-123"], 910209, [_XHTML_FORM4],
                select=lambda v: {"parsed": [bool(it.get("insiderTransaction")) for it in v["items"]], "warnings": codes(v),
                                  "titles": [it["title"] for it in v["items"]]},
-               mode="pinned", decision="FINDING: Python falls back to the HTML Form 4 parser only when XML parsing raises; the Worker whenever no XML transaction node exists",
-               expect_py={"parsed": [False], "warnings": ["FORM4_PARSE_UNAVAILABLE"], "titles": ["4 filed"]},
-               expect_ts={"parsed": [True], "warnings": [], "titles": ["Form 4: Sale by Doe Jane"]}),
+               expect={"parsed": [True], "warnings": [], "titles": ["Form 4: Sale by Doe Jane"]}),
 ]
 
 

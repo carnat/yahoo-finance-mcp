@@ -470,14 +470,10 @@ CASES += [
     # an 'AMEX:' mention was rejected and 'NYSE:' accepted. R-news Batch A (B-G4): the shared normaliser tests NYSE American /
     # AMEX / exact ASE before NYSE, so 'AMEX:' is accepted and 'NYSE:' rejected. 'NYSE American:' is accepted because its prefix
     # token 'American' is unknown.
-    # TODO(python-mirror): flip to equal with expect=<the expect_ts below> once Python uses the fixed normaliser.
     _collector_case(
         "news.yahoo.exchange_nyse_american_company_reads_as_nyse", ["BR-NWS-217"], "ABC",
         [_yn(t, when=_days_ago(1)) for t in ["NYSE American: ABC lifts", "AMEX: ABC lifts", "NYSE: ABC lifts2"]],
-        {**_ZETA, "exchange": "NYSE American"}, view=_collector_view, mode="pinned",
-        decision="FINDING: 2.17.0 Worker side landed: 'NYSE American' normalises to NYSE American (not NYSE) in the Worker; Python port pending",
-        expect_py=_collected([_kept("NYSE American: ABC lifts"), _kept("NYSE: ABC lifts2")], raw=3, rejections={"IDENTITY_MISMATCH": 1}),
-        expect_ts=_collected([_kept("NYSE American: ABC lifts"), _kept("AMEX: ABC lifts")], raw=3, rejections={"IDENTITY_MISMATCH": 1})),
+        {**_ZETA, "exchange": "NYSE American"}, view=_collector_view, expect=_collected([_kept("NYSE American: ABC lifts"), _kept("AMEX: ABC lifts")], raw=3, rejections={"IDENTITY_MISMATCH": 1})),
     # 'GS' is a NASDAQ code. Since 2.17.0 (B-G4) it counts only as a whole token or an exact code; in 'LSE GS' it is a whole
     # token, so the string still reads as NASDAQ in both runtimes (the substring case is the next one).
     _collector_case(
@@ -486,15 +482,11 @@ CASES += [
         {**_ZETA, "exchange": "LSE GS"}, view=_collector_view,
         expect=_collected([_kept("Nasdaq: ABC climbs")], raw=2, rejections={"IDENTITY_MISMATCH": 1})),
     # 2.17.0 (B-G4): GS / NMS / NGM / NCM inside another word ('GSX', 'XNMS') are not NASDAQ codes, so the company exchange is
-    # unknown and no prefix is incompatible (Python still reads them as NASDAQ and rejects the 'NYSE:' mention).
-    # TODO(python-mirror): flip to equal with expect=<the expect_ts below> once Python matches the codes as whole tokens.
+    # unknown and no prefix is incompatible (before, Python read them as NASDAQ and rejected the 'NYSE:' mention).
     _collector_case(
         "news.yahoo.exchange_nasdaq_codes_count_only_as_whole_tokens", ["BR-NWS-217"], "ABC",
         [_yn(t, when=_days_ago(1)) for t in ["Nasdaq: ABC climbs", "NYSE: ABC slips"]],
-        {**_ZETA, "exchange": "GSX XNMS"}, view=_collector_view, mode="pinned",
-        decision="FINDING: 2.17.0 Worker side landed: GS / NMS / NGM / NCM are NASDAQ codes only as whole tokens or exact codes in the Worker; Python port pending",
-        expect_py=_collected([_kept("Nasdaq: ABC climbs")], raw=2, rejections={"IDENTITY_MISMATCH": 1}),
-        expect_ts=_collected([_kept("Nasdaq: ABC climbs"), _kept("NYSE: ABC slips")], raw=2, rejections={})),
+        {**_ZETA, "exchange": "GSX XNMS"}, view=_collector_view, expect=_collected([_kept("Nasdaq: ABC climbs"), _kept("NYSE: ABC slips")], raw=2, rejections={})),
 ]
 
 # --- issuer acronym match and identity-unavailable gate (BR-NWS-243, BR-NWS-244, BR-NWS-245) ---------------------------
@@ -636,16 +628,12 @@ CASES += [
         [_yn("AMD summary check", when=_days_ago(1), summary=_LONG_SUMMARY)], AMD_IDENTITY,
         view=lambda v: [[len(i["summary"]), len(i["evidenceText"])] for i in v["items"]], expect=[[240, 180]]),
     # Call #13 (2.17.0): the summary is for display; identity and ticker matching read the title only, so a row whose title names
-    # neither the ticker nor the company is rejected even when its summary does. Python still matches on the summary.
-    # TODO(python-mirror): flip to equal with expect=<the expect_ts below> once Python matches on the title only.
+    # neither the ticker nor the company is rejected even when its summary does, in both runtimes.
     _collector_case(
         "news.yahoo.summary_mention_alone_does_not_match_the_issuer", ["BR-NWS-256", "BR-NWS-243"], "AMD",
         [_yn("Chip stocks rally on demand", when=_days_ago(1), summary="AMD and Advanced Micro Devices peers gained."),
          _yn("AMD beats estimates", when=_days_ago(2), summary="Quarterly results.")], AMD_IDENTITY,
-        view=_collector_view, mode="pinned",
-        decision="FINDING: 2.17.0 Worker side landed: Yahoo identity matching reads the title only in the Worker (call #13); Python still reads the summary",
-        expect_py=_collected([_kept("Chip stocks rally on demand"), _kept("AMD beats estimates")], raw=2, rejections={}),
-        expect_ts=_collected([_kept("AMD beats estimates")], raw=2, rejections={"IDENTITY_MISMATCH": 1})),
+        view=_collector_view, expect=_collected([_kept("AMD beats estimates")], raw=2, rejections={"IDENTITY_MISMATCH": 1})),
 ]
 
 
@@ -1078,19 +1066,14 @@ CASES += [
                 ["Form 4: Sale by Doe Jane", "Sale by Doe Jane: 1,500 shares.", "SEC Form 4 transaction code S on 2024-13-40.", "2024-13-40", None],
                 ["Form 4: Sale by Doe Jane", "Sale by Doe Jane: 1,500 shares, value $18,518.", "SEC Form 4 transaction code S on 2026-10-10.",
                  None, 18517.5]]),
-    # Python formats the dollar value and share count with f"{x:,.0f}" (round half to even), the Worker with Math.round
-    # (half up): 18,516.5 prints $18,516 in Python and $18,517 in the Worker; 0.5 prints $0 and $1; 2.5 shares print 2 and 3.
-    # R-news Batch A (B-G9): both runtimes print with the half-away-from-zero helper; the Worker output is unchanged.
-    # TODO(python-mirror): flip to equal with expect=<the expect_ts below> and rename to news.sec.form4_summary_rounds_halves_away_from_zero.
+    # Until 2.17.0 Python formatted the dollar value and share count with f"{x:,.0f}" (round half to even), the Worker with
+    # Math.round (half up): 18,516.5 printed $18,516 and $18,517; 0.5 printed $0 and $1; 2.5 shares printed 2 and 3.
+    # R-news Batch A (B-G9): both runtimes print with the half-away-from-zero helper.
     _form4_scenario(
-        "news.sec.form4_summary_rounding_differs_on_halves",
+        "news.sec.form4_summary_rounds_halves_away_from_zero",
         ["BR-NWS-255"],
         [{"shares": "1000", "price": "18.5165"}, {"shares": "1", "price": "0.5"}, {"shares": "2.5", "price": "10"}],
-        select=lambda v: [i["summary"] for i in v["items"]], mode="pinned",
-        decision="FINDING: Form 4 summary rounds halves to even in Python (f-string :,.0f) and half up in the Worker (Math.round)",
-        expect_py=["Sale by Doe Jane: 1,000 shares, value $18,516.", "Sale by Doe Jane: 1 shares, value $0.",
-                   "Sale by Doe Jane: 2 shares, value $25."],
-        expect_ts=["Sale by Doe Jane: 1,000 shares, value $18,517.", "Sale by Doe Jane: 1 shares, value $1.",
+        select=lambda v: [i["summary"] for i in v["items"]], expect=["Sale by Doe Jane: 1,000 shares, value $18,517.", "Sale by Doe Jane: 1 shares, value $1.",
                    "Sale by Doe Jane: 3 shares, value $25."]),
 ]
 
@@ -1858,45 +1841,26 @@ CASES += [
                 "newswire": {"status": "OK", "rawCount": 3, "filteredCount": 3}, "warnings": [], "sourcesUsed": ["newswire"], "status": None}),
     # Cards 224 / 225: a stock-category prefix naming another exchange ('NYSE:NVDA', 'TSX:NVDA') for a NASDAQ company is rejected by
     # the Worker (exchange compatibility) and accepted by Python (symbol only).
-    # TODO(python-mirror): R-news Batch A (B-G4) gives Python the Worker's stock-category exchange check with the fixed normaliser;
-    # flip to equal with expect=<the expect_ts below> and rename to news.gnw.other_exchange_prefix_is_rejected_in_both.
     _gnw_case(
-        "news.gnw.other_exchange_prefix_is_rejected_in_the_worker_only", ["BR-NWS-224", "BR-NWS-225", "BR-NWS-222"], "NVDA", _NVDA_INFO,
+        "news.gnw.other_exchange_prefix_is_rejected_in_both", ["BR-NWS-224", "BR-NWS-225", "BR-NWS-222"], "NVDA", _NVDA_INFO,
         [_gitem(1, "NASDAQ tagged", ["Nasdaq:NVDA"]), _gitem(3, "TSX tagged", ["TSX:NVDA"]), _gitem(4, "NYSE tagged", ["NYSE:NVDA"])],
-        select=_gnw_view, mode="pinned",
-        decision="FINDING: GlobeNewswire stock-category exchange compatibility is checked in the Worker only (NYSE:/TSX: tags for a NASDAQ company are dropped there, kept in Python)",
-        expect_py={"items": [_gnw_row("NASDAQ tagged", ["Nasdaq:NVDA"], "id1"), _gnw_row("TSX tagged", ["TSX:NVDA"], "id3"),
-                             _gnw_row("NYSE tagged", ["NYSE:NVDA"], "id4")],
-                   "newswire": {"status": "OK", "rawCount": 3, "filteredCount": 3}, "warnings": [], "sourcesUsed": ["newswire"], "status": None},
-        expect_ts={"items": [_gnw_row("NASDAQ tagged", ["Nasdaq:NVDA"], "id1")],
+        select=_gnw_view, expect={"items": [_gnw_row("NASDAQ tagged", ["Nasdaq:NVDA"], "id1")],
                    "newswire": {"status": "OK", "rawCount": 1, "filteredCount": 1}, "warnings": [], "sourcesUsed": ["newswire"], "status": None}),
     # Card 223: an NYSE American company whose Yahoo exchange reads 'NYSE American'. Until 2.17.0 it normalised to NYSE, so the Worker
     # rejected its own 'NYSE American:UUUU' tag (and any other). Since 2.17.0 (B-G4) it normalises to NYSE American, so the Worker keeps
-    # the 'NYSE American:' and 'AMEX:' tags and drops 'NASDAQ:'; Python has no exchange check yet and accepts all three.
-    # TODO(python-mirror): flip to equal with expect=<the expect_ts below> once Python has the check.
+    # the 'NYSE American:' and 'AMEX:' tags and drops 'NASDAQ:'; Python has the same check since 2.17.0.
     _gnw_case(
         "news.gnw.nyse_american_company_keeps_its_own_releases", ["BR-NWS-223", "BR-NWS-224"], "UUUU",
         {"shortName": "Energy Fuels", "longName": "Energy Fuels Inc.", "exchange": "NYSE American"},
         [_gitem(1, "Energy Fuels news", ["NYSE American:UUUU"]), _gitem(2, "Energy Fuels nasdaq", ["NASDAQ:UUUU"]), _gitem(3, "Energy Fuels amex", ["AMEX:UUUU"])],
-        select=_gnw_view, mode="pinned",
-        decision="FINDING: GlobeNewswire stock-category exchange compatibility is checked in the Worker only (2.17.0: 'NYSE American' reads as NYSE American there); Python does not check the exchange",
-        expect_py={"items": [_gnw_row("Energy Fuels news", ["NYSE American:UUUU"], "id1"), _gnw_row("Energy Fuels nasdaq", ["NASDAQ:UUUU"], "id2"),
-                             _gnw_row("Energy Fuels amex", ["AMEX:UUUU"], "id3")],
-                   "newswire": {"status": "OK", "rawCount": 3, "filteredCount": 3}, "warnings": [], "sourcesUsed": ["newswire"], "status": None},
-        expect_ts={"items": [_gnw_row("Energy Fuels news", ["NYSE American:UUUU"], "id1"), _gnw_row("Energy Fuels amex", ["AMEX:UUUU"], "id3")],
+        select=_gnw_view, expect={"items": [_gnw_row("Energy Fuels news", ["NYSE American:UUUU"], "id1"), _gnw_row("Energy Fuels amex", ["AMEX:UUUU"], "id3")],
                    "newswire": {"status": "OK", "rawCount": 2, "filteredCount": 2}, "warnings": [], "sourcesUsed": ["newswire"], "status": None}),
-    # Card 223 edge: an exchange name 'ASE' maps to NYSEAMERICAN in the Worker, which then accepts 'NYSE American:' and 'AMEX:' tags.
-    # TODO(python-mirror): flip to equal with expect=<the expect_ts below> once Python has the B-G4 exchange check.
+    # Card 223 edge: an exchange name 'ASE' maps to NYSEAMERICAN in both runtimes, which then accept 'NYSE American:' and 'AMEX:' tags.
     _gnw_case(
         "news.gnw.ase_exchange_name_maps_to_nyse_american_in_the_worker", ["BR-NWS-223"], "UUUU",
         {"shortName": "Energy Fuels", "longName": "Energy Fuels Inc.", "exchange": "ASE"},
         [_gitem(1, "Energy Fuels news", ["NYSE American:UUUU"]), _gitem(2, "Energy Fuels nasdaq", ["NASDAQ:UUUU"]), _gitem(3, "Energy Fuels amex", ["AMEX:UUUU"])],
-        select=_gnw_view, mode="pinned",
-        decision="FINDING: with exchange 'ASE' the Worker accepts the 'NYSE American:' and 'AMEX:' tags and rejects 'NASDAQ:'; Python accepts all three",
-        expect_py={"items": [_gnw_row("Energy Fuels news", ["NYSE American:UUUU"], "id1"), _gnw_row("Energy Fuels nasdaq", ["NASDAQ:UUUU"], "id2"),
-                             _gnw_row("Energy Fuels amex", ["AMEX:UUUU"], "id3")],
-                   "newswire": {"status": "OK", "rawCount": 3, "filteredCount": 3}, "warnings": [], "sourcesUsed": ["newswire"], "status": None},
-        expect_ts={"items": [_gnw_row("Energy Fuels news", ["NYSE American:UUUU"], "id1"), _gnw_row("Energy Fuels amex", ["AMEX:UUUU"], "id3")],
+        select=_gnw_view, expect={"items": [_gnw_row("Energy Fuels news", ["NYSE American:UUUU"], "id1"), _gnw_row("Energy Fuels amex", ["AMEX:UUUU"], "id3")],
                    "newswire": {"status": "OK", "rawCount": 2, "filteredCount": 2}, "warnings": [], "sourcesUsed": ["newswire"], "status": None}),
     # Card 272: a feed larger than 2 MiB is rejected in both runtimes (same text).
     _gnw_case(
@@ -1922,8 +1886,7 @@ CASES += [
 # Card 242, 2.17.0 (B-G12c): verify relevance reads the evidence text and issuer, not the tickers list every collector injects. A
 # GlobeNewswire release tagged Nasdaq:ZZTP whose text names neither the ticker nor the company (and has no contributor) is official
 # evidence, so the event is CONFIRMED before the relevance check, which then downgrades it to PARTIAL with LOW_RELEVANCE_EVIDENCE.
-# Python still scores the injected tickers list HIGH.
-# TODO(python-mirror): flip to equal with expect=<the expect_ts below> once Python stops reading the tickers list.
+# Python no longer scores the injected tickers list (it did, and kept CONFIRMED).
 CASES += [
     _scenario(
         "news.verify.low_relevance_downgrade_fires_without_ticker_or_name", ["BR-NWS-242"],
@@ -1934,9 +1897,7 @@ CASES += [
         routes={GNW_FEEDS: {"body": _rss([_gitem(1, "Beta Corp to be bought in all-stock acquisition", ["Nasdaq:ZZTP"], desc="Beta Corp holders approve.")]),
                             "headers": {"content-type": "application/rss+xml"}}},
         select=lambda v: {"status": v["status"], "warnings": _warning_codes(v), "relevance": [e["relevance"] for e in v["bestEvidence"]]},
-        mode="pinned", decision="FINDING: 2.17.0 Worker side landed: verify relevance ignores the injected tickers list in the Worker, so LOW_RELEVANCE_EVIDENCE fires; Python port pending",
-        expect_py={"status": "CONFIRMED", "warnings": [], "relevance": ["HIGH"]},
-        expect_ts={"status": "PARTIAL", "warnings": ["LOW_RELEVANCE_EVIDENCE"], "relevance": ["LOW"]}),
+        expect={"status": "PARTIAL", "warnings": ["LOW_RELEVANCE_EVIDENCE"], "relevance": ["LOW"]}),
 ]
 
 
@@ -2478,14 +2439,10 @@ CASES += [
     # 'corporates' -> rates -> macro, 'sector' -> sec -> regulatory. Whole-word matching (the Worker since 2.17.0, A-G1 / B-G13 /
     # call #6) types those 'other'. An s/es/d/ed/ing suffix on a keyword still matches (planner decision 1), so 'introduces' and
     # 'notes' keep their types.
-    # TODO(python-mirror): flip to equal with expect=_EVENT_TYPES_WHOLE_WORD (rename to ...keyword_groups_match_whole_words).
     _scenario(
-        "news.classification.keyword_groups_and_substring_false_hits_agree", ["BR-NWS-253"],
+        "news.classification.keyword_groups_match_whole_words", ["BR-NWS-253"],
         lambda: server.get_company_news("ACME", 100, 14, ["finnhub"]), 'm.yahooFinance.getCompanyNews("ACME", 100, 14, ["finnhub"])',
-        env=FINNHUB_ENV, routes=_finnhub(_finnhub_rows(_EVENT_TITLES_SHARED)), select=_event_types, mode="pinned",
-        decision="FINDING: 2.17.0 Worker side landed: event-type keywords match whole words in the Worker; Python still matches substrings (port pending)",
-        expect_py=sorted([t, e] for t, e in _EVENT_TYPES_SHARED.items()),
-        expect_ts=sorted([t, e] for t, e in _EVENT_TYPES_WHOLE_WORD.items())),
+        env=FINNHUB_ENV, routes=_finnhub(_finnhub_rows(_EVENT_TITLES_SHARED)), select=_event_types, expect=sorted([t, e] for t, e in _EVENT_TYPES_WHOLE_WORD.items())),
     # Card 253: one keyword table, Python's superset (2.17.0): 'announces new', 'annual report' and 'credit facility' type in both
     # runtimes ('secures' no longer contains the whole word 'sec').
     _scenario(
@@ -2510,7 +2467,7 @@ def _labels(v):
     return sorted([i["title"], i["evidenceClass"], i["tickerMatch"], i["urlProvenance"], i["decisionUse"]] for i in v["items"])
 
 
-_LABELS_SHARED = [  # Python today: substring keywords type the 'Sector ...' rows regulatory
+_LABELS_SHARED = [  # before 2.17.0 (substring keywords) the labels were typed the 'Sector ...' rows regulatory
     ["AAPL news one", "CONTEXTUAL_NEWS", "EXPLICIT", "PROVIDER", "CONTEXT_ONLY"],
     ["Sector five", "CONTEXTUAL_NEWS", "SOURCE_SCOPED", "UNKNOWN", "CHECK_OFFICIAL_RELEASES"],
     ["Sector headline", "CONTEXTUAL_NEWS", "SOURCE_SCOPED", "PROVIDER", "CHECK_OFFICIAL_RELEASES"],
@@ -2523,25 +2480,17 @@ _LABELS_WHOLE_WORD = [row[:4] + ["CONTEXT_ONLY"] for row in _LABELS_SHARED]
 CASES += [
     # Card 254: a Finnhub item is CONTEXTUAL_NEWS; its ticker match is EXPLICIT when the text holds the ticker, else SOURCE_SCOPED; a
     # finnhub.io or finance.yahoo.com host is PROVIDER, another host PUBLISHER, no URL UNKNOWN. A URL that does not parse is UNKNOWN
-    # (Worker; Python ports it in R-news Batch A, B-G14). 'Sector ...' headlines contain 'sec': with substring keywords (Python today)
-    # they are typed regulatory and carry CHECK_OFFICIAL_RELEASES; with whole-word keywords (the Worker since 2.17.0) they are 'other'
+    # (both runtimes since 2.17.0, B-G14). 'Sector ...' headlines contain 'sec': with substring keywords (before 2.17.0)
+    # they were typed regulatory and carried CHECK_OFFICIAL_RELEASES; with whole-word keywords (both runtimes) they are 'other'
     # and CONTEXT_ONLY (BR-NWS-253).
-    # TODO(python-mirror): flip to equal with expect=_LABELS_WHOLE_WORD once Python matches event keywords as whole words.
     _scenario(
         "news.labels.evidence_class_ticker_match_and_url_provenance", ["BR-NWS-254"],
         lambda: server.get_company_news("AAPL", 20, 14, ["finnhub"]), 'm.yahooFinance.getCompanyNews("AAPL", 20, 14, ["finnhub"])',
-        env=FINNHUB_ENV, routes=_finnhub([r for r in _LABEL_ROWS if r["headline"] != "Sector four"]), select=_labels, mode="pinned",
-        decision="FINDING: 2.17.0 Worker side landed: whole-word event keywords type 'Sector ...' headlines 'other' (CONTEXT_ONLY) in the Worker; Python port pending",
-        expect_py=_LABELS_SHARED, expect_ts=_LABELS_WHOLE_WORD),
+        env=FINNHUB_ENV, routes=_finnhub([r for r in _LABEL_ROWS if r["headline"] != "Sector four"]), select=_labels, expect=_LABELS_WHOLE_WORD),
     _scenario(
-        "news.labels.unparseable_url_provenance_differs", ["BR-NWS-254"],
+        "news.labels.unparseable_url_provenance_is_unknown", ["BR-NWS-254"],
         lambda: server.get_company_news("AAPL", 20, 14, ["finnhub"]), 'm.yahooFinance.getCompanyNews("AAPL", 20, 14, ["finnhub"])',
-        env=FINNHUB_ENV, routes=_finnhub([r for r in _LABEL_ROWS if r["headline"] == "Sector four"]), select=_labels, mode="pinned",
-        # TODO(python-mirror): R-news Batch A (B-G14 label: UNKNOWN; A-G1 whole-word keywords: CONTEXT_ONLY); flip to equal with
-        # expect=<the expect_ts below> and rename to news.labels.unparseable_url_provenance_is_unknown.
-        decision="FINDING: an unparseable URL has urlProvenance UNKNOWN in the Worker and PUBLISHER in Python",
-        expect_py=[["Sector four", "CONTEXTUAL_NEWS", "SOURCE_SCOPED", "PUBLISHER", "CHECK_OFFICIAL_RELEASES"]],
-        expect_ts=[["Sector four", "CONTEXTUAL_NEWS", "SOURCE_SCOPED", "UNKNOWN", "CONTEXT_ONLY"]]),
+        env=FINNHUB_ENV, routes=_finnhub([r for r in _LABEL_ROWS if r["headline"] == "Sector four"]), select=_labels, expect=[["Sector four", "CONTEXTUAL_NEWS", "SOURCE_SCOPED", "UNKNOWN", "CONTEXT_ONLY"]]),
 ]
 
 _LONG_TEXT = ("Sentence number one  with   extra   spaces. " * 20).strip()
@@ -2573,8 +2522,7 @@ CASES += [
 CASES += [
     # Card 257: with the legacy yahoo_finance source the news and press-release passes read the same 20 stories. Until 2.17.0 both
     # runtimes summed the passes (rawCount and retrievedCount 40, and the press-release pass's 20 NOT_ISSUER_WIRE_RELEASE rejections of
-    # stories the news pass accepted). R-news Batch A (B-G12b): the shared feed is counted once (Worker side landed; Python port pending).
-    # TODO(python-mirror): flip to equal with expect=<the expect_ts below> once Python counts the shared feed once.
+    # stories the news pass accepted). R-news Batch A (B-G12b): the shared feed is counted once (both runtimes).
     _scenario(
         "news.yahoo.legacy_aggregate_counts_the_same_feed_twice", ["BR-NWS-257"],
         lambda: server.get_company_news("AMD", 100, 14, ["yahoo_finance"]), 'm.yahooFinance.getCompanyNews("AMD", 100, 14, ["yahoo_finance"])',
@@ -2582,10 +2530,7 @@ CASES += [
         select=lambda v: {"returned": len(v["items"]), **{k: v["sourceStatus"]["yahoo_finance"][k] for k in
                                                          ("status", "rawCount", "retrievedCount", "filteredCount", "acceptedCount", "returnedCount",
                                                           "rejectedCount", "rejectionCounts", "identityStatus", "attempted")}},
-        mode="pinned", decision="FINDING: 2.17.0 Worker side landed: the legacy yahoo_finance aggregate counts the shared Yahoo feed once in the Worker; Python port pending",
-        expect_py={"returned": 20, "status": "OK", "rawCount": 40, "retrievedCount": 40, "filteredCount": 20, "acceptedCount": 20, "returnedCount": 20,
-                   "rejectedCount": 20, "rejectionCounts": {"NOT_ISSUER_WIRE_RELEASE": 20}, "identityStatus": "RESOLVED", "attempted": True},
-        expect_ts={"returned": 20, "status": "OK", "rawCount": 20, "retrievedCount": 20, "filteredCount": 20, "acceptedCount": 20, "returnedCount": 20,
+        expect={"returned": 20, "status": "OK", "rawCount": 20, "retrievedCount": 20, "filteredCount": 20, "acceptedCount": 20, "returnedCount": 20,
                    "rejectedCount": 0, "rejectionCounts": {}, "identityStatus": "RESOLVED", "attempted": True}),
 ]
 
@@ -2605,17 +2550,13 @@ CASES += [
                 ["Sector item 21", "LOW", "2026-10-14T09:00:00Z"], ["Sector item 0", "LOW", "2026-10-14T00:00:00Z"], ["Sector item 8", "LOW", "2026-10-13T16:00:00Z"],
                 ["Sector item 22", "LOW", "2026-10-13T14:00:00Z"]]),
     # Card 262: until 2.17.0 the raw-substring relevance test found the ticker 'A' inside 'MARKETS RALLY' in both runtimes, so a Finnhub
-    # row about nothing in particular was HIGH. R-news Batch A (B-G12a): a single-letter ticker matches only as a whole token (Worker
-    # side landed; Python port pending).
-    # TODO(python-mirror): flip to equal with expect=<the expect_ts below> (rename to ...single_letter_ticker_is_not_found_inside_a_word).
+    # row about nothing in particular was HIGH. R-news Batch A (B-G12a): a single-letter ticker matches only as a whole token (both
+    # runtimes).
     _scenario(
-        "news.ranking.single_letter_ticker_is_found_inside_any_word", ["BR-NWS-262"],
+        "news.ranking.single_letter_ticker_is_not_found_inside_a_word", ["BR-NWS-262"],
         lambda: server.get_company_news("A", 10, 14, ["finnhub"]), 'm.yahooFinance.getCompanyNews("A", 10, 14, ["finnhub"])',
         env=FINNHUB_ENV, routes=_finnhub(_finnhub_rows(["Markets rally", "Zzz yyy"], summary="")),
-        select=lambda v: sorted([i["title"], i["tickerRelevance"], i["confidence"]] for i in v["items"]), mode="pinned",
-        decision="FINDING: 2.17.0 Worker side landed: a single-letter ticker matches only as a whole token in the Worker; Python port pending",
-        expect_py=[["Markets rally", "HIGH", "MEDIUM"], ["Zzz yyy", "LOW", "MEDIUM"]],
-        expect_ts=[["Markets rally", "LOW", "MEDIUM"], ["Zzz yyy", "LOW", "MEDIUM"]]),
+        select=lambda v: sorted([i["title"], i["tickerRelevance"], i["confidence"]] for i in v["items"]), expect=[["Markets rally", "LOW", "MEDIUM"], ["Zzz yyy", "LOW", "MEDIUM"]]),
     # 2.17.0 (B-G12a): a single-letter ticker that stands as its own token is still found (HIGH in both runtimes).
     _scenario(
         "news.ranking.single_letter_ticker_matches_as_a_whole_token", ["BR-NWS-262"],
@@ -2665,19 +2606,14 @@ CASES += [
         info=AMD_INFO, select=lambda v: [[i["title"], i["publishedAt"], v["meta"]["watermark"]] for i in v["items"]],
         expect=[["AMD tick", "2026-10-14T09:00:00Z", NOW_ISO], ["AMD zero", "2026-10-13T00:00:00Z", NOW_ISO]]),
     _scenario(
-        "news.timestamps.provider_date_strings_parse_differently", ["BR-NWS-278"],
+        "news.timestamps.provider_date_strings_parse_alike", ["BR-NWS-278"],
         lambda: server.get_company_news("AAPL", 10, 14, ["finnhub"]), 'm.yahooFinance.getCompanyNews("AAPL", 10, 14, ["finnhub"])',
         env=FINNHUB_ENV,
         routes=_finnhub([{"headline": "AAPL rfc date", "summary": "s", "source": "W", "url": "https://e.com/1", "datetime": "Tue, 13 Oct 2026 10:00:00 GMT"},
                          {"headline": "AAPL iso date", "summary": "s", "source": "W", "url": "https://e.com/2", "datetime": "2026-10-13T10:00:00Z"},
                          {"headline": "AAPL compact", "summary": "s", "source": "W", "url": "https://e.com/3", "datetime": "20261012"},
                          {"headline": "AAPL compact14", "summary": "s", "source": "W", "url": "https://e.com/4", "datetime": "20261011101010"}]),
-        select=lambda v: [[i["title"], i["publishedAt"]] for i in v["items"]], mode="pinned",
-        # TODO(python-mirror): R-news Batch A (B-G14 RFC 2822) makes Python parse the RFC 2822 string; flip to equal with
-        # expect=<the expect_ts below> and rename to news.timestamps.provider_date_strings_parse_alike.
-        decision="FINDING: an RFC 2822 date string parses in the Worker only (Python gives null and the date window drops the row)",
-        expect_py=[["AAPL iso date", "2026-10-13T10:00:00Z"], ["AAPL compact", "2026-10-12T00:00:00Z"], ["AAPL compact14", "2026-10-11T10:10:10Z"]],
-        expect_ts=[["AAPL rfc date", "2026-10-13T10:00:00Z"], ["AAPL iso date", "2026-10-13T10:00:00Z"], ["AAPL compact", "2026-10-12T00:00:00Z"],
+        select=lambda v: [[i["title"], i["publishedAt"]] for i in v["items"]], expect=[["AAPL rfc date", "2026-10-13T10:00:00Z"], ["AAPL iso date", "2026-10-13T10:00:00Z"], ["AAPL compact", "2026-10-12T00:00:00Z"],
                    ["AAPL compact14", "2026-10-11T10:10:10Z"]]),
 ]
 

@@ -19,6 +19,7 @@ from yfmcp.parsing.html import _strip_html_tags
 from yfmcp.news.shared import (
     _event_type_from_keywords,
     _make_duplicate_group_id,
+    _round_half_away_from_zero,
     _short_text,
     _within_date_window,
 )
@@ -184,7 +185,7 @@ def _form4_transaction_payload(
         "transactionLabel": _FORM4_TRANSACTION_LABELS.get(str(code or "").upper(), "Other/Unclassified"),
         "shares": shares,
         "price": price,
-        "value": round(shares * price, 2) if shares is not None and price is not None else None,
+        "value": _round_half_away_from_zero(shares * price, 2) if shares is not None and price is not None else None,
         "ownershipForm": ownership_form,
         "transactionDate": transaction_date,
     }
@@ -210,7 +211,8 @@ def _parse_form4_transaction(xml_text: str) -> dict | None:
     if tx is None:
         tx = root.find(".//derivativeTransaction")
     if tx is None:
-        return None
+        # A well-formed XHTML primary document has no XML transaction node: read it as HTML (Worker behaviour, 2.17.0).
+        return _parse_form4_html_transaction(xml_text)
     code = _xml_text(tx, ".//transactionCoding/transactionCode")
     shares_text = _xml_text(tx, ".//transactionAmounts/transactionShares/value")
     price_text = _xml_text(tx, ".//transactionAmounts/transactionPricePerShare/value")
@@ -252,8 +254,9 @@ async def _try_attach_form4_transaction(item: dict, filing: dict, warnings: list
     owner = parsed.get("owner") or "reporting owner"
     shares = parsed.get("shares")
     value = parsed.get("value")
-    value_part = f", value ${value:,.0f}" if isinstance(value, (int, float)) else ""
-    shares_part = f"{shares:,.0f} shares" if isinstance(shares, (int, float)) else "shares unavailable"
+    # The summary rounds with the same helper as the value; int() keeps a result of zero as "0", never "-0" (2.17.0).
+    value_part = f", value ${int(_round_half_away_from_zero(value, 0)):,}" if isinstance(value, (int, float)) else ""
+    shares_part = f"{int(_round_half_away_from_zero(shares, 0)):,} shares" if isinstance(shares, (int, float)) else "shares unavailable"
     item["title"] = f"Form 4: {label} by {owner}"
     item["summary"] = _short_text(f"{label} by {owner}: {shares_part}{value_part}.")
     item["evidenceText"] = _short_text(f"SEC Form 4 transaction code {parsed.get('transactionCode') or 'unknown'} on {parsed.get('transactionDate') or item.get('filingDate')}.")
@@ -286,6 +289,12 @@ def _build_sec_event_item(ticker: str, filing: dict, retrieved_at: str, issuer: 
         url = _safe_sec_url(f"https://www.sec.gov/Archives/edgar/data/{cik_int}/{acc_clean}/{primary_document}")
     if not url and cik_int and accession:
         url = _safe_sec_url(f"https://www.sec.gov/Archives/edgar/data/{cik_int}/{acc_clean}/{accession}-index.htm")
+    if not url:
+        warnings.append({
+            "code": "SEC_URL_INVALID",
+            "message": "SEC event URL missing or invalid SEC Archives URL.",
+            "severity": "warning",
+        })
     confidence = "HIGH" if (accession and accepted_at and url) else ("MEDIUM" if accession and url else "LOW")
     title = f"{filing_type} filed" if filing_type else "SEC filing"
     event_type = _event_type_from_form(filing_type)

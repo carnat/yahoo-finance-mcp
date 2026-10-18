@@ -21,6 +21,7 @@ from yfmcp.news.shared import (
     _event_type_from_keywords,
     _make_duplicate_group_id,
     _short_text,
+    _ticker_in_text,
     _within_date_window,
 )
 
@@ -144,7 +145,6 @@ async def _collect_finnhub_events(
                 "message": "Weak dedupe key for at least one item.",
                 "severity": "warning",
             })
-        blob = f"{title} {summary}".upper()
         item = {
             "title": title,
             "source": "finnhub",
@@ -159,7 +159,7 @@ async def _collect_finnhub_events(
             "summary": _short_text(summary or title, 240),
             "evidenceText": _short_text(summary or title, 180),
             "confidence": "MEDIUM" if item_url else "LOW",
-            "tickerRelevance": "HIGH" if ticker_u in blob else "LOW",
+            "tickerRelevance": "HIGH" if _ticker_in_text(f"{title} {summary}", ticker_u) else "LOW",
             "duplicateGroupId": duplicate_group_id,
         }
         if not _within_date_window(
