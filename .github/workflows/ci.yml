@@ -82,7 +82,7 @@ jobs:
 
       # ── 1. Fastest sanity gates (no deps) ────────────────────────────────
       - name: Python syntax check
-        run: python -m py_compile server.py tool_groups.py yfmcp/*.py yfmcp/tools/*.py scripts/*.py
+        run: python -m py_compile server.py tool_groups.py yfmcp/*.py yfmcp/tools/*.py yfmcp/news/*.py yfmcp/news/providers/*.py scripts/*.py
 
       - name: Python import check
         run: python -c "import server"
