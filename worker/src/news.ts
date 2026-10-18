@@ -32,6 +32,8 @@ import { MARKETAUX_WIRE_DOMAINS, MARKETAUX_MAX_ITEMS, collectMarketauxEvents } f
 import { collectSecEvents } from "./news/providers/sec.js";
 import { yahooNewsIdentityFor, yahooDecisionUse, collectYahooEvents } from "./news/providers/yahoo.js";
 import { sourceDecisionUse, shortText, withinDateWindow } from "./news/shared.js";
+import newsSourceRegistry from "./news-source-registry.json";
+import { getWorkerVar } from "./response.js";
 // Names other modules and tests import from news.ts (2.15.1 provider move).
 export { parseHtmlTable } from "./news/shared.js";
 export { getNews, yahooItemIssuer, collectYahooEvents } from "./news/providers/yahoo.js";
@@ -85,7 +87,8 @@ function confidenceForSourceType(sourceType: unknown, fallback: unknown = "LOW")
 }
 // Default source sets the news tools apply when `sources` is omitted or null (Q3h, 2.7.0).
 // An explicit array, including [], is used as given: [] attempts no source.
-export const DEFAULT_NEWS_SOURCES = ["yahoo_finance_news", "yahoo_finance_press_releases", "finnhub", "marketaux"];
+// 2.16.0: the news defaults come from the shared source registry (news-source-registry.json), which Python reads too.
+export const DEFAULT_NEWS_SOURCES: string[] = [...newsSourceRegistry.defaultSources];
 export const DEFAULT_PRESS_RELEASE_SOURCES = ["sec", "company_ir_page", "yahoo_finance_press_releases"];
 export const DEFAULT_EVENT_SOURCES = ["sec", "company_ir_page", "company_ir", "yahoo_finance_news", "yahoo_finance_press_releases", "finnhub", "marketaux"];
 const NOT_ATTEMPTED_SOURCE_STATUSES = new Set(["NOT_ELIGIBLE", "NOT_NEEDED", "UNCONFIGURED"]);
@@ -120,6 +123,35 @@ function normalizeSources(sources: string[] | undefined, defaults: string[]): { 
   return { selected, warnings };
 }
 /**
+ * Operator off switch (2.16.0): NEWS_SOURCES_DISABLED is a comma-separated list of source names, each trimmed
+ * and lower-cased; unknown names are ignored and an empty or unset value disables nothing.
+ */
+function disabledNewsSources(): Set<string> {
+  const raw = getWorkerVar("NEWS_SOURCES_DISABLED") ?? "";
+  return new Set(raw.split(",").map(name => name.trim().toLowerCase()).filter(name => SUPPORTED_EVENT_SOURCES.has(name)));
+}
+/** Selected sources split into the ones to collect and the ones the operator disabled (selection order kept). */
+function splitDisabledSources(selected: string[]): { active: string[]; disabled: string[] } {
+  const off = disabledNewsSources();
+  return { active: selected.filter(src => !off.has(src)), disabled: selected.filter(src => off.has(src)) };
+}
+/** One info warning per disabled source that was selected (existing SOURCE_UNAVAILABLE shape). */
+function disabledSourceWarnings(disabled: string[]): Record<string, unknown>[] {
+  return disabled.map(source => ({
+    code: "SOURCE_UNAVAILABLE",
+    message: `Source ${source} is disabled by the server operator.`,
+    severity: "info",
+    source,
+  }));
+}
+/** A disabled source's row always replaces whatever message inference produced (RNEWS2 §8.2/§8.3). */
+function markDisabledSources(sourceStatus: Record<string, unknown>, disabled: string[]): Record<string, unknown> {
+  for (const source of disabled) {
+    sourceStatus[source] = { status: "UNCONFIGURED", rawCount: 0, filteredCount: 0, attempted: false };
+  }
+  return sourceStatus;
+}
+/**
  * An explicit sources list that selects no supported source attempts nothing (Q3h). The result is
  * neither a provider failure nor confirmed absence, so it reads as source-limited.
  */
@@ -140,6 +172,8 @@ type CompanyEventCollectionResult = {
   sourceDiagnostics: Record<string, unknown>;
   /** Sources whose collection had a fetch refused for the subrequest budget (2.11.0); never serialized. */
   budgetStarvedSources?: string[];
+  /** Selected sources the operator disabled (2.16.0); never serialized. */
+  disabledSources?: string[];
 };
 function evidenceClassFor(sourceType: unknown): string {
   const source = _str(sourceType);
@@ -293,6 +327,7 @@ function computeSourceStatus(
   selectedSources: string[],
   sourceDiagnostics: Record<string, unknown> = {},
   budgetStarvedSources: string[] = [],
+  disabledSources: string[] = [],
 ): Record<string, unknown> {
   const warningCodes = new Set(warnings.map(w => _str(w.code)));
   const warningMsgs = warnings
@@ -350,7 +385,12 @@ function computeSourceStatus(
     result.yahoo_finance_identity = identityDiagnostic;
   }
   if (selectedSources.includes("sec")) {
-    if (sourcesUsed.includes("sec")) {
+    const secDiagnostic = (sourceDiagnostics.sec && typeof sourceDiagnostics.sec === "object")
+      ? sourceDiagnostics.sec as Record<string, unknown>
+      : {};
+    if (_str(secDiagnostic.status) === "NOT_ELIGIBLE") {
+      result.sec = { status: "NOT_ELIGIBLE", rawCount: 0, filteredCount: 0, ...secDiagnostic };
+    } else if (sourcesUsed.includes("sec")) {
       result.sec = { status: secItems.length > 0 ? "OK" : "EMPTY_RESULT", rawCount: secItems.length, filteredCount: secItems.length };
     } else if (warningMsgs.some(m => m.includes("sec submissions"))) {
       result.sec = { status: "PROVIDER_ERROR", rawCount: 0, filteredCount: 0 };
@@ -518,7 +558,7 @@ function computeSourceStatus(
       result.newswire = { status: "EMPTY_RESULT", rawCount: 0, filteredCount: 0 };
     }
   }
-  return markBudgetStarvedSources(result, budgetStarvedSources);
+  return markDisabledSources(markBudgetStarvedSources(result, budgetStarvedSources), disabledSources);
 }
 /**
  * A source whose collection had a fetch refused for the subrequest budget and
@@ -649,12 +689,14 @@ async function collectCompanyEvents(
   const safeMax = clampInt(maxResults, 10, 1, 100);
   const safeLookback = clampInt(lookbackDays, 14, 1, 3650);
   const watermark = new Date().toISOString();
-  const { selected, warnings: sourceWarnings } = normalizeSources(sources, [
+  const { selected: requestedSelection, warnings: sourceWarnings } = normalizeSources(sources, [
     "sec", "company_ir_page", "company_ir",
     "yahoo_finance", "yahoo_finance_news", "yahoo_finance_press_releases",
     "finnhub", "marketaux",
   ]);
-  const warnings: Record<string, unknown>[] = [...sourceWarnings];
+  // A source the operator disabled is never collected (2.16.0); it is reported instead.
+  const { active: selected, disabled: disabledSources } = splitDisabledSources(requestedSelection);
+  const warnings: Record<string, unknown>[] = [...sourceWarnings, ...disabledSourceWarnings(disabledSources)];
   const items: Record<string, unknown>[] = [];
   const sourcesUsed: string[] = [];
   const sourceDiagnostics: Record<string, unknown> = {};
@@ -681,7 +723,20 @@ async function collectCompanyEvents(
     const sec = await watched(["sec"], () => collectSecEvents(ticker, secFilingTypes, safeMax, watermark, startDate, endDate, safeLookback));
     if (sec.used) sourcesUsed.push("sec");
     items.push(...sec.items);
-    warnings.push(...sec.warnings);
+    if (sec.noCik) {
+      // A ticker SEC has no CIK for is not eligible, as an ineligible Finnhub ticker is (RNEWS2 §8.7).
+      sourceDiagnostics.sec = { status: "NOT_ELIGIBLE", attempted: false, reasonCode: null };
+      warnings.push({
+        code: "SOURCE_NOT_ELIGIBLE",
+        message: `SEC has no filings for ${ticker.toUpperCase()} (no SEC CIK).`,
+        severity: "warning",
+        source: "sec",
+        attempted: false,
+        reasonCode: null,
+      });
+    } else {
+      warnings.push(...sec.warnings);
+    }
   }
 
   if (selected.includes("company_ir")) {
@@ -798,7 +853,8 @@ async function collectCompanyEvents(
   }
 
   if (selected.includes("marketaux")) {
-    const fallbackReason = marketauxFallbackReason(selected, items, warnings, sourceDiagnostics, searchQuery);
+    // The requested selection, disabled sources included: a disabled finnhub counts as limited coverage (RNEWS2 §8.3).
+    const fallbackReason = marketauxFallbackReason(requestedSelection, items, warnings, sourceDiagnostics, searchQuery);
     if (fallbackReason === null) {
       sourceDiagnostics.marketaux = {
         status: "NOT_NEEDED",
@@ -853,7 +909,7 @@ async function collectCompanyEvents(
     warningKeys.add(key);
     uniqueWarnings.push(w);
   }
-  return { items: deduped, sourcesUsed, warnings: uniqueWarnings, watermark, sourceDiagnostics, budgetStarvedSources: [...budgetStarved] };
+  return { items: deduped, sourcesUsed, warnings: uniqueWarnings, watermark, sourceDiagnostics, budgetStarvedSources: [...budgetStarved], disabledSources };
 }
 // ─── Public event / news tools ─────────────────────────────────────────────────
 
@@ -896,7 +952,7 @@ export async function getCompanyNews(
   const out = await collectCompanyEvents(ticker, { maxResults: Math.min(100, safeMax * 3), lookbackDays, sources });
   out.items = rankNewsItemsByRelevance(out.items).slice(0, safeMax);
   const status = collectionStatus(out.items, out.sourcesUsed, out.warnings);
-  const sourceStatus = computeSourceStatus(out.sourcesUsed, out.warnings, out.items, sources, out.sourceDiagnostics, out.budgetStarvedSources);
+  const sourceStatus = computeSourceStatus(out.sourcesUsed, out.warnings, out.items, sources, out.sourceDiagnostics, out.budgetStarvedSources, out.disabledSources);
   const sourceCoverage = computeSourceCoverage(sourceStatus);
   const coverage = buildCoverage(sourceStatus);
   const payload: Record<string, unknown> = {
@@ -937,7 +993,7 @@ export async function searchCompanyNews(
     : out.items;
   const matched = rankNewsItemsByRelevance(matchedAll).slice(0, clampInt(maxResults, 10, 1, 100));
   const status = collectionStatus(matched, out.sourcesUsed, out.warnings);
-  const sourceStatus = computeSourceStatus(out.sourcesUsed, out.warnings, matched, sources, out.sourceDiagnostics, out.budgetStarvedSources);
+  const sourceStatus = computeSourceStatus(out.sourcesUsed, out.warnings, matched, sources, out.sourceDiagnostics, out.budgetStarvedSources, out.disabledSources);
   const sourceCoverage = computeSourceCoverage(sourceStatus);
   const coverage = buildCoverage(sourceStatus);
   const payload: Record<string, unknown> = {
@@ -964,7 +1020,9 @@ export async function getCompanyPressReleases(
   const sources = requestedSources ?? DEFAULT_PRESS_RELEASE_SOURCES;
   const safeMax = clampInt(maxResults, 20, 1, 100);
   const safeLookback = clampInt(lookbackDays, 90, 1, 3650);
-  const { selected, warnings: sourceWarnings } = normalizeSources(sources, ["sec", "company_ir_page", "yahoo_finance_press_releases"]);
+  const { selected: requestedSelection, warnings: sourceWarnings } = normalizeSources(sources, ["sec", "company_ir_page", "yahoo_finance_press_releases"]);
+  // Disabled sources are dropped here, so the inner collections never see them; the report is attached once below (2.16.0).
+  const { active: selected, disabled: disabledSources } = splitDisabledSources(requestedSelection);
   const primarySources = selected.filter(src => src === "sec" || src === "company_ir_page");
   const optionalSources = selected.filter(src => src !== "sec" && src !== "company_ir_page");
   const selectedHasCompanyIr = selected.includes("company_ir");
@@ -1042,7 +1100,7 @@ export async function getCompanyPressReleases(
       secFilingTypes: ["8-K"],
     })
     : emptyCollection();
-  const warnings = [...sourceWarnings, ...primary.warnings, ...supplemental.warnings];
+  const warnings = [...sourceWarnings, ...disabledSourceWarnings(disabledSources), ...primary.warnings, ...supplemental.warnings];
   const warningKeys = new Set<string>();
   const uniqueWarnings: Record<string, unknown>[] = [];
   for (const w of warnings) {
@@ -1106,7 +1164,8 @@ export async function getCompanyPressReleases(
     } else if (selectedHasCompanyIr) {
       status = "COMPANY_IR_NOT_FOUND";
     } else {
-      status = "NOT_FOUND";
+      // A disabled source never yields NOT_FOUND: the source-limited path applies (2.16.0).
+      status = disabledSources.length > 0 ? collectionStatus(processedItems, sourcesUsed, uniqueWarnings) : "NOT_FOUND";
     }
   } else {
     status = collectionStatus(processedItems, sourcesUsed, uniqueWarnings);
@@ -1124,7 +1183,7 @@ export async function getCompanyPressReleases(
       : "Resolved an approved, registry-reviewed company IR page source for this call."
     : "No resolved SEC EX-99 press-release exhibit in this call; use for verification/context only.";
   const budgetStarvedSources = [...new Set([...(primary.budgetStarvedSources ?? []), ...(supplemental.budgetStarvedSources ?? [])])];
-  const sourceStatus = computeSourceStatus(sourcesUsed, uniqueWarnings, processedItems, selected, sourceDiagnostics, budgetStarvedSources);
+  const sourceStatus = computeSourceStatus(sourcesUsed, uniqueWarnings, processedItems, requestedSelection, sourceDiagnostics, budgetStarvedSources, disabledSources);
   const sourceCoverage = computeSourceCoverage(sourceStatus);
   const coverage = buildCoverage(sourceStatus, payloadDecisionGrade ? "USE_OFFICIAL_EVIDENCE" : null);
 
@@ -1211,7 +1270,7 @@ export async function getPublicEventTimeline(
       : _str(a.timestamp).localeCompare(_str(b.timestamp)))
     .slice(0, clampInt(maxResults, 50, 1, 100));
   const status = collectionStatus(out.items, out.sourcesUsed, out.warnings);
-  const sourceStatus = computeSourceStatus(out.sourcesUsed, out.warnings, out.items, sources, out.sourceDiagnostics, out.budgetStarvedSources);
+  const sourceStatus = computeSourceStatus(out.sourcesUsed, out.warnings, out.items, sources, out.sourceDiagnostics, out.budgetStarvedSources, out.disabledSources);
   const sourceCoverage = computeSourceCoverage(sourceStatus);
   const coverage = buildCoverage(sourceStatus);
   const payload: Record<string, unknown> = {
@@ -1408,7 +1467,7 @@ export async function verifyCompanyEvent(
       });
     }
   }
-  const sourceStatus = computeSourceStatus(out.sourcesUsed, out.warnings, out.items, sources, out.sourceDiagnostics, out.budgetStarvedSources);
+  const sourceStatus = computeSourceStatus(out.sourcesUsed, out.warnings, out.items, sources, out.sourceDiagnostics, out.budgetStarvedSources, out.disabledSources);
   const sourceCoverage = computeSourceCoverage(sourceStatus);
   const coverage = buildCoverage(sourceStatus);
   const coverageFailureMode = verifyCoverageFailureMode(sourceStatus, out.warnings);

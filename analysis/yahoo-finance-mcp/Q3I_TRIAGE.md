@@ -133,3 +133,4 @@ These came up while implementing R4b. None is a regression.
 - **F6. Telemetry.**
   - Analytics Engine counts about 15 preview-canary requests per deploy that Workers Logs never shows.
   - The Phase 4 baseline comparison should exclude them, by filtering out deploy-hour canary actions or by tagging the preview version.
+- **F7. Python EDGAR ticker index after a failed load** (found in 2.16.0). `_load_edgar_tickers` caches `{}` with load time 0.0. While machine uptime is under 24 h, that passes the TTL check, so a failed index load is not retried for up to a day, and CIK lookups via the index miss in the meantime. The 2.16.0 NOT_ELIGIBLE path is safe, because `_edgar_ticker_map_loaded` requires a non-empty map with a load time. The fix is to treat an empty map as not cached. Check the Worker's equivalent at the same time.

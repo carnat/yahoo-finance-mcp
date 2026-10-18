@@ -3,7 +3,7 @@
  * Moved out of news.ts in 2.15.1 (pure restructure); providers never import news.ts.
  */
 
-import { edgarGetHtml, getSubmissionsForTicker, stripHtmlTags, _str } from "../../yahoo-finance.js";
+import { edgarGetHtml, edgarTickerMapLoaded, getSubmissionsForTicker, stripHtmlTags, _str } from "../../yahoo-finance.js";
 import {
   parseHtmlTable,
   sourceDecisionUse,
@@ -274,7 +274,9 @@ export async function collectSecEvents(
   const { cikPadded, submissions } = await getSubmissionsForTicker(ticker);
   if (!cikPadded || !submissions) {
     warnings.push({ code: "SOURCE_UNAVAILABLE", message: "SEC submissions source unavailable.", severity: "warning" });
-    return { items, warnings, used: false };
+    // No CIK although SEC's ticker index was read: the ticker has no SEC filings (2.16.0). A failed lookup or
+    // submissions fetch stays a provider failure.
+    return { items, warnings, used: false, ...(!cikPadded && edgarTickerMapLoaded() ? { noCik: true } : {}) };
   }
   const recent = ((submissions.filings as Record<string, unknown>)?.recent as Record<string, unknown[]>) ?? {};
   const forms = (recent.form ?? []) as string[];

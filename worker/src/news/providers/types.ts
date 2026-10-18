@@ -15,6 +15,11 @@ export type NewsProviderResult = {
   items: Record<string, unknown>[];
   warnings: Record<string, unknown>[];
   used: boolean;
+  /**
+   * SEC only (2.16.0): true when no CIK was found although SEC's ticker index was read, so the ticker has no SEC
+   * filings. The news pipeline reports it as NOT_ELIGIBLE; get_sec_recent_events keeps its own reporting. Never serialized.
+   */
+  noCik?: boolean;
 };
 
 /** A NewsProviderResult that also carries the provider's per-source diagnostics. */

@@ -16,7 +16,7 @@ from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-from source_text import ROOT as _SRC_ROOT, module_sources, worker_runtime_source  # noqa: E402
+from source_text import ROOT as _SRC_ROOT, definition_source, module_sources, python_runtime_source, worker_runtime_source  # noqa: E402
 
 
 def _open_worker_yahoo_news(root):
@@ -162,7 +162,7 @@ class TestPhase6BCompanyNews(unittest.TestCase):
             self.assertEqual(data.get("sourceStatus", {}).get("finnhub", {}).get("status"), "OK")
 
     def test_get_company_news_default_sources_use_priority_routing(self):
-        """Defaults expose fine-grained Yahoo, Finnhub, and Marketaux fallback status."""
+        """Defaults expose fine-grained Yahoo, SEC, Finnhub, and Marketaux fallback status."""
         yf_items = [
             {
                 "title": "Apple reports record sales",
@@ -207,14 +207,14 @@ class TestPhase6BCompanyNews(unittest.TestCase):
             data = _parse(_run(srv.get_company_news("AAPL")))
             # Must return 2 items from Yahoo even though Finnhub is absent
             self.assertEqual(len(data.get("items", [])), 2)
-            # sourceStatus must include both Yahoo lanes, Finnhub, and the Marketaux fallback.
+            # sourceStatus must include both Yahoo lanes, SEC (a default since 2.16.0), Finnhub, and the Marketaux fallback.
             source_status = data.get("sourceStatus", {})
+            self.assertIn("sec", source_status)
             self.assertIn("yahoo_finance_news", source_status)
             self.assertIn("yahoo_finance_press_releases", source_status)
             self.assertIn("finnhub", source_status)
             self.assertIn("marketaux", source_status)
-            # sec, company_ir, newswire, legacy yahoo_finance must NOT appear in default sourceStatus
-            self.assertNotIn("sec", source_status)
+            # company_ir, newswire, legacy yahoo_finance must NOT appear in default sourceStatus
             self.assertNotIn("company_ir", source_status)
             self.assertNotIn("newswire", source_status)
             self.assertNotIn("yahoo_finance", source_status)
@@ -2484,6 +2484,69 @@ class TestGlobeNewswireRSS(unittest.TestCase):
         # 2.10.0: discovery candidate paths were removed with the fetch allow-list
         self.assertNotIn('"/rss-news-feeds"', worker_text)
         self.assertNotIn('"/feed/press-releases.xml"', worker_text)
+
+
+class TestNewsSourceRegistry(unittest.TestCase):
+    """2.16.0 (RNEWS2 §1): worker/src/news-source-registry.json is shared data both runtimes read."""
+
+    REGISTRY_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "worker", "src", "news-source-registry.json")
+    OFFICIAL = {"sec", "company_ir", "company_ir_page", "newswire"}
+    AGGREGATOR = {"yahoo_finance", "yahoo_finance_news", "yahoo_finance_press_releases", "finnhub", "marketaux"}
+
+    @classmethod
+    def setUpClass(cls):
+        with open(cls.REGISTRY_PATH, encoding="utf-8") as fh:
+            cls.registry = json.load(fh)
+
+    def test_shape(self):
+        self.assertEqual(set(self.registry), {"schemaVersion", "defaultSources", "sources"})
+        self.assertEqual(self.registry["schemaVersion"], "2026-10-18")
+        for name, entry in self.registry["sources"].items():
+            self.assertEqual(set(entry), {"tier", "requiresKey", "approxSubrequests", "description"}, name)
+            self.assertIn(entry["tier"], ("official", "aggregator"), name)
+            self.assertIsInstance(entry["requiresKey"], list, name)
+            self.assertIsInstance(entry["approxSubrequests"], int, name)
+            self.assertGreaterEqual(entry["approxSubrequests"], 0, name)
+            self.assertTrue(entry["description"].strip() and "\n" not in entry["description"], name)
+
+    def test_tiers(self):
+        tiers = {name: entry["tier"] for name, entry in self.registry["sources"].items()}
+        self.assertEqual({n for n, t in tiers.items() if t == "official"}, self.OFFICIAL)
+        self.assertEqual({n for n, t in tiers.items() if t == "aggregator"}, self.AGGREGATOR)
+
+    def test_registry_names_equal_each_runtime_accepted_names(self):
+        from yfmcp.tools import news as news_tools
+        ts_text = definition_source("worker", "SUPPORTED_EVENT_SOURCES")
+        ts_names = set(re.findall(r'"([a-z_]+)"', ts_text))
+        names = set(self.registry["sources"])
+        self.assertEqual(names, ts_names)
+        self.assertEqual(names, set(news_tools._PHASE6B_SUPPORTED_SOURCES))
+
+    def test_required_keys_are_the_env_names_the_providers_read(self):
+        sources = self.registry["sources"]
+        self.assertEqual(sources["finnhub"]["requiresKey"], ["FINNHUB_API_KEY", "FINNHUB_TOKEN"])
+        self.assertEqual(sources["marketaux"]["requiresKey"], ["MARKETAUX_API_TOKEN", "MARKETAUX_API_KEY"])
+        for name, entry in sources.items():
+            if name not in ("finnhub", "marketaux"):
+                self.assertEqual(entry["requiresKey"], [], name)
+        worker_text = worker_runtime_source()
+        python_text = python_runtime_source()
+        for key in sources["finnhub"]["requiresKey"] + sources["marketaux"]["requiresKey"]:
+            self.assertIn(f'getWorkerVar("{key}")', worker_text, key)
+            self.assertIn(f'os.environ.get("{key}")', python_text, key)
+
+    def test_defaults_include_sec_after_yahoo_press_releases(self):
+        self.assertEqual(self.registry["defaultSources"],
+                         ["yahoo_finance_news", "yahoo_finance_press_releases", "sec", "finnhub", "marketaux"])
+        self.assertTrue(set(self.registry["defaultSources"]) <= set(self.registry["sources"]))
+
+    def test_worker_defaults_are_read_from_the_registry(self):
+        self.assertIn('from "./news-source-registry.json"', worker_runtime_source())
+        self.assertIn("newsSourceRegistry.defaultSources", definition_source("worker", "DEFAULT_NEWS_SOURCES"))
+
+    def test_python_defaults_equal_the_registry(self):
+        from yfmcp.tools import news as news_tools
+        self.assertEqual(list(news_tools._DEFAULT_NEWS_SOURCES), self.registry["defaultSources"])
 
 
 if __name__ == "__main__":

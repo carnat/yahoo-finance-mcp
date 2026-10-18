@@ -813,6 +813,19 @@ MX_MIXED_ROWS = [
     mx_row("Old NVIDIA wire result", "2026-08-01T12:00:00Z", uuid="a5"),
 ]
 
+_NOT_CALLED_EXPECT_2150 = {"marketaux": {"status": "NOT_NEEDED", "rawCount": 0, "acceptedCount": 0, "returnedCount": 0, "rejectedCount": 0,
+                                    "rejectionCounts": {}, "attempted": False, "reasonCode": "HIGHER_PRIORITY_EVIDENCE_FOUND",
+                                    "fallbackReason": None,
+                                    "quotaPolicy": {**MX_QUOTA, "pagesRequested": 0}, "domains": MX_DOMAIN_LIST, "allowedAction": "none"},
+                      "items": [{"title": f"Acme story {w}", "sourceType": "yahoo_finance_news", "matchBasis": "TICKER_TOKEN",
+                                 "confidence": "MEDIUM", "tickerRelevance": "HIGH"} for w in ("alpha", "beta", "gamma")],
+                      "coverage": {"sourceCoverage": "FULL", "state": "FULL", "failed": [],
+                                   "skipped": [["marketaux", "NOT_NEEDED"]], "truncated": [], "action": "USE_RETURNED_CONTEXT"}}
+# 2.16.0: the same, plus the default sec source failing for lack of an SEC stub (coverage PARTIAL, CHECK_OFFICIAL_RELEASES).
+_NOT_CALLED_EXPECT_2160 = {**_NOT_CALLED_EXPECT_2150,
+                           "coverage": {"sourceCoverage": "PARTIAL", "state": "PARTIAL", "failed": [["sec", "PROVIDER_ERROR"]],
+                                        "skipped": [["marketaux", "NOT_NEEDED"]], "truncated": [], "action": "CHECK_OFFICIAL_RELEASES"}}
+
 CASES += [
     # Cards 187/188/189: one page of at most 3 rows from the three wire domains for the lookback window; rows are filtered locally.
     tool_case("news.marketaux.explicit_source_makes_one_bounded_request_and_filters_rows",
@@ -833,20 +846,15 @@ CASES += [
               select=lambda v: {"status": v["sourceStatus"]["marketaux"]["status"], "attempted": v["sourceStatus"]["marketaux"]["attempted"]},
               expect={"status": "EMPTY_RESULT", "attempted": True}),
     # Cards 184/186/190: Yahoo and Finnhub found evidence and nothing is limited -> no Marketaux call, no quota spent.
+    # 2.16.0 (RNEWS2 §4.1): the defaults now include sec. ACME has no SEC ticker-map stub, so the Worker reports
+    # sec PROVIDER_ERROR (as for an explicit sec on a ticker without a CIK) and coverage reads PARTIAL; the Marketaux
+    # gate is unchanged. Both runtimes read the registry defaults.
     tool_case("news.marketaux.not_called_when_higher_priority_sources_found_evidence",
               ["BR-NWS-184", "BR-NWS-186", "BR-NWS-190"], "news", ["ACME", 10, 14, None],
               {"env": {**FAKE_FINNHUB, **FAKE_MARKETAUX}, "info": ACME_INFO,
                "news": [yahoo_row(f"Acme story {w}", f"2026-10-1{n}T09:00:00Z") for n, w in ((4, "alpha"), (3, "beta"), (2, "gamma"))],
                "routes": {FINNHUB_NEWS: {"json": []}}},
-              select=mx_view,
-              expect={"marketaux": {"status": "NOT_NEEDED", "rawCount": 0, "acceptedCount": 0, "returnedCount": 0, "rejectedCount": 0,
-                                    "rejectionCounts": {}, "attempted": False, "reasonCode": "HIGHER_PRIORITY_EVIDENCE_FOUND",
-                                    "fallbackReason": None,
-                                    "quotaPolicy": {**MX_QUOTA, "pagesRequested": 0}, "domains": MX_DOMAIN_LIST, "allowedAction": "none"},
-                      "items": [{"title": f"Acme story {w}", "sourceType": "yahoo_finance_news", "matchBasis": "TICKER_TOKEN",
-                                 "confidence": "MEDIUM", "tickerRelevance": "HIGH"} for w in ("alpha", "beta", "gamma")],
-                      "coverage": {"sourceCoverage": "FULL", "state": "FULL", "failed": [],
-                                   "skipped": [["marketaux", "NOT_NEEDED"]], "truncated": [], "action": "USE_RETURNED_CONTEXT"}}),
+              select=mx_view, expect=_NOT_CALLED_EXPECT_2160),
     # Card 168: a Finnhub NOT_ELIGIBLE skip (a deliberate policy skip) still counts as limited coverage and spends a Marketaux call.
     tool_case("news.marketaux.finnhub_policy_skip_forces_the_fallback_even_with_yahoo_evidence", ["BR-NWS-168", "BR-NWS-186"], "news",
               ["ERIC-B.ST", 10, 14, None],
@@ -856,10 +864,12 @@ CASES += [
               select=lambda v: {"marketaux": status_row(v["sourceStatus"]["marketaux"], "status", "attempted", "fallbackReason", "reasonCode", "quotaPolicy"),
                                 "finnhub": status_row(v["sourceStatus"]["finnhub"], "status", "attempted"),
                                 "warnings": codes(v), "items": [it["title"] for it in v["items"]]},
+              # 2.16.0 (RNEWS2 §4.1): the default sec source has no CIK for ERIC-B.ST, so both runtimes add the SOURCE_UNAVAILABLE
+              # warning first.
               expect={"marketaux": {"status": "EMPTY_RESULT", "attempted": True, "fallbackReason": "HIGHER_PRIORITY_COVERAGE_LIMITED",
-                                    "reasonCode": None, "quotaPolicy": MX_QUOTA},
-                      "finnhub": {"status": "NOT_ELIGIBLE", "attempted": False},
-                      "warnings": ["SOURCE_NOT_ELIGIBLE"], "items": ["ERIC-B.ST story alpha", "ERIC-B.ST story beta"]}),
+                                       "reasonCode": None, "quotaPolicy": MX_QUOTA},
+                         "finnhub": {"status": "NOT_ELIGIBLE", "attempted": False},
+                         "warnings": ["SOURCE_UNAVAILABLE", "SOURCE_NOT_ELIGIBLE"], "items": ["ERIC-B.ST story alpha", "ERIC-B.ST story beta"]}),
     # Card 185: for search_company_news the priority items must contain the query, otherwise Marketaux runs (HIGHER_PRIORITY_EMPTY).
     tool_case("news.marketaux.search_fallback_runs_when_no_priority_item_contains_the_query", ["BR-NWS-185"], "search",
               ["ACME", "buyback", "", "", None, 10],
@@ -955,7 +965,8 @@ def doc_url(cik: int, accession: str, doc: str) -> str:
 
 
 CASES += [
-    # Cards 159/160: SEC selected, no CIK / no submissions -> PROVIDER_ERROR (not absence); the empty result is source-limited.
+    # Cards 159/160: SEC selected, no CIK resolved / no submissions -> PROVIDER_ERROR (not absence); the empty result is source-limited.
+    # 2.16.0: no SEC ticker-index stub here, so the lookup failed rather than finding no CIK (RNEWS2 §8.7 keeps PROVIDER_ERROR).
     tool_case("news.sec.no_cik_is_provider_error_and_empty_result_is_source_limited", ["BR-NWS-160", "BR-NWS-159"], "news",
               ["ZZSEC", 10, 14, ["sec"]], {"info": {}},
               select=lambda v: {"sec": v["sourceStatus"]["sec"], "status": v.get("status"), "coverage": coverage_view(v),

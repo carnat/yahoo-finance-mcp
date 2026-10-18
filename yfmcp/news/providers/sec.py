@@ -11,7 +11,9 @@ import xml.etree.ElementTree as _ET
 
 from yfmcp.util import _to_iso_utc
 from yfmcp.clients.edgar import _edgar_get_html
+from yfmcp.clients.edgar import _edgar_ticker_map_loaded
 from yfmcp.clients.edgar import _get_submissions_for_ticker
+from yfmcp.clients.edgar import _load_edgar_tickers
 from yfmcp.parsing.html import _parse_html_table
 from yfmcp.parsing.html import _strip_html_tags
 from yfmcp.news.shared import (
@@ -313,6 +315,14 @@ def _build_sec_event_item(ticker: str, filing: dict, retrieved_at: str, issuer: 
     return item, warnings
 
 
+class _SecEventsResult(tuple):
+    """The ``(items, warnings, used)`` triple plus ``no_cik`` (2.16.0; Worker ``noCik``): True when no CIK was found
+    although SEC's ticker index was read, so the ticker has no SEC filings. The news pipeline reports it as
+    NOT_ELIGIBLE; get_sec_recent_events keeps unpacking the triple and its own reporting. Never serialized."""
+
+    no_cik: bool = False
+
+
 async def _collect_sec_events(
     ticker: str,
     *,
@@ -328,7 +338,13 @@ async def _collect_sec_events(
     cik_padded, submissions = await _get_submissions_for_ticker(ticker)
     if not cik_padded or not submissions:
         warnings.append({"code": "SOURCE_UNAVAILABLE", "message": "SEC submissions source unavailable.", "severity": "warning"})
-        return events, warnings, False
+        result = _SecEventsResult((events, warnings, False))
+        # Index read but no CIK: no SEC filings for the ticker. A failed lookup or submissions fetch stays a provider failure.
+        if not cik_padded:
+            # Cached after the CIK lookup read it; a fetch happens only when the lookup never reached the index.
+            await _load_edgar_tickers()
+            result.no_cik = _edgar_ticker_map_loaded()
+        return result
     recent = ((submissions.get("filings") or {}).get("recent") or {}) if isinstance(submissions, dict) else {}
     forms = list(recent.get("form") or [])
     filing_dates = list(recent.get("filingDate") or [])

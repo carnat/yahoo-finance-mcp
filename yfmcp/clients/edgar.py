@@ -98,6 +98,15 @@ async def _load_edgar_tickers() -> dict[str, int]:
     return _EDGAR_TICKERS  # type: ignore[return-value]
 
 
+def _edgar_ticker_map_loaded() -> bool:
+    """True when SEC's company_tickers.json index was read and is current (no fetch); mirrors Worker edgarTickerMapLoaded.
+
+    After a CIK lookup came back empty, this tells "SEC has no CIK for the ticker" (the index was read) from
+    "the index could not be read" (2.16.0). A failed load leaves an empty map with no load time.
+    """
+    return bool(_EDGAR_TICKERS) and _EDGAR_TICKERS_LOADED_AT > 0.0 and (time.monotonic() - _EDGAR_TICKERS_LOADED_AT) < _EDGAR_TTL
+
+
 class EdgarError(Exception):
     def __init__(self, message: str, status_code: int | None = None):
         super().__init__(message)

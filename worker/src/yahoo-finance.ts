@@ -5291,6 +5291,14 @@ async function getEdgarTickerCikMap(): Promise<Map<string, number> | null> {
   return edgarTickerMapLoad;
 }
 
+/**
+ * True when SEC's company_tickers.json index is loaded and current (no fetch). After a CIK lookup came back
+ * empty, this tells "SEC has no CIK for the ticker" (the index was read) from "the index could not be read" (2.16.0).
+ */
+export function edgarTickerMapLoaded(): boolean {
+  return !!edgarTickerMap && Date.now() < edgarTickerMap.expiresAt;
+}
+
 /** Resolve CIK for a ticker using the EDGAR company_tickers.json index. */
 async function edgarResolveCik(ticker: string): Promise<number | null> {
   const map = await getEdgarTickerCikMap();

@@ -2959,6 +2959,40 @@ F-024, F-026, F-029). Both runtimes change alike.
   beyond the cap. No new field.
 - **Rollback:** revert the release.
 
+## News Source Registry and Off Switch (2.16.0)
+
+- **Why:** R-news part 2 from the approved Q3i triage (§3a), plus the owner's 2026-10-18 decision to add SEC to the default news sources. Release type: minor.
+- **Source registry:** `worker/src/news-source-registry.json` lists every news source name that both runtimes accept. Each entry has:
+  - `tier`: `official` (`sec`, `company_ir`, `company_ir_page`, `newswire`) or `aggregator` (Yahoo variants, `finnhub`, `marketaux`);
+  - `requiresKey`: the env names each runtime reads;
+  - `approxSubrequests`: a cold count for one ticker.
+
+  Both runtimes read their default source list from its `defaultSources` field, and a test keeps the registry and both runtimes in step.
+- **New defaults:** `yahoo_finance_news`, `yahoo_finance_press_releases`, `sec`, `finnhub`, `marketaux` (Marketaux stays a fallback). They apply to `get_company_news` and `search_company_news` when `sources` is omitted, and the advertised defaults and descriptions say so.
+- **Budget:** default `get_company_news` for one ticker, measured cold against live upstream:
+  - 11 subrequests before and 12 after (provider keys set);
+  - 9 before and 10 after (no keys).
+
+  SEC adds only the submissions request, because the ticker index is already read for identity. The limit is 45 per invocation.
+- **SEC for a ticker with no SEC CIK** (most foreign listings): when SEC's ticker index was read and has no entry, `sourceStatus.sec` is `NOT_ELIGIBLE` (`reasonCode: null`).
+  - It carries the `SOURCE_NOT_ELIGIBLE` warning "SEC has no filings for <TICKER> (no SEC CIK).".
+  - Coverage reads PARTIAL with `CHECK_OFFICIAL_RELEASES`, as an ineligible Finnhub ticker already does.
+  - If the index could not be read, or the submissions fetch failed, the result stays `PROVIDER_ERROR` "SEC submissions source unavailable.".
+  - `get_sec_recent_events` is unchanged.
+- **Operator off switch, `NEWS_SOURCES_DISABLED`:** a comma-separated list of source names. Names are trimmed and case-insensitive, and unknown names are ignored. Set it under `[vars]` in `worker/wrangler.toml`, for example `NEWS_SOURCES_DISABLED = "marketaux,finnhub"`, then redeploy. Locally, set it as an environment variable. A disabled source:
+  - is never fetched and costs no subrequests;
+  - reports `sourceStatus.<name> = {status: "UNCONFIGURED", rawCount: 0, filteredCount: 0, attempted: false}`;
+  - adds an info warning, `SOURCE_UNAVAILABLE` "Source <name> is disabled by the server operator.";
+  - adds a `coverage.failedSources` entry, so coverage reads PARTIAL;
+  - never yields NOT_FOUND by itself.
+
+  Further rules:
+  - Disabling `finnhub` counts as limited coverage, so the Marketaux fallback runs unless `marketaux` is disabled too.
+  - `get_company_press_releases` reports a disabled source once, and its status uses only the active sources.
+  - `get_sec_recent_events` is not affected.
+  - Production does not set the variable.
+- **Rollback:** revert the release, or unset the variable to undo a disable.
+
 ## News Provider Adapters (2.15.1)
 
 - **Why:** R-news part 1 from the approved Q3i triage (§3a). Release type: patch. This is a pure restructure with no behaviour change.
