@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 from unittest.mock import patch
 
 from scripts.parity.harness import Case
@@ -132,13 +133,17 @@ def hit_view(v):
 
 
 def outline_view(v):
+    """The full outline payload (2.15.0: no masking); an error envelope as {ok, error}, without Python's meta."""
     if not isinstance(v, dict):
         return v
     if v.get("ok") is False and isinstance(v.get("error"), dict):
         return {"ok": False, "error": v["error"]}
-    if v.get("error"):
-        return {"error": True, "message": v.get("message")}
-    return {"outline": [h["title"] for h in v.get("outline") or []]}
+    return v
+
+
+def outline_keys(v):
+    """The outline payload's key order, read before the harness canonicalises (it compares dicts without order)."""
+    return list(v) if isinstance(v, dict) else v
 
 
 def _case(name: str, py, ts: dict, select, **kw) -> Case:
@@ -215,20 +220,144 @@ CASES += [
 # ── get_filing_outline with an accession and no document_url ────────────────────────────────────────────────────
 # Both runtimes resolve the accession through the resolver and read that filing's primary document. The filing index
 # page (<acc>-index.htm) is served here with different headings so a read of it would be told apart.
+#
+# 2.15.0 (R4B2_SPEC §2, R4-OUTLINE-SHAPE): one shape in both runtimes, keys in this order:
+#     ticker, accessionNumber, documentUrl, outline, status, tableCount, warnings
+# accessionNumber is the resolved filing's accession, the accession given alongside a document_url, or null when only a
+# document_url was given; documentUrl is the document read; status is OK (headings found) / OUTLINE_NOT_PARSED (no
+# headings, tables found) / EMPTY (neither); warnings carries TABLES_FOUND_OUTLINE_EMPTY with OUTLINE_NOT_PARSED. Python's
+# sanitiser (_sanitize_sec_html) runs on the document before headings, the filingItemHeadings fallback and tableCount are
+# read. Failures are the ok:false envelope with Python's codes. The Worker follows this today; Python after its port.
+OUTLINE_TARGET_KEYS = ["ticker", "accessionNumber", "documentUrl", "outline", "status", "tableCount", "warnings"]
+TEN_K_OUTLINE = [{"level": 2, "title": "Item 1. Business"}, {"level": 2, "title": "Item 1A. Risk Factors"}]
+TEN_Q_OUTLINE = [{"level": 2, "title": "Item 2. Management's Discussion and Analysis"}]
+TABLES_FOUND_OUTLINE_EMPTY = {"code": "TABLES_FOUND_OUTLINE_EMPTY",
+                              "message": "Filing tables were detected but no section outline headings were parsed.",
+                              "severity": "warning"}
+
+
+def _outline_target(accession, document_url, outline, status="OK", table_count=0, warnings=None) -> dict:
+    return {"ticker": "AAPL", "accessionNumber": accession, "documentUrl": document_url, "outline": outline,
+            "status": status, "tableCount": table_count, "warnings": warnings or []}
+
+
+DOC_URL_ONLY = f"{BASE}/000032019325000080/outline-cases.htm"
+NO_HEADINGS_DOC = f"{BASE}/000032019325000081/bold-items.htm"
+TABLES_ONLY_DOC = f"{BASE}/000032019325000082/tables-only.htm"
+EMPTY_DOC = f"{BASE}/000032019325000083/empty.htm"
+SCRIPT_DOC = f"{BASE}/000032019325000084/script-heading.htm"
+MISSING_DOC = f"{BASE}/000032019325000085/missing.htm"
+OUTLINE_ROUTES = {
+    **ROUTES,
+    DOC_URL_ONLY: {"body": TEN_K_HTML},
+    # No <hN> headings: the item headings are bold paragraphs, read by the filingItemHeadings fallback.
+    NO_HEADINGS_DOC: {"body": "<html><body><p><b>Item 1. Business</b></p><p>We sell devices and services worldwide.</p>"
+                              "<p><b>Item 1A. Risk Factors</b></p><p>Supply risk.</p></body></html>"},
+    TABLES_ONLY_DOC: {"body": "<html><body><p>Numbers</p><table><tr><td>1</td></tr></table>"
+                              "<table><tr><td>2</td></tr></table></body></html>"},
+    EMPTY_DOC: {"body": "<html><body><p>No headings and no tables.</p></body></html>"},
+    # Script text inside a heading never reaches a title once the document is sanitised.
+    SCRIPT_DOC: {"body": "<html><body><h2 onclick=\"x()\">Item 7. <script>var t = 1;</script>MD&amp;A</h2>"
+                         "<style>h2 { color: red; }</style></body></html>"},
+    MISSING_DOC: {"status": 404, "body": "not found"},
+}
+
+
+def _outline_pending(name: str, py, ts: dict, *, today_py, target, select=outline_view, routes=None) -> Case:
+    """TODO(python-mirror): flip to mode equal with expect=target once server.get_filing_outline is ported."""
+    return Case(name=name, ids=["R4-OUTLINE-SHAPE"], py=py, ts=ts, routes=routes or OUTLINE_ROUTES, select=select,
+                mode="pinned", decision="R4b-2", expect_py=today_py, expect_ts=target)
+
+
+def _outline_equal(name: str, py, ts: dict, expect, select=outline_view) -> Case:
+    return Case(name=name, ids=["R4-OUTLINE-SHAPE"], py=py, ts=ts, routes=OUTLINE_ROUTES, select=select, expect=expect)
+
+
 CASES += [
-    _miss_case("q3a.outline.accession_only_hit_reads_the_primary_document",
-             _py(server.get_filing_outline, "AAPL", TEN_K_ACC, None),
-             _ts("getFilingOutline", "AAPL", TEN_K_ACC, None),
-             {"outline": ["Item 1. Business", "Item 1A. Risk Factors"]}, select=outline_view),
+    # TODO(python-mirror): flip to equal, expect=_outline_target(TEN_K_ACC, TEN_K_DOC, TEN_K_OUTLINE).
+    _outline_pending("q3a.outline.accession_only_hit_reads_the_primary_document",
+                     _py(server.get_filing_outline, "AAPL", TEN_K_ACC, None),
+                     _ts("getFilingOutline", "AAPL", TEN_K_ACC, None),
+                     today_py={"ticker": "AAPL", "accessionNumber": TEN_K_ACC, "outline": TEN_K_OUTLINE},
+                     target=_outline_target(TEN_K_ACC, TEN_K_DOC, TEN_K_OUTLINE)),
     _miss_case("q3a.outline.accession_only_miss",
-             _py(server.get_filing_outline, "AAPL", MISSING_ACC, None),
-             _ts("getFilingOutline", "AAPL", MISSING_ACC, None),
-             select=outline_view),
-    # document_url wins when given, as before.
-    _case("q3a.outline.document_url_wins_over_accession",
-          _py(server.get_filing_outline, "AAPL", MISSING_ACC, TEN_Q_DOC),
-          _ts("getFilingOutline", "AAPL", MISSING_ACC, TEN_Q_DOC), outline_view,
-          expect={"outline": ["Item 2. Management's Discussion and Analysis"]}),
+               _py(server.get_filing_outline, "AAPL", MISSING_ACC, None),
+               _ts("getFilingOutline", "AAPL", MISSING_ACC, None),
+               select=outline_view),
+    # document_url wins when given, as before; the accession given with it is echoed.
+    # TODO(python-mirror): flip to equal, expect=_outline_target(MISSING_ACC, TEN_Q_DOC, TEN_Q_OUTLINE).
+    _outline_pending("q3a.outline.document_url_wins_over_accession",
+                     _py(server.get_filing_outline, "AAPL", MISSING_ACC, TEN_Q_DOC),
+                     _ts("getFilingOutline", "AAPL", MISSING_ACC, TEN_Q_DOC),
+                     today_py={"ticker": "AAPL", "accessionNumber": MISSING_ACC, "outline": TEN_Q_OUTLINE},
+                     target=_outline_target(MISSING_ACC, TEN_Q_DOC, TEN_Q_OUTLINE)),
+    # TODO(python-mirror): flip to equal, expect=OUTLINE_TARGET_KEYS (this exact order).
+    _outline_pending("r4b2.outline.key_order",
+                     lambda: outline_keys(json.loads(_py(server.get_filing_outline, "AAPL", TEN_K_ACC, None)())),
+                     {"js": "return Object.keys(JSON.parse(await m.yahooFinance.getFilingOutline(...args)));",
+                      "args": ["AAPL", TEN_K_ACC, None], "isolate": True},
+                     today_py=["ticker", "accessionNumber", "outline"], target=OUTLINE_TARGET_KEYS, select=None),
+    # TODO(python-mirror): flip to equal, expect=_outline_target(None, DOC_URL_ONLY, TEN_K_OUTLINE).
+    _outline_pending("r4b2.outline.document_url_only_has_null_accession",
+                     _py(server.get_filing_outline, "AAPL", None, DOC_URL_ONLY),
+                     _ts("getFilingOutline", "AAPL", None, DOC_URL_ONLY),
+                     today_py={"ticker": "AAPL", "accessionNumber": None, "outline": TEN_K_OUTLINE},
+                     target=_outline_target(None, DOC_URL_ONLY, TEN_K_OUTLINE)),
+    # TODO(python-mirror): flip to equal, expect=_outline_target(None, NO_HEADINGS_DOC, <the two bold items at level 2>).
+    _outline_pending("r4b2.outline.item_heading_fallback_without_hn_headings",
+                     _py(server.get_filing_outline, "AAPL", None, NO_HEADINGS_DOC),
+                     _ts("getFilingOutline", "AAPL", None, NO_HEADINGS_DOC),
+                     today_py={"ticker": "AAPL", "accessionNumber": None, "outline": []},
+                     target=_outline_target(None, NO_HEADINGS_DOC, TEN_K_OUTLINE)),
+    # TODO(python-mirror): flip to equal, expect=the target below (OUTLINE_NOT_PARSED, 2 tables, the warning).
+    _outline_pending("r4b2.outline.tables_without_headings_is_outline_not_parsed",
+                     _py(server.get_filing_outline, "AAPL", None, TABLES_ONLY_DOC),
+                     _ts("getFilingOutline", "AAPL", None, TABLES_ONLY_DOC),
+                     today_py={"ticker": "AAPL", "accessionNumber": None, "outline": []},
+                     target=_outline_target(None, TABLES_ONLY_DOC, [], "OUTLINE_NOT_PARSED", 2, [TABLES_FOUND_OUTLINE_EMPTY])),
+    # TODO(python-mirror): flip to equal, expect=_outline_target(None, EMPTY_DOC, [], "EMPTY").
+    _outline_pending("r4b2.outline.neither_headings_nor_tables_is_empty",
+                     _py(server.get_filing_outline, "AAPL", None, EMPTY_DOC),
+                     _ts("getFilingOutline", "AAPL", None, EMPTY_DOC),
+                     today_py={"ticker": "AAPL", "accessionNumber": None, "outline": []},
+                     target=_outline_target(None, EMPTY_DOC, [], "EMPTY")),
+    # Python's sanitiser, mirrored in the Worker: script/style blocks and on* attributes go before headings are read.
+    # TODO(python-mirror): flip to equal, expect=_outline_target(None, SCRIPT_DOC, [{"level": 2, "title": "Item 7. MD&amp;A"}]).
+    _outline_pending("r4b2.outline.script_text_never_reaches_a_title",
+                     _py(server.get_filing_outline, "AAPL", None, SCRIPT_DOC),
+                     _ts("getFilingOutline", "AAPL", None, SCRIPT_DOC),
+                     today_py={"ticker": "AAPL", "accessionNumber": None, "outline": [{"level": 2, "title": "Item 7. MD&amp;A"}]},
+                     target=_outline_target(None, SCRIPT_DOC, [{"level": 2, "title": "Item 7. MD&amp;A"}])),
+    # Errors: the standard ok:false envelope with Python's codes and messages; the Worker's bare {error, message} is gone.
+    _outline_equal("r4b2.outline.invalid_sec_url_is_input_validation_error",
+                   _py(server.get_filing_outline, "AAPL", None, "https://example.com/doc.htm"),
+                   _ts("getFilingOutline", "AAPL", None, "https://example.com/doc.htm"),
+                   {"ok": False, "error": {"code": "INPUT_VALIDATION_ERROR",
+                                           "message": "Invalid SEC URL: must start with 'https://www.sec.gov/Archives/'."}}),
+    _outline_equal("r4b2.outline.neither_accession_nor_document_url_is_input_validation_error",
+                   _py(server.get_filing_outline, "AAPL", None, None),
+                   _ts("getFilingOutline", "AAPL", None, None),
+                   {"ok": False, "error": {"code": "INPUT_VALIDATION_ERROR",
+                                           "message": "Either accession_number or document_url is required"}}),
+    # A failed document read is PROVIDER_ERROR in both. PLANNER: the message differs (urllib's "HTTP Error 404: <reason>"
+    # vs the Worker's "HTTP 404"); the spec names codes only, so the messages stay as each runtime words them.
+    Case(name="r4b2.outline.document_read_failure_is_provider_error", ids=["R4-OUTLINE-SHAPE"],
+         py=_py(server.get_filing_outline, "AAPL", None, MISSING_DOC), ts=_ts("getFilingOutline", "AAPL", None, MISSING_DOC),
+         routes=OUTLINE_ROUTES, select=outline_view, mode="pinned", decision="R4b-2",
+         expect_py={"ok": False, "error": {"code": "PROVIDER_ERROR", "message": "HTTP Error 404: stubbed"}},
+         expect_ts={"ok": False, "error": {"code": "PROVIDER_ERROR", "message": "HTTP 404"}}),
+]
+
+# The Worker's sanitiser is Python's _sanitize_sec_html, character for character.
+from yfmcp.validation import _sanitize_sec_html  # noqa: E402
+
+SANITIZE_INPUT = ('<p onclick="a()" class=x>One</p><SCRIPT type="t">bad()</script ><style>p{}</STYLE>'
+                  "<a href='#' onmouseover='b()'>Two</a><div onload=c>Three</div><!-- kept -->")
+CASES += [
+    Case(name="r4b2.outline.worker_sanitiser_matches_python", ids=["R4-OUTLINE-SHAPE"],
+         py=lambda: _sanitize_sec_html(SANITIZE_INPUT),
+         ts={"module": "yahooFinance", "fn": "sanitizeSecHtml", "args": [SANITIZE_INPUT]},
+         expect='<p class=x>One</p><a href=\'#\'>Two</a><div>Three</div><!-- kept -->'),
 ]
 
 # ── Out of scope, unchanged (spec §1): extract_china_exposure is not an action that fails closed on a miss. ────────
@@ -238,4 +367,265 @@ CASES += [
     _case("q3a.out_of_scope.china_exposure_accession_miss_unchanged",
           _py(server.extract_china_exposure, "AAPL", "10-K", "latest", MISSING_ACC),
           _ts("extractChinaExposure", "AAPL", "10-K", "latest", MISSING_ACC), None),
+]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+# 2.15.0 (R4b-2; spec analysis/yahoo-finance-mcp/R4B2_SPEC.md §1): requested accessions honoured.
+#
+# §1a extract_geographic_revenue: a non-empty accession is passed into the filing read, so the figure, the evidence and
+# the raw index all come from that filing; the 20-F retry stays pinned and is skipped when the pinned filing is not a
+# 20-F; a miss is the ACCESSION_NOT_FOUND envelope above (not_found()), with no fallback to the latest filing.
+# §1b query_sec_filing_index: geographic_revenue_share goes through §1a; china_exposure is unchanged (its miss reads
+# FILING_NOT_FOUND_TRY_OTHER_TYPE, as 2.13.0 left it).
+#
+# GEOX files two 10-Ks and a 20-F. Its XBRL revenue facts carry no geographic segment, so the region is read from the
+# filing's own table (the HTML fallback): the 2025 10-K says China 200 of 500, the 2024 10-K China 100 of 400, so the
+# filing a figure came from is visible in the value. The 2023 20-F's table has no China row.
+# ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+GEOX_CIK = "0000777001"
+GEOX_NEW_10K = "0000777001-25-000010"
+GEOX_OLD_10K = "0000777001-24-000010"
+GEOX_20F = "0000777001-23-000010"
+GEOX_MISSING = "0000777001-99-999999"
+GEOX_BASE = "https://www.sec.gov/Archives/edgar/data/777001"
+
+
+def _geo_html(year: int, china: int | None, total: int) -> str:
+    china_row = f"<tr><td>China</td><td>{china}</td></tr>" if china is not None else ""
+    return (f"<html><body><h2>Item 8. Financial Statements</h2>"
+            f"<p>Revenue by geographic area (in millions) for fiscal {year}:</p>"
+            f"<table><tr><td>Geographic area</td><td>{year}</td></tr>"
+            f"<tr><td>United States</td><td>{total - (china or 0)}</td></tr>{china_row}"
+            f"<tr><td>Total revenue</td><td>{total}</td></tr></table></body></html>")
+
+
+def _geox_fact(accn: str, form: str, fy: int, filed: str, val: int) -> dict:
+    return {"start": f"{fy - 1}-10-01", "end": f"{fy}-09-30", "val": val, "accn": accn, "fy": fy, "fp": "FY",
+            "form": form, "filed": filed}
+
+
+GEOX_FACTS = {"units": {"USD": [
+    _geox_fact(GEOX_NEW_10K, "10-K", 2025, "2025-11-01", 500_000_000),
+    _geox_fact(GEOX_OLD_10K, "10-K", 2024, "2024-11-01", 400_000_000),
+]}}
+GEOX_ROUTES = {
+    **ROUTES,
+    "https://www.sec.gov/files/company_tickers.json": {"json": {
+        "0": {"cik_str": 320193, "ticker": "AAPL", "title": "Apple Inc."},
+        "1": {"cik_str": 777001, "ticker": "GEOX", "title": "Geo Example Corp"},
+    }},
+    f"https://data.sec.gov/submissions/CIK{GEOX_CIK}.json": {"json": {"cik": "777001", "name": "Geo Example Corp",
+        "filings": {"recent": {
+            "form": ["10-K", "10-K", "20-F"],
+            "accessionNumber": [GEOX_NEW_10K, GEOX_OLD_10K, GEOX_20F],
+            "primaryDocument": ["geox-2025.htm", "geox-2024.htm", "geox-20f.htm"],
+            "filingDate": ["2025-11-01", "2024-11-01", "2023-11-01"],
+            "reportDate": ["2025-09-30", "2024-09-30", "2023-09-30"],
+            "acceptanceDateTime": ["2025-11-01T16:30:00.000Z", "2024-11-01T16:30:00.000Z", "2023-11-01T16:30:00.000Z"],
+        }}}},
+    f"https://data.sec.gov/api/xbrl/companyconcept/CIK{GEOX_CIK}/us-gaap/RevenueFromContractWithCustomerExcludingAssessedTax.json":
+        {"json": GEOX_FACTS},
+    f"https://data.sec.gov/api/xbrl/companyconcept/CIK{GEOX_CIK}/*": {"status": 404, "body": "not found"},
+    f"https://data.sec.gov/api/xbrl/companyfacts/CIK{GEOX_CIK}.json":
+        {"json": {"facts": {"us-gaap": {"RevenueFromContractWithCustomerExcludingAssessedTax": GEOX_FACTS}}}},
+    f"{GEOX_BASE}/000077700125000010/geox-2025.htm": {"body": _geo_html(2025, 200, 500)},
+    f"{GEOX_BASE}/000077700124000010/geox-2024.htm": {"body": _geo_html(2024, 100, 400)},
+    f"{GEOX_BASE}/000077700123000010/geox-20f.htm": {"body": _geo_html(2023, None, 300)},
+}
+
+
+def geo_view(v):
+    """An error envelope as {ok, error}; a geographic read as the value and the filing its evidence names."""
+    if not isinstance(v, dict):
+        return v
+    if v.get("ok") is False and isinstance(v.get("error"), dict):
+        return {"ok": False, "error": v["error"]}
+    ev = v.get("evidence") if isinstance(v.get("evidence"), dict) else {}
+    return {"value": v.get("value"), "status": v.get("status"), "evidenceAccession": ev.get("accessionNumber"),
+            "evidenceFilingType": ev.get("filingType"),
+            "warnings": sorted(w.get("code") for w in v.get("warnings") or [] if isinstance(w, dict))}
+
+
+def query_view(v):
+    """An error envelope as {ok, error}; a query answer as its status, value and the filings its evidence names."""
+    if not isinstance(v, dict):
+        return v
+    if v.get("ok") is False and isinstance(v.get("error"), dict):
+        return {"ok": False, "error": v["error"]}
+    answer = v.get("answer") if isinstance(v.get("answer"), dict) else {}
+    return {"status": v.get("status"), "value": answer.get("value"),
+            "evidenceAccessions": [e.get("accessionNumber") for e in v.get("evidence") or [] if isinstance(e, dict)]}
+
+
+def _geo_case(name: str, py, ts: dict, select, **kw) -> Case:
+    return Case(name=name, ids=["R4-ACC-GEO"], py=py, ts=ts, routes=GEOX_ROUTES, select=select, **kw)
+
+
+def raw_view(v):
+    """detailLevel=raw: the figure, and the filing named by the evidence and by the raw filing index."""
+    if not isinstance(v, dict) or v.get("ok") is False:
+        return geo_view(v)
+    idx = (v.get("rawContext") or {}).get("filingIndex") or {}
+    return {**geo_view(v), "period": v.get("period"), "rawIndexAccession": idx.get("accessionNumber")}
+
+
+def _q(ticker, query_type, acc, params):
+    return _py(server.query_sec_filing_index, ticker, query_type, "10-K", "latest", acc, params)
+
+
+def _q_ts(ticker, query_type, acc, params):
+    return _ts("querySecFilingIndex", ticker, "10-K", "latest", acc, query_type, params)
+
+
+GEO = {"region": "China"}
+NEW_CHINA = {"value": 200_000_000, "status": "FOUND", "evidenceAccession": GEOX_NEW_10K, "evidenceFilingType": "10-K", "warnings": []}
+OLD_CHINA = {"value": 100_000_000, "status": "FOUND", "evidenceAccession": GEOX_OLD_10K, "evidenceFilingType": "10-K", "warnings": []}
+GEOX_NOT_FOUND = not_found(GEOX_MISSING, "GEOX")
+
+
+def _pending(name: str, py, ts: dict, select, *, today_py, target, ids=("R4-ACC-GEO",)) -> Case:
+    """A 2.15.0 rule the Worker already follows and Python follows after its port: pinned to Python's value today and the
+    Worker's new value (target). TODO(python-mirror): flip to mode equal with expect=target once server.py is ported."""
+    return Case(name=name, ids=list(ids), py=py, ts=ts, routes=GEOX_ROUTES, select=select, mode="pinned",
+                decision="R4b-2", expect_py=today_py, expect_ts=target)
+
+
+CASES += [
+    # TODO(python-mirror): flip to equal, expect=OLD_CHINA (China 100 of 400 from the 2024 10-K, evidence names it).
+    _pending("r4b2.geo.pinned_accession_is_the_filing_read",
+             _py(server.extract_geographic_revenue, "GEOX", "China", "10-K", "latest", GEOX_OLD_10K),
+             _ts("extractGeographicRevenue", "GEOX", "China", "10-K", "latest", GEOX_OLD_10K), geo_view,
+             today_py=NEW_CHINA, target=OLD_CHINA),
+    _geo_case("r4b2.geo.no_accession_reads_the_latest_filing_unchanged",
+              _py(server.extract_geographic_revenue, "GEOX", "China", "10-K", "latest", None),
+              _ts("extractGeographicRevenue", "GEOX", "China", "10-K", "latest", None), geo_view, expect=NEW_CHINA),
+    # TODO(python-mirror): flip to equal, expect=GEOX_NOT_FOUND (the Q3a envelope, no fallback to the latest filing).
+    _pending("r4b2.geo.accession_miss_fails_closed",
+             _py(server.extract_geographic_revenue, "GEOX", "China", "10-K", "latest", GEOX_MISSING),
+             _ts("extractGeographicRevenue", "GEOX", "China", "10-K", "latest", GEOX_MISSING), geo_view,
+             today_py=NEW_CHINA, target=GEOX_NOT_FOUND),
+    # Today Python's raw evidence and index name the requested 2024 filing while the figure is the 2025 filing's.
+    # TODO(python-mirror): flip to equal, expect={**OLD_CHINA, "period": "FY2024", "rawIndexAccession": GEOX_OLD_10K}.
+    _pending("r4b2.geo.raw_figure_evidence_and_index_name_one_filing",
+             _py(server.extract_geographic_revenue, "GEOX", "China", "10-K", "latest", GEOX_OLD_10K, "raw"),
+             _ts("extractGeographicRevenue", "GEOX", "China", "10-K", "latest", GEOX_OLD_10K, "raw"), raw_view,
+             today_py={**NEW_CHINA, "evidenceAccession": GEOX_OLD_10K, "period": "FY2025", "rawIndexAccession": GEOX_OLD_10K},
+             target={**OLD_CHINA, "period": "FY2024", "rawIndexAccession": GEOX_OLD_10K}),
+    # The pinned filing is a 10-K, so no 20-F retry runs (no POSSIBLE_20F_FILER / AUTO_20F_FALLBACK), though GEOX files a 20-F.
+    # TODO(python-mirror): flip to equal, expect={"value": None, "status": "NOT_DISCLOSED", "evidenceAccession": GEOX_OLD_10K,
+    #                      "evidenceFilingType": "10-K", "warnings": []}.
+    _pending("r4b2.geo.pinned_10k_skips_the_20f_retry",
+             _py(server.extract_geographic_revenue, "GEOX", "Japan", "10-K", "latest", GEOX_OLD_10K),
+             _ts("extractGeographicRevenue", "GEOX", "Japan", "10-K", "latest", GEOX_OLD_10K), geo_view,
+             today_py={"value": None, "status": "NOT_DISCLOSED", "evidenceAccession": GEOX_NEW_10K, "evidenceFilingType": "10-K",
+                       "warnings": ["POSSIBLE_20F_FILER"]},
+             target={"value": None, "status": "NOT_DISCLOSED", "evidenceAccession": GEOX_OLD_10K, "evidenceFilingType": "10-K",
+                     "warnings": []}),
+    _geo_case("r4b2.geo.unpinned_not_disclosed_keeps_the_20f_retry",
+              _py(server.extract_geographic_revenue, "GEOX", "Japan", "10-K", "latest", None),
+              _ts("extractGeographicRevenue", "GEOX", "Japan", "10-K", "latest", None), geo_view,
+              expect={"value": None, "status": "NOT_DISCLOSED", "evidenceAccession": GEOX_NEW_10K, "evidenceFilingType": "10-K",
+                      "warnings": ["POSSIBLE_20F_FILER"]}),
+    # A pinned 20-F asked for as filing_type 10-K: the pinned read has no 10-K XBRL fact in that accession, so getFilingData's
+    # existing pinned path answers NO_FACT_FOR_ACCESSION for that accession (no HTML fallback, no 20-F retry: the result is
+    # not NOT_DISCLOSED). Recorded so the port reproduces it; evidenceFilingType echoes the requested filing_type.
+    # TODO(python-mirror): flip to equal, expect=the target below.
+    _pending("r4b2.geo.pinned_20f_with_10k_filing_type_reads_that_accession",
+             _py(server.extract_geographic_revenue, "GEOX", "China", "10-K", "latest", GEOX_20F),
+             _ts("extractGeographicRevenue", "GEOX", "China", "10-K", "latest", GEOX_20F), geo_view,
+             today_py=NEW_CHINA,
+             target={"value": None, "status": "SEC_FACT_NOT_AVAILABLE", "evidenceAccession": GEOX_20F, "evidenceFilingType": "10-K",
+                     "warnings": ["NO_FACT_FOR_ACCESSION"]}),
+    # §1b: one hit and one miss per query type with an accession.
+    # TODO(python-mirror): flip to equal, expect={"status": "ANSWERED", "value": 100_000_000, "evidenceAccessions": [GEOX_OLD_10K]}.
+    _pending("r4b2.query.geographic_hit", _q("GEOX", "geographic_revenue_share", GEOX_OLD_10K, GEO),
+             _q_ts("GEOX", "geographic_revenue_share", GEOX_OLD_10K, GEO), query_view, ids=("R4-ACC-QUERY",),
+             today_py={"status": "ANSWERED", "value": 200_000_000, "evidenceAccessions": [GEOX_NEW_10K]},
+             target={"status": "ANSWERED", "value": 100_000_000, "evidenceAccessions": [GEOX_OLD_10K]}),
+    # TODO(python-mirror): flip to equal, expect=GEOX_NOT_FOUND.
+    _pending("r4b2.query.geographic_miss", _q("GEOX", "geographic_revenue_share", GEOX_MISSING, GEO),
+             _q_ts("GEOX", "geographic_revenue_share", GEOX_MISSING, GEO), query_view, ids=("R4-ACC-QUERY",),
+             today_py={"status": "ANSWERED", "value": 200_000_000, "evidenceAccessions": [GEOX_NEW_10K]},
+             target=GEOX_NOT_FOUND),
+    # china_exposure is unchanged by 2.15.0 in both runtimes. PLANNER (finding): with a found accession its evidence still
+    # names the latest 10-K (its revenue read is not pinned), so a hit is not proof the pinned filing was read.
+    Case(name="r4b2.query.china_hit_unchanged", ids=["R4-ACC-QUERY"], py=_q("GEOX", "china_exposure", GEOX_OLD_10K, {}),
+         ts=_q_ts("GEOX", "china_exposure", GEOX_OLD_10K, {}), routes=GEOX_ROUTES, select=query_view,
+         expect={"status": "ANSWERED", "value": None, "evidenceAccessions": [GEOX_NEW_10K]}),
+    Case(name="r4b2.query.china_miss_unchanged", ids=["R4-ACC-QUERY"], py=_q("GEOX", "china_exposure", GEOX_MISSING, {}),
+         ts=_q_ts("GEOX", "china_exposure", GEOX_MISSING, {}), routes=GEOX_ROUTES, select=query_view,
+         expect={"status": "FILING_NOT_FOUND_TRY_OTHER_TYPE", "value": None, "evidenceAccessions": []}),
+]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+# 2.15.0 §1c (R4-ACC-EXHIBITS): list_sec_filing_exhibits / get_sec_filing_exhibit_content. When SEC answers the filing
+# index for (CIK, accession) with HTTP 404, the result is ACCESSION_NOT_FOUND ("...in <TICKER>'s SEC filings.", no
+# "recent": the recent-filings resolver is not used, so an older real accession keeps working). Other index failures
+# (5xx, timeouts) keep today's empty success.
+# ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+from yfmcp.tools import earnings as earnings_tools  # noqa: E402
+
+OLD_ACC = "0000320193-10-000001"  # a real-looking accession older than the recent-filings list
+OLD_INDEX = f"{BASE}/000032019310000001/{OLD_ACC}-index.htm"
+SERVER_ERROR_ACC = "0000320193-11-000002"
+OLD_INDEX_HTML = ("<html><body><table>"
+                  "<tr><th>Seq</th><th>Description</th><th>Document</th><th>Type</th><th>Size</th></tr>"
+                  f'<tr><td>1</td><td>Annual report</td><td><a href="/Archives/edgar/data/320193/000032019310000001/aapl-2010.htm">aapl-2010.htm</a></td><td>10-K</td><td>100</td></tr>'
+                  f'<tr><td>2</td><td>Press release</td><td><a href="/Archives/edgar/data/320193/000032019310000001/ex99.htm">ex99.htm</a></td><td>EX-99.1</td><td>10</td></tr>'
+                  "</table></body></html>")
+EXHIBIT_ROUTES = {
+    **ROUTES,
+    f"{BASE}/{MISSING_ACC.replace('-', '')}/*": {"status": 404, "body": "not found"},
+    OLD_INDEX: {"body": OLD_INDEX_HTML},
+    f"{BASE}/000032019311000002/*": {"status": 503, "body": "unavailable"},
+}
+
+
+def exhibits_view(v):
+    """An error as {ok, error}; a listing as its accession and exhibit documents (Python's success data is enveloped)."""
+    if not isinstance(v, dict):
+        return v
+    if v.get("ok") is False and isinstance(v.get("error"), dict):
+        err = v["error"]
+        return {"ok": False, "error": {k: err.get(k) for k in ("code", "message", "requestedAccession", "retryable") if k in err}}
+    data = v.get("data") if isinstance(v.get("data"), dict) else v
+    return {"accessionNumber": data.get("accessionNumber"), "documents": [e.get("document") for e in data.get("exhibits") or []]}
+
+
+def exhibit_not_found(acc: str = MISSING_ACC, ticker: str = "AAPL") -> dict:
+    return {"ok": False, "error": {"code": "ACCESSION_NOT_FOUND",
+                                   "message": f"Accession {acc} was not found in {ticker}'s SEC filings.",
+                                   "requestedAccession": acc, "retryable": False}}
+
+
+def _exhibit_case(name: str, py, ts: dict, **kw) -> Case:
+    return Case(name=name, ids=["R4-ACC-EXHIBITS"], py=py, ts=ts, routes=EXHIBIT_ROUTES, select=exhibits_view, **kw)
+
+
+CASES += [
+    # TODO(python-mirror): flip to equal, expect=exhibit_not_found() (today Python lists no exhibits as a success).
+    _exhibit_case("r4b2.exhibits.list_index_404_is_accession_not_found",
+                  _py(earnings_tools.list_sec_filing_exhibits, "AAPL", MISSING_ACC),
+                  _ts("listSecFilingExhibits", "AAPL", MISSING_ACC), mode="pinned", decision="R4b-2",
+                  expect_py={"accessionNumber": MISSING_ACC, "documents": []}, expect_ts=exhibit_not_found()),
+    # TODO(python-mirror): flip to equal, expect=exhibit_not_found() (today Python answers FETCH_ERROR).
+    _exhibit_case("r4b2.exhibits.content_index_404_is_accession_not_found",
+                  _py(earnings_tools.get_sec_filing_exhibit_content, "AAPL", MISSING_ACC, "ex99.htm"),
+                  _ts("getSecFilingExhibitContent", "AAPL", MISSING_ACC, "ex99.htm"), mode="pinned", decision="R4b-2",
+                  expect_py={"ok": False, "error": {"code": "FETCH_ERROR", "message": "Could not fetch exhibit 'ex99.htm'."}},
+                  expect_ts=exhibit_not_found()),
+    # An older accession outside the recent-filings list still lists its exhibits (no resolver check).
+    _exhibit_case("r4b2.exhibits.older_accession_outside_recent_filings_still_lists",
+                  _py(earnings_tools.list_sec_filing_exhibits, "AAPL", OLD_ACC),
+                  _ts("listSecFilingExhibits", "AAPL", OLD_ACC),
+                  expect={"accessionNumber": OLD_ACC, "documents": ["aapl-2010.htm", "ex99.htm"]}),
+    # A 5xx index read is not a miss: today's empty success, unchanged.
+    _exhibit_case("r4b2.exhibits.index_server_error_keeps_empty_success",
+                  _py(earnings_tools.list_sec_filing_exhibits, "AAPL", SERVER_ERROR_ACC),
+                  _ts("listSecFilingExhibits", "AAPL", SERVER_ERROR_ACC),
+                  expect={"accessionNumber": SERVER_ERROR_ACC, "documents": []}),
 ]

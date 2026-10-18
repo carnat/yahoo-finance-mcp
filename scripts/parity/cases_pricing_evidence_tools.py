@@ -796,6 +796,135 @@ CASES += [
 
 
 # ═══════════════════════════════════════════════════════════════════════════════════════════════
+# BR-EVD-041 (2.15.0, R4B2_SPEC §3): a listing keeps the NEWEST `limit` keys, in ascending key order (the order callers
+# already expect), after paging through the whole listing. The Worker does this today; Python after its port.
+# TODO(python-mirror): flip each pinned case below to mode equal with expect=<its expect_ts>.
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+import tempfile  # noqa: E402
+
+LIST_PREFIX = "consensus-history/LST/"
+LIST_KEYS = [f"{LIST_PREFIX}2026-10-0{d}.json" for d in range(1, 8)]  # 7 days, oldest first
+
+
+def _list_py_memory(keys: list[str], prefix: str, limit: int):
+    store = es.MemoryStore()
+    store.objects.update({k: "{}" for k in keys})
+    return store.list(prefix, limit)
+
+
+def _list_py_local_dir(keys: list[str], prefix: str, limit: int):
+    with tempfile.TemporaryDirectory() as tmp:
+        store = es.LocalDirStore(tmp)
+        for k in keys:
+            store.put(k, "{}", {})
+        return store.list(prefix, limit)
+
+
+_LIST_MEMORY_JS = """
+const store = m.evidenceStore.memoryEvidenceStore();
+for (const k of args[0]) store.objects.set(k, "{}");
+return await store.list(args[1], args[2]);
+"""
+
+# An R2 bucket that serves at most two keys per page, ascending, with a cursor (R2's list contract).
+_LIST_R2_JS = """
+const all = [...args[0]].sort();
+const bucket = {
+  put: async () => {}, get: async () => null, head: async () => null,
+  list: async ({ prefix, cursor, limit }) => {
+    const keys = all.filter((k) => k.startsWith(prefix));
+    const start = cursor ? Number(cursor) : 0;
+    const page = keys.slice(start, start + Math.min(limit, 2));
+    const next = start + page.length;
+    return { objects: page.map((key) => ({ key })), truncated: next < keys.length, cursor: next < keys.length ? String(next) : undefined };
+  },
+};
+m.evidenceStore.setEvidenceBucket(bucket);
+return await m.evidenceStore.getEvidenceStore().list(args[1], args[2]);
+"""
+
+
+def _list_case(name: str, py, js: str, keys: list[str], limit: int, today_py, target) -> Case:
+    return Case(name=name, ids=["BR-EVD-041"], py=lambda: py(keys, LIST_PREFIX, limit),
+                ts={"js": js, "args": [keys, LIST_PREFIX, limit], "isolate": True},
+                mode="pinned", decision="R4b-2", expect_py=today_py, expect_ts=target)
+
+
+CUT_HASH = "c" * 64
+_DAY0 = __import__("datetime").date(2023, 1, 1)
+_DAYS = [(_DAY0 + __import__("datetime").timedelta(days=i)) for i in range(1001)]  # consecutive days, oldest first
+MANY_CUTS = [f"evidence-cuts/LST/{d:%Y%m%d}T120000Z/{CUT_HASH}.json" for d in _DAYS]
+
+
+def _many_cuts_py():
+    store = es.MemoryStore()
+    store.objects.update({k: "{}" for k in MANY_CUTS})
+    with _python_store(store):
+        return asyncio.run(server.list_evidence_cuts("LST", 2))
+
+
+_MANY_CUTS_JS = """
+const store = m.evidenceStore.memoryEvidenceStore();
+for (const k of args[0]) store.objects.set(k, "{}");
+m.evidenceStore.setEvidenceStoreForTests(store);
+return await m.evidencePack.listEvidenceCuts("LST", 2);
+"""
+
+MANY_DAYS = [f"consensus-history/LST/{d.isoformat()}.json" for d in _DAYS[:401]]
+
+
+def _many_days_py():
+    store = es.MemoryStore()
+    store.objects.update({k: "{}" for k in MANY_DAYS})
+    with _python_store(store):
+        return asyncio.run(server.get_consensus_forecast_curve("LST", observation_date="2020-01-02"))
+
+
+_MANY_DAYS_JS = """
+const store = m.evidenceStore.memoryEvidenceStore();
+for (const k of args[0]) store.objects.set(k, "{}");
+m.evidenceStore.setEvidenceStoreForTests(store);
+return await m.evidencePack.getConsensusForecastCurve("LST", 5, 3, 10, "2020-01-02");
+"""
+
+
+def _days_view(v):
+    dates = ((v or {}).get("storage") or {}).get("observationDates") or []
+    return {"status": v.get("status"), "count": len(dates), "first": dates[0] if dates else None,
+            "last": dates[-1] if dates else None}
+
+
+def _cut_day(i: int) -> str:
+    return MANY_CUTS[i].split("/")[2]
+
+
+CASES += [
+    _list_case("evd.store.list_keeps_newest_limit_memory", _list_py_memory, _LIST_MEMORY_JS, LIST_KEYS, 3,
+               today_py=LIST_KEYS[:3], target=LIST_KEYS[-3:]),
+    # The Worker's R2 store pages with the cursor; Python's on-disk store lists its directory. Same newest three.
+    _list_case("evd.store.list_keeps_newest_limit_r2_paged_vs_local_dir", _list_py_local_dir, _LIST_R2_JS, LIST_KEYS, 3,
+               today_py=LIST_KEYS[:3], target=LIST_KEYS[-3:]),
+    # A store under the cap is listed whole, in ascending order, in both runtimes.
+    Case(name="evd.store.list_under_limit_is_whole_and_ascending", ids=["BR-EVD-041"],
+         py=lambda: _list_py_memory(list(reversed(LIST_KEYS)), LIST_PREFIX, 10),
+         ts={"js": _LIST_MEMORY_JS, "args": [list(reversed(LIST_KEYS)), LIST_PREFIX, 10], "isolate": True}, expect=LIST_KEYS),
+    # list_evidence_cuts reads at most 1,000 cut keys: with 1,001 stored, the newest cut is listed first.
+    Case(name="evd.store.list_evidence_cuts_beyond_1000_keeps_the_newest", ids=["BR-EVD-041"], py=_many_cuts_py,
+         ts={"js": _MANY_CUTS_JS, "args": [MANY_CUTS], "isolate": True},
+         select=lambda v: [c["cutoff"] for c in v.get("cuts") or []], mode="pinned", decision="R4b-2",
+         expect_py=[_cut_day(999), _cut_day(998)], expect_ts=[_cut_day(1000), _cut_day(999)]),
+    # A missing observation lists at most 400 stored days: with 401 stored, the newest 400 (the oldest day drops).
+    Case(name="evd.store.observation_dates_beyond_400_keep_the_newest", ids=["BR-EVD-041"], py=_many_days_py,
+         ts={"js": _MANY_DAYS_JS, "args": [MANY_DAYS], "isolate": True}, select=_days_view, mode="pinned", decision="R4b-2",
+         expect_py={"status": "OBSERVATION_NOT_FOUND", "count": 400, "first": MANY_DAYS[0].split("/")[-1][:-5],
+                    "last": MANY_DAYS[399].split("/")[-1][:-5]},
+         expect_ts={"status": "OBSERVATION_NOT_FOUND", "count": 400, "first": MANY_DAYS[1].split("/")[-1][:-5],
+                    "last": MANY_DAYS[400].split("/")[-1][:-5]}),
+]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
 # BR-SHR-001: decision-grade SEC XBRL fact
 # Python: server._is_decision_grade_sec_xbrl_fact. Worker: yahooFinance.isDecisionGradeXbrlFact.
 # ═══════════════════════════════════════════════════════════════════════════════════════════════

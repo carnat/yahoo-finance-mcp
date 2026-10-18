@@ -245,7 +245,7 @@ if (heading !== "PART I - FINANCIAL INFORMATION Net 31.5 Item 2") throw new Erro
         self.assertIsNotNone(match)
         section = match.group(0)
         self.assertIn("edgarDocumentUrlFromRef(cik, accessionNumber, fileName)", section)
-        self.assertIn("edgarListExhibitsFromIndex(edgarIndexUrl)", section)
+        self.assertIn("edgarReadExhibitIndex(edgarIndexUrl)", section)
         self.assertIn("matched.documentUrl", section)
 
     def test_risk_factor_mentions_use_search_context_text(self) -> None:
