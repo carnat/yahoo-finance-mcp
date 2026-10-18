@@ -294,6 +294,13 @@ export interface RequestFacts {
   authorizationHeaderPresent: boolean;
   /** How this /mcp request presented its credential. Never the credential itself. */
   credentialTransport: "header" | "path" | "none";
+  /**
+   * The caller may use the key-gated paid providers (2.18.0): true for the
+   * owner key and for anonymous grace-mode requests, a personal key's
+   * `paidProviders` otherwise. When false the provider credentials read as
+   * unconfigured for this request (see paidProvidersAllowed).
+   */
+  paidProvidersAllowed?: boolean;
 }
 
 const requestFacts = new AsyncLocalStorage<RequestFacts>();
@@ -306,4 +313,14 @@ export function withRequestFacts<T>(facts: RequestFacts, fn: () => Promise<T>): 
 /** The current request's facts, or undefined outside an /mcp request. */
 export function currentRequestFacts(): RequestFacts | undefined {
   return requestFacts.getStore();
+}
+
+/**
+ * Whether the current request may read the key-gated provider credentials
+ * (2.18.0). True outside an /mcp request and whenever the flag is not false.
+ * Checked in one place only: getWorkerVar (response.ts), which index.ts
+ * points at this function through setPaidProvidersProvider.
+ */
+export function paidProvidersAllowed(): boolean {
+  return requestFacts.getStore()?.paidProvidersAllowed !== false;
 }

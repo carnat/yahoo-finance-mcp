@@ -10,7 +10,8 @@
  * are looked up in the server's own tool registry (an unknown tool records
  * `tools/call:unknown`, an unknown or non-string method `rpc:other`), error
  * codes come from the server's own envelopes, and everything else is a
- * counter, a bucket or a fixed enum. Never recorded: the credential, the
+ * counter, a bucket or a fixed enum. The caller is recorded as a key id only
+ * (`owner`, a personal key's hash prefix, or `-`). Never recorded: the credential, the
  * Authorization header, the request URL or path, request or response bodies,
  * tool arguments, provider content, the caller's IP or `cf` geo fields.
  *
@@ -44,6 +45,11 @@ export interface RequestRecord {
   body: string | null;
   /** The request's root cache scope, once dispatch has started. */
   scope: CacheScope | undefined;
+  /**
+   * Who called (2.18.0): `owner`, a personal key's 8-character id, or `-` when
+   * no key is identified. Never the key, its hash or its label.
+   */
+  keyId: string;
 }
 
 export function newRequestRecord(credentialTransport: "header" | "path" | "none"): RequestRecord {
@@ -56,6 +62,7 @@ export function newRequestRecord(credentialTransport: "header" | "path" | "none"
     httpStatus: 0,
     body: null,
     scope: undefined,
+    keyId: "-",
   };
 }
 
@@ -168,6 +175,11 @@ export function sizeBucket(bytes: number): string {
   return ">=1M";
 }
 
+/** `owner`, an 8-hex key id, or `-`; anything else is recorded as `-`. */
+function keyIdBlob(keyId: string): string {
+  return keyId === "owner" || /^[0-9a-f]{8}$/.test(keyId) ? keyId : "-";
+}
+
 function timeoutClass(timeouts: number, upstream: number): string {
   if (timeouts <= 0) return "none";
   return timeouts >= upstream ? "all" : "some";
@@ -178,7 +190,7 @@ function timeoutClass(timeouts: number, upstream: number): string {
  *
  * index1 = action. Blobs: domain, serverVersion, buildShaShort, outcome,
  * errorCode, sizeBucket, credentialTransport, budgetExhausted, cacheSource,
- * toolMode, timeoutClass. Doubles: latencyMs, responseBytes, httpStatus,
+ * toolMode, timeoutClass, keyId (2.18.0). Doubles: latencyMs, responseBytes, httpStatus,
  * upstreamRequests, subrequestsUsed, budgetRefusals, providerTimeouts,
  * edgeCacheHits, edgeCacheMisses, providerRetries.
  */
@@ -211,6 +223,7 @@ export function writeRequestDataPoint(dataset: TelemetryDataset | undefined, rec
         cacheSource,
         isGroupedMode() ? "grouped" : "expanded",
         timeoutClass(timeouts, upstream),
+        keyIdBlob(record.keyId),
       ],
       doubles: [
         latencyMs,

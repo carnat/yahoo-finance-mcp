@@ -6,9 +6,11 @@
  * `resolveCredential` only; swapping the static token for another scheme means
  * replacing this file, not the call sites.
  *
- * The token must never reach a response, log line, error message or telemetry.
+ * Neither the token nor a personal key may reach a response, log line, error message or telemetry.
  * If a URL is ever logged, log `redactPath(pathname)` instead.
  */
+
+import { checkPersonalKey } from "./access-keys.js";
 
 export type CredentialTransport = "header" | "path" | "none";
 export type CredentialStatus = "valid" | "invalid" | "absent";
@@ -61,25 +63,60 @@ function presentedHeaderToken(request: Request): string | null {
  *   the caller answers 404), and any presented header credential is `invalid`.
  */
 export function resolveCredential(request: Request, pathname: string, env: AuthEnv): ResolvedCredential {
+  const read = readCredential(request, pathname, env);
+  if (read.route === "other") return read;
+  if (read.presented === null) return { route: "mcp", transport: "none", status: "absent" };
+  const token = configuredToken(env);
+  const status: CredentialStatus = token !== "" && timingSafeEqual(read.presented, token) ? "valid" : "invalid";
+  return { route: "mcp", transport: read.transport, status };
+}
+
+type ReadCredential =
+  | { route: "mcp"; transport: CredentialTransport; presented: string | null }
+  | { route: "other" };
+
+function readCredential(request: Request, pathname: string, env: AuthEnv): ReadCredential {
   const pathMatch = PATH_FORM.exec(pathname);
   if (pathname !== "/mcp" && !pathMatch) return { route: "other" };
-
-  const token = configuredToken(env);
-  if (pathMatch && token === "") return { route: "other" };
-
+  // With MCP_TOKEN unset or empty the path form does not exist, for personal keys too.
+  if (pathMatch && configuredToken(env) === "") return { route: "other" };
   const headerToken = presentedHeaderToken(request);
-  let transport: CredentialTransport;
-  let presented: string;
-  if (headerToken !== null) {
-    transport = "header";
-    presented = headerToken;
-  } else if (pathMatch) {
-    transport = "path";
-    presented = pathMatch[1];
-  } else {
-    return { route: "mcp", transport: "none", status: "absent" };
-  }
+  if (headerToken !== null) return { route: "mcp", transport: "header", presented: headerToken };
+  if (pathMatch) return { route: "mcp", transport: "path", presented: pathMatch[1] };
+  return { route: "mcp", transport: "none", presented: null };
+}
 
-  const status: CredentialStatus = token !== "" && timingSafeEqual(presented, token) ? "valid" : "invalid";
-  return { route: "mcp", transport, status };
+/**
+ * Who is calling, for an /mcp request already resolved by resolveCredential.
+ *
+ * - `owner`: the owner token (no limits, provider access, no store or counter call).
+ * - `key`: an active personal key within its limits; `paidProviders` from its record.
+ * - `limited`: an active personal key over a limit (HTTP 429).
+ * - `anonymous`: no credential (grace mode serves it, enforce rejects it).
+ * - `rejected`: anything else (the existing 401), unknown and revoked keys included.
+ *
+ * `keyId` is `owner`, the record's 8-character id, or `-` when no key is identified.
+ * Throws (fail closed) when the key store or the usage counter fails.
+ */
+export type CallerIdentity =
+  | { kind: "owner" | "anonymous" | "rejected"; keyId: string; paidProviders: boolean }
+  | { kind: "key"; keyId: string; paidProviders: boolean }
+  | { kind: "limited"; keyId: string; paidProviders: boolean; retryAfterSeconds: number };
+
+export async function identifyCaller(
+  request: Request,
+  pathname: string,
+  env: AuthEnv,
+  status: CredentialStatus,
+): Promise<CallerIdentity> {
+  if (status === "valid") return { kind: "owner", keyId: "owner", paidProviders: true };
+  if (status === "absent") return { kind: "anonymous", keyId: "-", paidProviders: true };
+  const read = readCredential(request, pathname, env);
+  if (read.route !== "mcp" || read.presented === null) return { kind: "rejected", keyId: "-", paidProviders: false };
+  const result = await checkPersonalKey(read.presented, env);
+  if (result.kind === "allowed") return { kind: "key", keyId: result.id, paidProviders: result.paidProviders };
+  if (result.kind === "limited") {
+    return { kind: "limited", keyId: result.id, paidProviders: false, retryAfterSeconds: result.retryAfterSeconds };
+  }
+  return { kind: "rejected", keyId: "-", paidProviders: false };
 }

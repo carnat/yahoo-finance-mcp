@@ -79,6 +79,16 @@ BREAKDOWN = {"meta": [], "data": [
     {"action": PRICE, "outcome": "tool_error", "error_code": "RATE_LIMIT", "size_bucket": "<1K", "requests": "1"},
     {"action": "rejected:auth", "outcome": "rejected", "error_code": "AUTH_REQUIRED", "size_bucket": "<1K", "requests": "5"},
 ], "rows": 4}
+# Per keyId (2.18.0, blob12). The empty key id is a pre-2.18.0 row.
+KEYS = {"meta": [], "data": [
+    {"key_id": "owner", "outcome": "ok", "requests": "30"},
+    {"key_id": "owner", "outcome": "tool_error", "requests": "2"},
+    {"key_id": "e773fa26", "outcome": "ok", "requests": "8"},
+    {"key_id": "e773fa26", "outcome": "rejected", "requests": "1"},
+    {"key_id": "-", "outcome": "rejected", "requests": "4"},
+    {"key_id": "", "outcome": "ok", "requests": "1"},
+    {"key_id": "yfk_leaked-label", "outcome": "ok", "requests": "1"},
+], "rows": 7}
 # Workers Observability `events` view, in the documented response shape
 # (result.events.events[] of {"$metadata", dataset, source, timestamp, "$workers"}).
 # The Worker logs a JSON string, so `source` is a string. The outcome is on the
@@ -176,6 +186,8 @@ class FakeTransport:
                 return json.dumps(HOURLY).encode()
             if "GROUP BY action, outcome, error_code, size_bucket" in sql:
                 return json.dumps(BREAKDOWN).encode()
+            if "GROUP BY key_id, outcome" in sql:
+                return json.dumps(KEYS).encode()
             return json.dumps(DAILY).encode()
         if url.endswith("/workers/observability/telemetry/query"):
             if self.fail_logs:
@@ -197,20 +209,20 @@ class TestRequests(unittest.TestCase):
         urls = [c[0] for c in t.calls]
         sql_url = f"https://api.cloudflare.com/client/v4/accounts/{ACCOUNT}/analytics_engine/sql"
         logs_url = f"https://api.cloudflare.com/client/v4/accounts/{ACCOUNT}/workers/observability/telemetry/query"
-        self.assertEqual(urls, [sql_url, sql_url, sql_url, logs_url])
+        self.assertEqual(urls, [sql_url, sql_url, sql_url, sql_url, logs_url])
         for _, headers, _ in t.calls:
             self.assertEqual(headers["Authorization"], f"Bearer {TOKEN}")
 
     def test_sql_window_dataset_and_sample_weighting(self):
         _, _, t = _export()
-        for _, _, body in t.calls[:3]:
+        for _, _, body in t.calls[:4]:
             sql = body.decode()
             self.assertIn("FROM yfmcp_telemetry", sql)
             self.assertIn(f"timestamp >= toDateTime({START_S}) AND timestamp < toDateTime({END_S})", sql)
             self.assertIn("SUM(_sample_interval)", sql)
             self.assertIn("FORMAT JSON", sql)
             self.assertNotIn("count()", sql)  # counts are sample-weighted sums
-            self.assertNotRegex(sql, r"\bblob(1[2-9]|20)\b")
+            self.assertNotRegex(sql, r"\bblob(1[3-9]|20)\b")
         hourly = t.calls[0][2].decode()
         self.assertIn("toStartOfInterval(timestamp, INTERVAL '1' HOUR) AS hour", hourly)
         self.assertIn("quantileExactWeighted(0.95)(double1, _sample_interval)", hourly)
@@ -220,7 +232,7 @@ class TestRequests(unittest.TestCase):
 
     def test_observability_query_shape(self):
         _, _, t = _export()
-        body = json.loads(t.calls[3][2])
+        body = json.loads(t.calls[4][2])
         self.assertEqual(body["view"], "events")
         self.assertEqual(body["timeframe"], {"from": START_S * 1000, "to": END_S * 1000})  # epoch ms
         self.assertTrue(body["dry"])  # documented: executes, does not persist the results
@@ -265,7 +277,7 @@ class TestRequests(unittest.TestCase):
         with mock.patch.object(et, "MAX_EVENT_PAGES", 3):
             doc, problems, t = _export(FakeTransport(observability=endless))
         self.assertFalse(doc["workersLogs"]["available"])
-        self.assertEqual(len(t.calls), 3 + 3)
+        self.assertEqual(len(t.calls), 4 + 3)
         self.assertTrue(problems and "more than 6000" in problems[0])
 
 
@@ -310,6 +322,21 @@ class TestAggregation(unittest.TestCase):
         self.assertIn("invalid", actions)
         self.assertEqual(actions["invalid"]["domain"], "invalid")
         self.assertNotIn("AAPL", json.dumps(doc))
+
+    def test_requests_by_key_id(self):
+        doc, _, t = _export()
+        keys_sql = t.calls[3][2].decode()
+        self.assertIn("blob12 AS key_id", keys_sql)
+        self.assertIn("GROUP BY key_id, outcome", keys_sql)
+        keys = doc["analyticsEngine"]["keys"]
+        self.assertEqual(sorted(keys), ["-", "e773fa26", "invalid", "owner"])
+        self.assertEqual(keys["owner"], {"requests": 32, "outcomes": {
+            "ok": 30, "tool_error": 2, "rpc_error": 0, "rejected": 0, "exception": 0}})
+        self.assertEqual(keys["e773fa26"]["requests"], 9)
+        self.assertEqual(keys["e773fa26"]["outcomes"]["rejected"], 1)
+        self.assertEqual(keys["-"]["requests"], 5)  # 4 unidentified + 1 pre-2.18.0 row
+        self.assertEqual(keys["invalid"]["requests"], 1)
+        self.assertNotIn("yfk_", json.dumps(doc))
 
     def test_invocations_joined_to_action(self):
         doc, _, _ = _export()
@@ -442,6 +469,7 @@ class TestOutput(unittest.TestCase):
         self.assertEqual(problems, [])
         self.assertEqual(doc["analyticsEngine"]["actions"], {})
         self.assertEqual(doc["analyticsEngine"]["totals"]["requests"], 0)
+        self.assertEqual(doc["analyticsEngine"]["keys"], {})
         self.assertEqual(doc["workersLogs"]["invocations"], 0)
 
 

@@ -124,6 +124,12 @@ jobs:
       - name: Worker credential (grace and enforce) and request-limit tests
         run: python scripts/test_worker_auth.py -v
 
+      - name: Worker per-person access key (store, limits, provider flag, telemetry keyId) tests
+        run: python scripts/test_worker_access_keys.py -v
+
+      - name: Access key admin script tests (fake wrangler runner)
+        run: python scripts/test_manage_access_keys.py -v
+
       - name: Fetch allow-list, redirect, CORS and evidence-guard tests
         run: python scripts/test_url_policy.py -v
 
