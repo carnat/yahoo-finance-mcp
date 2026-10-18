@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import re
@@ -39,6 +40,13 @@ def _run(coro):  # type: ignore[no-untyped-def]
 
 def _parse(raw: str) -> dict:
     return json.loads(raw)
+
+
+@contextlib.contextmanager
+def _patch_yf():
+    """`yf` is looked up by the pipeline (yfmcp.tools.news) and by the Yahoo provider; patch both with one mock."""
+    with patch("yfmcp.tools.news.yf") as mock_yf, patch("yfmcp.news.providers.yahoo.yf", mock_yf):
+        yield mock_yf
 
 
 class TestPhase6BCompanyNews(unittest.TestCase):
@@ -529,7 +537,7 @@ class TestPhase6BSecEvents(unittest.TestCase):
                 }
             },
         }
-        with patch("yfmcp.tools.news._get_submissions_for_ticker", new_callable=AsyncMock) as mocked:
+        with patch("yfmcp.news.providers.sec._get_submissions_for_ticker", new_callable=AsyncMock) as mocked:
             mocked.return_value = ("0000000000", subs)
             data = _parse(
                 _run(
@@ -1246,9 +1254,9 @@ class TestPhase6BYahooFinanceSources(unittest.TestCase):
                     raise RuntimeError("profile unavailable")
                 return info
 
-        search = patch("yfmcp.tools.news._yahoo_search_news", side_effect=raw_items) if isinstance(raw_items, Exception) \
-            else patch("yfmcp.tools.news._yahoo_search_news", return_value=raw_items)
-        with patch("yfmcp.tools.news.yf") as mock_yf, search:
+        search = patch("yfmcp.news.providers.yahoo._yahoo_search_news", side_effect=raw_items) if isinstance(raw_items, Exception) \
+            else patch("yfmcp.news.providers.yahoo._yahoo_search_news", return_value=raw_items)
+        with _patch_yf() as mock_yf, search:
             mock_yf.Ticker.return_value = _TickerMock()
             return _run(srv_mod._collect_yahoo_events(ticker, retrieved_at=retrieved, max_results=10, feed="press_releases", include_diagnostics=True))
 
@@ -1343,7 +1351,7 @@ class TestPhase6BYahooFinanceSources(unittest.TestCase):
                     "exchangeName": "NasdaqGS"
                 }
 
-        with patch("yfmcp.tools.news.yf") as mock_yf, patch("yfmcp.tools.news._yahoo_search_news", return_value=[bad_item, good_item]):
+        with _patch_yf() as mock_yf, patch("yfmcp.news.providers.yahoo._yahoo_search_news", return_value=[bad_item, good_item]):
             mock_yf.Ticker.return_value = _TickerMock([bad_item, good_item])
             items, warnings, used = _run(
                 srv_mod._collect_yahoo_events(
@@ -1403,7 +1411,7 @@ class TestPhase6BYahooFinanceSources(unittest.TestCase):
             def info(self):
                 return {"shortName": "Marvell Technology, Inc.", "exchange": "NMS"}
 
-        with patch("yfmcp.tools.news.yf") as mock_yf, patch("yfmcp.tools.news._yahoo_search_news", return_value=raw_items):
+        with _patch_yf() as mock_yf, patch("yfmcp.news.providers.yahoo._yahoo_search_news", return_value=raw_items):
             mock_yf.Ticker.return_value = _TickerMock()
             items, _warnings, used, diagnostics = _run(
                 srv_mod._collect_yahoo_events(
@@ -1442,7 +1450,7 @@ class TestPhase6BYahooFinanceSources(unittest.TestCase):
             def info(self):
                 raise RuntimeError("profile unavailable")
 
-        with patch("yfmcp.tools.news.yf") as mock_yf, patch("yfmcp.tools.news._yahoo_search_news", return_value=raw_items):
+        with _patch_yf() as mock_yf, patch("yfmcp.news.providers.yahoo._yahoo_search_news", return_value=raw_items):
             mock_yf.Ticker.return_value = _TickerMock()
             items, _warnings, used, diagnostics = _run(
                 srv_mod._collect_yahoo_events(
@@ -1783,7 +1791,7 @@ class TestGlobeNewswireRSS(unittest.TestCase):
             @property
             def info(self):
                 return {}
-        mock_yf = patch("yfmcp.tools.news.yf").__enter__()
+        mock_yf = _patch_yf().__enter__()
         return mock_yf
 
     def test_relevant_item_returned_filtered_out_unrelated(self):
@@ -1801,9 +1809,9 @@ class TestGlobeNewswireRSS(unittest.TestCase):
                     pass
             return _Resp()
 
-        with patch("yfmcp.tools.news.yf") as mock_yf, \
+        with _patch_yf() as mock_yf, \
              patch("yfmcp.url_policy.urlopen", side_effect=_fake_urlopen), \
-             patch("yfmcp.tools.news._tool_cache") as mock_cache:
+             patch("yfmcp.news.providers.globenewswire._tool_cache") as mock_cache:
             mock_yf.Ticker.return_value.info = {"shortName": "Apple Inc.", "longName": "Apple Inc."}
             mock_cache.get.return_value = None
             mock_cache.set.return_value = None
@@ -1851,9 +1859,9 @@ class TestGlobeNewswireRSS(unittest.TestCase):
                     pass
             return _Resp()
 
-        with patch("yfmcp.tools.news.yf") as mock_yf, \
+        with _patch_yf() as mock_yf, \
              patch("yfmcp.url_policy.urlopen", side_effect=_fake_urlopen), \
-             patch("yfmcp.tools.news._tool_cache") as mock_cache:
+             patch("yfmcp.news.providers.globenewswire._tool_cache") as mock_cache:
             mock_yf.Ticker.return_value.info = {}
             mock_cache.get.return_value = None
             mock_cache.set.return_value = None
@@ -1884,9 +1892,9 @@ class TestGlobeNewswireRSS(unittest.TestCase):
 
         for ticker, category in expected.items():
             with self.subTest(ticker=ticker), \
-                 patch("yfmcp.tools.news.yf") as mock_yf, \
+                 _patch_yf() as mock_yf, \
                  self._mock_urlopen(_MOCK_RSS_EXACT_TICKERS), \
-                 patch("yfmcp.tools.news._tool_cache") as mock_cache:
+                 patch("yfmcp.news.providers.globenewswire._tool_cache") as mock_cache:
                 mock_yf.Ticker.return_value.info = {}
                 mock_cache.get.return_value = None
                 mock_cache.set.return_value = None
@@ -1912,9 +1920,9 @@ class TestGlobeNewswireRSS(unittest.TestCase):
 
         for ticker in ("NVDA", "ASTS", "LITE"):
             with self.subTest(ticker=ticker), \
-                 patch("yfmcp.tools.news.yf") as mock_yf, \
+                 _patch_yf() as mock_yf, \
                  self._mock_urlopen(_MOCK_RSS_TEXT_FALSE_POSITIVES), \
-                 patch("yfmcp.tools.news._tool_cache") as mock_cache:
+                 patch("yfmcp.news.providers.globenewswire._tool_cache") as mock_cache:
                 mock_yf.Ticker.return_value.info = {}
                 mock_cache.get.return_value = None
                 mock_cache.set.return_value = None
@@ -1936,9 +1944,9 @@ class TestGlobeNewswireRSS(unittest.TestCase):
         srv_mod = self._get_srv()
         retrieved = self._retrieved()
 
-        with patch("yfmcp.tools.news.yf") as mock_yf, \
+        with _patch_yf() as mock_yf, \
              self._mock_urlopen(_MOCK_RSS_AMBIGUOUS_WORDS), \
-             patch("yfmcp.tools.news._tool_cache") as mock_cache:
+             patch("yfmcp.news.providers.globenewswire._tool_cache") as mock_cache:
             mock_yf.Ticker.return_value.info = {}
             mock_cache.get.return_value = None
             mock_cache.set.return_value = None
@@ -1960,9 +1968,9 @@ class TestGlobeNewswireRSS(unittest.TestCase):
         srv_mod = self._get_srv()
         retrieved = self._retrieved()
 
-        with patch("yfmcp.tools.news.yf") as mock_yf, \
+        with _patch_yf() as mock_yf, \
              self._mock_urlopen(_MOCK_RSS_AMBIGUOUS_MARKER), \
-             patch("yfmcp.tools.news._tool_cache") as mock_cache:
+             patch("yfmcp.news.providers.globenewswire._tool_cache") as mock_cache:
             mock_yf.Ticker.return_value.info = {}
             mock_cache.get.return_value = None
             mock_cache.set.return_value = None
@@ -1999,9 +2007,9 @@ class TestGlobeNewswireRSS(unittest.TestCase):
 </rss>
 """
 
-        with patch("yfmcp.tools.news.yf") as mock_yf, \
+        with _patch_yf() as mock_yf, \
              self._mock_urlopen(rss), \
-             patch("yfmcp.tools.news._tool_cache") as mock_cache:
+             patch("yfmcp.news.providers.globenewswire._tool_cache") as mock_cache:
             mock_yf.Ticker.return_value.info = {"shortName": "ON Semiconductor Corporation"}
             mock_cache.get.return_value = None
             mock_cache.set.return_value = None
@@ -2023,9 +2031,9 @@ class TestGlobeNewswireRSS(unittest.TestCase):
         srv_mod = self._get_srv()
         retrieved = self._retrieved()
 
-        with patch("yfmcp.tools.news.yf") as mock_yf, \
+        with _patch_yf() as mock_yf, \
              self._mock_urlopen(_MOCK_RSS_DATED_MANY), \
-             patch("yfmcp.tools.news._tool_cache") as mock_cache:
+             patch("yfmcp.news.providers.globenewswire._tool_cache") as mock_cache:
             mock_yf.Ticker.return_value.info = {}
             mock_cache.get.return_value = None
             mock_cache.set.return_value = None
@@ -2050,9 +2058,9 @@ class TestGlobeNewswireRSS(unittest.TestCase):
         srv_mod = self._get_srv()
         retrieved = self._retrieved()
 
-        with patch("yfmcp.tools.news.yf") as mock_yf, \
+        with _patch_yf() as mock_yf, \
              self._mock_urlopen(_MOCK_RSS_DATED_MANY), \
-             patch("yfmcp.tools.news._tool_cache") as mock_cache:
+             patch("yfmcp.news.providers.globenewswire._tool_cache") as mock_cache:
             mock_yf.Ticker.return_value.info = {}
             mock_cache.get.return_value = None
             mock_cache.set.return_value = None
@@ -2075,9 +2083,9 @@ class TestGlobeNewswireRSS(unittest.TestCase):
         retrieved = self._retrieved()
         oversized = b"x" * (srv_mod._GLOBENEWSWIRE_MAX_BYTES + 1)
 
-        with patch("yfmcp.tools.news.yf") as mock_yf, \
+        with _patch_yf() as mock_yf, \
              self._mock_urlopen(oversized), \
-             patch("yfmcp.tools.news._tool_cache") as mock_cache:
+             patch("yfmcp.news.providers.globenewswire._tool_cache") as mock_cache:
             mock_yf.Ticker.return_value.info = {}
             mock_cache.get.return_value = None
 
@@ -2098,9 +2106,9 @@ class TestGlobeNewswireRSS(unittest.TestCase):
         srv_mod = self._get_srv()
         retrieved = self._retrieved()
 
-        with patch("yfmcp.tools.news.yf") as mock_yf, \
+        with _patch_yf() as mock_yf, \
              self._mock_urlopen(_MOCK_RSS_DOCTYPE), \
-             patch("yfmcp.tools.news._tool_cache") as mock_cache:
+             patch("yfmcp.news.providers.globenewswire._tool_cache") as mock_cache:
             mock_yf.Ticker.return_value.info = {}
             mock_cache.get.return_value = None
             mock_cache.set.return_value = None
@@ -2125,9 +2133,9 @@ class TestGlobeNewswireRSS(unittest.TestCase):
         def _raise_error(req, timeout=20):
             raise OSError("connection refused")
 
-        with patch("yfmcp.tools.news.yf") as mock_yf, \
+        with _patch_yf() as mock_yf, \
              patch("yfmcp.url_policy.urlopen", side_effect=_raise_error), \
-             patch("yfmcp.tools.news._tool_cache") as mock_cache:
+             patch("yfmcp.news.providers.globenewswire._tool_cache") as mock_cache:
             mock_yf.Ticker.return_value.info = {}
             mock_cache.get.return_value = None
 
@@ -2163,9 +2171,9 @@ class TestGlobeNewswireRSS(unittest.TestCase):
                     pass
             return _Resp()
 
-        with patch("yfmcp.tools.news.yf") as mock_yf, \
+        with _patch_yf() as mock_yf, \
              patch("yfmcp.url_policy.urlopen", side_effect=_fake_urlopen), \
-             patch("yfmcp.tools.news._tool_cache") as mock_cache:
+             patch("yfmcp.news.providers.globenewswire._tool_cache") as mock_cache:
             mock_yf.Ticker.return_value.info = {}
             mock_cache.get.return_value = None
             mock_cache.set.return_value = None
@@ -2198,9 +2206,9 @@ class TestGlobeNewswireRSS(unittest.TestCase):
                     pass
             return _Resp()
 
-        with patch("yfmcp.tools.news.yf") as mock_yf, \
+        with _patch_yf() as mock_yf, \
              patch("yfmcp.url_policy.urlopen", side_effect=_fake_urlopen), \
-             patch("yfmcp.tools.news._tool_cache") as mock_cache:
+             patch("yfmcp.news.providers.globenewswire._tool_cache") as mock_cache:
             mock_yf.Ticker.return_value.info = {}
             mock_cache.get.return_value = None
             mock_cache.set.return_value = None
@@ -2234,7 +2242,7 @@ class TestGlobeNewswireRSS(unittest.TestCase):
             return _Resp()
 
         # First call: cache miss → fetch
-        with patch("yfmcp.tools.news.yf") as mock_yf, \
+        with _patch_yf() as mock_yf, \
              patch("yfmcp.url_policy.urlopen", side_effect=_fake_urlopen):
             mock_yf.Ticker.return_value.info = {}
             for key in list(srv_mod._tool_cache._store):
@@ -2247,7 +2255,7 @@ class TestGlobeNewswireRSS(unittest.TestCase):
         first_count = fetch_count["n"]
 
         # Second call: cache hit → no fetch
-        with patch("yfmcp.tools.news.yf") as mock_yf, \
+        with _patch_yf() as mock_yf, \
              patch("yfmcp.url_policy.urlopen", side_effect=_fake_urlopen):
             mock_yf.Ticker.return_value.info = {}
             _run(srv_mod._collect_globenewswire_events(

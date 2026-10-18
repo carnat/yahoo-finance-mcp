@@ -31,6 +31,7 @@ from scripts.parity.harness import Case
 import server  # noqa: F401,E402
 from yfmcp.envelope import _envelope_tool_result  # noqa: E402
 from yfmcp.tools import news as news_tools  # noqa: E402
+from yfmcp.news.providers import yahoo as yahoo_provider  # noqa: E402
 
 CASES: list[Case] = []
 
@@ -341,7 +342,7 @@ def _tool_case(name: str, tool: str, args: dict, py_call, select, *, routes: dic
         async def call():
             return _envelope_tool_result(tool, await py_call())
         with patch.object(server.yf, "Ticker", side_effect=RuntimeError("offline")), \
-                patch.object(news_tools, "_yahoo_search_news", return_value=[]), \
+                patch.object(yahoo_provider, "_yahoo_search_news", return_value=[]), \
                 (_python_sec_state() if routes else contextlib.nullcontext()):
             return asyncio.run(call())
 

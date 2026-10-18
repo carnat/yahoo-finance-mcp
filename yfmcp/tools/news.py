@@ -45,11 +45,99 @@ from yfmcp import extraction_rules as _er
 from yfmcp.deprecations import TOOL_RELIABILITY_CLASS as _TOOL_RELIABILITY_CLASS
 from yfmcp.tools.pricing import _run_ticker_batch
 
+# Moved to yfmcp/news/ in 2.15.1 (pure restructure). Every moved name is re-imported here so
+# `yfmcp.tools.news.<name>` and `server.<name>` keep resolving; providers never import this module.
+
+from yfmcp.news.shared import (
+    _DEDUP_TITLE_MAX_LEN,
+    _event_type_from_keywords,
+    _make_duplicate_group_id,
+    _normalize_exchange,
+    _normalized_event_title_stem,
+    _short_text,
+    _within_date_window,
+)
+from yfmcp.news.providers.yahoo import (
+    _PRESS_RELEASE_WIRE_RE,
+    _YAHOO_ALLOWED_CONTENT_TYPES,
+    _YAHOO_NEWS_ACRONYM_IGNORED_WORDS,
+    _YAHOO_NEWS_LEGAL_SUFFIXES,
+    _YAHOO_PRESS_RELEASE_METHOD,
+    _build_yahoo_event_item,
+    _collect_yahoo_events,
+    _is_ticker_compatible_with_context,
+    _normalize_event_text,
+    _strip_yahoo_news_legal_suffix,
+    _yahoo_decision_use,
+    _yahoo_item_issuer,
+    _yahoo_news_identity_from_info,
+    _yahoo_news_match_for,
+    _yahoo_search_news,
+)
+from yfmcp.news.providers.sec import (
+    _FORM4_TRANSACTION_LABELS,
+    _build_sec_event_item,
+    _collect_sec_events,
+    _event_type_from_form,
+    _form4_date,
+    _form4_num,
+    _form4_owner_from_html,
+    _form4_role_from_html,
+    _form4_transaction_payload,
+    _parse_form4_html_transaction,
+    _parse_form4_transaction,
+    _safe_sec_url,
+    _strip_xml_namespaces,
+    _try_attach_form4_transaction,
+    _xml_text,
+)
+from yfmcp.news.providers.company_ir_page import (
+    _COMPANY_IR_PAGE_MAX_BYTES,
+    _COMPANY_IR_PAGE_REGISTRY_PATH,
+    _collect_company_ir_page_events,
+    _company_ir_page_entry,
+    _company_ir_page_item,
+    _company_ir_page_json_records,
+    _company_ir_page_registry_fresh,
+    _company_ir_page_url_allowed,
+    _fetch_company_ir_page,
+    _host_without_www,
+    _html_attr,
+    _load_company_ir_page_registry,
+    _parse_company_ir_page_html,
+    _parse_company_ir_page_json,
+)
+from yfmcp.news.providers.globenewswire import (
+    _GLOBENEWSWIRE_BLOCKED_XML_MARKERS,
+    _GLOBENEWSWIRE_ISIN_CATEGORY_DOMAIN,
+    _GLOBENEWSWIRE_MAX_BYTES,
+    _GLOBENEWSWIRE_RSS_FEEDS,
+    _GLOBENEWSWIRE_RSS_URL,
+    _GLOBENEWSWIRE_STOCK_CATEGORY_DOMAIN,
+    _collect_globenewswire_events,
+    _globenewswire_category_values,
+    _globenewswire_plain_text,
+    _globenewswire_stock_category_matches,
+    _globenewswire_xml_is_safe,
+    _xml_child_texts,
+    _xml_first_child_text,
+    _xml_local_name,
+)
+from yfmcp.news.providers.finnhub import (
+    _FINNHUB_NEWS_API,
+    _collect_finnhub_events,
+)
+from yfmcp.news.providers.marketaux import (
+    _MARKETAUX_MAX_ITEMS,
+    _MARKETAUX_NEWS_API,
+    _MARKETAUX_WIRE_DOMAINS,
+    _collect_marketaux_events,
+)
+
 # ---------------------------------------------------------------------------
 # Phase 6B public event helpers (multi-source, source-backed, deduped)
 # ---------------------------------------------------------------------------
 
-_DEDUP_TITLE_MAX_LEN = 80
 _STALE_EVENT_DAYS = 90
 _PHASE6B_SUPPORTED_SOURCES = {
     "sec", "company_ir", "company_ir_page", "newswire",
@@ -177,206 +265,37 @@ def _build_coverage(source_status: dict, resolved_action: str | None = None) -> 
     }
 
 
-_YAHOO_NEWS_LEGAL_SUFFIXES = frozenset({
-    "inc", "incorporated", "corp", "corporation", "ltd", "limited", "llc", "plc",
-    "co", "company", "sa", "ag", "nv", "se", "gmbh",
-})
-_YAHOO_NEWS_ACRONYM_IGNORED_WORDS = frozenset({"the", "and", "of", "for"})
 
 
-def _normalize_event_text(value: object) -> str:
-    return _re.sub(r"\s+", " ", _re.sub(r"[^a-z0-9]+", " ", str(value or "").lower())).strip()
 
 
-def _strip_yahoo_news_legal_suffix(value: str) -> str:
-    words = [word for word in value.split() if word]
-    while len(words) > 1 and words[-1] in _YAHOO_NEWS_LEGAL_SUFFIXES:
-        words.pop()
-    return " ".join(words)
 
 
-def _yahoo_news_identity_from_info(ticker: str, info: dict | None) -> dict:
-    info = info if isinstance(info, dict) else {}
-    aliases: set[str] = set()
-    acronyms: set[str] = set()
-    company_name = str(info.get("longName") or info.get("shortName") or "").strip() or None
-    for raw_name in (info.get("shortName"), info.get("longName")):
-        normalized = _normalize_event_text(raw_name)
-        if not normalized:
-            continue
-        stripped = _strip_yahoo_news_legal_suffix(normalized)
-        for alias in (normalized, stripped):
-            if len(alias) >= 3:
-                aliases.add(alias)
-        initials = "".join(
-            word[0] for word in stripped.split()
-            if word and word not in _YAHOO_NEWS_ACRONYM_IGNORED_WORDS
-        )
-        if 3 <= len(initials) <= 6:
-            acronyms.add(initials)
-    return {
-        "status": "RESOLVED" if aliases else "UNAVAILABLE",
-        "companyName": company_name,
-        "aliases": tuple(sorted(aliases)),
-        "acronyms": tuple(sorted(acronyms)),
-        "exchange": info.get("exchange") or info.get("exchangeName"),
-        "ticker": ticker.upper(),
-    }
 
 
-def _yahoo_item_issuer(item: dict, identity: dict) -> str | None:
-    """Issuer of a Yahoo press-release item: the company when the headline starts with its name or ticker."""
-    if item.get("source") != "yahoo_finance_press_releases":
-        return None
-    title = _normalize_event_text(item.get("title"))
-    leads = [*(identity.get("aliases") or ()), *(str(t).lower() for t in item.get("tickers") or [])]
-    if any(lead and (title == lead or title.startswith(f"{lead} ")) for lead in leads):
-        return identity.get("companyName")
-    return None
 
 
-def _yahoo_news_match_for(text: str, ticker: str, identity: dict) -> tuple[str, int] | None:
-    if _is_ticker_compatible_with_context(text, ticker, identity.get("exchange")):
-        return "TICKER_TOKEN", 0
-    if identity.get("status") != "RESOLVED":
-        return None
-    normalized_text = f" {_normalize_event_text(text)} "
-    if any(f" {alias} " in normalized_text for alias in identity.get("aliases") or ()):
-        return "ISSUER_NAME", 1
-    if any(_re.search(r"\b" + _re.escape(acronym) + r"\b", text, _re.IGNORECASE) for acronym in identity.get("acronyms") or ()):
-        return "ISSUER_ACRONYM", 2
-    return None
 
 
-def _yahoo_decision_use(event_type: str) -> str:
-    return "CHECK_OFFICIAL_RELEASES" if event_type in {
-        "earnings", "guidance", "contract", "financing", "product", "regulatory", "litigation",
-    } else "CONTEXT_ONLY"
 _NEWSWIRE_HINTS = ("businesswire", "globenewswire", "prnewswire")
 _COMPANY_IR_URL_MARKERS = ("investor.", "investors.", "/investor", "/news-releases", "/press-release")
-_YAHOO_ALLOWED_CONTENT_TYPES = {"STORY", "ARTICLE", "PRESS_RELEASE"}
 
-_FINNHUB_NEWS_API = "https://finnhub.io/api/v1/company-news"
-_MARKETAUX_NEWS_API = "https://api.marketaux.com/v1/news/all"
-_MARKETAUX_WIRE_DOMAINS = ("businesswire.com", "prnewswire.com", "globenewswire.com")
-_MARKETAUX_MAX_ITEMS = 3
-_GLOBENEWSWIRE_RSS_FEEDS = (
-    (
-        "public_companies",
-        "https://www.globenewswire.com/RssFeed/orgclass/1/feedTitle/"
-        "GlobeNewswire%20-%20News%20about%20Public%20Companies",
-    ),
-    (
-        "press_releases",
-        "https://www.globenewswire.com/RssFeed/subjectcode/72-Press%20Releases/"
-        "feedTitle/GlobeNewswire%20-%20Press%20Releases",
-    ),
-    (
-        "earnings",
-        "https://www.globenewswire.com/RssFeed/subjectcode/"
-        "13-Earnings%20Releases%20And%20Operating%20Results/feedTitle/"
-        "GlobeNewswire%20-%20Earnings%20Releases%20And%20Operating%20Results",
-    ),
-    (
-        "stock_market_news",
-        "https://www.globenewswire.com/RssFeed/subjectcode/39-Stock%20Market%20News/"
-        "feedTitle/GlobeNewswire%20-%20Stock%20Market%20News",
-    ),
-    (
-        "technology",
-        "https://www.globenewswire.com/RssFeed/industry/9000-Technology/feedTitle/"
-        "GlobeNewswire%20-%20Industry%20News%20on%20Technology",
-    ),
-    (
-        "semiconductors",
-        "https://www.globenewswire.com/RssFeed/industry/9576-Semiconductors/feedTitle/"
-        "GlobeNewswire%20-%20Industry%20News%20on%20Semiconductors",
-    ),
-    (
-        "telecommunications",
-        "https://www.globenewswire.com/RssFeed/industry/6000-Telecommunications/"
-        "feedTitle/GlobeNewswire%20-%20Industry%20News%20on%20Telecommunications",
-    ),
-    (
-        "mobile_telecommunications",
-        "https://www.globenewswire.com/RssFeed/industry/6575-Mobile%20Telecommunications/"
-        "feedTitle/GlobeNewswire%20-%20Industry%20News%20on%20Mobile%20Telecommunications",
-    ),
-    (
-        "telecommunications_equipment",
-        "https://www.globenewswire.com/RssFeed/industry/9578-Telecommunications%20Equipment/"
-        "feedTitle/GlobeNewswire%20-%20Industry%20News%20on%20Telecommunications%20Equipment",
-    ),
-    (
-        "electronic_equipment",
-        "https://www.globenewswire.com/RssFeed/industry/2737-Electronic%20Equipment/"
-        "feedTitle/GlobeNewswire%20-%20Industry%20News%20on%20Electronic%20Equipment",
-    ),
-)
-_GLOBENEWSWIRE_RSS_URL = _GLOBENEWSWIRE_RSS_FEEDS[0][1]
-_GLOBENEWSWIRE_MAX_BYTES = 2 * 1024 * 1024
-_GLOBENEWSWIRE_BLOCKED_XML_MARKERS = ("<!doctype", "<!entity")
-_GLOBENEWSWIRE_STOCK_CATEGORY_DOMAIN = "https://www.globenewswire.com/rss/stock"
-_GLOBENEWSWIRE_ISIN_CATEGORY_DOMAIN = "https://www.globenewswire.com/rss/ISIN"
-_COMPANY_IR_PAGE_REGISTRY_PATH = Path(__file__).resolve().parents[2] / "worker" / "src" / "company-ir-page-registry.json"
 
 _NEWS_SOURCE_CAPABILITIES_PATH = Path(__file__).resolve().parents[2] / "worker" / "src" / "news-source-capabilities.json"
-_COMPANY_IR_PAGE_MAX_BYTES = 750 * 1024
 
 
-def _globenewswire_xml_is_safe(xml_content: str) -> bool:
-    lowered = xml_content.lower()
-    return not any(marker in lowered for marker in _GLOBENEWSWIRE_BLOCKED_XML_MARKERS)
 
 
-def _xml_local_name(tag: str) -> str:
-    return tag.rsplit("}", 1)[-1].split(":", 1)[-1]
 
 
-def _xml_child_texts(node: _ET.Element, local_name: str) -> list[str]:
-    values: list[str] = []
-    for child in list(node):
-        if _xml_local_name(str(child.tag)) == local_name:
-            text = "".join(child.itertext()).strip()
-            if text:
-                values.append(text)
-    return values
 
 
-def _xml_first_child_text(node: _ET.Element, local_name: str) -> str:
-    values = _xml_child_texts(node, local_name)
-    return values[0] if values else ""
 
 
-def _globenewswire_category_values(rss_item: _ET.Element, domain: str) -> list[str]:
-    values: list[str] = []
-    domain_l = domain.lower()
-    for child in list(rss_item):
-        if _xml_local_name(str(child.tag)) != "category":
-            continue
-        if str(child.attrib.get("domain") or "").lower() != domain_l:
-            continue
-        text = "".join(child.itertext()).strip()
-        for part in text.split(","):
-            value = part.strip()
-            if value:
-                values.append(value)
-    return values
 
 
-def _globenewswire_stock_category_matches(ticker: str, stock_categories: list[str]) -> bool:
-    ticker_u = ticker.upper()
-    for category in stock_categories:
-        symbol = category.rsplit(":", 1)[-1].strip().upper()
-        if symbol == ticker_u:
-            return True
-    return False
 
 
-def _globenewswire_plain_text(value: str) -> str:
-    text = _re.sub(r"<[^>]+>", " ", value or "")
-    text = _html_module.unescape(text)
-    return _re.sub(r"\s+", " ", text).strip()
 
 
 def _coerce_max_results(value: int, default_value: int) -> int:
@@ -452,1435 +371,90 @@ def _mark_no_source_selected(payload: dict, requested_sources: list[str] | None)
     return payload
 
 
-def _event_type_from_keywords(text: str) -> str:
-    t = (text or "").lower()
-    if any(k in t for k in ("earnings", "eps", "quarterly", "10-q", "10-k", "annual report")):
-        return "earnings"
-    if any(k in t for k in ("guidance", "outlook", "forecast", "reaffirm", "raises", "lowers")):
-        return "guidance"
-    if any(k in t for k in ("contract", "agreement", "deal", "partnership")):
-        return "contract"
-    if any(k in t for k in ("offering", "financing", "debt", "credit facility", "note")):
-        return "financing"
-    if any(k in t for k in ("launch", "product", "introduce", "announces new")):
-        return "product"
-    if any(k in t for k in ("analyst", "rating", "upgrade", "downgrade", "price target")):
-        return "analyst"
-    if any(k in t for k in ("macro", "inflation", "rates", "fomc", "cpi")):
-        return "macro"
-    if any(k in t for k in ("lawsuit", "litigation", "court", "settlement")):
-        return "litigation"
-    if any(k in t for k in ("insider", "director", "officer", "form 4")):
-        return "insider"
-    if any(k in t for k in ("sec", "regulatory", "8-k", "10-q", "10-k", "filing")):
-        return "regulatory"
-    return "other"
 
 
-def _normalized_event_title_stem(ticker: str, title: str | None) -> str:
-    text = _html_module.unescape(str(title or "")).lower()
-    text = _re.sub(r"https?://\S+", " ", text)
-    text = _re.sub(r"[^a-z0-9]+", " ", text)
-    ticker_l = str(ticker or "").lower()
-    if ticker_l:
-        text = _re.sub(rf"\b{_re.escape(ticker_l)}\b", " ", text)
-    stop_terms = {
-        "yahoo", "finance", "finnhub", "globenewswire", "press", "release",
-        "inc", "corp", "corporation", "company", "plc", "ltd", "llc",
-    }
-    words = [w for w in text.split() if w not in stop_terms]
-    return " ".join(words)[:_DEDUP_TITLE_MAX_LEN]
 
 
-def _event_type_from_form(form_type: str) -> str:
-    ft = (form_type or "").upper()
-    if ft in ("10-Q", "10-K"):
-        return "earnings"
-    if ft in ("S-3", "S-1", "424B"):
-        return "financing"
-    if ft in ("8-K", "DEF14A", "PRE14A"):
-        return "regulatory"
-    if ft == "4":
-        return "insider"
-    return "other"
 
 
-def _short_text(text: object, max_chars: int = 220) -> str | None:
-    value = " ".join(str(text or "").split())
-    if not value:
-        return None
-    return value[:max_chars]
 
 
-def _make_duplicate_group_id(
-    ticker: str,
-    title: str | None,
-    published_at: str | None,
-    issuer: str | None,
-    url: str | None,
-) -> str | None:
-    norm_title = _normalized_event_title_stem(ticker, title)
-    event_day = (published_at or "")[:10]
-    entity = (issuer or ticker or "").upper().strip()
-    if not norm_title and not event_day:
-        return None
-    key = f"{norm_title}|{event_day}|{entity}"
-    return hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
 
 
-def _xml_text(root: _ET.Element, path: str) -> str | None:
-    found = root.find(path)
-    if found is not None and found.text:
-        text = found.text.strip()
-        return text or None
-    return None
 
 
-def _strip_xml_namespaces(xml_text: str) -> str:
-    return _re.sub(r'\sxmlns(:\w+)?="[^"]*"', "", xml_text)
 
 
-_FORM4_TRANSACTION_LABELS = {
-    "P": "Purchase",
-    "S": "Sale",
-    "A": "Grant/Award",
-    "D": "Disposition",
-    "M": "Option exercise/conversion",
-    "F": "Tax withholding/payment",
-    "G": "Gift",
-}
 
 
-def _form4_num(value: str | None) -> float | None:
-    if value is None:
-        return None
-    text = _strip_html_tags(value)
-    match = _re.search(r"-?\$?\s*\(?\d[\d,]*(?:\.\d+)?\)?", text)
-    if not match:
-        return None
-    s = match.group(0).replace("$", "").replace(",", "").replace(" ", "")
-    negative = s.startswith("(") and s.endswith(")")
-    s = s.strip("()")
-    try:
-        n = float(s)
-    except Exception:
-        return None
-    return -n if negative else n
 
 
-def _form4_date(value: str | None) -> str | None:
-    text = _strip_html_tags(value or "")
-    if not text:
-        return None
-    if _re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
-        return text
-    m = _re.search(r"\b(\d{1,2})/(\d{1,2})/(\d{4})\b", text)
-    if not m:
-        return text
-    month, day, year = (int(m.group(1)), int(m.group(2)), int(m.group(3)))
-    return f"{year:04d}-{month:02d}-{day:02d}"
 
 
-def _form4_owner_from_html(html_text: str) -> str | None:
-    m = _re.search(
-        r"Name and Address of Reporting Person[\s\S]*?<a\b[^>]*>([\s\S]*?)</a>",
-        html_text,
-        _re.IGNORECASE,
-    )
-    return _strip_html_tags(m.group(1)) if m else None
 
 
-def _form4_role_from_html(html_text: str) -> str | None:
-    m = _re.search(
-        r"Relationship of Reporting Person\(s\) to Issuer([\s\S]*?)Individual or Joint/Group Filing",
-        html_text,
-        _re.IGNORECASE,
-    )
-    if not m:
-        return None
-    roles: list[str] = []
-    for row in _parse_html_table(m.group(1)):
-        for i, cell in enumerate(row[:-1]):
-            if cell.strip().upper() == "X":
-                label = row[i + 1].strip().lower()
-                if "director" in label:
-                    roles.append("director")
-                elif "officer" in label:
-                    roles.append("officer")
-                elif "10%" in label or "owner" in label:
-                    roles.append("ten_percent_owner")
-                elif "other" in label:
-                    roles.append("other")
-    return ", ".join(dict.fromkeys(roles)) or None
 
 
-def _parse_form4_html_transaction(html_text: str) -> dict | None:
-    owner_name = _form4_owner_from_html(html_text)
-    role = _form4_role_from_html(html_text)
-    for table_m in _re.finditer(r"<table[^>]*>([\s\S]*?)</table>", html_text, _re.IGNORECASE):
-        table_html = table_m.group(0)
-        table_text = _strip_html_tags(table_html).lower()
-        if "non-derivative securities" in table_text:
-            for row in _parse_html_table(table_html):
-                if len(row) < 10:
-                    continue
-                code = row[3].strip().upper()
-                shares = _form4_num(row[5])
-                if not code or shares is None:
-                    continue
-                price = _form4_num(row[7])
-                return _form4_transaction_payload(
-                    owner_name=owner_name,
-                    role=role,
-                    code=code,
-                    shares=shares,
-                    price=price,
-                    ownership_form=row[9].strip() or None,
-                    transaction_date=_form4_date(row[1]),
-                )
-        if "derivative securities" in table_text:
-            for row in _parse_html_table(table_html):
-                if len(row) < 15:
-                    continue
-                code = row[4].strip().upper()
-                shares = _form4_num(row[6])
-                if not code or shares is None:
-                    continue
-                return _form4_transaction_payload(
-                    owner_name=owner_name,
-                    role=role,
-                    code=code,
-                    shares=shares,
-                    price=_form4_num(row[1]),
-                    ownership_form=row[14].strip() or None,
-                    transaction_date=_form4_date(row[2]),
-                )
-    return None
 
 
-def _form4_transaction_payload(
-    *,
-    owner_name: str | None,
-    role: str | None,
-    code: str | None,
-    shares: float | None,
-    price: float | None,
-    ownership_form: str | None,
-    transaction_date: str | None,
-) -> dict:
-    return {
-        "owner": owner_name,
-        "role": role,
-        "transactionCode": code,
-        "transactionLabel": _FORM4_TRANSACTION_LABELS.get(str(code or "").upper(), "Other/Unclassified"),
-        "shares": shares,
-        "price": price,
-        "value": round(shares * price, 2) if shares is not None and price is not None else None,
-        "ownershipForm": ownership_form,
-        "transactionDate": transaction_date,
-    }
 
 
-def _parse_form4_transaction(xml_text: str) -> dict | None:
-    try:
-        root = _ET.fromstring(_strip_xml_namespaces(xml_text))
-    except Exception:
-        return _parse_form4_html_transaction(xml_text)
-    owner_name = _xml_text(root, ".//reportingOwnerId/rptOwnerName")
-    officer_title = _xml_text(root, ".//reportingOwnerRelationship/officerTitle")
-    roles: list[str] = []
-    for flag, label in (
-        ("isDirector", "director"),
-        ("isOfficer", "officer"),
-        ("isTenPercentOwner", "ten_percent_owner"),
-        ("isOther", "other"),
-    ):
-        if (_xml_text(root, f".//reportingOwnerRelationship/{flag}") or "").lower() in {"1", "true"}:
-            roles.append(label)
-    tx = root.find(".//nonDerivativeTransaction")
-    if tx is None:
-        tx = root.find(".//derivativeTransaction")
-    if tx is None:
-        return None
-    code = _xml_text(tx, ".//transactionCoding/transactionCode")
-    shares_text = _xml_text(tx, ".//transactionAmounts/transactionShares/value")
-    price_text = _xml_text(tx, ".//transactionAmounts/transactionPricePerShare/value")
-    shares = _form4_num(shares_text)
-    price = _form4_num(price_text)
-    return _form4_transaction_payload(
-        owner_name=owner_name,
-        role=officer_title or ", ".join(roles) or None,
-        code=code,
-        shares=shares,
-        price=price,
-        ownership_form=_xml_text(tx, ".//ownershipNature/directOrIndirectOwnership/value"),
-        transaction_date=_form4_date(_xml_text(tx, ".//transactionDate/value")),
-    )
 
 
-async def _try_attach_form4_transaction(item: dict, filing: dict, warnings: list[dict]) -> None:
-    if str(filing.get("filingType") or "").upper() != "4":
-        return
-    url = _safe_sec_url(item.get("url"))
-    if not url:
-        warnings.append({
-            "code": "FORM4_PARSE_UNAVAILABLE",
-            "message": "Form 4 primary document URL is unavailable.",
-            "severity": "warning",
-        })
-        return
-    xml_text = await _edgar_get_html(url, max_bytes=2_000_000)
-    parsed = _parse_form4_transaction(xml_text or "")
-    if not parsed:
-        warnings.append({
-            "code": "FORM4_PARSE_UNAVAILABLE",
-            "message": "Form 4 transaction details could not be parsed from the primary document.",
-            "severity": "warning",
-        })
-        return
-    item["insiderTransaction"] = parsed
-    label = parsed.get("transactionLabel") or "Insider transaction"
-    owner = parsed.get("owner") or "reporting owner"
-    shares = parsed.get("shares")
-    value = parsed.get("value")
-    value_part = f", value ${value:,.0f}" if isinstance(value, (int, float)) else ""
-    shares_part = f"{shares:,.0f} shares" if isinstance(shares, (int, float)) else "shares unavailable"
-    item["title"] = f"Form 4: {label} by {owner}"
-    item["summary"] = _short_text(f"{label} by {owner}: {shares_part}{value_part}.")
-    item["evidenceText"] = _short_text(f"SEC Form 4 transaction code {parsed.get('transactionCode') or 'unknown'} on {parsed.get('transactionDate') or item.get('filingDate')}.")
 
 
 def _source_rank(source_type: object) -> int:
     return _SOURCE_PRIORITY.get(str(source_type or "other"), _SOURCE_PRIORITY["other"])
 
 
-def _safe_sec_url(candidate: object) -> str | None:
-    url = str(candidate or "").strip()
-    return url if url.startswith("https://www.sec.gov/Archives/") else None
-
-
-def _within_date_window(
-    iso_ts: str | None,
-    start_date: str = "",
-    end_date: str = "",
-    lookback_days: int | None = None,
-) -> bool:
-    if not iso_ts:
-        return False
-    day = iso_ts[:10]
-    if start_date and day < start_date:
-        return False
-    if end_date and day > end_date:
-        return False
-    if lookback_days is not None:
-        cutoff = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=lookback_days)).strftime("%Y-%m-%d")
-        if day < cutoff:
-            return False
-    return True
-
-
-def _load_company_ir_page_registry() -> dict:
-    try:
-        return json.loads(_COMPANY_IR_PAGE_REGISTRY_PATH.read_text(encoding="utf-8"))
-    except Exception:
-        return {"schemaVersion": "unknown", "registryVersion": "unknown", "sources": []}
-
-
-def _company_ir_page_entry(ticker: str) -> dict | None:
-    ticker_u = str(ticker or "").upper()
-    registry = _load_company_ir_page_registry()
-    for entry in registry.get("sources") or []:
-        if isinstance(entry, dict) and str(entry.get("ticker") or "").upper() == ticker_u:
-            return dict(entry, registryVersion=registry.get("registryVersion"), registrySchemaVersion=registry.get("schemaVersion"))
-    return None
-
-
-def _host_without_www(host: str) -> str:
-    return str(host or "").lower().removeprefix("www.")
-
-
-def _company_ir_page_url_allowed(entry: dict, raw_url: str) -> bool:
-    try:
-        parsed = _urlparse.urlparse(str(raw_url or ""))
-    except Exception:
-        return False
-    if parsed.scheme.lower() != "https":
-        return False
-    host = _host_without_www(parsed.hostname or "")
-    allowed_hosts = {_host_without_www(h) for h in entry.get("allowedHosts") or []}
-    prefixes = [str(p) for p in entry.get("allowedPathPrefixes") or [] if str(p)]
-    return host in allowed_hosts and any(parsed.path.startswith(prefix) for prefix in prefixes)
-
-
-def _company_ir_page_registry_fresh(entry: dict) -> bool:
-    raw = entry.get("revalidateAfter")
-    if not raw:
-        return True
-    try:
-        deadline = datetime.datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
-        if deadline.tzinfo is None:
-            deadline = deadline.replace(tzinfo=datetime.timezone.utc)
-        return deadline >= datetime.datetime.now(datetime.timezone.utc)
-    except Exception:
-        return False
-
-
-def _company_ir_page_item(
-    ticker: str,
-    entry: dict,
-    title: str,
-    summary: str,
-    raw_url: str | None,
-    published_at: str | None,
-    retrieved_at: str,
-    final_url: str,
-) -> dict | None:
-    url = _urlparse.urljoin(final_url, raw_url or final_url)
-    if not _company_ir_page_url_allowed(entry, url):
-        return None
-    ticker_u = ticker.upper()
-    issuer = str(entry.get("issuerName") or ticker_u)
-    duplicate_group_id = _make_duplicate_group_id(ticker_u, title, published_at, issuer, url)
-    return {
-        "title": title,
-        "source": "company_ir_page",
-        "originalSource": issuer,
-        "sourceType": "company_ir_page",
-        "provider": "company_ir_page_registry",
-        "discoveredVia": "approved_company_ir_page_registry",
-        "adapter": entry.get("adapter"),
-        "canonicalUrl": entry.get("canonicalUrl"),
-        "registryVersion": entry.get("registryVersion"),
-        "approvalStatus": "approved",
-        "publishedAt": published_at,
-        "retrievedAt": retrieved_at,
-        "url": url,
-        "issuer": issuer,
-        "tickers": [ticker_u],
-        "eventType": _event_type_from_keywords(f"{title} {summary}"),
-        "summary": _short_text(summary or title, 240),
-        "evidenceText": _short_text(summary or title, 180),
-        "confidence": "HIGH",
-        "tickerRelevance": "HIGH",
-        "duplicateGroupId": duplicate_group_id,
-    }
-
-
-def _company_ir_page_json_records(payload: object) -> list[dict]:
-    if not isinstance(payload, dict):
-        return []
-    candidates = [
-        payload.get("items"),
-        payload.get("releases"),
-        payload.get("pressReleases"),
-        payload.get("news"),
-        payload.get("data"),
-    ]
-    feed = payload.get("feed")
-    if isinstance(feed, dict):
-        candidates.append(feed.get("items"))
-    data = payload.get("data")
-    if isinstance(data, dict):
-        candidates.extend(data.values())
-    for candidate in candidates:
-        if isinstance(candidate, list):
-            records = [r for r in candidate if isinstance(r, dict)]
-            if records:
-                return records
-    return []
-
-
-def _parse_company_ir_page_json(ticker: str, entry: dict, text: str, retrieved_at: str, final_url: str) -> list[dict]:
-    try:
-        payload = json.loads(text)
-    except Exception:
-        return []
-    items: list[dict] = []
-    for raw in _company_ir_page_json_records(payload):
-        title = str(raw.get("title") or raw.get("headline") or raw.get("name") or "").strip()
-        if not title:
-            continue
-        summary = str(raw.get("summary") or raw.get("description") or raw.get("excerpt") or raw.get("content") or "").strip()
-        raw_url = str(raw.get("url") or raw.get("link") or raw.get("external_url") or raw.get("permalink") or "").strip() or None
-        published_at = _to_iso_utc(raw.get("publishedAt") or raw.get("published_at") or raw.get("datePublished") or raw.get("date_published") or raw.get("date") or raw.get("pubDate"))
-        item = _company_ir_page_item(ticker, entry, title, summary, raw_url, published_at, retrieved_at, final_url)
-        if item:
-            items.append(item)
-    return items
-
-
-def _html_attr(attrs: str, name: str) -> str:
-    match = _re.search(rf'\b{_re.escape(name)}\s*=\s*["\']([^"\']+)["\']', attrs or "", flags=_re.I)
-    return _html_module.unescape(match.group(1)) if match else ""
-
-
-def _parse_company_ir_page_html(ticker: str, entry: dict, html_text: str, retrieved_at: str, final_url: str) -> list[dict]:
-    blocks = _re.findall(r"<article\b[^>]*>[\s\S]*?</article>", html_text or "", flags=_re.I)
-    if not blocks:
-        blocks = [
-            m.group(0)
-            for m in _re.finditer(r"<li\b[^>]*>[\s\S]*?</li>", html_text or "", flags=_re.I)
-            if _re.search(r"press release|news release|earnings|results|announces|reports", _strip_html_tags(m.group(0)), flags=_re.I)
-        ]
-    items: list[dict] = []
-    for block in blocks[:50]:
-        heading = _re.search(r"<h[1-4]\b[^>]*>([\s\S]*?)</h[1-4]>", block, flags=_re.I)
-        anchor = _re.search(r"<a\b([^>]*)>([\s\S]*?)</a>", block, flags=_re.I)
-        title = _strip_html_tags((heading.group(1) if heading else anchor.group(2) if anchor else "") or "").strip()
-        if len(title) < 6:
-            continue
-        href = _html_attr(anchor.group(1), "href") if anchor else ""
-        time_match = _re.search(r"<time\b([^>]*)>([\s\S]*?)</time>", block, flags=_re.I)
-        datetime_raw = ""
-        if time_match:
-            datetime_raw = _html_attr(time_match.group(1), "datetime") or _strip_html_tags(time_match.group(2))
-        item = _company_ir_page_item(
-            ticker,
-            entry,
-            title,
-            _strip_html_tags(block),
-            href or None,
-            _to_iso_utc(datetime_raw),
-            retrieved_at,
-            final_url,
-        )
-        if item:
-            items.append(item)
-    return items
-
-
-async def _fetch_company_ir_page(entry: dict) -> tuple[str, str, str]:
-    canonical_url = str(entry.get("canonicalUrl") or "")
-    if not _company_ir_page_url_allowed(entry, canonical_url):
-        raise ValueError("registry canonical URL is outside its allow-list")
-    if str(entry.get("status") or "") != "approved":
-        # Only approved entries are fetched. The Worker reaches the same refusal because the fetch allow-list
-        # holds the hosts of approved entries only.
-        raise _url_policy.UrlPolicyError("URL host not allowed")
-
-    def _fetch() -> tuple[str, str, str]:
-        req = _urlrequest.Request(
-            canonical_url,
-            headers={
-                "User-Agent": "yahoo-finance-mcp/ir-page-registry",
-                "Accept": "application/json, application/xml, text/xml, text/html;q=0.9",
-            },
-        )
-        with _url_policy.urlopen(req, timeout=15) as resp:
-            final_url = resp.geturl()
-            if not _company_ir_page_url_allowed(entry, final_url):
-                raise ValueError("redirect target is outside registry allow-list")
-            content_type = str(resp.headers.get("content-type") or "").lower()
-            data = resp.read(_COMPANY_IR_PAGE_MAX_BYTES + 1)
-            if len(data) > _COMPANY_IR_PAGE_MAX_BYTES:
-                raise ValueError("response exceeded size limit")
-            return data.decode("utf-8", errors="replace"), final_url, content_type
-
-    return await asyncio.to_thread(_fetch)
-
-
-async def _collect_company_ir_page_events(
-    ticker: str,
-    *,
-    retrieved_at: str,
-    max_results: int,
-    start_date: str = "",
-    end_date: str = "",
-    lookback_days: int | None = None,
-) -> tuple[list[dict], list[dict], bool]:
-    entry = _company_ir_page_entry(ticker)
-    if not entry:
-        return [], [], False
-    status = str(entry.get("status") or "")
-    warning_base = {
-        "canonicalUrl": entry.get("canonicalUrl"),
-        "registryVersion": entry.get("registryVersion"),
-        "approvalStatus": status,
-    }
-    if status == "disabled":
-        return [], [{**warning_base, "code": "COMPANY_IR_PAGE_DISABLED", "message": "Company IR page registry entry is disabled.", "severity": "info"}], False
-    if status == "candidate":
-        candidate = {
-            "ticker": entry.get("ticker"),
-            "issuerName": entry.get("issuerName"),
-            "canonicalUrl": entry.get("canonicalUrl"),
-            "adapter": entry.get("adapter"),
-            "candidateReason": entry.get("candidateReason"),
-            "discoveredAt": entry.get("discoveredAt"),
-            "decisionGrade": False,
-        }
-        return [], [{**warning_base, "code": "COMPANY_IR_PAGE_CANDIDATE_AVAILABLE", "message": "Company IR page candidate is available for review but was not fetched.", "severity": "info", "candidate": candidate}], False
-    if not _company_ir_page_registry_fresh(entry):
-        return [], [{**warning_base, "code": "COMPANY_IR_PAGE_REVALIDATION_DUE", "message": "Approved company IR page is past its revalidation date; skipped until reviewed.", "severity": "warning"}], False
-    try:
-        text, final_url, content_type = await _fetch_company_ir_page(entry)
-        adapter = str(entry.get("adapter") or "")
-        if adapter == "structured" or "json" in content_type:
-            items = _parse_company_ir_page_json(ticker, entry, text, retrieved_at, final_url)
-        else:
-            items = _parse_company_ir_page_html(ticker, entry, text, retrieved_at, final_url)
-        items = [
-            item for item in items
-            if _within_date_window(item.get("publishedAt"), start_date=start_date, end_date=end_date, lookback_days=lookback_days)
-        ][:max_results]
-        return items, [], True
-    except Exception as exc:
-        return [], [{**warning_base, "code": "COMPANY_IR_PAGE_VALIDATION_FAILED", "message": f"Approved company IR page validation failed: {exc}", "severity": "warning"}], False
-
-
-def _build_yahoo_event_item(
-    ticker: str,
-    news_item: dict,
-    retrieved_at: str,
-    feed_source: str | None = None,
-) -> tuple[dict, list[dict]]:
-    """Build a standardised event item from a Yahoo Finance news entry.
-
-    feed_source, when provided, sets the ``source`` / ``sourceType`` explicitly
-    (``"yahoo_finance_news"`` or ``"yahoo_finance_press_releases"``).  When
-    omitted the label is inferred from the item's ``contentType`` field:
-    ``PRESS_RELEASE`` → ``yahoo_finance_press_releases``, anything else →
-    ``yahoo_finance_news``.  The original publisher name is preserved in
-    ``originalSource``.
-    """
-    warnings: list[dict] = []
-    content = news_item.get("content", {}) if isinstance(news_item.get("content"), dict) else {}
-    title = str(content.get("title") or news_item.get("title") or "").strip()
-    summary = str(content.get("summary") or news_item.get("summary") or "").strip()
-    url = str((content.get("canonicalUrl", {}) or {}).get("url") or news_item.get("link") or news_item.get("url") or "").strip()
-    provider = str((content.get("provider", {}) or {}).get("displayName") or news_item.get("publisher") or "Yahoo Finance").strip()
-
-    # Determine the precise source label.
-    if feed_source in ("yahoo_finance_news", "yahoo_finance_press_releases"):
-        source_key = feed_source
-    else:
-        content_type = str(content.get("contentType") or news_item.get("contentType") or "").upper()
-        source_key = "yahoo_finance_press_releases" if content_type == "PRESS_RELEASE" else "yahoo_finance_news"
-
-    published_at = _to_iso_utc(news_item.get("providerPublishTime") or content.get("pubDate") or news_item.get("publishedAt"))
-    if not published_at:
-        warnings.append({
-            "code": "PUBLISHED_AT_UNAVAILABLE",
-            "message": f"Published timestamp unavailable for source '{provider or 'Yahoo Finance'}'.",
-            "severity": "warning",
-        })
-    ticker_u = ticker.upper()
-    text_blob = f"{title} {summary}".upper()
-    ticker_relevance = "HIGH" if ticker_u in text_blob else "LOW"
-    confidence = "MEDIUM"
-    if not url:
-        confidence = "LOW"
-    if ticker_relevance == "LOW":
-        confidence = "LOW"
-    issuer = None
-    duplicate_group_id = _make_duplicate_group_id(ticker, title, published_at, issuer, url)
-    if duplicate_group_id is None:
-        warnings.append({"code": "DEDUPE_WEAK_KEY", "message": "Weak dedupe key for at least one item.", "severity": "warning"})
-    item = {
-        "title": title,
-        "source": source_key,
-        "originalSource": provider or "Yahoo Finance",
-        "sourceType": source_key,
-        "publishedAt": published_at,
-        "retrievedAt": retrieved_at,
-        "url": url or None,
-        "issuer": issuer,
-        "tickers": [ticker_u],
-        "eventType": _event_type_from_keywords(f"{title} {summary}"),
-        "summary": _short_text(summary or title, 240),
-        "evidenceText": _short_text(summary or title, 180),
-        "confidence": confidence,
-        "tickerRelevance": ticker_relevance,
-        "duplicateGroupId": duplicate_group_id,
-    }
-    return item, warnings
-
-
-def _build_sec_event_item(ticker: str, filing: dict, retrieved_at: str, issuer: str | None = None) -> tuple[dict, list[dict]]:
-    warnings: list[dict] = []
-    filing_type = str(filing.get("filingType") or filing.get("formType") or filing.get("form") or "").upper()
-    filing_date = str(filing.get("filingDate") or "").strip()
-    accepted_at = _to_iso_utc(filing.get("acceptedAt") or filing.get("acceptanceDateTime"))
-    published_at = accepted_at
-    if not published_at and filing_date:
-        published_at = f"{filing_date}T00:00:00Z"
-        warnings.append({
-            "code": "PUBLISHED_AT_ESTIMATED",
-            "message": f"acceptedAt unavailable for {filing_type or 'SEC filing'}; filingDate used.",
-            "severity": "warning",
-        })
-    accession = str(filing.get("accessionNumber") or "").strip()
-    cik_int = str(filing.get("cikInt") or filing.get("cik") or "").strip()
-    acc_clean = accession.replace("-", "")
-    primary_document = str(filing.get("primaryDocument") or "").strip()
-    url = _safe_sec_url(filing.get("documentUrl")) or _safe_sec_url(filing.get("primaryDocumentUrl"))
-    if not url and cik_int and accession and primary_document:
-        url = _safe_sec_url(f"https://www.sec.gov/Archives/edgar/data/{cik_int}/{acc_clean}/{primary_document}")
-    if not url and cik_int and accession:
-        url = _safe_sec_url(f"https://www.sec.gov/Archives/edgar/data/{cik_int}/{acc_clean}/{accession}-index.htm")
-    confidence = "HIGH" if (accession and accepted_at and url) else ("MEDIUM" if accession and url else "LOW")
-    title = f"{filing_type} filed" if filing_type else "SEC filing"
-    event_type = _event_type_from_form(filing_type)
-    duplicate_group_id = _make_duplicate_group_id(ticker, title, published_at, issuer, url)
-    if duplicate_group_id is None:
-        warnings.append({"code": "DEDUPE_WEAK_KEY", "message": "Weak dedupe key for at least one item.", "severity": "warning"})
-    item = {
-        "title": title,
-        "source": "SEC",
-        "sourceType": "sec_filing",
-        "filingType": filing_type or None,
-        "filingDate": filing_date or None,
-        "acceptedAt": accepted_at,
-        "accessionNumber": accession or None,
-        "url": url,
-        "publishedAt": published_at,
-        "retrievedAt": retrieved_at,
-        "issuer": issuer,
-        "tickers": [ticker.upper()],
-        "eventType": event_type or _event_type_from_keywords(title),
-        "summary": _short_text(f"SEC {filing_type} filing for {ticker.upper()}"),
-        "evidenceText": _short_text(f"{filing_type} accepted by SEC on {accepted_at or filing_date}"),
-        "confidence": confidence,
-        "tickerRelevance": "HIGH",
-        "duplicateGroupId": duplicate_group_id,
-    }
-    return item, warnings
-
-
-async def _collect_sec_events(
-    ticker: str,
-    *,
-    filing_types: list[str],
-    retrieved_at: str,
-    max_results: int,
-    start_date: str = "",
-    end_date: str = "",
-    lookback_days: int | None = None,
-) -> tuple[list[dict], list[dict], bool]:
-    warnings: list[dict] = []
-    events: list[dict] = []
-    cik_padded, submissions = await _get_submissions_for_ticker(ticker)
-    if not cik_padded or not submissions:
-        warnings.append({"code": "SOURCE_UNAVAILABLE", "message": "SEC submissions source unavailable.", "severity": "warning"})
-        return events, warnings, False
-    recent = ((submissions.get("filings") or {}).get("recent") or {}) if isinstance(submissions, dict) else {}
-    forms = list(recent.get("form") or [])
-    filing_dates = list(recent.get("filingDate") or [])
-    accepted = list(recent.get("acceptanceDateTime") or [])
-    accessions = list(recent.get("accessionNumber") or [])
-    primary_docs = list(recent.get("primaryDocument") or [])
-    issuer = str(submissions.get("name") or "").strip() or None if isinstance(submissions, dict) else None
-    desired = {f.upper() for f in filing_types}
-    cik_int = str(int(cik_padded))
-    for i, form in enumerate(forms):
-        form_str = str(form or "").upper()
-        if desired and form_str not in desired:
-            continue
-        filing_date = str(filing_dates[i] or "") if i < len(filing_dates) else ""
-        accepted_at = str(accepted[i] or "") if i < len(accepted) else ""
-        accession = str(accessions[i] or "") if i < len(accessions) else ""
-        primary_doc = str(primary_docs[i] or "") if i < len(primary_docs) else ""
-        filing_obj = {
-            "filingType": form_str,
-            "filingDate": filing_date,
-            "acceptedAt": accepted_at,
-            "accessionNumber": accession,
-            "primaryDocument": primary_doc,
-            "cikInt": cik_int,
-        }
-        item, item_warnings = _build_sec_event_item(ticker, filing_obj, retrieved_at, issuer=issuer)
-        await _try_attach_form4_transaction(item, filing_obj, item_warnings)
-        if not _within_date_window(item.get("publishedAt"), start_date=start_date, end_date=end_date, lookback_days=lookback_days):
-            continue
-        events.append(item)
-        warnings.extend(item_warnings)
-        if len(events) >= max_results:
-            break
-    return events, warnings, True
-
-
-def _normalize_exchange(exch: str | None) -> str | None:
-    if not exch:
-        return None
-    exch = str(exch).upper()
-    if any(x in exch for x in ("NASDAQ", "NMS", "NGM", "NCM", "GS")):
-        return "NASDAQ"
-    if "NYSE" in exch or exch == "NYQ":
-        return "NYSE"
-    if any(x in exch for x in ("AMEX", "NYSE AMERICAN", "ASE")):
-        return "NYSEAMERICAN"
-    if "TSXV" in exch or "CVE" in exch:
-        return "TSXV"
-    if "TSX" in exch or "TOR" in exch:
-        return "TSX"
-    return None
-
-
-def _is_ticker_compatible_with_context(text: str, ticker: str, company_exchange: str | None) -> bool:
-    ticker_u = ticker.upper()
-    ticker_pat = _re.compile(r"\b" + _re.escape(ticker_u) + r"\b", _re.IGNORECASE)
-    matches = list(ticker_pat.finditer(text))
-    if not matches:
-        return False
-    
-    norm_comp = _normalize_exchange(company_exchange)
-    if not norm_comp:
-        return True
-        
-    prefix_pat = _re.compile(r"\b([A-Za-z0-9]+)\s*:\s*$", _re.IGNORECASE)
-    
-    for m in matches:
-        start = m.start()
-        preceding = text[max(0, start - 20):start]
-        pm = prefix_pat.search(preceding)
-        if pm:
-            prefix = pm.group(1).upper()
-            norm_prefix = _normalize_exchange(prefix)
-            if norm_prefix:
-                if norm_prefix == norm_comp:
-                    return True
-            else:
-                if prefix in ("TSXV", "TSX", "NYSE", "NASDAQ", "AMEX", "CVE", "ASX", "LSE", "TSX-V"):
-                    # Incompatible exchange prefix
-                    pass
-                else:
-                    return True
-        else:
-            return True
-            
-    return False
-
-
-async def _collect_yahoo_events(
-    ticker: str,
-    *,
-    retrieved_at: str,
-    max_results: int,
-    start_date: str = "",
-    end_date: str = "",
-    lookback_days: int | None = None,
-    feed: str = "news",
-    identity: dict | None = None,
-    include_diagnostics: bool = False,
-) -> tuple:
-    """Fetch Yahoo Finance items for the given *feed*.
-
-    ``feed="news"`` fetches the general news tab and labels items as
-    ``yahoo_finance_news`` (press-release items from that feed are labelled
-    ``yahoo_finance_press_releases`` automatically via their ``contentType``).
-
-    ``feed="press_releases"`` fetches the press-releases tab directly
-    (requires yfinance ≥ 0.2.x with ``get_news(tab=…)`` support) and labels
-    all returned items as ``yahoo_finance_press_releases``.
-    """
-    warnings: list[dict] = []
-    items: list[dict] = []
-    diagnostics: dict = {
-        "rawCount": 0,
-        "retrievedCount": 0,
-        "filteredCount": 0,
-        "acceptedCount": 0,
-        "rejectedCount": 0,
-        "rejectionCounts": {},
-        "identityStatus": "UNAVAILABLE",
-    }
-
-    def _reject(reason: str) -> None:
-        diagnostics["rejectedCount"] += 1
-        counts = diagnostics["rejectionCounts"]
-        counts[reason] = counts.get(reason, 0) + 1
-
-    def _result(collected: list[dict], used: bool) -> tuple:
-        if include_diagnostics:
-            return collected, warnings, used, diagnostics
-        return collected, warnings, used
-
-    feed_source_override: str | None = "yahoo_finance_press_releases" if feed == "press_releases" else None
-
-    try:
-        company = yf.Ticker(ticker)
-        # Yahoo retired the endpoint behind get_news(tab=...) (/xhr/ncp: HTTP 404 for every ticker, and yfinance
-        # returns an empty list), so both feeds read the news search feed the Worker reads; press releases are the
-        # issuer's own wire releases in it (2.5.33).
-        if feed == "press_releases":
-            diagnostics["method"] = _YAHOO_PRESS_RELEASE_METHOD
-        raw_news = _yahoo_search_news(ticker)
-    except Exception as exc:
-        warnings.append({"code": "SOURCE_UNAVAILABLE", "message": f"Yahoo Finance source unavailable: {exc}", "severity": "warning"})
-        return _result(items, False)
-
-    if identity is None:
-        try:
-            identity = _yahoo_news_identity_from_info(ticker, company.info)
-        except Exception:
-            identity = _yahoo_news_identity_from_info(ticker, None)
-    diagnostics["identityStatus"] = identity.get("status") or "UNAVAILABLE"
-    accepted: list[tuple[dict, int]] = []
-
-    for n in raw_news:
-        if not isinstance(n, dict):
-            continue
-        diagnostics["rawCount"] += 1
-        diagnostics["retrievedCount"] += 1
-        content = n.get("content", {}) if isinstance(n.get("content"), dict) else {}
-        content_type = str(content.get("contentType") or n.get("contentType") or "").upper()
-        if content_type and content_type not in _YAHOO_ALLOWED_CONTENT_TYPES:
-            _reject("CONTENT_TYPE")
-            continue
-        # For the press-releases feed, Yahoo tab membership is authoritative:
-        # valid press-release tab items may still arrive as STORY/ARTICLE.
-        item, item_warnings = _build_yahoo_event_item(ticker, n, retrieved_at, feed_source=feed_source_override)
-
-        if not _within_date_window(item.get("publishedAt"), start_date=start_date, end_date=end_date, lookback_days=lookback_days):
-            _reject("DATE_WINDOW")
-            continue
-        match = _yahoo_news_match_for(
-            f"{item.get('title') or ''} {item.get('summary') or ''} {item.get('evidenceText') or ''}",
-            ticker,
-            identity,
-        )
-        if match is None:
-            _reject("IDENTITY_UNAVAILABLE_TICKER_NOT_FOUND" if identity.get("status") == "UNAVAILABLE" else "IDENTITY_MISMATCH")
-            continue
-        match_basis, rank = match
-        # The match names the company, but a release about it may be issued
-        # by another company ("Qualcomm renews license with Apple").
-        item["mentionedCompany"] = identity.get("companyName")
-        item["issuer"] = _yahoo_item_issuer(item, identity)
-        # A press release is the company's own: a wire release whose headline leads with its name or ticker
-        # (AEHR's ACCESS Newswire Sonoma order), not another issuer's release that mentions it (QuickLogic's).
-        if feed == "press_releases" and not (_PRESS_RELEASE_WIRE_RE.match(str(item.get("originalSource") or "")) and item["issuer"]):
-            _reject("NOT_ISSUER_WIRE_RELEASE")
-            continue
-        item["matchBasis"] = match_basis
-        item["sourceTickerMatch"] = True
-        item["tickerRelevance"] = "HIGH"
-        item["confidence"] = "MEDIUM" if item.get("url") else "LOW"
-        item["decisionUse"] = _yahoo_decision_use(str(item.get("eventType") or "other"))
-        accepted.append((item, rank))
-        warnings.extend(item_warnings)
-    # Stable sorts make the primary match rank deterministic, then newest first.
-    accepted.sort(key=lambda pair: str(pair[0].get("publishedAt") or ""), reverse=True)
-    accepted.sort(key=lambda pair: pair[1])
-    diagnostics["filteredCount"] = len(accepted)
-    diagnostics["acceptedCount"] = len(accepted)
-    items = [item for item, _rank in accepted[:max_results]]
-    return _result(items, True)
-
-
-def _yahoo_search_news(ticker: str) -> list[dict]:
-    """Yahoo's news search feed for a ticker (the Worker's getNews reads the same endpoint)."""
-    return list(yf.Search(ticker, max_results=0, news_count=20, enable_fuzzy_query=False, raise_errors=True).news or [])
-
-
-# Wire services that distribute issuers' own press releases (not news services such as MT Newswires).
-_PRESS_RELEASE_WIRE_RE = _re.compile(r"(?:access\s?newswire|accesswire|globe\s?newswire|business\s?wire|pr\s?newswire|newsfile|prweb|eqs(?:\s+newswire)?|cision)\b", _re.I | _re.A)
-_YAHOO_PRESS_RELEASE_METHOD = "ISSUER_WIRE_RELEASES_IN_NEWS_FEED"
-
-
-async def _collect_globenewswire_events(
-    ticker: str,
-    *,
-    retrieved_at: str,
-    max_results: int,
-    start_date: str = "",
-    end_date: str = "",
-    lookback_days: int | None = None,
-    filter_low_relevance: bool = True,
-) -> tuple[list[dict], list[dict], bool]:
-    """Fetch GlobeNewswire RSS feeds and return exact stock-category matches.
-
-    Items are labelled with ``source="newswire"``, ``sourceType="newswire"``,
-    ``originalSource="GlobeNewswire"``, ``provider="globenewswire"``, and
-    ``discoveredVia="globenewswire_rss"``. Feeds are cached independently for
-    :data:`TTL_NEWS` seconds. Ticker relevance is established only from
-    GlobeNewswire RSS stock-category metadata such as ``Nasdaq:NVDA``.
-    """
-    warnings: list[dict] = []
-    items: list[dict] = []
-    ticker_u = ticker.upper()
-    seen_keys: set[str] = set()
-    parsed_any_feed = False
-
-    for feed_name, feed_url in _GLOBENEWSWIRE_RSS_FEEDS:
-        cache_key = f"gnw_rss:{feed_name}"
-        xml_content: str | None = None
-        cached_entry = _tool_cache.get(cache_key)
-        if cached_entry is not None:
-            xml_content = cached_entry[0]
-
-        if xml_content is None:
-            loop = asyncio.get_event_loop()
-
-            def _fetch_rss() -> str:
-                req = _urlrequest.Request(
-                    feed_url,
-                    headers={"User-Agent": _PROVIDER_USER_AGENT},
-                )
-                with _url_policy.urlopen(req, timeout=20) as resp:  # noqa: S310
-                    raw = resp.read(_GLOBENEWSWIRE_MAX_BYTES + 1)
-                    if len(raw) > _GLOBENEWSWIRE_MAX_BYTES:
-                        raise ValueError("GlobeNewswire RSS response exceeded size limit")
-                    return raw.decode("utf-8", errors="replace")
-
-            try:
-                xml_content = await loop.run_in_executor(None, _url_policy.in_context(_fetch_rss))
-                _tool_cache.set(cache_key, xml_content, TTL_NEWS)
-            except Exception as exc:
-                warnings.append({
-                    "code": "SOURCE_UNAVAILABLE",
-                    "message": f"GlobeNewswire RSS feed '{feed_name}' unavailable: {exc}",
-                    "severity": "warning",
-                })
-                continue
-
-        try:
-            if not _globenewswire_xml_is_safe(xml_content):
-                raise ValueError("unsupported XML declaration in GlobeNewswire RSS")
-            root = _ET.fromstring(xml_content)  # noqa: S314 (trusted source)
-            channel = root.find("channel") if _xml_local_name(str(root.tag)) != "channel" else root
-            rss_items = channel.findall("item") if channel is not None else []
-            parsed_any_feed = True
-        except Exception as exc:
-            warnings.append({
-                "code": "SOURCE_UNAVAILABLE",
-                "message": f"GlobeNewswire RSS feed '{feed_name}' parse error: {exc}",
-                "severity": "warning",
-            })
-            continue
-
-        for rss_item in rss_items:
-            stock_categories = _globenewswire_category_values(
-                rss_item,
-                _GLOBENEWSWIRE_STOCK_CATEGORY_DOMAIN,
-            )
-            if not _globenewswire_stock_category_matches(ticker_u, stock_categories):
-                continue
-            relevance = "HIGH"
-
-            title = _xml_first_child_text(rss_item, "title").strip()
-            description_raw = _xml_first_child_text(rss_item, "description").strip()
-            description = _globenewswire_plain_text(description_raw)
-            link = _xml_first_child_text(rss_item, "link").strip() or None
-            guid = _xml_first_child_text(rss_item, "guid").strip() or None
-            published_at = _parse_rss_date(_xml_first_child_text(rss_item, "pubDate").strip())
-            isin_values = _globenewswire_category_values(rss_item, _GLOBENEWSWIRE_ISIN_CATEGORY_DOMAIN)
-            keywords = _xml_child_texts(rss_item, "keyword")
-            subject = _xml_first_child_text(rss_item, "subject").strip() or None
-            language = _xml_first_child_text(rss_item, "language").strip() or None
-            issuer = _xml_first_child_text(rss_item, "contributor").strip() or None
-            globenewswire_id = _xml_first_child_text(rss_item, "identifier").strip() or None
-
-            if not _within_date_window(
-                published_at,
-                start_date=start_date,
-                end_date=end_date,
-                lookback_days=lookback_days,
-            ):
-                continue
-
-            if not published_at:
-                warnings.append({
-                    "code": "PUBLISHED_AT_UNAVAILABLE",
-                    "message": "Published timestamp unavailable for GlobeNewswire item.",
-                    "severity": "warning",
-                })
-
-            duplicate_group_id = _make_duplicate_group_id(
-                ticker_u,
-                title,
-                published_at,
-                issuer,
-                link or guid,
-            )
-            if duplicate_group_id is None:
-                warnings.append({
-                    "code": "DEDUPE_WEAK_KEY",
-                    "message": "Weak dedupe key for at least one GlobeNewswire item.",
-                    "severity": "warning",
-                })
-
-            dedupe_key = duplicate_group_id or f"{feed_name}:{link or guid}:{title}:{published_at}"
-            if dedupe_key in seen_keys:
-                continue
-            seen_keys.add(dedupe_key)
-
-            item = {
-                "title": title,
-                "source": "newswire",
-                "originalSource": "GlobeNewswire",
-                "sourceType": "newswire",
-                "provider": "globenewswire",
-                "discoveredVia": "globenewswire_rss",
-                "publishedAt": published_at,
-                "retrievedAt": retrieved_at,
-                "url": link or guid,
-                "issuer": issuer,
-                "tickers": [ticker_u],
-                "eventType": _event_type_from_keywords(f"{title} {description} {subject or ''}"),
-                "summary": _short_text(description or title, 240),
-                "evidenceText": _short_text(description or title, 180),
-                "confidence": "HIGH" if (relevance == "HIGH" and (link or guid)) else "MEDIUM",
-                "tickerRelevance": relevance,
-                "duplicateGroupId": duplicate_group_id,
-                "stockCategories": stock_categories,
-                "feedSource": feed_name,
-            }
-            if isin_values:
-                item["isin"] = isin_values[0]
-            if subject:
-                item["subject"] = subject
-            if keywords:
-                item["keywords"] = keywords
-            if language:
-                item["language"] = language
-            if globenewswire_id:
-                item["globenewswireId"] = globenewswire_id
-            items.append(item)
-            if len(items) >= max_results:
-                return items, warnings, True
-
-    if warnings and not items:
-        return items, warnings, False
-    return items, warnings, parsed_any_feed
-
-
-async def _collect_finnhub_events(
-    ticker: str,
-    *,
-    retrieved_at: str,
-    max_results: int,
-    start_date: str = "",
-    end_date: str = "",
-    lookback_days: int | None = None,
-) -> tuple[list[dict], list[dict], bool, dict]:
-    warnings: list[dict] = []
-    items: list[dict] = []
-    diagnostics = {
-        "rawCount": 0,
-        "retrievedCount": 0,
-        "acceptedCount": 0,
-        "collectedCount": 0,
-        "rejectedCount": 0,
-        "rejectionCounts": {},
-        "attempted": True,
-        "completed": False,
-    }
-
-    def _reject(reason: str) -> None:
-        diagnostics["rejectedCount"] += 1
-        diagnostics["rejectionCounts"][reason] = diagnostics["rejectionCounts"].get(reason, 0) + 1
-
-    api_key = os.environ.get("FINNHUB_API_KEY") or os.environ.get("FINNHUB_TOKEN")
-    if not api_key:
-        warnings.append({
-            "code": "SOURCE_UNAVAILABLE",
-            "message": "Finnhub company-news source is not configured; skipped.",
-            "severity": "warning",
-        })
-        diagnostics["attempted"] = False
-        return items, warnings, False, diagnostics
-
-    from_day = (
-        datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=lookback_days or 14)
-    ).strftime("%Y-%m-%d")
-    to_day = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
-    query = _urlparse.urlencode({
-        "symbol": ticker.upper(),
-        "from": from_day,
-        "to": to_day,
-    })
-    url = f"{_FINNHUB_NEWS_API}?{query}"
-    loop = asyncio.get_event_loop()
-
-    def _fetch() -> list[dict]:
-        req = _urlrequest.Request(
-            url,
-            headers={"User-Agent": _PROVIDER_USER_AGENT, "X-Finnhub-Token": api_key},
-        )
-        with _url_policy.urlopen(req, timeout=20) as resp:  # noqa: S310
-            return json.loads(resp.read().decode("utf-8", errors="replace"))
-
-    try:
-        raw_items = await loop.run_in_executor(None, _url_policy.in_context(_fetch))
-    except _urlerror.HTTPError as exc:
-        if exc.code in (401, 403):
-            warnings.append({
-                "code": "SOURCE_UNAVAILABLE",
-                "message": f"Finnhub auth error: HTTP {exc.code}",
-                "severity": "warning",
-            })
-        elif exc.code == 429:
-            warnings.append({
-                "code": "SOURCE_UNAVAILABLE",
-                "message": "Finnhub rate limited: HTTP 429",
-                "severity": "warning",
-            })
-        else:
-            warnings.append({
-                "code": "SOURCE_UNAVAILABLE",
-                "message": f"Finnhub source unavailable: {exc}",
-                "severity": "warning",
-            })
-        return items, warnings, False, diagnostics
-    except Exception as exc:
-        warnings.append({
-            "code": "SOURCE_UNAVAILABLE",
-            "message": f"Finnhub source unavailable: {exc}",
-            "severity": "warning",
-        })
-        return items, warnings, False, diagnostics
-
-    if not isinstance(raw_items, list):
-        warnings.append({
-            "code": "SOURCE_UNAVAILABLE",
-            "message": "Finnhub provider changed: unexpected response format",
-            "severity": "warning",
-        })
-        return items, warnings, False, diagnostics
-
-    diagnostics["rawCount"] = len(raw_items)
-    diagnostics["retrievedCount"] = len(raw_items)
-    ticker_u = ticker.upper()
-    for row in raw_items:
-        if not isinstance(row, dict):
-            _reject("INVALID_ROW")
-            continue
-        title = str(row.get("headline") or "").strip()
-        if not title:
-            _reject("MISSING_HEADLINE")
-            continue
-        summary = str(row.get("summary") or "").strip()
-        original_source = str(row.get("source") or "").strip() or None
-        item_url = str(row.get("url") or "").strip() or None
-        published_at = _to_iso_utc(row.get("datetime"))
-        duplicate_group_id = _make_duplicate_group_id(ticker_u, title, published_at, None, item_url)
-        if duplicate_group_id is None:
-            warnings.append({
-                "code": "DEDUPE_WEAK_KEY",
-                "message": "Weak dedupe key for at least one item.",
-                "severity": "warning",
-            })
-        blob = f"{title} {summary}".upper()
-        item = {
-            "title": title,
-            "source": "finnhub",
-            "originalSource": original_source,
-            "sourceType": "company_news",
-            "publishedAt": published_at,
-            "retrievedAt": retrieved_at,
-            "url": item_url,
-            "issuer": None,
-            "tickers": [ticker_u],
-            "eventType": _event_type_from_keywords(f"{title} {summary}"),
-            "summary": _short_text(summary or title, 240),
-            "evidenceText": _short_text(summary or title, 180),
-            "confidence": "MEDIUM" if item_url else "LOW",
-            "tickerRelevance": "HIGH" if ticker_u in blob else "LOW",
-            "duplicateGroupId": duplicate_group_id,
-        }
-        if not _within_date_window(
-            item.get("publishedAt"),
-            start_date=start_date,
-            end_date=end_date,
-            lookback_days=lookback_days,
-        ):
-            _reject("DATE_OUTSIDE_WINDOW")
-            continue
-        diagnostics["acceptedCount"] += 1
-        if len(items) < max_results:
-            items.append(item)
-    diagnostics["collectedCount"] = len(items)
-    diagnostics["completed"] = True
-    return items, warnings, True, diagnostics
-
-
-async def _collect_marketaux_events(
-    ticker: str,
-    *,
-    retrieved_at: str,
-    max_results: int,
-    start_date: str = "",
-    end_date: str = "",
-    lookback_days: int | None = None,
-    fallback_reason: str = "EXPLICIT_SOURCE_SELECTION",
-    search_query: str = "",
-    expected_exchange: str | None = None,
-) -> tuple[list[dict], list[dict], bool, dict]:
-    """Fetch one bounded Marketaux page from major wire domains.
-
-    Marketaux is a contextual aggregator, not official evidence. The free-tier
-    request is deliberately capped at three rows and never paginated.
-    """
-    warnings: list[dict] = []
-    items: list[dict] = []
-    limit = min(_MARKETAUX_MAX_ITEMS, max(1, int(max_results)))
-    diagnostics = {
-        "status": "PROVIDER_ERROR",
-        "rawCount": 0,
-        "retrievedCount": 0,
-        "acceptedCount": 0,
-        "collectedCount": 0,
-        "rejectedCount": 0,
-        "rejectionCounts": {},
-        "attempted": True,
-        "completed": False,
-        "fallbackReason": fallback_reason,
-        "domains": list(_MARKETAUX_WIRE_DOMAINS),
-        "quotaPolicy": {
-            "dailyLimit": 100,
-            "maxArticlesPerRequest": _MARKETAUX_MAX_ITEMS,
-            "pagesRequested": 1,
-            "automaticPagination": False,
-        },
-    }
-
-    def _reject(reason: str) -> None:
-        diagnostics["rejectedCount"] += 1
-        diagnostics["rejectionCounts"][reason] = diagnostics["rejectionCounts"].get(reason, 0) + 1
-
-    api_token = os.environ.get("MARKETAUX_API_TOKEN") or os.environ.get("MARKETAUX_API_KEY")
-    if not api_token:
-        diagnostics.update({"status": "UNCONFIGURED", "attempted": False})
-        warnings.append({
-            "code": "SOURCE_UNAVAILABLE",
-            "message": "Marketaux wire fallback is not configured; set MARKETAUX_API_TOKEN to enable it.",
-            "severity": "warning",
-            "source": "marketaux",
-        })
-        return items, warnings, False, diagnostics
-
-    now = datetime.datetime.now(datetime.timezone.utc)
-    from_day = start_date or (now - datetime.timedelta(days=lookback_days or 14)).strftime("%Y-%m-%d")
-    to_day = end_date or now.strftime("%Y-%m-%d")
-    safe_params = {
-        "symbols": ticker.upper(),
-        "filter_entities": "true",
-        "language": "en",
-        "domains": ",".join(_MARKETAUX_WIRE_DOMAINS),
-        "published_after": f"{from_day}T00:00:00",
-        "published_before": f"{to_day}T23:59:59",
-        "limit": str(limit),
-        "page": "1",
-    }
-    if str(search_query or "").strip():
-        safe_params["search"] = str(search_query).strip()
-    public_url = f"{_MARKETAUX_NEWS_API}?{_urlparse.urlencode({**safe_params, 'api_token': 'REDACTED'})}"
-    request_url = f"{_MARKETAUX_NEWS_API}?{_urlparse.urlencode({**safe_params, 'api_token': api_token})}"
-    diagnostics["providerUrl"] = public_url
-    loop = asyncio.get_event_loop()
-
-    def _fetch() -> dict:
-        req = _urlrequest.Request(request_url, headers={"User-Agent": _PROVIDER_USER_AGENT})
-        with _url_policy.urlopen(req, timeout=12) as resp:  # noqa: S310
-            return json.loads(resp.read().decode("utf-8", errors="replace"))
-
-    try:
-        payload = await loop.run_in_executor(None, _url_policy.in_context(_fetch))
-    except _urlerror.HTTPError as exc:
-        status = "AUTH_ERROR" if exc.code in (401, 403) else "RATE_LIMITED" if exc.code in (402, 429) else "PROVIDER_ERROR"
-        diagnostics["status"] = status
-        warnings.append({
-            "code": "SOURCE_UNAVAILABLE",
-            "message": f"Marketaux wire fallback returned HTTP {exc.code} ({status}).",
-            "severity": "warning",
-            "source": "marketaux",
-        })
-        return items, warnings, False, diagnostics
-    except Exception as exc:
-        message = str(exc).replace(api_token, "REDACTED")
-        status = "TIMEOUT" if any(token in message.lower() for token in ("timeout", "timed out")) else "PROVIDER_ERROR"
-        diagnostics["status"] = status
-        warnings.append({
-            "code": "SOURCE_UNAVAILABLE",
-            "message": f"Marketaux wire fallback unavailable ({status}).",
-            "severity": "warning",
-            "source": "marketaux",
-        })
-        return items, warnings, False, diagnostics
-
-    raw_items = payload.get("data") if isinstance(payload, dict) else None
-    if not isinstance(raw_items, list):
-        diagnostics["status"] = "PROVIDER_CHANGED"
-        warnings.append({
-            "code": "SOURCE_UNAVAILABLE",
-            "message": "Marketaux provider changed: expected a data array.",
-            "severity": "warning",
-            "source": "marketaux",
-        })
-        return items, warnings, False, diagnostics
-
-    diagnostics["rawCount"] = len(raw_items)
-    diagnostics["retrievedCount"] = len(raw_items)
-    ticker_u = ticker.upper()
-    for row in raw_items:
-        if not isinstance(row, dict):
-            _reject("INVALID_ROW")
-            continue
-        title = str(row.get("title") or "").strip()
-        item_url = str(row.get("url") or "").strip()
-        if not title:
-            _reject("MISSING_HEADLINE")
-            continue
-        if not item_url.startswith("https://"):
-            _reject("INVALID_URL")
-            continue
-        host = (_urlparse.urlparse(item_url).hostname or "").lower()
-        if not any(host == domain or host.endswith(f".{domain}") for domain in _MARKETAUX_WIRE_DOMAINS):
-            _reject("DOMAIN_NOT_ALLOWED")
-            continue
-        entities = row.get("entities") if isinstance(row.get("entities"), list) else []
-        matched_entity = next((
-            entity for entity in entities
-            if isinstance(entity, dict) and str(entity.get("symbol") or "").upper() == ticker_u
-        ), None)
-        if matched_entity is None:
-            _reject("ENTITY_SYMBOL_MISMATCH")
-            continue
-        expected_exchange_norm = _normalize_exchange(expected_exchange)
-        provider_exchange_norm = _normalize_exchange(str(matched_entity.get("exchange") or ""))
-        if expected_exchange_norm and provider_exchange_norm and expected_exchange_norm != provider_exchange_norm:
-            _reject("ENTITY_EXCHANGE_MISMATCH")
-            continue
-        published_at = _to_iso_utc(row.get("published_at"))
-        if not _within_date_window(published_at, start_date=start_date, end_date=end_date, lookback_days=lookback_days):
-            _reject("DATE_OUTSIDE_WINDOW")
-            continue
-        summary = str(row.get("snippet") or row.get("description") or title).strip()
-        duplicate_group_id = _make_duplicate_group_id(ticker_u, title, published_at, None, item_url)
-        item = {
-            "title": title,
-            "source": "marketaux",
-            "originalSource": str(row.get("source") or host).strip() or host,
-            "sourceType": "marketaux_wire",
-            "provider": "marketaux",
-            "discoveredVia": "marketaux_api",
-            "publishedAt": published_at,
-            "retrievedAt": retrieved_at,
-            "url": item_url,
-            "issuer": str(matched_entity.get("name") or "").strip() or None,
-            "tickers": [ticker_u],
-            "matchBasis": "PROVIDER_ENTITY_SYMBOL",
-            "sourceTickerMatch": True,
-            "eventType": _event_type_from_keywords(f"{title} {summary}"),
-            "summary": _short_text(summary, 240),
-            "evidenceText": _short_text(summary, 180),
-            "confidence": "LOW",
-            "tickerRelevance": "HIGH",
-            "duplicateGroupId": duplicate_group_id,
-            "providerArticleId": str(row.get("uuid") or "").strip() or None,
-            "providerRelevanceScore": matched_entity.get("match_score"),
-        }
-        diagnostics["acceptedCount"] += 1
-        if len(items) < limit:
-            items.append(item)
-
-    diagnostics.update({
-        "status": "OK" if diagnostics["acceptedCount"] else "EMPTY_RESULT",
-        "collectedCount": len(items),
-        "completed": True,
-    })
-    return items, warnings, True, diagnostics
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 def _marketaux_fallback_reason(

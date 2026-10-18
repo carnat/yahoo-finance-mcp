@@ -54,6 +54,8 @@ from yfmcp import capital_structure as cs  # noqa: E402
 from yfmcp import cache as pycache  # noqa: E402
 from yfmcp.clients import edgar  # noqa: E402
 from yfmcp.tools import news as news_tools  # noqa: E402
+from yfmcp.news import shared as news_shared  # noqa: E402
+from yfmcp.news.providers import company_ir_page as ir_page_provider, finnhub as finnhub_provider, marketaux as marketaux_provider, sec as sec_provider, yahoo as yahoo_provider  # noqa: E402
 from yfmcp.tools import provider_gaps  # noqa: E402
 
 CASES: list[Case] = []
@@ -134,12 +136,15 @@ def _py_news_env(*, news=None, info=None, env=None, submissions=None, clock=True
     with contextlib.ExitStack() as stack:
         stack.enter_context(_env_scope(env))
         if clock:
-            stack.enter_context(patch.object(news_tools, "datetime", _DT_SHIM))
+            for clock_owner in (news_tools, news_shared, ir_page_provider, finnhub_provider, marketaux_provider):
+                stack.enter_context(patch.object(clock_owner, "datetime", _DT_SHIM))
             stack.enter_context(patch.object(news_tools, "_utc_now_iso", lambda: NOW_ISO))
-        stack.enter_context(patch.object(news_tools, "_yahoo_search_news", lambda ticker: copy.deepcopy(news or [])))
+        stack.enter_context(patch.object(yahoo_provider, "_yahoo_search_news", lambda ticker: copy.deepcopy(news or [])))
         stack.enter_context(patch.object(server.yf, "Ticker", lambda ticker, *a, **k: _FakeTicker(info if info is not None else {})))
         if submissions is not None:
-            stack.enter_context(patch.object(news_tools, "_get_submissions_for_ticker", AsyncMock(return_value=submissions)))
+            stub_submissions = AsyncMock(return_value=submissions)
+            for submissions_owner in (news_tools, sec_provider):
+                stack.enter_context(patch.object(submissions_owner, "_get_submissions_for_ticker", stub_submissions))
         saved = dict(pycache._tool_cache._store)
         saved_html = dict(edgar._EDGAR_HTML_CACHE)
         if gnw_cache_clear:
@@ -2035,7 +2040,7 @@ def _ir_page_case(name, ids, body, *, entry=None, content_type="text/html; chars
         with tempfile.TemporaryDirectory(prefix="ir-registry-") as tmp:
             path = Path(tmp) / "registry.json"
             path.write_text(json.dumps({"schemaVersion": "2026-07-10", "registryVersion": "2026-09-25.1200", "sources": [entry]}), encoding="utf-8")
-            with _py_news_env(news=[], info={}), patch.object(news_tools, "_COMPANY_IR_PAGE_REGISTRY_PATH", path), \
+            with _py_news_env(news=[], info={}), patch.object(ir_page_provider, "_COMPANY_IR_PAGE_REGISTRY_PATH", path), \
                     url_policy.registry_override(news_tools._load_company_ir_page_registry()):
                 return json.loads(asyncio.run(server.get_company_news("IQE.L", max_results, lookback, ["company_ir_page"])))
 
