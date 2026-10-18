@@ -843,12 +843,11 @@ CASES += [
                 GOOD_EVIDENCE, "FOUND", True),
     _grade_case("shr.decision_grade.numeric_zero_evidence_field_counts_as_present", ["BR-SHR-001"], GOOD_PAYLOAD,
                 {**GOOD_EVIDENCE, "periodEnd": 0}, "FOUND", True),
-    # Python/Worker divergences with no owner decision (FINDING): Python requires xbrlContext to be a dict while the
-    # Worker accepts any object (an array passes); Python accepts a whitespace-only evidence field, the Worker trims.
+    # 2.14.0 (R4B1_SPEC section 2): one predicate in both runtimes. xbrlContext must be a plain object (an array is
+    # rejected) and every required evidence field must be non-blank after trimming.
     _grade_case("shr.decision_grade.array_xbrl_context_diverges", ["BR-SHR-001"], {**GOOD_PAYLOAD, "xbrlContext": []},
-                GOOD_EVIDENCE, "FOUND", mode="pinned",
-                decision="FINDING: Worker accepts an array xbrlContext as decision-grade, Python requires a dict",
-                expect_py=False, expect_ts=True),
+                GOOD_EVIDENCE, "FOUND", False),
+    # TODO(python-mirror): flip to equal (R4B1_SPEC section 2), expect=False, once Python trims evidence fields.
     _grade_case("shr.decision_grade.whitespace_only_evidence_field_diverges", ["BR-SHR-001"], GOOD_PAYLOAD,
                 {**GOOD_EVIDENCE, "concept": "   "}, "FOUND", mode="pinned",
                 decision="FINDING: Python accepts a whitespace-only evidence field, the Worker trims it and rejects",

@@ -15,8 +15,9 @@ console.log.
 - Privacy (Q10, Q13): every recorded string is in an allow-set or matches
   ^[A-Za-z0-9_./:<>=-]{0,64}$; no blob, index or log line carries the token,
   an argument value, a caller-supplied tool name or method, or the path.
-- One dispatch-start log line per dispatched request, with exactly the keys
-  t, v, action, domain, build, and none for rejections.
+- One dispatch-start log line per dispatched request, logged as an object (not
+  a JSON string, 2.14.0) with exactly the keys t, v, action, domain, build, and
+  none for rejections.
 - Without the binding (and with a binding that throws) nothing throws and the
   responses (status, headers, body) are byte-identical.
 """
@@ -56,10 +57,14 @@ const WRONG = process.env.TEST_WRONG;
 const FAKE = JSON.parse(process.env.TEST_FAKE);
 const ctx = { waitUntil() {}, passThroughOnException() {} };
 
-// Captured console.log: the dispatch-start lines.
+// Captured console.log: the dispatch-start lines. A single logged object is kept as {object}, so the test can tell
+// an object from a JSON string; anything else is kept as {text}.
 const logLines = [];
 const realLog = console.log;
-console.log = (...args) => { logLines.push(args.map(String).join(" ")); };
+console.log = (...args) => {
+  const one = args.length === 1 && args[0] !== null && typeof args[0] === "object" && !Array.isArray(args[0]);
+  logLines.push(one ? { object: JSON.parse(JSON.stringify(args[0])) } : { text: args.map(String).join(" ") });
+};
 
 // A fixed clock, so responses from separate runs compare byte for byte.
 const RealDate = Date;
@@ -196,6 +201,16 @@ def _node() -> str | None:
 
 
 _RESULT: dict = {}
+
+
+def _dispatch_objects(logs: list[dict]) -> list[dict]:
+    """The dispatch-start lines logged as objects."""
+    return [e["object"] for e in logs if isinstance(e.get("object"), dict) and e["object"].get("t") == "yfmcp"]
+
+
+def _dispatch_strings(logs: list[dict]) -> list[str]:
+    """Dispatch-start lines logged as a JSON string (the pre-2.14.0 form)."""
+    return [e["text"] for e in logs if isinstance(e.get("text"), str) and '"t":"yfmcp"' in e["text"]]
 
 
 def _run() -> dict:
@@ -422,21 +437,34 @@ class TestWorkerTelemetry(unittest.TestCase):
         forbidden = [TOKEN, WRONG, FAKE_TICKER, FAKE_TOOL, "evil_tool", FAKE_METHOD, "evil-method", FAKE_ACTION, FAKE_ARG,
                      "telemetry.invalid", "/mcp/", "Bearer", "5d"]
         for name in DISPATCHED + REJECTED:
-            recorded = json.dumps(r[name]["points"]) + "\n".join(r[name]["logs"])
+            recorded = json.dumps(r[name]["points"]) + json.dumps(r[name]["logs"])
             for value in forbidden:
                 self.assertNotIn(value, recorded, f"{name}: {value!r} recorded")
 
     def test_one_dispatch_log_line_per_dispatched_request(self):
         r = _run()["withBinding"]
         for name in DISPATCHED:
-            lines = [json.loads(line) for line in r[name]["logs"] if line.startswith('{"t":"yfmcp"')]
+            lines = _dispatch_objects(r[name]["logs"])
             self.assertEqual(len(lines), 1, (name, r[name]["logs"]))
             line = lines[0]
             self.assertEqual(list(line), ["t", "v", "action", "domain", "build"], name)
             f = _fields(_point(name))
             self.assertEqual(line, {"t": "yfmcp", "v": 1, "action": f["action"], "domain": f["domain"], "build": SHORT_SHA}, name)
+            for value in line.values():
+                if isinstance(value, str):
+                    self.assertRegex(value, SAFE_STRING, name)
         for name in REJECTED:
-            self.assertEqual([l for l in r[name]["logs"] if l.startswith('{"t":"yfmcp"')], [], name)
+            self.assertEqual(_dispatch_objects(r[name]["logs"]), [], name)
+            self.assertEqual(_dispatch_strings(r[name]["logs"]), [], name)
+
+    def test_dispatch_log_line_is_an_object_not_a_json_string(self):
+        """OPS-TEL-1 (2.14.0): Workers Logs extracts the fields of a logged object only."""
+        r = _run()["withBinding"]
+        for name in DISPATCHED + REJECTED:
+            self.assertEqual(_dispatch_strings(r[name]["logs"]), [], name)
+        for name in DISPATCHED:
+            self.assertEqual([type(e) for e in r[name]["logs"] if "object" in e and e["object"].get("t") == "yfmcp"],
+                             [dict], name)
 
     def test_dispatch_log_line_does_not_depend_on_the_binding(self):
         r = _run()

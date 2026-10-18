@@ -206,28 +206,47 @@ function enrichFacts(val: any, parentSourceType: string | null = null, parentCon
           evList = [origEv];
         }
 
+        // The 14-key row, in Python's order (2.14.0). Table evidence (sourceTableId / sourceRows) fills
+        // tableIndex, rowLabel and rawRow when the raw object has none of its own.
         const standardisedEv = evList.map(ev => {
           if (ev && typeof ev === "object") {
             const url = ev.url || ev.documentUrl || null;
             if (url) urls.push(String(url));
+            const sourceRows = Array.isArray(ev.sourceRows) ? ev.sourceRows : null;
+            const firstSourceRow = sourceRows && typeof sourceRows[0] === "string" ? sourceRows[0] : null;
+            const joinedSourceRows = sourceRows && sourceRows.length > 0 && sourceRows.every((r: unknown) => typeof r === "string")
+              ? sourceRows.join(" | ")
+              : null;
             return {
               url,
+              sourceType: ev.sourceType || null,
               filingType: ev.filingType || null,
               accessionNumber: ev.accessionNumber || null,
               filingDate: ev.filingDate || null,
-              tableIndex: ev.tableIndex || null,
-              rowLabel: ev.rowLabel || null,
+              publishedAt: ev.publishedAt || null,
+              retrievedAt: ev.retrievedAt || null,
+              excerpt: ev.excerpt || null,
+              concept: ev.concept || null,
+              periodEnd: ev.periodEnd || null,
+              tableIndex: ev.tableIndex || ev.sourceTableId || null,
+              rowLabel: ev.rowLabel || firstSourceRow || null,
               columnLabel: ev.columnLabel || null,
-              rawRow: ev.rawRow || null,
+              rawRow: ev.rawRow || joinedSourceRows || null,
             };
           } else if (ev) {
             const evStr = String(ev);
             if (evStr.startsWith("http")) urls.push(evStr);
             return {
               url: evStr.startsWith("http") ? evStr : null,
+              sourceType: null,
               filingType: null,
               accessionNumber: null,
               filingDate: null,
+              publishedAt: null,
+              retrievedAt: null,
+              excerpt: null,
+              concept: null,
+              periodEnd: null,
               tableIndex: null,
               rowLabel: null,
               columnLabel: null,

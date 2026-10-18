@@ -48,6 +48,11 @@ N2_NOTICE = _notice(
     "decisionUse=EVIDENCE_ONLY marks the evidence boundary.")
 PRICE_TARGET_NOTICE = _notice(
     ["bracket", "inferredTag", "tag", "tagNote"], "priceAtOrAboveTarget",
+    f"bracket, inferredTag, tag, tagNote are deprecated and {REMOVAL}; "
+    "use priceAtOrAboveTarget (direction); referenceTargetPct gives the price/target ratio.")
+# TODO(python-mirror): delete once Python carries the 2.14.0 wording (R4B1_SPEC section 7); the cases using it flip back to equal.
+PRICE_TARGET_NOTICE_PRE_2_14 = _notice(
+    ["bracket", "inferredTag", "tag", "tagNote"], "priceAtOrAboveTarget",
     f"bracket, inferredTag, tag, tagNote are deprecated and {REMOVAL}; use priceAtOrAboveTarget and referenceTargetPct.")
 VOLUME_GATE_NOTICE = _notice(
     ["gatePass", "gateThresholdUsd"], "meetsMinimum",
@@ -238,15 +243,28 @@ def _bracket_envelope_view(v: dict) -> dict:
             "inferredTag": data.get("inferredTag"), "tag": data.get("tag"), "warnings": v["meta"]["warnings"]}
 
 
+_N3A_LONG = {"ok": True, "priceAtOrAboveTarget": False, "bracket": "STRONG_BUY", "inferredTag": "LONG", "tag": "LONG"}
+_N3A_AT_TARGET = {"ok": True, "priceAtOrAboveTarget": True, "bracket": "CAUTION", "inferredTag": "INVERTED", "tag": "INVERTED"}
+_N3A_WORDING = "R4B1_SPEC section 7: price-target notice wording (2.14.0), Worker first; Python follows in the same release"
+_TAG_NOTE = "Deprecated: tag is inferred from currentPrice/referenceTargetPrice distance. Use priceAtOrAboveTarget."
+_TAG_NOTE_PRE_2_14 = "Deprecated: tag is inferred from currentPrice/referenceTargetPrice distance. Use inferredTag."
+
 CASES += [
+    # TODO(python-mirror): flip to equal (R4B1_SPEC section 7), expect={**_N3A_LONG, "warnings": [PRICE_TARGET_NOTICE]}.
     _bracket_case("neutral.n3a.envelope_keeps_the_labels_and_adds_the_flag_and_the_notice", ["BR-PRC-022", "Q14-N3"], 70.0, 100.0,
-                  market_time=QUOTE_TIME, via="envelope", select=_bracket_envelope_view,
-                  expect={"ok": True, "priceAtOrAboveTarget": False, "bracket": "STRONG_BUY", "inferredTag": "LONG", "tag": "LONG",
-                          "warnings": [PRICE_TARGET_NOTICE]}),
+                  market_time=QUOTE_TIME, via="envelope", select=_bracket_envelope_view, mode="pinned", decision=_N3A_WORDING,
+                  expect_py={**_N3A_LONG, "warnings": [PRICE_TARGET_NOTICE_PRE_2_14]},
+                  expect_ts={**_N3A_LONG, "warnings": [PRICE_TARGET_NOTICE]}),
+    # TODO(python-mirror): flip to equal (R4B1_SPEC section 7), expect={**_N3A_AT_TARGET, "warnings": [PRICE_TARGET_NOTICE]}.
     _bracket_case("neutral.n3a.envelope_flag_true_at_the_target", ["BR-PRC-022", "Q14-N3"], 100.0, 100.0,
-                  market_time=QUOTE_TIME, via="envelope", select=_bracket_envelope_view,
-                  expect={"ok": True, "priceAtOrAboveTarget": True, "bracket": "CAUTION", "inferredTag": "INVERTED", "tag": "INVERTED",
-                          "warnings": [PRICE_TARGET_NOTICE]}),
+                  market_time=QUOTE_TIME, via="envelope", select=_bracket_envelope_view, mode="pinned", decision=_N3A_WORDING,
+                  expect_py={**_N3A_AT_TARGET, "warnings": [PRICE_TARGET_NOTICE_PRE_2_14]},
+                  expect_ts={**_N3A_AT_TARGET, "warnings": [PRICE_TARGET_NOTICE]}),
+    # The tagNote text points at the neutral replacement (2.14.0, R4B1_SPEC section 7).
+    # TODO(python-mirror): flip to equal (R4B1_SPEC section 7), expect={"tagNote": _TAG_NOTE}.
+    _bracket_case("neutral.n3a.tag_note_points_to_price_at_or_above_target", ["BR-PRC-022", "Q14-N3"], 70.0, 100.0,
+                  market_time=QUOTE_TIME, keys=("tagNote",), mode="pinned", decision=_N3A_WORDING,
+                  expect_py={"tagNote": _TAG_NOTE_PRE_2_14}, expect_ts={"tagNote": _TAG_NOTE}),
     # A failure carries no data and no notice.
     _bracket_case("neutral.n3a.envelope_failure_carries_no_notice", ["BR-PRC-022", "Q14-N3"], None, 100.0,
                   market_time=QUOTE_TIME, via="envelope",

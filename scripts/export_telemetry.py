@@ -18,6 +18,9 @@ telemetry/<end date>.json:
    {"t":"yfmcp","v":1,"action":...,"domain":...,"build":...}, which is parsed
    client-side, and the outcome comes from the invocation log with the same
    request id. Only action, domain, build and the outcome are read.
+3. coverage.warnings (2.14.0): LOGS_ZERO_WITH_REQUESTS when Analytics Engine
+   counted requests and Workers Logs, read successfully, counted 0 invocations.
+   An ops signal: it is printed and the run still exits 0.
 
 Environment: CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_TELEMETRY_TOKEN, a token with
 Account Analytics: Read plus Workers Observability access (the API reference
@@ -312,7 +315,8 @@ def _round_tree(value: Any) -> Any:
 # (2.13.1). The 2.11.1 query returned `invocations: 0` on the first live export,
 # while Analytics Engine counted 68 requests in the same window:
 #
-# - The Worker logs a JSON *string*: console.log(JSON.stringify({t: "yfmcp", ...})).
+# - The Worker logged a JSON *string*: console.log(JSON.stringify({t: "yfmcp", ...})).
+#   (2.14.0 logs the object itself; both forms are still read below.)
 #   Workers Logs documents field extraction only for logged *objects*
 #   (`console.log({user_id: 123})` gives `{user_id: 123}`, filterable by key). It
 #   shows a logged string as `{message: "..."}`, and the API says an event's
@@ -484,6 +488,27 @@ def aggregate_invocations(events: list[dict[str, Any]]) -> dict[str, Any]:
     })
 
 
+# ── Coverage ─────────────────────────────────────────────────────────────────
+
+LOGS_ZERO_WITH_REQUESTS = "LOGS_ZERO_WITH_REQUESTS"
+
+
+def coverage_warnings(analytics: dict[str, Any], logs: dict[str, Any]) -> list[dict[str, str]]:
+    """Ops signals about how far the two sources agree (2.14.0, OPS-TEL-2). They never fail the export.
+
+    LOGS_ZERO_WITH_REQUESTS: Analytics Engine counted requests but Workers Logs, read successfully,
+    counted no invocations (the 2.13.0 export read 0 this way).
+    """
+    warnings: list[dict[str, str]] = []
+    requests = _num(analytics.get("totals", {}).get("requests"))
+    if logs.get("available") and requests > 0 and _num(logs.get("invocations")) == 0:
+        warnings.append({
+            "code": LOGS_ZERO_WITH_REQUESTS,
+            "message": f"Analytics Engine counted {_clean(requests)} requests but Workers Logs counted 0 invocations.",
+        })
+    return warnings
+
+
 # ── Export ───────────────────────────────────────────────────────────────────
 
 def build_export(
@@ -510,14 +535,16 @@ def build_export(
     except ExportError as error:
         problems.append(f"workersLogs: {error}")
         logs = {"available": False, "error": str(error)}
+    analytics = aggregate_analytics(hourly, daily, breakdown)
     document = {
         "schemaVersion": SCHEMA_VERSION,
         "date": stop.date().isoformat(),
         "window": {"from": start.isoformat().replace("+00:00", "Z"), "to": stop.isoformat().replace("+00:00", "Z")},
         "dataset": dataset,
         "scriptName": script_name,
-        "analyticsEngine": aggregate_analytics(hourly, daily, breakdown),
+        "analyticsEngine": analytics,
         "workersLogs": logs,
+        "coverage": {"warnings": coverage_warnings(analytics, logs)},
     }
     return document, problems
 
@@ -556,6 +583,9 @@ def main(argv: list[str] | None = None, transport: Transport = urllib_transport)
     totals = document["analyticsEngine"]["totals"]
     print(f"wrote {path} ({totals['requests']} requests, "
           f"{document['workersLogs'].get('invocations', 'n/a')} logged invocations)")
+    # Coverage warnings are reported, never a failure: the export itself succeeded.
+    for warning in document["coverage"]["warnings"]:
+        print(f"telemetry export coverage warning: {warning['code']}: {warning['message']}")
     for problem in problems:
         print(f"telemetry export incomplete: {problem}", file=sys.stderr)
     return 1 if problems else 0

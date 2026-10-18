@@ -153,10 +153,11 @@ function serverVersion(): string {
 
 /**
  * The one dispatch-start line for Workers Logs. It carries the action, the
- * domain and the build only: never arguments, tickers, ids or URLs.
+ * domain and the build only: never arguments, tickers, ids or URLs. Logged as
+ * an object, not a JSON string, so Workers Logs extracts its fields (2.14.0).
  */
 export function logDispatchStart(action: string, domain: string): void {
-  console.log(JSON.stringify({ t: "yfmcp", v: 1, action, domain, build: buildShaShort() }));
+  console.log({ t: "yfmcp", v: 1, action, domain, build: buildShaShort() });
 }
 
 export function sizeBucket(bytes: number): string {

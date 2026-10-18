@@ -1207,19 +1207,23 @@ CASES += [
                                    "url": "https://www.sec.gov/Archives/edgar/data/910302/000091030226000001/ex99.htm",
                                    "decisionUse": "USE_OFFICIAL_EVIDENCE"}],
                         "warnings": []}),
-    # Card 109: a bare 'EX-99' typed exhibit described as a press release resolves in both runtimes (Python accepts EX-99 outright,
-    # the Worker needs release wording) - the card's claim that Python rejects it does not hold.
+    # Card 109: a bare 'EX-99' typed exhibit described as a press release resolves in both runtimes. 2.14.0 (R4B1_SPEC
+    # section 1): an EX-99 type is accepted only with PRESS/EARNINGS/RESULTS RELEASE wording, in both runtimes.
     _press_case("press.ex99.bare_ex99_with_press_release_description_resolves_in_both", ["BR-NWS-109"], 910303,
                 [("EX-99", "Press Release", "ex99.htm")],
                 select=lambda v: {"status": v.get("status"), "decisionGrade": v.get("decisionGrade")},
                 expect={"status": "SEC_EX99_FOUND", "decisionGrade": True}),
-    # Card 109 divergences on the same 8-K: a bare 'EX-99' with a non-release description (Python resolves, Worker does not);
-    # 'EX-99.01' and a file name like ex99_1.htm with no type (Worker resolves, Python does not).
+    # Card 109 on the same 8-K, 2.14.0 (R4B1_SPEC section 1): the type must be EX-99.1 / EX-99.01 (or the 99.1 alias),
+    # or an EX-99 type with release wording; a file name alone is not accepted.
+    # TODO(python-mirror): flip to equal (R4B1_SPEC section 1), expect={"status": "SEC_8K_FOUND_EX99_NOT_FOUND",
+    # "decisionGrade": False}, once Python requires release wording for a bare EX-99.
     _press_case("press.ex99.bare_ex99_with_other_description_resolves_only_in_python", ["BR-NWS-109"], 910304,
                 [("EX-99", "Exhibit", "ex99.htm")], select=lambda v: {"status": v.get("status"), "decisionGrade": v.get("decisionGrade")},
                 mode="pinned", decision="FINDING: Python resolves any bare 'EX-99' exhibit as the press release; the Worker requires release wording in the description",
                 expect_py={"status": "SEC_EX99_FOUND", "decisionGrade": True},
                 expect_ts={"status": "SEC_8K_FOUND_EX99_NOT_FOUND", "decisionGrade": False}),
+    # TODO(python-mirror): flip to equal (R4B1_SPEC section 1), expect={"status": "SEC_EX99_FOUND", "decisionGrade": True},
+    # once Python accepts EX-99.01.
     _press_case("press.ex99.zero_padded_type_resolves_only_in_worker", ["BR-NWS-109"], 910305,
                 [("EX-99.01", "Press Release", "ex99.htm")], select=lambda v: {"status": v.get("status"), "decisionGrade": v.get("decisionGrade")},
                 mode="pinned", decision="FINDING: the Worker accepts type EX-99.01 as the press release exhibit; Python accepts only EX-99.1, EX-99 and 99.1",
@@ -1227,9 +1231,7 @@ CASES += [
                 expect_ts={"status": "SEC_EX99_FOUND", "decisionGrade": True}),
     _press_case("press.ex99.file_name_match_without_a_type_resolves_only_in_worker", ["BR-NWS-109"], 910306,
                 [("", "Exhibit", "ex99_1.htm")], select=lambda v: {"status": v.get("status"), "decisionGrade": v.get("decisionGrade")},
-                mode="pinned", decision="FINDING: the Worker also resolves an exhibit by its file name (ex99_1); Python needs the type column",
-                expect_py={"status": "SEC_8K_FOUND_EX99_NOT_FOUND", "decisionGrade": False},
-                expect_ts={"status": "SEC_EX99_FOUND", "decisionGrade": True}),
+                expect={"status": "SEC_8K_FOUND_EX99_NOT_FOUND", "decisionGrade": False}),
 ]
 
 

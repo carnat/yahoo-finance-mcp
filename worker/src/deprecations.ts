@@ -59,7 +59,7 @@ const PRICE_TARGET_LABEL_FIELDS = ["bracket", "inferredTag", "tag", "tagNote"];
 export const PRICE_TARGET_LABEL_DEPRECATION = deprecatedFieldWarning(
   PRICE_TARGET_LABEL_FIELDS,
   "priceAtOrAboveTarget",
-  `${fieldList(PRICE_TARGET_LABEL_FIELDS)} deprecated and ${REMOVAL}; use priceAtOrAboveTarget and referenceTargetPct.`,
+  `${fieldList(PRICE_TARGET_LABEL_FIELDS)} deprecated and ${REMOVAL}; use priceAtOrAboveTarget (direction); referenceTargetPct gives the price/target ratio.`,
 );
 
 /** N3b: the fixed $10M liquidity gate on check_volume_liquidity_threshold. */

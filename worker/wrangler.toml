@@ -41,6 +41,8 @@ dataset = "yfmcp_telemetry"
 [placement]
 mode = "smart"
 
+# Off on purpose: Workers Logs are enabled explicitly under [observability.logs]
+# below, and traces stay off under [observability.traces].
 [observability]
 enabled = false
 head_sampling_rate = 1
