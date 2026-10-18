@@ -346,7 +346,10 @@ Each R-release is a set of **separately released** behaviour changes that must b
       - 2.13.1 fixed the Workers Logs query, which had read 0 invocations. Run 39062644642 read 45 invocations by action: 42 `ok`, 3 `unknown`.
       - `$workers.scriptName` is confirmed. The outcome comes from the invocation event joined on `$metadata.requestId`.
       - **The 7-day Phase 4 baseline counts from 2026-10-17**, the first export with data; the first eligible day is 2026-10-24.
-    - **Remaining in R4:** the Q3i triage table, for one owner approval.
+    - **Q3i triage: APPROVED 2026-10-18** (`Q3I_TRIAGE.md`; owner: "agree, add it to R-news and approve Q3i triage").
+      - 152 rows: 80 repair, 28 preserve align-free, 14 preserve document, 30 planner calls (decided in §2 of that file).
+      - Releases: R4b before Phase 4; R-news (provider adapters, then the source registry and the `NEWS_SOURCES_DISABLED` off switch, then the news repairs); R5-shared (the BR-ENV-001 confidence default); and R5-‹unit›.
+    - **Remaining in R4:** R4b. Implement the R4b rows of `Q3I_TRIAGE.md` §3.
   - Q3a: the Worker honours exact `accession_number` with fail-closed semantics.
   - Q3b: central ticker and accession validation in both runtimes, on every relevant action, including the Python paths that skip it.
   - Q3c + Q12: the per-tool ticker caps from the §7 Q12 table, advertised as schema `maxItems` and rejected with `BATCH_LIMIT_EXCEEDED` in both runtimes. Measure `get_market_snapshot` first and set its cap. Correct the stale comment at `yahoo-finance.ts:58–64`.
@@ -593,6 +596,7 @@ All 9 Q7 news P0 rules were confirmed by the extraction's P0 panel and are cover
 - [x] **Q3g.** CHANGE: replace `.info` vs raw quoteSummary divergence with one normalized shared-client `MarketInputs` contract consumed by both runtimes.
 - [x] **Q3h.** CHANGE: omitted/null `sources` uses defaults; explicit `sources=[]` means attempt none. Preserve requested/attempted/skipped/defaulted metadata separately.
 - [x] **Q3i.** CHANGE confirmed semantic/data-integrity defects. Preserve only cosmetic/intentional compatibility differences. Doctrine-critical defects are repaired before or in the same governed release as the phase touching their domain.
+  - **Triage result (2026-10-18, approved):** `Q3I_TRIAGE.md`, with per-row detail in `q3i/`. It is the binding repair/preserve classification for every pinned `FINDING` case and every untagged §3 defect, including the release each fix ships in.
 - [x] **Q4.** Remove `SMOKE_TICKER_CIK_FALLBACKS` from production lookup; retain only as injected test fixtures. — *Scheduled in R4 (before Phase 4), not Phase 6: see R1 below.*
 - [x] **Q5 (Phase 5/6).** Generalise `extract_china_exposure` into a governed preset over `extract_exposure`; move issuer-specific aliases to data/config. Keep the public compatibility action for now.
 - [x] **Q6 (whole plan).** Keep both runtimes: Python local/stdio + hosted Worker. Runtime retirement is a separate rearchitecture decision.

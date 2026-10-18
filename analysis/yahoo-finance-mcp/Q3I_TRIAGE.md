@@ -1,6 +1,6 @@
 # Q3i triage table (R4, last item): for one owner approval
 
-**Status:** DRAFT 2026-10-17, awaiting owner approval. Once approved, the decisions are written into the brief's §7, and R4b and R-news implement them.
+**Status:** APPROVED 2026-10-18 by the owner, with the R-news additions in §3a. The decisions are recorded in the brief's §7; R4b and R-news implement them.
 
 **Method:** A2, accepted 2026-10-16.
 - **Repair** a divergence or defect that changes a published figure, status, `decisionGrade`, confidence or coverage claim. Align both runtimes to the safer behaviour, meaning the one that never overstates evidence.
@@ -86,12 +86,33 @@ Every row, with code sites, the Python and Worker values and the reasoning, is i
 | **R5-shared** (before the first Phase 5 unit) | BR-ENV-001 (call 21) | Phase 5 |
 | **R5-‹unit›** | pricing: calls 1–4, 22–24, zero price, CAGR boundary, quoteDataDate, changePct. extractors: BR-EXT-035, BR-EXT-084. valuation: BR-VAL-068, `tolerance_pct`. earnings: call 5, BR-ERN-039, the `source_url` message | each unit's move |
 
+### 3a. R-news additions (owner, 2026-10-18)
+
+R-news ships in three parts, in this order:
+
+1. **Provider adapters (pure restructure).**
+   - Each news source moves to its own adapter file in both runtimes: `worker/src/news/providers/*.ts` and `yfmcp/news/providers/*.py`.
+   - Every adapter returns standard items plus a source status.
+   - The shared pipeline stays in one place: identity, dedupe, event typing, ranking and coverage.
+   - Output must be byte-identical; the parity harness and the before/after tool output prove it.
+2. **Source registry and operator off switch.**
+   - **Registry:** a data file lists each source with its name, whether it is on by default, the key it needs, a rough subrequest cost and its tier (official or aggregator).
+   - **Off switch:** the setting `NEWS_SOURCES_DISABLED` holds a comma list of source names. It is set as a Worker var in `wrangler.toml` and as an environment variable locally.
+   - **What a disabled source does:**
+     - it is never fetched and costs no subrequests;
+     - its `sourceStatus` reads `SOURCE_UNCONFIGURED` with `providerAttempted: false`, plus a `SOURCE_UNAVAILABLE` warning saying the operator disabled it;
+     - coverage reads PARTIAL, never NOT_FOUND;
+     - an explicit request for it gets the same reporting.
+   - **Planner decision on the status label:** reuse the existing `SOURCE_UNCONFIGURED` status and `SOURCE_UNAVAILABLE` warning, so no new status value is added (rule P4).
+   - Changing the default sources, for example adding `sec`, remains a separate owner decision. It is not part of this release.
+3. **The Q3i news repairs** from §2, each landing in its own adapter or in the shared pipeline.
+
 The pinned harness cases flip to `equal` as each fix lands. Preserve-document rows get a line in `docs/provider-runtime-guidance.md`.
 
 ## 4. Approval
 
 ```
-Q3i triage — Approved by: ________  Date: ________
-Owner's words, verbatim: "________"
-Overrides (row or call # → decision): ________
+Q3i triage — Approved by: repository owner (carnat), in session  Date: 2026-10-18
+Owner's words, verbatim: "agree, add it to R-news and approve Q3i triage"
+Overrides: none. Addition: R-news provider adapters, source registry and NEWS_SOURCES_DISABLED off switch (§3a).
 ```
