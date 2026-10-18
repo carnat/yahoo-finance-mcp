@@ -11,6 +11,7 @@ import os
 import re as _re
 import threading
 import time
+import urllib.error as _urlerr
 import urllib.parse as _urlparse
 import urllib.request as _urlreq
 
@@ -192,6 +193,21 @@ async def _edgar_list_exhibits_from_index(index_url: str) -> list[dict]:
     html = await _edgar_get_html(index_url, max_bytes=500_000)
     if not html:
         return []
+    return _parse_exhibit_index_html(html)
+
+
+async def _edgar_read_exhibit_index(index_url: str) -> tuple[list[dict], bool]:
+    """The Worker's edgarReadExhibitIndex: (exhibits, not_found).
+
+    not_found is True only when SEC answered the filing index with HTTP 404 (the accession is not a filing of that
+    CIK); a timeout, 5xx or any other failed read is not_found False with no exhibits (2.15.0, R4-ACC-EXHIBITS).
+    """
+    text, http_status = await asyncio.get_running_loop().run_in_executor(
+        None, _url_policy.in_context(_fetch_edgar_html_status, index_url, 500_000))
+    return (_parse_exhibit_index_html(text) if text else []), http_status == 404
+
+
+def _parse_exhibit_index_html(html: str) -> list[dict]:
     exhibits: list[dict] = []
     for row_m in _re.finditer(r"<tr[^>]*>([\s\S]*?)</tr>", html, _re.IGNORECASE):
         row_html = row_m.group(1)
@@ -221,7 +237,8 @@ async def _edgar_list_exhibits_from_index(index_url: str) -> list[dict]:
     return exhibits
 
 
-def _fetch_edgar_html(url: str, max_bytes: int) -> str | None:
+def _fetch_edgar_html_status(url: str, max_bytes: int) -> tuple[str | None, int | None]:
+    """(text, None), or (None, the HTTP status of a failed response; None when no response came back)."""
     req = _urlreq.Request(
         url,
         headers={"User-Agent": _SEC_REQUIRED_UA},
@@ -230,11 +247,17 @@ def _fetch_edgar_html(url: str, max_bytes: int) -> str | None:
         with _url_policy.urlopen(req, timeout=30) as resp:  # noqa: S310
             raw = resp.read(max_bytes)
         try:
-            return raw.decode("utf-8")
+            return raw.decode("utf-8"), None
         except UnicodeDecodeError:
-            return raw.decode("latin-1", errors="replace")
+            return raw.decode("latin-1", errors="replace"), None
+    except _urlerr.HTTPError as e:
+        return None, e.code
     except Exception:
-        return None
+        return None, None
+
+
+def _fetch_edgar_html(url: str, max_bytes: int) -> str | None:
+    return _fetch_edgar_html_status(url, max_bytes)[0]
 
 
 # EDGAR archive documents never change once filed, and composite tools read

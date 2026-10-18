@@ -801,9 +801,10 @@ _GEO_EXPECTED: dict[str, dict[str, tuple[str, str | None]]] = {
     "read_429": {"get_filing_data": ("PROVIDER_ERROR", "SEC_READ_FAILED"), "extract_geographic_revenue": ("PROVIDER_ERROR", "SEC_READ_FAILED"), "extract_revenue_exposure": ("PROVIDER_ERROR", "SEC_READ_FAILED"), "extract_china_exposure": ("PROVIDER_ERROR", "SEC_READ_FAILED")},
     "read_429_with_risk_text": {"get_filing_data": ("PROVIDER_ERROR", "SEC_READ_FAILED"), "extract_geographic_revenue": ("PROVIDER_ERROR", "SEC_READ_FAILED"), "extract_revenue_exposure": ("PROVIDER_ERROR", "SEC_READ_FAILED"), "extract_china_exposure": ("FOUND_NON_REVENUE_EXPOSURE", "SEC_READ_FAILED")},
     "pinned_older_filing": {"get_filing_data": ("FOUND", None), "extract_geographic_revenue": ("FOUND", None), "extract_revenue_exposure": ("FOUND_REVENUE_EXPOSURE", None), "extract_china_exposure": ("FOUND_REVENUE_EXPOSURE", None)},
-    # The tools do not pass the pin to get_filing_data, so they read the latest 10-K (which has its document here).
-    "pinned_older_filing_no_doc": {"get_filing_data": ("EXTRACTION_FAILED", "FILING_TEXT_NOT_AVAILABLE"), "extract_geographic_revenue": ("FOUND", None), "extract_revenue_exposure": ("FOUND_REVENUE_EXPOSURE", None), "extract_china_exposure": ("FOUND_REVENUE_EXPOSURE", None)},
-    "pinned_filing_not_listed": {"get_filing_data": (_FND, _FND), "extract_geographic_revenue": ("FOUND", None), "extract_revenue_exposure": ("FOUND_REVENUE_EXPOSURE", None), "extract_china_exposure": (_FND, _FND)},
+    # extract_geographic_revenue passes the pin (2.15.0), so it reads the older filing and finds no document; the other tools do not
+    # pass the pin to get_filing_data and read the latest 10-K (which has its document here).
+    "pinned_older_filing_no_doc": {"get_filing_data": ("EXTRACTION_FAILED", "FILING_TEXT_NOT_AVAILABLE"), "extract_geographic_revenue": ("EXTRACTION_FAILED", "FILING_TEXT_NOT_AVAILABLE"), "extract_revenue_exposure": ("FOUND_REVENUE_EXPOSURE", None), "extract_china_exposure": ("FOUND_REVENUE_EXPOSURE", None)},
+    "pinned_filing_not_listed": {"get_filing_data": (_FND, _FND), "extract_geographic_revenue": ("ACCESSION_NOT_FOUND", "ACCESSION_NOT_FOUND"), "extract_revenue_exposure": ("FOUND_REVENUE_EXPOSURE", None), "extract_china_exposure": (_FND, _FND)},
     "china_manufacturing_text": {"get_filing_data": ("EXTRACTION_FAILED", "EXTRACTION_FAILED"), "extract_geographic_revenue": ("EXTRACTION_FAILED", "EXTRACTION_FAILED"), "extract_revenue_exposure": ("EXTRACTION_FAILED", "EXTRACTION_FAILED"), "extract_china_exposure": ("FOUND_NON_REVENUE_EXPOSURE", "EXTRACTION_FAILED")},
     "china_bank_risk_text": {"get_filing_data": ("EXTRACTION_FAILED", "EXTRACTION_FAILED"), "extract_geographic_revenue": ("EXTRACTION_FAILED", "EXTRACTION_FAILED"), "extract_revenue_exposure": ("EXTRACTION_FAILED", "EXTRACTION_FAILED"), "extract_china_exposure": ("FOUND_NON_REVENUE_EXPOSURE", "EXTRACTION_FAILED")},
     "pinned_fallback_no_doc": {"get_filing_data": ("EXTRACTION_FAILED", "FILING_TEXT_NOT_AVAILABLE"), "extract_geographic_revenue": ("EXTRACTION_FAILED", "FILING_TEXT_NOT_AVAILABLE"), "extract_revenue_exposure": ("EXTRACTION_FAILED", "FILING_TEXT_NOT_AVAILABLE"), "extract_china_exposure": ("EXTRACTION_FAILED", "EXTRACTION_FAILED")},
@@ -833,6 +834,9 @@ class TestGeographicToolsAgree(unittest.TestCase):
             for call, (status, code) in expected.items():
                 name = f"geo_{scenario}__{call}"
                 got = self._same_payload(name)
+                if got.get("ok") is False:  # 2.15.0: an unlisted pinned accession is the Q3a error envelope
+                    self.assertEqual((got["error"]["code"], got["error"]["code"]), (status, code), name)
+                    continue
                 self.assertEqual((got["overallStatus"] if call == "extract_china_exposure" else got["status"], got["code"]), (status, code), name)
 
     def test_every_scenario_is_listed(self) -> None:

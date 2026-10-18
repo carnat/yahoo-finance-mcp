@@ -881,6 +881,12 @@ async def list_sec_filings(ticker: str, form_type: str = "10-K", max_filings: in
         return _mcp_failure("list_sec_filings", ErrorCode.PROVIDER_ERROR, str(e))
 
 
+def _outline_read_failure(message: str) -> str:
+    """A failed outline read: a 429 stays RATE_LIMIT and a timeout PROVIDER_TIMEOUT (the Worker's classifier), else PROVIDER_ERROR."""
+    classified = _classify_error_message(message)
+    return _mcp_failure("get_filing_outline", classified[0] if classified else ErrorCode.PROVIDER_ERROR, message)
+
+
 async def get_filing_outline(ticker: str, accession_number: str | None = None, document_url: str | None = None) -> str:
     err = _validate_ticker(ticker)
     if err:
@@ -896,6 +902,7 @@ async def get_filing_outline(ticker: str, accession_number: str | None = None, d
 
     try:
         import urllib.request
+        resolved_accession = accession_number or None
         if not document_url and accession_number:
             # An explicit accession without document_url: the outline of that filing's primary document, found by the
             # same resolver as the filing index; a miss is ACCESSION_NOT_FOUND (2.13.0, R4 Q3a). document_url wins.
@@ -906,14 +913,18 @@ async def get_filing_outline(ticker: str, accession_number: str | None = None, d
                     return _accession_not_found_envelope(resolve_error)
                 return json.dumps({"ok": False, "error": resolve_error, **resolve_error})
             document_url = resolved_filing["documentUrl"]
+            resolved_accession = resolved_filing.get("accessionNumber")
 
         if not document_url:
             return _mcp_failure("get_filing_outline", ErrorCode.INPUT_VALIDATION_ERROR,
                                 "Either accession_number or document_url is required")
 
         req = urllib.request.Request(document_url, headers={"User-Agent": "yahoo-finance-mcp/1.0 admin@example.com"})
-        with _url_policy.urlopen(req, timeout=15) as resp:
-            html = resp.read().decode("utf-8", errors="replace")
+        try:
+            with _url_policy.urlopen(req, timeout=15) as resp:
+                html = resp.read().decode("utf-8", errors="replace")
+        except _urlerror.HTTPError as http_err:
+            return _outline_read_failure(f"HTTP {http_err.code}")
 
         html = _sanitize_sec_html(html)
         outline = []
@@ -926,9 +937,25 @@ async def get_filing_outline(ticker: str, accession_number: str | None = None, d
             if text and (item_re.search(text) or len(text) < 100):
                 outline.append({"level": level, "title": text})
 
-        return json.dumps({"ticker": ticker, "accessionNumber": accession_number, "outline": outline[:100]})
+        outline = outline[:100]
+        if not outline:
+            outline = [{"level": h.level, "title": h.title} for h in _fs.filing_item_headings(html)[:100]]
+        table_count = len(_re.findall(r'<table\b', html, _re.IGNORECASE))
+        return json.dumps({
+            "ticker": ticker,
+            "accessionNumber": resolved_accession,
+            "documentUrl": document_url,
+            "outline": outline,
+            "status": "OK" if outline else ("OUTLINE_NOT_PARSED" if table_count > 0 else "EMPTY"),
+            "tableCount": table_count,
+            "warnings": [{
+                "code": "TABLES_FOUND_OUTLINE_EMPTY",
+                "message": "Filing tables were detected but no section outline headings were parsed.",
+                "severity": "warning",
+            }] if not outline and table_count > 0 else [],
+        })
     except Exception as e:
-        return _mcp_failure("get_filing_outline", ErrorCode.PROVIDER_ERROR, str(e))
+        return _outline_read_failure(str(e))
 
 
 async def get_filing_section(ticker: str, section_name: str, document_url: str, context_chars: int = 3000) -> str:
@@ -6377,8 +6404,20 @@ async def extract_geographic_revenue(
             "warnings": [{"code": "INPUT_VALIDATION_ERROR", "message": "region is required", "severity": "error"}],
         })
 
+    # An explicit accession is the filing read: the figure, the evidence and the raw index all come from it, and a
+    # miss fails closed with no fallback to the latest filing (2.15.0, R4-ACC-GEO).
+    pinned = accession_number is not None and str(accession_number).strip() != ""
+    pinned_filing_form = None
+    if pinned:
+        resolved_filing, resolve_error = await _resolve_sec_filing(ticker, filing_type, accession_number)
+        if resolved_filing is None and _is_accession_not_found(resolve_error):
+            return _accession_not_found_envelope(resolve_error)
+        pinned_filing_form = str(
+            resolved_filing.get("filingType") if resolved_filing is not None else (resolve_error or {}).get("filingType") or ""
+        ).upper()
     payload = _safe_json_loads(await get_filing_data(
         ticker=ticker, fact_type=FilingFactType.geographic_revenue, region=region, filing_type=filing_type, period=period,
+        accession_number=accession_number if pinned else None,
     ))
     detail = str(detailLevel).lower()
     # The filing index is read for detailLevel raw only, as the Worker does (compact evidence comes from the payload).
@@ -6436,12 +6475,16 @@ async def extract_geographic_revenue(
     if str(filing_type or "").upper() == "10-K" and str(shaped["confidence"] or "").upper() == "NOT_DISCLOSED":
         evidence_filing_type = str(shaped["evidence"].get("filingType") or "").upper()
         maybe_20f = evidence_filing_type == "20-F"
-        if not maybe_20f and evidence_filing_type in ("", "10-K"):
+        if pinned:
+            # A pinned read stays pinned: the 20-F retry reads the same filing, and only when that filing is a 20-F (2.15.0).
+            maybe_20f = pinned_filing_form == "20-F"
+        elif not maybe_20f and evidence_filing_type in ("", "10-K"):
             maybe_20f = await _may_be_20f_filer(ticker)
         if maybe_20f:
             # Automatic 20-F fallback: retry extraction with 20-F filing type
             fallback_payload = _safe_json_loads(await get_filing_data(
                 ticker=ticker, fact_type=FilingFactType.geographic_revenue, region=region, filing_type="20-F", period=period,
+                accession_number=accession_number if pinned else None,
             ))
             fallback_idx = _safe_json_loads(await get_sec_filing_index(ticker, "20-F", period, accession_number))
             if fallback_payload.get("value") is not None:
@@ -8539,6 +8582,9 @@ async def query_sec_filing_index(
             accession_number=accession_number,
             detailLevel=detail,
         ))
+        # An explicit accession that is not among the company's recent filings fails closed here too (2.15.0, R4-ACC-QUERY).
+        if geo.get("ok") is False and _is_accession_not_found(geo.get("error")):
+            return _accession_not_found_envelope(geo["error"])
         evidence_obj = geo.get("evidence") if isinstance(geo.get("evidence"), dict) else {}
         evidence = [_shape_evidence(evidence_obj)] if evidence_obj else []
         status = "ANSWERED" if geo.get("value") is not None else _as_status(geo)

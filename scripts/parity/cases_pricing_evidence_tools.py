@@ -798,7 +798,6 @@ CASES += [
 # ═══════════════════════════════════════════════════════════════════════════════════════════════
 # BR-EVD-041 (2.15.0, R4B2_SPEC §3): a listing keeps the NEWEST `limit` keys, in ascending key order (the order callers
 # already expect), after paging through the whole listing. The Worker does this today; Python after its port.
-# TODO(python-mirror): flip each pinned case below to mode equal with expect=<its expect_ts>.
 # ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 import tempfile  # noqa: E402
@@ -845,10 +844,10 @@ return await m.evidenceStore.getEvidenceStore().list(args[1], args[2]);
 """
 
 
-def _list_case(name: str, py, js: str, keys: list[str], limit: int, today_py, target) -> Case:
+def _list_case(name: str, py, js: str, keys: list[str], limit: int, target) -> Case:
     return Case(name=name, ids=["BR-EVD-041"], py=lambda: py(keys, LIST_PREFIX, limit),
                 ts={"js": js, "args": [keys, LIST_PREFIX, limit], "isolate": True},
-                mode="pinned", decision="R4b-2", expect_py=today_py, expect_ts=target)
+                expect=target)
 
 
 CUT_HASH = "c" * 64
@@ -901,10 +900,10 @@ def _cut_day(i: int) -> str:
 
 CASES += [
     _list_case("evd.store.list_keeps_newest_limit_memory", _list_py_memory, _LIST_MEMORY_JS, LIST_KEYS, 3,
-               today_py=LIST_KEYS[:3], target=LIST_KEYS[-3:]),
+               target=LIST_KEYS[-3:]),
     # The Worker's R2 store pages with the cursor; Python's on-disk store lists its directory. Same newest three.
     _list_case("evd.store.list_keeps_newest_limit_r2_paged_vs_local_dir", _list_py_local_dir, _LIST_R2_JS, LIST_KEYS, 3,
-               today_py=LIST_KEYS[:3], target=LIST_KEYS[-3:]),
+               target=LIST_KEYS[-3:]),
     # A store under the cap is listed whole, in ascending order, in both runtimes.
     Case(name="evd.store.list_under_limit_is_whole_and_ascending", ids=["BR-EVD-041"],
          py=lambda: _list_py_memory(list(reversed(LIST_KEYS)), LIST_PREFIX, 10),
@@ -912,14 +911,12 @@ CASES += [
     # list_evidence_cuts reads at most 1,000 cut keys: with 1,001 stored, the newest cut is listed first.
     Case(name="evd.store.list_evidence_cuts_beyond_1000_keeps_the_newest", ids=["BR-EVD-041"], py=_many_cuts_py,
          ts={"js": _MANY_CUTS_JS, "args": [MANY_CUTS], "isolate": True},
-         select=lambda v: [c["cutoff"] for c in v.get("cuts") or []], mode="pinned", decision="R4b-2",
-         expect_py=[_cut_day(999), _cut_day(998)], expect_ts=[_cut_day(1000), _cut_day(999)]),
+         select=lambda v: [c["cutoff"] for c in v.get("cuts") or []],
+         expect=[_cut_day(1000), _cut_day(999)]),
     # A missing observation lists at most 400 stored days: with 401 stored, the newest 400 (the oldest day drops).
     Case(name="evd.store.observation_dates_beyond_400_keep_the_newest", ids=["BR-EVD-041"], py=_many_days_py,
-         ts={"js": _MANY_DAYS_JS, "args": [MANY_DAYS], "isolate": True}, select=_days_view, mode="pinned", decision="R4b-2",
-         expect_py={"status": "OBSERVATION_NOT_FOUND", "count": 400, "first": MANY_DAYS[0].split("/")[-1][:-5],
-                    "last": MANY_DAYS[399].split("/")[-1][:-5]},
-         expect_ts={"status": "OBSERVATION_NOT_FOUND", "count": 400, "first": MANY_DAYS[1].split("/")[-1][:-5],
+         ts={"js": _MANY_DAYS_JS, "args": [MANY_DAYS], "isolate": True}, select=_days_view,
+         expect={"status": "OBSERVATION_NOT_FOUND", "count": 400, "first": MANY_DAYS[1].split("/")[-1][:-5],
                     "last": MANY_DAYS[400].split("/")[-1][:-5]}),
 ]
 
