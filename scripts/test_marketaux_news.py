@@ -9,7 +9,6 @@ import os
 import sys
 import types
 import unittest
-from pathlib import Path
 from urllib.error import HTTPError
 from urllib.parse import parse_qs, urlparse
 from unittest.mock import AsyncMock, patch
@@ -18,6 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 import server as srv  # noqa: E402
+from scripts.source_text import worker_runtime_source  # noqa: E402
 
 
 def _run(coro):  # type: ignore[no-untyped-def]
@@ -327,9 +327,7 @@ class TestMarketauxPriorityRouting(unittest.TestCase):
         self.assertEqual(diagnostics["marketaux"]["status"], "OK")
 
     def test_worker_has_matching_bounded_fallback_contract(self):
-        worker_dir = Path(__file__).resolve().parents[1] / "worker" / "src"
-        # yahoo-finance.ts plus news.ts: the news code moved to news.ts in Phase 3
-        worker_source = (worker_dir / "yahoo-finance.ts").read_text(encoding="utf-8") + "\n" + (worker_dir / "news.ts").read_text(encoding="utf-8")
+        worker_source = worker_runtime_source()  # every Worker runtime module (scripts/source_text.py)
         self.assertIn('const MARKETAUX_MAX_ITEMS = 3;', worker_source)
         self.assertIn('const MARKETAUX_WIRE_DOMAINS = ["businesswire.com", "prnewswire.com", "globenewswire.com"]', worker_source)
         self.assertIn('api_token: "REDACTED"', worker_source)

@@ -4,25 +4,27 @@
 from __future__ import annotations
 
 from pathlib import Path
+import sys
 import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-WORKER_YAHOO = ROOT / "worker" / "src" / "yahoo-finance.ts"
+sys.path.append(str(ROOT / "scripts"))
+from source_text import definition_source, worker_runtime_source  # noqa: E402
+
 WORKER_RESPONSE = ROOT / "worker" / "src" / "response.ts"
 
 
 class TestWorkerOptionsSummaryEnvelope(unittest.TestCase):
     def setUp(self) -> None:
-        source = WORKER_YAHOO.read_text(encoding="utf-8")
-        start = source.index("export async function getOptionsSummary")
-        end = source.index("export async function listSecCompanyFilings", start)
-        self.summary_source = source[start:end]
+        # getOptionsSummary in whichever Worker module defines it (scripts/source_text.py).
+        self.summary_source = definition_source("worker", "getOptionsSummary")
 
     def test_failure_paths_are_typed_legacy_envelopes(self) -> None:
         self.assertIn("code: ErrorCode.NO_OPTIONS_DATA", self.summary_source)
         self.assertIn("code: ErrorCode.PROVIDER_ERROR", self.summary_source)
-        self.assertNotIn('JSON.stringify({ ticker, error:', self.summary_source)
+        # No Worker module may build an untyped options failure (wider than the old getOptionsSummary slice).
+        self.assertNotIn('JSON.stringify({ ticker, error:', worker_runtime_source())
 
     def test_dispatcher_promotes_legacy_failure_to_v2_not_ok_true(self) -> None:
         response_source = WORKER_RESPONSE.read_text(encoding="utf-8")

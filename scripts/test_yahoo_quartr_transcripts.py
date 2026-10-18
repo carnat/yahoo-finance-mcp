@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, patch
 
 import server as srv
 from yfmcp.tools import earnings as earnings_tools
+from scripts.source_text import definition_source, worker_runtime_source
 from yfmcp.clients import yahoo_transcripts as yahoo_client
 from yfmcp.clients.yahoo_transcripts import (
     YahooTranscriptResult,
@@ -553,8 +554,9 @@ class SecTranscriptValidationTests(unittest.TestCase):
 class WorkerParityTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.worker_source = (ROOT / "worker" / "src" / "yahoo-finance.ts").read_text(encoding="utf-8")
-        cls.worker_tools = (ROOT / "worker" / "src" / "tools.ts").read_text(encoding="utf-8")
+        # Every Worker runtime module (scripts/source_text.py), wherever the transcript code lives.
+        cls.worker_source = worker_runtime_source()
+        cls.worker_tools = worker_runtime_source()
         cls.worker_hash_contract = (ROOT / "worker" / "src" / "transcript-contract.ts").read_text(encoding="utf-8")
 
     def test_worker_uses_structured_yahoo_endpoint_and_validates_sec_content(self):
@@ -564,9 +566,7 @@ class WorkerParityTests(unittest.TestCase):
         self.assertIn("candidateDiagnostics", self.worker_source)
 
     def test_worker_validates_yahoo_identity_before_cache_and_success(self):
-        fetch_start = self.worker_source.index("async function fetchYahooQuartrTranscript(")
-        normalize_start = self.worker_source.index("async function normalizeYahooQuartrPayload(", fetch_start)
-        fetch_source = self.worker_source[fetch_start:normalize_start]
+        fetch_source = definition_source("worker", "fetchYahooQuartrTranscript")
         self.assertIn("validateYahooTranscriptPayloadIdentity", fetch_source)
         self.assertIn("assessYahooTranscriptPayloadCompleteness", fetch_source)
         self.assertIn('status: completeness.contentCompleteness === "PARTIAL" ? "INCOMPLETE_TRANSCRIPT"', fetch_source)
@@ -578,9 +578,7 @@ class WorkerParityTests(unittest.TestCase):
             fetch_source.index("await setProviderCache(cacheKey, payload"),
         )
 
-        attempt_start = self.worker_source.index("async function attemptYahooQuartrTranscript(")
-        attempt_end = self.worker_source.index("const SEC_TRANSCRIPT_MARKER_RE", attempt_start)
-        attempt_source = self.worker_source[attempt_start:attempt_end]
+        attempt_source = definition_source("worker", "attemptYahooQuartrTranscript")
         self.assertIn("validateYahooTranscriptPayloadIdentity", attempt_source)
         self.assertIn("assessYahooTranscriptPayloadCompleteness", attempt_source)
         self.assertIn('reasonCode: "YAHOO_METADATA_MISMATCH"', attempt_source)

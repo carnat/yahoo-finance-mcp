@@ -99,6 +99,9 @@ jobs:
       - name: MCP SDK public-API guard (no private access or class patching)
         run: python scripts/test_mcp_sdk_public_api.py
 
+      - name: Source-text guard (tests read runtime source through scripts/source_text.py)
+        run: python scripts/test_no_direct_source_reads.py
+
       - name: Deployed canary registry validation
         run: python scripts/test_deployed_canaries.py --validate-only
 

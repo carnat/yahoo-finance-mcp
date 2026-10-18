@@ -1,5 +1,9 @@
 import pathlib
+import sys
 import unittest
+
+sys.path.append(str(pathlib.Path(__file__).resolve().parent))
+from source_text import definition_source, source_between, worker_runtime_source  # noqa: E402
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -10,7 +14,7 @@ class TestWorkerTransportContract(unittest.TestCase):
     def setUpClass(cls):
         cls.mcp = (ROOT / "worker" / "src" / "mcp.ts").read_text(encoding="utf-8")
         cls.index = (ROOT / "worker" / "src" / "index.ts").read_text(encoding="utf-8")
-        cls.tools = (ROOT / "worker" / "src" / "tools.ts").read_text(encoding="utf-8")
+        cls.tools = worker_runtime_source()  # every Worker runtime module (scripts/source_text.py)
         cls.response = (ROOT / "worker" / "src" / "response.ts").read_text(encoding="utf-8")
         cls.stamp = (ROOT / "scripts" / "stamp_worker_build.py").read_text(encoding="utf-8")
 
@@ -25,17 +29,13 @@ class TestWorkerTransportContract(unittest.TestCase):
         self.assertIn("getBuildVersion()", self.mcp)
 
     def test_envelope_schema_matches_structured_response(self):
-        schema_start = self.tools.index("const ENVELOPE_V2_OUTPUT_SCHEMA")
-        schema_end = self.tools.index("const OUTPUT_SCHEMAS", schema_start)
-        schema = self.tools[schema_start:schema_end]
+        schema = definition_source("worker", "ENVELOPE_V2_OUTPUT_SCHEMA")
         for field in ('ok:', 'data:', 'meta:', 'error:'):
             self.assertIn(field, schema)
         self.assertIn('required: ["ok", "data", "meta", "error"]', schema)
 
     def test_dispatch_errors_are_stable_tool_errors(self):
-        call_start = self.tools.index("export async function callTool")
-        call_end = self.tools.index("export async function callVisibleTool", call_start)
-        body = self.tools[call_start:call_end]
+        body = source_between("worker", "export async function callTool(", "export async function callVisibleTool")
         for code in ("TICKER_NOT_FOUND", "RATE_LIMIT", "PROVIDER_TIMEOUT", "PROVIDER_ERROR"):
             self.assertIn(code, body)
         self.assertIn("retryable", body)

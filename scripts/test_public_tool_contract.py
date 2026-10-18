@@ -12,6 +12,7 @@ from scripts.public_tool_contract import (
     validate_python_schema_source,
     validate_worker_source_contract,
 )
+from scripts.source_text import python_runtime_source, worker_runtime_source
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -63,11 +64,12 @@ class TestPublicToolContract(unittest.TestCase):
             validate_live_tool_contract(tools)
 
     def test_worker_source_matches_live_contract(self) -> None:
-        source = (ROOT / "worker" / "src" / "tools.ts").read_text(encoding="utf-8")
+        source = worker_runtime_source()
         validate_worker_source_contract(source)
 
     def test_worker_source_rejects_generic_high_value_schema(self) -> None:
-        source = (ROOT / "worker" / "src" / "tools.ts").read_text(encoding="utf-8")
+        source = worker_runtime_source()
+        self.assertEqual(source.count("get_fund_profile: FUND_PROFILE_OUTPUT_SCHEMA,"), 1)
         source = source.replace(
             "get_fund_profile: FUND_PROFILE_OUTPUT_SCHEMA,",
             "get_fund_profile: SIMPLE_OBJECT_SCHEMA,",
@@ -77,11 +79,12 @@ class TestPublicToolContract(unittest.TestCase):
             validate_worker_source_contract(source)
 
     def test_python_schema_mirror_exposes_high_value_fields(self) -> None:
-        source = (ROOT / "yfmcp" / "schemas.py").read_text(encoding="utf-8")
+        source = python_runtime_source()
         validate_python_schema_source(source)
 
     def test_python_source_rejects_generic_high_value_schema(self) -> None:
-        source = (ROOT / "yfmcp" / "schemas.py").read_text(encoding="utf-8")
+        source = python_runtime_source()
+        self.assertEqual(source.count('"get_etf_info": _FUND_PROFILE_OUTPUT_SCHEMA,'), 1)
         source = source.replace(
             '"get_etf_info": _FUND_PROFILE_OUTPUT_SCHEMA,',
             '"get_etf_info": _SIMPLE_OUTPUT_SCHEMA,',

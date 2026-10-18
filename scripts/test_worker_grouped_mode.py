@@ -12,33 +12,34 @@ from __future__ import annotations
 import json
 import pathlib
 import re
+import sys
 import unittest
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from source_text import definition_source, python_runtime_source, source_between, worker_runtime_source  # noqa: E402
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 CATALOG = ROOT / "tool_catalog.json"
-TOOLS_TS = ROOT / "worker" / "src" / "tools.ts"
 MCP_TS = ROOT / "worker" / "src" / "mcp.ts"
 CATALOG_TS = ROOT / "worker" / "src" / "tool-catalog.ts"
-YAHOO_TS = ROOT / "worker" / "src" / "yahoo-finance.ts"
-NEWS_TS = ROOT / "worker" / "src" / "news.ts"
 DEPLOY_WORKFLOW = ROOT / ".github" / "workflows" / "deploy-worker.yml"
 CI_WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
-SERVER = ROOT / "server.py"
 
 
 class TestWorkerGroupedMode(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.catalog = json.loads(CATALOG.read_text(encoding="utf-8"))
-        cls.tools_ts = TOOLS_TS.read_text(encoding="utf-8")
+        # Every Worker / Python runtime module (scripts/source_text.py): markers are
+        # found wherever the code lives, and "not present" checks cover all modules.
+        cls.tools_ts = worker_runtime_source()
         cls.mcp_ts = MCP_TS.read_text(encoding="utf-8")
         cls.catalog_ts = CATALOG_TS.read_text(encoding="utf-8")
-        # yahoo-finance.ts plus news.ts: the news code moved to news.ts in Phase 3
-        cls.yahoo_ts = YAHOO_TS.read_text(encoding="utf-8") + "\n" + NEWS_TS.read_text(encoding="utf-8")
+        cls.yahoo_ts = worker_runtime_source()
         cls.deploy_workflow = DEPLOY_WORKFLOW.read_text(encoding="utf-8")
         cls.ci_workflow = CI_WORKFLOW.read_text(encoding="utf-8")
-        cls.server = SERVER.read_text(encoding="utf-8")
+        cls.server = python_runtime_source()
 
     def test_catalog_has_expected_group_surface(self) -> None:
         groups = self.catalog["groups"]
@@ -97,9 +98,7 @@ class TestWorkerGroupedMode(unittest.TestCase):
         self.assertIn("export function isGroupedMode()", self.tools_ts)
         self.assertIn("const GROUPED_TOOLS", self.tools_ts)
         self.assertIn("const GROUPED_ACTIONS", self.tools_ts)
-        call_start = self.tools_ts.index("export async function callVisibleTool")
-        call_end = self.tools_ts.index("async function _dispatchTool", call_start)
-        body = self.tools_ts[call_start:call_end]
+        body = source_between("worker", "export async function callVisibleTool", "async function _dispatchTool")
         self.assertIn("validateGroupedActionParams(action, actionParams)", body)
         self.assertIn("if (validationFailure) return { text: validationFailure }", body)
         self.assertIn("return callToolResult(action, actionParams)", body)
@@ -123,9 +122,7 @@ class TestWorkerGroupedMode(unittest.TestCase):
         self.assertIn("annotations: annotationsForTool(group.name)", self.tools_ts)
 
     def test_grouped_validation_is_action_specific_and_recoverable(self) -> None:
-        validation_start = self.tools_ts.index("function validateGroupedActionParams")
-        validation_end = self.tools_ts.index("function legacyToolFailure", validation_start)
-        body = self.tools_ts[validation_start:validation_end]
+        body = definition_source("worker", "validateGroupedActionParams")
         self.assertIn("TOOLS.find((tool) => tool.name === action)", body)
         for field in (
             "missingParams",
@@ -137,24 +134,18 @@ class TestWorkerGroupedMode(unittest.TestCase):
             self.assertIn(field, body)
 
     def test_grouped_validation_leaves_semantic_enums_to_handlers(self) -> None:
-        validation_start = self.tools_ts.index("function matchesParamSchema")
-        validation_end = self.tools_ts.index("function validateGroupedActionParams", validation_start)
-        body = self.tools_ts[validation_start:validation_end]
+        body = definition_source("worker", "matchesParamSchema")
         self.assertNotIn("schema.enum", body)
         self.assertIn("schema.type", body)
         self.assertIn('"UNSUPPORTED_QUERY_TYPE"', self.yahoo_ts)
 
     def test_legacy_text_errors_are_not_wrapped_as_success(self) -> None:
-        call_start = self.tools_ts.index("export async function callTool")
-        call_end = self.tools_ts.index("export async function callVisibleTool", call_start)
-        body = self.tools_ts[call_start:call_end]
+        body = source_between("worker", "export async function callTool(", "export async function callVisibleTool")
         self.assertIn("legacyToolFailure(raw)", body)
         self.assertIn("return mcpFailureResult(name, legacyFailure.code, legacyFailure.message", body)
 
     def test_company_news_rejects_empty_symbols_before_collection(self) -> None:
-        start = self.yahoo_ts.index("export async function getCompanyNews")
-        end = self.yahoo_ts.index("export async function searchCompanyNews", start)
-        body = self.yahoo_ts[start:end]
+        body = definition_source("worker", "getCompanyNews")
         guard = body.index('code: "INPUT_VALIDATION_ERROR"')
         collect = body.index("collectCompanyEvents(")
         self.assertLess(guard, collect)

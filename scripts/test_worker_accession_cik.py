@@ -39,6 +39,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.parity import cases_accession as ca  # noqa: E402
+from scripts.source_text import worker_runtime_source  # noqa: E402
 
 CATALOG = json.loads((ROOT / "tool_catalog.json").read_text(encoding="utf-8"))
 GROUP_OF = {action: group for group, spec in CATALOG["groups"].items() for action in spec["actions"]}
@@ -245,7 +246,8 @@ class TestTickerCikFixtures(unittest.TestCase):
         for path in (WORKER / "src").glob("*.ts"):
             with self.subTest(path=path.name):
                 self.assertNotIn("SMOKE_TICKER_CIK", path.read_text(encoding="utf-8"))
-        source = (WORKER / "src" / "yahoo-finance.ts").read_text(encoding="utf-8")
+        # Every Worker runtime module (scripts/source_text.py): no module may carry a fixture entry.
+        source = worker_runtime_source()
         self.assertRegex(source, r"export function setTickerCikFixturesForTests\(")
         # Production holds no entries: the module-level map starts empty.
         self.assertRegex(source, r"let tickerCikFixtures: ReadonlyMap<string, string> = new Map\(\);")
