@@ -104,7 +104,7 @@ R-news ships in three parts, in this order:
      - coverage reads PARTIAL, never NOT_FOUND;
      - an explicit request for it gets the same reporting.
    - **Planner decision on the status label:** reuse the existing `SOURCE_UNCONFIGURED` status and `SOURCE_UNAVAILABLE` warning, so no new status value is added (rule P4).
-   - Changing the default sources, for example adding `sec`, remains a separate owner decision. It is not part of this release.
+   - **Default sources (owner, 2026-10-18):** add `sec` to the `get_company_news` defaults. This ships in R-news, after the registry exists, and the default list lives in the registry.
 3. **The Q3i news repairs** from §2, each landing in its own adapter or in the shared pipeline.
 
 The pinned harness cases flip to `equal` as each fix lands. Preserve-document rows get a line in `docs/provider-runtime-guidance.md`.
