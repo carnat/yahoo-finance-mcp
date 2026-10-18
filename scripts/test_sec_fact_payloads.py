@@ -60,6 +60,7 @@ sys.path.insert(0, str(ROOT))
 
 
 import server as srv  # noqa: E402
+from scripts.source_text import definition_source  # noqa: E402
 from yfmcp.clients.edgar import EdgarError  # noqa: E402
 from yfmcp.parsing.extractors import extract_geo_revenue_from_html  # noqa: E402
 
@@ -1029,7 +1030,7 @@ class TestGeoTableReaderAgrees(unittest.TestCase):
 
 
 class TestAsStatusAgrees(unittest.TestCase):
-    """_as_status is the Worker's normalizeStatus (not exported: its source is sliced from yahoo-finance.ts and run in Node)."""
+    """_as_status is the Worker's normalizeStatus (not exported: its definition is located with scripts/source_text.py, wherever it lives, and run in Node)."""
 
     PAYLOADS = [
         {}, {"status": "FILING_NOT_FOUND_TRY_OTHER_TYPE"}, {"code": "filing_text_not_available"}, {"status": "EXTRACTION_FAILED"},
@@ -1045,9 +1046,7 @@ class TestAsStatusAgrees(unittest.TestCase):
 
     def test_every_branch(self) -> None:
         node = _node()
-        source = (WORKER / "src" / "yahoo-finance.ts").read_text(encoding="utf-8")
-        start = source.index("function normalizeStatus(")
-        body = source[start:source.index("\n}\n", start) + 3]
+        body = definition_source("worker", "normalizeStatus")
         js = subprocess.run([str(ESBUILD), "--loader=ts", "--log-level=error"], input=body, capture_output=True, text=True, check=True, timeout=60).stdout
         script = js + "\nconst cases = JSON.parse(process.argv[1]);\nconsole.log(JSON.stringify(cases.map(normalizeStatus)));\n"
         out = subprocess.run([node, "--input-type=module", "-e", script, json.dumps(self.PAYLOADS)], capture_output=True, text=True, check=True, timeout=60)

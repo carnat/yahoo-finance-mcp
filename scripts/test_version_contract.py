@@ -16,6 +16,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from scripts import stamp_worker_build as stamp  # noqa: E402
+from scripts.source_text import python_runtime_source  # noqa: E402
 from yfmcp.version import RELEASE_VERSION  # noqa: E402
 
 
@@ -25,8 +26,8 @@ class TestVersionContract(unittest.TestCase):
         self.assertIn("from yfmcp.build_info import BUILD_VERSION", app_source)
         self.assertIn("version=BUILD_VERSION", app_source)
         self.assertIn("yfinance_server = create_server(", app_source)
-        server_source = (ROOT / "server.py").read_text(encoding="utf-8")
-        self.assertIn("grouped = create_server(", server_source)
+        # The grouped server is built in whichever Python runtime module holds it (scripts/source_text.py).
+        self.assertIn("grouped = create_server(", python_runtime_source())
 
     def test_committed_version_sources_match_canonical_release(self) -> None:
         pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))

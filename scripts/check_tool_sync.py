@@ -16,15 +16,27 @@ try:
         validate_python_schema_source,
         validate_worker_source_contract,
     )
+    from scripts.source_text import (
+        WORKER,
+        module_defining,
+        python_runtime_files,
+        python_runtime_source,
+        worker_runtime_source,
+    )
 except ModuleNotFoundError:  # direct ``python scripts/check_tool_sync.py`` execution
     from public_tool_contract import (  # type: ignore[no-redef]
         validate_python_schema_source,
         validate_worker_source_contract,
     )
+    from source_text import (  # type: ignore[no-redef]
+        WORKER,
+        module_defining,
+        python_runtime_files,
+        python_runtime_source,
+        worker_runtime_source,
+    )
 
 ROOT = Path(__file__).resolve().parent.parent
-SERVER_PY = ROOT / "server.py"
-TOOLS_TS = ROOT / "worker" / "src" / "tools.ts"
 TOOL_CATALOG = ROOT / "tool_catalog.json"
 TOOL_CATALOG_TS = ROOT / "worker" / "src" / "tool-catalog.ts"
 
@@ -129,23 +141,28 @@ PRIVATE_ALIASES = {
 def get_python_tools() -> set:
     """Extract tool names from @yfinance_server.tool(name=...) decorators.
 
-    Scans server.py and all yfmcp/tools/*.py domain modules so the check
-    remains correct once handlers are progressively moved out of server.py.
+    Scans every Python runtime module (scripts/source_text.py: server.py,
+    tool_groups.py, yfmcp/**) so the check stays correct as handlers move.
     """
-    sources = [SERVER_PY]
-    tools_dir = ROOT / "yfmcp" / "tools"
-    if tools_dir.is_dir():
-        sources.extend(sorted(tools_dir.glob("*.py")))
     names = set()
-    for path in sources:
+    for path in python_runtime_files():
         for match in re.finditer(r'@yfinance_server\.tool\(\s*name\s*=\s*"([^"]+)"', path.read_text(encoding="utf-8")):
             names.add(match.group(1))
     return names
 
 
+def worker_manifest_source() -> str:
+    """The Worker module that defines the ``TOOLS`` manifest (tools.ts today), wherever it lives.
+
+    Scoped to that one module on purpose: ``name: "..."`` also matches unrelated
+    fields (news categories, package names) in other Worker modules.
+    """
+    return module_defining(WORKER, "TOOLS")[1]
+
+
 def get_worker_tools() -> set:
-    """Extract tool names from the TOOLS array in tools.ts."""
-    source = TOOLS_TS.read_text(encoding="utf-8")
+    """Extract tool names from the module that defines the TOOLS array."""
+    source = worker_manifest_source()
     names = set()
     for match in re.finditer(r'name:\s*"([^"]+)"', source):
         names.add(match.group(1))
@@ -167,8 +184,8 @@ def validate_alias_targets(aliases: dict[str, str], tools: set[str], source_name
 
 
 def main():
-    py_source = SERVER_PY.read_text(encoding="utf-8")
-    ts_source = TOOLS_TS.read_text(encoding="utf-8")
+    py_source = python_runtime_source()
+    ts_source = worker_runtime_source()
     py_tools = get_python_tools()
     ts_tools = get_worker_tools()
     py_aliases = parse_alias_pairs(py_source)
@@ -259,7 +276,7 @@ def main():
 
     try:
         validate_worker_source_contract(ts_source)
-        validate_python_schema_source((ROOT / "yfmcp" / "schemas.py").read_text(encoding="utf-8"))
+        validate_python_schema_source(python_runtime_source())
     except AssertionError as exc:
         print(f"ERROR: LLM-facing tool contract mismatch: {exc}", file=sys.stderr)
         return 1

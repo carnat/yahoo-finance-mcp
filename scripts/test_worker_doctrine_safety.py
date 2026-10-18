@@ -16,16 +16,47 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-TOOLS_TS = ROOT / "worker" / "src" / "tools.ts"
-YAHOO_FINANCE_TS = ROOT / "worker" / "src" / "yahoo-finance.ts"
-NEWS_TS = ROOT / "worker" / "src" / "news.ts"
+
+_SCRIPTS_DIR = str(ROOT / "scripts")
+if _SCRIPTS_DIR not in sys.path:
+    sys.path.append(_SCRIPTS_DIR)
+from source_text import ROOT as _SRC_ROOT, find_definition, module_sources, python_runtime_source, worker_runtime_source  # noqa: E402
+
 DEPLOYED_DISCOVERY = ROOT / "scripts" / "test_deployed_discovery.py"
 DEPLOYED_CANARIES = ROOT / "scripts" / "test_deployed_canaries.py"
 
 
 def _yahoo_worker_source() -> str:
-    """yahoo-finance.ts plus news.ts (the news code moved there in Phase 3; the combined text is what the file held before)."""
-    return YAHOO_FINANCE_TS.read_text(encoding="utf-8") + "\n" + NEWS_TS.read_text(encoding="utf-8")
+    """Every Worker runtime module (scripts/source_text.py), so the checks survive code moves between modules."""
+    return worker_runtime_source()
+
+
+def _code_mentions(source: str, needle: str) -> list[str]:
+    """Identifiers and non-docstring string literals in Python ``source`` that contain ``needle``."""
+    import ast
+
+    tree = ast.parse(source.removeprefix("\ufeff"))
+    docstrings = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)) and node.body:
+            first = node.body[0]
+            if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant):
+                docstrings.add(id(first.value))
+    hits = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in docstrings:
+            if needle in node.value:
+                hits.append(node.value)
+        elif isinstance(node, ast.Name) and needle in node.id:
+            hits.append(node.id)
+        elif isinstance(node, ast.Attribute) and needle in node.attr:
+            hits.append(node.attr)
+    return hits
+
+
+def _tools_source() -> str:
+    """Every Worker runtime module: "must contain" markers are found wherever the code lives, "must not contain" covers all."""
+    return worker_runtime_source()
 
 
 def _node_json(source: str) -> dict:
@@ -175,7 +206,7 @@ class TestWorkerDoctrineSafety(unittest.TestCase):
         self.assertEqual(payload["data"]["evidence"], payload["data"]["sourceEvidence"])
 
     def test_removed_alias_names_are_not_routed(self) -> None:
-        tools = TOOLS_TS.read_text(encoding="utf-8")
+        tools = _tools_source()
         self.assertNotIn("TOOL_ALIASES", tools)
         self.assertNotIn("DEPRECATED_ALIAS_NAMES", tools)
         self.assertNotIn('name: "get_historical_stock_prices"', tools)
@@ -190,7 +221,7 @@ class TestWorkerDoctrineSafety(unittest.TestCase):
         self.assertIn("privacyScope", canaries)
 
     def test_public_diagnostics_omit_internal_contract_maps(self) -> None:
-        tools = TOOLS_TS.read_text(encoding="utf-8")
+        tools = _tools_source()
         self.assertIn("ENVELOPE_SCHEMA_VERSION", tools)
         self.assertIn("schemaHash", tools)
         for field in ("responseFieldContract", "hiddenAliases", "hiddenAliasVisibility", "structuredFactProviderConfigured"):
@@ -212,7 +243,7 @@ class TestWorkerDoctrineSafety(unittest.TestCase):
         self.assertIn("payloadDecisionGrade", worker)
         self.assertIn("APPROVED_IR_PAGE_RESOLVED", worker)
         self.assertIn("irPageEvidence", worker)
-        tools = TOOLS_TS.read_text(encoding="utf-8")
+        tools = _tools_source()
         self.assertIn('capabilityStatus: "ACTIVE"', tools)
         self.assertIn('doctrineUse: "ALLOWED"', tools)
         self.assertIn("coverageStatus=SEC_EX99_RESOLVED", tools)
@@ -220,10 +251,7 @@ class TestWorkerDoctrineSafety(unittest.TestCase):
         self.assertNotIn('failureMode: "SEC_EX99_LINKAGE_INCOMPLETE"', tools)
 
     def test_press_release_ex99_resolver_uses_index_exhibits(self) -> None:
-        worker = _yahoo_worker_source()
-        start = worker.index("async function resolveEx991Url")
-        end = worker.index("/** Parse inline XBRL", start)
-        resolver = worker[start:end]
+        resolver = find_definition("worker", "resolveEx991Url").text
         self.assertIn("edgarListExhibitsFromIndex(indexUrl)", resolver)
         self.assertIn('type.startsWith("EX-99")', resolver)
         self.assertIn("PRESS RELEASE|EARNINGS RELEASE|RESULTS RELEASE", resolver)
@@ -239,7 +267,7 @@ class TestWorkerDoctrineSafety(unittest.TestCase):
 
     def test_sec_filing_fact_preserves_xbrl_context_metadata(self) -> None:
         worker = _yahoo_worker_source()
-        tools = TOOLS_TS.read_text(encoding="utf-8")
+        tools = _tools_source()
         self.assertIn("xbrlContext: payload.xbrlContext ?? null", worker)
         self.assertIn("XBRL_CONTEXT_METADATA_UNAVAILABLE", worker)
         self.assertIn("function buildXbrlFactContext", worker)
@@ -258,7 +286,7 @@ class TestWorkerDoctrineSafety(unittest.TestCase):
         self.assertNotIn('failureMode: "XBRL_CONTEXT_METADATA_UNDER_VERIFICATION"', tools)
 
     def test_query_sec_filing_index_no_longer_quarantined(self) -> None:
-        tools = TOOLS_TS.read_text(encoding="utf-8")
+        tools = _tools_source()
         smoke = DEPLOYED_DISCOVERY.read_text(encoding="utf-8")
         self.assertNotIn("ENVELOPE_SEMANTICS_UNDER_VERIFICATION", tools)
         self.assertNotIn('"query_sec_filing_index": ("DEGRADED", "VERIFY_ONLY")', smoke)
@@ -285,7 +313,7 @@ class TestWorkerDoctrineSafety(unittest.TestCase):
             self.assertIn(field, worker)
 
     def test_tool_descriptions_do_not_overstate_degraded_tools(self) -> None:
-        tools = TOOLS_TS.read_text(encoding="utf-8")
+        tools = _tools_source()
         self.assertIn("unverified Markdown from a degraded Worker HTML fallback", tools)
         self.assertIn("Gate use is payload-level", tools)
 
@@ -301,8 +329,8 @@ class TestWorkerDoctrineSafety(unittest.TestCase):
             {"ALLOWED": "RELIABLE", "VERIFY_ONLY": "VERIFY_BEFORE_USE", "DIAGNOSTICS_ONLY": "DIAGNOSTIC", "BLOCKED": "UNRELIABLE"},
         )
         # The three tools of the Worker's status table, with the class their doctrineUse maps to.
-        tools = TOOLS_TS.read_text(encoding="utf-8")
-        table = tools.split("const TOOL_DOCTRINE_STATUS", 1)[1].split("\n};", 1)[0]
+        tools = _tools_source()
+        table = find_definition("worker", "TOOL_DOCTRINE_STATUS").text
         worker_status = {
             name: RELIABILITY_CLASS_BY_DOCTRINE_USE[use]
             for name, use in re.findall(r'(\w+): \{[^{}]*?doctrineUse: "(\w+)"', table)
@@ -312,11 +340,19 @@ class TestWorkerDoctrineSafety(unittest.TestCase):
         self.assertIn('doctrineUse: "ALLOWED",\n    reliabilityClass: reliabilityClassFor("ALLOWED")', worker)
         self.assertIn('doctrineUse: "BLOCKED",\n    reliabilityClass: reliabilityClassFor("BLOCKED")', worker)
         self.assertIn("reliabilityClass: reliabilityClassFor(doctrineUse)", tools)
-        # get_company_press_releases moved from server.py to yfmcp/tools/news.py (Phase 3).
-        python = (ROOT / "server.py").read_text(encoding="utf-8") + "\n" + (ROOT / "yfmcp" / "tools" / "news.py").read_text(encoding="utf-8")
+        # Every Python runtime module, wherever get_company_press_releases and the section tool live.
+        python = python_runtime_source()
         self.assertIn('"reliabilityClass": _TOOL_RELIABILITY_CLASS["get_company_press_releases"]', python)
         self.assertIn('"reliabilityClass": _TOOL_RELIABILITY_CLASS["get_sec_filing_section_markdown"]', python)
-        self.assertNotIn("doctrineUse", python)  # Python never emitted it and still does not
+        # Python never emitted doctrineUse and still does not. No Python runtime module carries it in code
+        # (string literal or identifier); only yfmcp/deprecations.py may name it, in comments and docstrings
+        # that document the N1 mapping. Every other module must not mention it at all (the pre-helper check
+        # covered server.py and yfmcp/tools/news.py only).
+        for path, text in module_sources("python").items():
+            rel = path.relative_to(_SRC_ROOT).as_posix()
+            self.assertEqual(_code_mentions(text, "doctrineUse"), [], rel)
+            if rel != "yfmcp/deprecations.py":
+                self.assertNotIn("doctrineUse", text, rel)
 
     def test_deprecated_field_notices_stay_out_of_data_and_the_legacy_envelope(self) -> None:
         payload = _node_json(

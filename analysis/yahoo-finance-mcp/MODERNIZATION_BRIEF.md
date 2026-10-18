@@ -358,7 +358,8 @@ Each R-release is a set of **separately released** behaviour changes that must b
     - **Q3i triage: APPROVED 2026-10-18** (`Q3I_TRIAGE.md`; owner: "agree, add it to R-news and approve Q3i triage").
       - 152 rows: 80 repair, 28 preserve align-free, 14 preserve document, 30 planner calls (decided in §2 of that file).
       - Releases: R4b before Phase 4; R-news (provider adapters, then the source registry and the `NEWS_SOURCES_DISABLED` off switch, then the news repairs); R5-shared (the BR-ENV-001 confidence default); and R5-‹unit›.
-    - **Remaining in R4:** R4b. Implement the R4b rows of `Q3I_TRIAGE.md` §3.
+    - **R4b-1 (2.14.0, #289) and R4b-2 (2.15.0, #290):** merged, deployed (runs #268 and the 2.15.0 deploy, canaries green) and live-verified on 2026-10-18.
+    - **R4 is complete as of 2026-10-18.**
   - Q3a: the Worker honours exact `accession_number` with fail-closed semantics.
   - Q3b: central ticker and accession validation in both runtimes, on every relevant action, including the Python paths that skip it.
   - Q3c + Q12: the per-tool ticker caps from the §7 Q12 table, advertised as schema `maxItems` and rejected with `BATCH_LIMIT_EXCEEDED` in both runtimes. Measure `get_market_snapshot` first and set its cap. Correct the stale comment at `yahoo-finance.ts:58–64`.
@@ -439,11 +440,11 @@ Each R-release is a set of **separately released** behaviour changes that must b
   - Route the Python SEC filing tools through `yfmcp/clients/edgar.py`. This changes the User-Agent and adds caching; Q3a in R4 already aligned the accession semantics.
 - **Entry criteria:**
   - [x] Phase 3 exit criteria are met; `PLAYBOOK.md` is written. *(The regenerated brief is approved with §8.)*
-  - [ ] Phase 1 is released and live-verified.
-  - [ ] **Source-text test cleanup is merged** (pilot lesson 2): no test reads `server.py` or `yahoo-finance.ts` text directly; they read through one helper that covers all domain modules, or check behaviour.
+  - [x] Phase 1 is released and live-verified.
+  - [x] **Source-text test cleanup is merged** (pilot lesson 2): no test reads `server.py` or `yahoo-finance.ts` text directly; they read through one helper that covers all domain modules, or check behaviour.
   - [ ] Each hub unit's spec lists its scope from the topology (`#shared` plus the client functions), as in `phase3_news_region.json`.
-  - [ ] R4 is released.
-  - [ ] **The telemetry baseline window is captured** (Q10).
+  - [x] R4 is released (2.11.1–2.15.0, complete 2026-10-18).
+  - [ ] **The telemetry baseline window is captured** (Q10). It runs from 2026-10-17, and the first eligible day is 2026-10-24. Exclude the preview-canary requests (Q3i finding F6).
 - **Exit criteria:**
   - [ ] No `#shared` region remains.
   - [ ] Zero SEC fetches happen outside the client in either runtime (grep).

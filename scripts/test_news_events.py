@@ -13,16 +13,21 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 
-def _open_worker_yahoo_news(root):
-    """File-like over yahoo-finance.ts plus news.ts (the news code moved to news.ts in Phase 3; the combined text is unchanged)."""
-    import io
-    parts = []
-    for name in ("yahoo-finance.ts", "news.ts"):
-        with open(os.path.join(root, "worker", "src", name), encoding="utf-8") as handle:
-            parts.append(handle.read())
-    return io.StringIO("\n".join(parts))
-
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+from source_text import ROOT as _SRC_ROOT, module_sources, worker_runtime_source  # noqa: E402
+
+
+def _open_worker_yahoo_news(root):
+    """File-like over every Worker runtime module (scripts/source_text.py), wherever the news code lives."""
+    import io
+    return io.StringIO(worker_runtime_source())
+
+
+def _open_worker_tools(root):
+    """File-like over every Worker runtime module: tool definitions are found wherever they live."""
+    import io
+    return io.StringIO(worker_runtime_source())
 
 
 import server as srv  # noqa: E402
@@ -1533,11 +1538,17 @@ class TestPhase6BYahooFinanceSources(unittest.TestCase):
 
     def test_no_private_terms_in_public_descriptions(self):
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        with open(os.path.join(root, "server.py"), encoding="utf-8") as f:
-            server_text = f.read()
-        with open(os.path.join(root, "yfmcp", "tools", "news.py"), encoding="utf-8") as f:
-            server_text += "\n" + f.read()  # the news tools moved from server.py to yfmcp/tools/news.py (Phase 3)
-        with open(os.path.join(root, "worker", "src", "tools.ts"), encoding="utf-8") as f:
+        # Every Python runtime module is checked in full, wherever the news tools live. The two internal
+        # modules below name the doctrine field they deprecate or document; they hold no tool descriptions.
+        # Before the helper this check covered server.py and yfmcp/tools/news.py only.
+        internal_doctrine_vocabulary = {"yfmcp/deprecations.py", "yfmcp/evidence.py"}
+        python_modules = {
+            path.relative_to(_SRC_ROOT).as_posix(): text for path, text in module_sources("python").items()
+        }
+        server_text = "\n".join(
+            text for rel, text in python_modules.items() if rel not in internal_doctrine_vocabulary
+        )
+        with _open_worker_tools(root) as f:
             tools_text = f.read()
         private_terms = ("Commander", "portfolio state", "doctrine", "DC-", "TPS", "PCCE")
         names = [
@@ -1557,6 +1568,11 @@ class TestPhase6BYahooFinanceSources(unittest.TestCase):
         blob = server_text + "\n" + public_descriptions
         for term in private_terms:
             self.assertNotIn(term, blob)
+        # The exempt modules may name the deprecated doctrine field, but no other private term.
+        for rel in internal_doctrine_vocabulary:
+            for term in private_terms:
+                if term != "doctrine":
+                    self.assertNotIn(term, python_modules[rel], rel)
 
 
 _MOCK_RSS_RELEVANT = """\
@@ -2312,7 +2328,7 @@ class TestGlobeNewswireRSS(unittest.TestCase):
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         with _open_worker_yahoo_news(root) as f:
             worker_text = f.read()
-        with open(os.path.join(root, "worker", "src", "tools.ts"), encoding="utf-8") as f:
+        with _open_worker_tools(root) as f:
             tools_text = f.read()
 
         self.assertIn("const GLOBENEWSWIRE_RSS_FEEDS", worker_text)
@@ -2436,7 +2452,7 @@ class TestGlobeNewswireRSS(unittest.TestCase):
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         with _open_worker_yahoo_news(root) as f:
             worker_text = f.read()
-        with open(os.path.join(root, "worker", "src", "tools.ts"), encoding="utf-8") as f:
+        with _open_worker_tools(root) as f:
             tools_text = f.read()
 
         self.assertIn("function verifyCoverageFailureMode", worker_text)

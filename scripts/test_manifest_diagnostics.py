@@ -13,6 +13,8 @@ import sys
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+from source_text import PYTHON, module_sources, worker_runtime_source  # noqa: E402
 
 os.environ["MCP_ENVELOPE_V2"] = "true"
 
@@ -225,16 +227,8 @@ class TestQuoteFreshnessClassifier(unittest.TestCase):
         )
 
     def test_worker_uses_quote_timestamp_and_market_state(self):
-        worker_source = (
-            os.path.join(
-                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                "worker",
-                "src",
-                "yahoo-finance.ts",
-            )
-        )
-        with open(worker_source, encoding="utf-8") as handle:
-            source = handle.read()
+        # Every Worker runtime module (scripts/source_text.py), wherever the quote code lives.
+        source = worker_runtime_source()
         self.assertIn("function classifyQuoteFreshness(", source)
         self.assertIn("quoteTimestamp,\n    retrievedAt,\n    marketOpen,", source)
         self.assertNotIn("classifyFreshness(dataDate, retrievedAt)", source)
@@ -520,35 +514,22 @@ class TestPublicWording(unittest.TestCase):
         self.srv = _reload_server()
 
     def _get_canonical_tool_names(self):
-        import glob
         import re
-        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        sources = [os.path.join(root, "server.py")]
-        tools_dir = os.path.join(root, "yfmcp", "tools")
-        if os.path.isdir(tools_dir):
-            sources.extend(sorted(glob.glob(os.path.join(tools_dir, "*.py"))))
+        # Every Python runtime module (scripts/source_text.py), wherever the tools are registered.
         names = set()
-        for path in sources:
-            with open(path, encoding="utf-8") as fh:
-                names.update(
-                    m.group(1)
-                    for m in re.finditer(r'@yfinance_server\.tool\(\s*name\s*=\s*"([^"]+)"', fh.read())
-                )
+        for source in module_sources(PYTHON).values():
+            names.update(
+                m.group(1)
+                for m in re.finditer(r'@yfinance_server\.tool\(\s*name\s*=\s*"([^"]+)"', source)
+            )
         return names
 
     def _get_tool_descriptions(self):
         """Extract all tool descriptions from @yfinance_server.tool decorators."""
-        import glob
         import re
-        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        sources = [os.path.join(root, "server.py")]
-        tools_dir = os.path.join(root, "yfmcp", "tools")
-        if os.path.isdir(tools_dir):
-            sources.extend(sorted(glob.glob(os.path.join(tools_dir, "*.py"))))
+        # Every Python runtime module (scripts/source_text.py), wherever the tools are registered.
         descs = []
-        for path in sources:
-            with open(path, encoding="utf-8") as fh:
-                source = fh.read()
+        for source in module_sources(PYTHON).values():
             descs += re.findall(r'description\s*=\s*"""(.*?)"""', source, re.DOTALL)
             descs += re.findall(r'description\s*=\s*"([^"]+)"', source)
         return descs
@@ -574,20 +555,14 @@ class TestToolRegistration(unittest.TestCase):
         self.srv = _reload_server()
 
     def _get_registered_tool_names(self):
-        import glob
         import re
-        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        sources = [os.path.join(root, "server.py")]
-        tools_dir = os.path.join(root, "yfmcp", "tools")
-        if os.path.isdir(tools_dir):
-            sources.extend(sorted(glob.glob(os.path.join(tools_dir, "*.py"))))
+        # Every Python runtime module (scripts/source_text.py), wherever the tools are registered.
         names = set()
-        for path in sources:
-            with open(path, encoding="utf-8") as fh:
-                names.update(
-                    m.group(1)
-                    for m in re.finditer(r'@yfinance_server\.tool\(\s*name\s*=\s*"([^"]+)"', fh.read())
-                )
+        for source in module_sources(PYTHON).values():
+            names.update(
+                m.group(1)
+                for m in re.finditer(r'@yfinance_server\.tool\(\s*name\s*=\s*"([^"]+)"', source)
+            )
         return names
 
     def test_duplicate_tools_retired(self):

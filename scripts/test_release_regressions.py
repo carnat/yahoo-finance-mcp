@@ -37,6 +37,7 @@ ROOT = Path(__file__).resolve().parents[1]
 WORKER = ROOT / "worker"
 ESBUILD = WORKER / "node_modules" / ".bin" / "esbuild"
 sys.path.insert(0, str(ROOT))
+from scripts.source_text import python_runtime_source, worker_runtime_source  # noqa: E402
 
 REQUESTED = "0001193125-26-999999"
 
@@ -185,20 +186,18 @@ class TestSourceContracts(unittest.TestCase):
     """Wiring that needs every news provider to exercise end to end."""
 
     def test_event_verification_matches_before_the_display_cap(self) -> None:
-        # yahoo-finance.ts plus news.ts: the news code moved to news.ts in Phase 3
-        ts = (WORKER / "src" / "yahoo-finance.ts").read_text(encoding="utf-8") + "\n" + (WORKER / "src" / "news.ts").read_text(encoding="utf-8")
+        # Every runtime module of each runtime (scripts/source_text.py), wherever the news code lives.
+        ts = worker_runtime_source()
         self.assertRegex(ts, r"collectCompanyEvents\(ticker, \{[^}]*keepAll: true")
         self.assertIn("keepAll ? allDeduped : allDeduped.slice(0, safeMax)", ts)
-        # The news collectors moved from server.py to yfmcp/tools/news.py (Phase 3).
-        py = (ROOT / "server.py").read_text(encoding="utf-8") + "\n" + (ROOT / "yfmcp" / "tools" / "news.py").read_text(encoding="utf-8")
+        py = python_runtime_source()
         self.assertRegex(py, r"keep_all=True")
         self.assertRegex(py, r"if not keep_all:\s*\n\s*deduped = deduped\[:max_cap\]")
 
     def test_options_flow_fields_name_what_they_measure(self) -> None:
-        for path in (WORKER / "src" / "yahoo-finance.ts", ROOT / "server.py"):
-            text = path.read_text(encoding="utf-8")
+        for runtime, text in (("worker", worker_runtime_source()), ("python", python_runtime_source())):
             for field in ("ivVsRealizedRangePct", "putVolPer1PctStockAdv", "fieldNotes"):
-                self.assertIn(field, text, f"{field} missing from {path.name}")
+                self.assertIn(field, text, f"{field} missing from the {runtime} runtime")
 
 
 # ── Python runtime ───────────────────────────────────────────────────────────

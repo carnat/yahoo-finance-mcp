@@ -21,6 +21,7 @@ os.environ["MCP_ENVELOPE_V2"] = "true"
 os.environ.setdefault("SEC_OPEN_DATA_API_KEY", "fixture-key")
 
 from yfmcp.tools import thai_funds as thai  # noqa: E402
+from scripts.source_text import worker_runtime_source  # noqa: E402
 
 
 def decode(raw: str) -> dict:
@@ -384,8 +385,9 @@ class ThaiFundFixtureTest(unittest.TestCase):
 
 class ThaiFundWorkerParityTest(unittest.TestCase):
     def test_worker_has_same_bounded_provider_contract(self) -> None:
-        worker = (ROOT / "worker" / "src" / "sec-thailand.ts").read_text(encoding="utf-8")
-        tools = (ROOT / "worker" / "src" / "tools.ts").read_text(encoding="utf-8")
+        # Every Worker runtime module (scripts/source_text.py), wherever the Thai fund code and tool list live.
+        worker = worker_runtime_source()
+        tools = worker
         catalog = json.loads((ROOT / "tool_catalog.json").read_text(encoding="utf-8"))
         for endpoint in ("/general-info/profiles", "/daily-info/nav", "/factsheet/statistics", "/factsheet/top5-holdings", "/factsheet/urls", "/daily-info/dividend-history"):
             self.assertIn(endpoint, worker)

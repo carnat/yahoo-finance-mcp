@@ -10,22 +10,25 @@ import pathlib
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import AsyncMock, patch
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-TOOLS_TS = ROOT / "worker" / "src" / "tools.ts"
-YAHOO_TS = ROOT / "worker" / "src" / "yahoo-finance.ts"
-NEWS_TS = ROOT / "worker" / "src" / "news.ts"
+sys.path.append(str(ROOT / "scripts"))
+from source_text import WORKER, definition_source, module_defining, worker_runtime_source  # noqa: E402
+
+ESBUILD = ROOT / "worker" / "node_modules" / ".bin" / "esbuild"
 
 
 class TestWorkerSecProvider(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls.tools = TOOLS_TS.read_text(encoding="utf-8")
-        cls.worker = YAHOO_TS.read_text(encoding="utf-8")
+        # Every Worker runtime module (scripts/source_text.py), wherever the code lives.
+        cls.tools = worker_runtime_source()
+        cls.worker = worker_runtime_source()
 
     def test_structured_extractors_route_to_worker_local_sec_extractors(self) -> None:
         self.assertIn("data.sec.gov", self.worker)
@@ -131,17 +134,14 @@ class TestWorkerSecProvider(unittest.TestCase):
 
     def test_geo_html_fallback_china_does_not_match_taiwan_row(self) -> None:
         node = os.environ.get("NODE_BINARY") or shutil.which("node")
-        if node is None:
-            raise unittest.SkipTest("node executable not found")
+        if node is None or not ESBUILD.exists():
+            raise unittest.SkipTest("node and worker/node_modules (npm ci) are required")
 
-        helper_start = self.worker.index("function stripHtmlTags")
-        helper_end = self.worker.index("function filingHasRelevantGeoText")
-        helper_source = self.worker[helper_start:helper_end]
-        # parseHtmlTable sat inside this slice before the Phase 3 move; it now lives in news.ts.
-        news_source = NEWS_TS.read_text(encoding="utf-8")
-        table_start = news_source.index("export function parseHtmlTable")
-        table_end = news_source.index("\n}\n", table_start) + 3
-        helper_source += "\n" + news_source[table_start:table_end].removeprefix("export ")
+        # Behaviour, not source slices: bundle the real exports from whichever Worker module defines them.
+        exported = ("extractGeoRevenueFromHtml", "stripHtmlTags")
+        entry_source = "".join(
+            f"export {{ {name} }} from {json.dumps(module_defining(WORKER, name)[0].as_posix())};\n" for name in exported
+        )
         fixture = r"""
 const aaoiTable = `
   <p>The following tables set forth the Company's revenue and asset information by geographic region (in thousands):</p>
@@ -167,22 +167,22 @@ if (taiwan.sourceRows[0][0] !== "Taiwan") throw new Error(`Taiwan fixture row wa
 const heading = stripHtmlTags('<p><span style="a">PART I - FINANC</span><span style="b">IAL INFORMATION</span></p><td>Net</td><td>31.5</td> <b>Item</b> <i>2</i>');
 if (heading !== "PART I - FINANCIAL INFORMATION Net 31.5 Item 2") throw new Error(`stripHtmlTags gave ${heading}`);
 """
-        tmp_path: pathlib.Path | None = None
-        try:
-            with tempfile.NamedTemporaryFile("w", suffix=".ts", encoding="utf-8", delete=False, dir=ROOT) as handle:
-                handle.write(f"{helper_source}\n{fixture}")
-                tmp_path = pathlib.Path(handle.name)
-            proc = subprocess.run(
-                [node, "--experimental-strip-types", str(tmp_path)],
-                text=True,
-                capture_output=True,
-                cwd=ROOT,
-                timeout=20,
+        with tempfile.TemporaryDirectory(prefix="geo-html-fallback-") as tmp:
+            tmp_dir = pathlib.Path(tmp)
+            entry = tmp_dir / "entry.ts"
+            entry.write_text(entry_source, encoding="utf-8")
+            bundle = tmp_dir / "bundle.mjs"
+            subprocess.run(
+                [str(ESBUILD), str(entry), "--bundle", "--format=esm", "--platform=neutral", "--main-fields=module,main",
+                 "--external:node:async_hooks", f"--outfile={bundle}", "--log-level=error"],
+                cwd=ROOT / "worker", check=True, capture_output=True, text=True, timeout=120,
             )
+            script = tmp_dir / "run.mjs"
+            script.write_text(
+                f"import {{ {', '.join(exported)} }} from {json.dumps(bundle.as_uri())};\n{fixture}", encoding="utf-8"
+            )
+            proc = subprocess.run([node, str(script)], text=True, capture_output=True, cwd=ROOT, timeout=60)
             self.assertEqual(proc.returncode, 0, proc.stderr or proc.stdout)
-        finally:
-            if tmp_path is not None:
-                tmp_path.unlink(missing_ok=True)
 
     def test_ownership_holder_schema_advertises_supported_types(self) -> None:
         self.assertIn("export const SUPPORTED_HOLDER_TYPES", self.worker)
@@ -382,7 +382,10 @@ if (heading !== "PART I - FINANCIAL INFORMATION Net 31.5 Item 2") throw new Erro
         self.assertIn("MANAGEMENT_COMMENTARY_TOPIC_ALIASES", self.worker)
         for term in ("outlook", "expects", "production", "manufacturing", "net sales", "artificial intelligence"):
             self.assertIn(term, self.worker)
-        revenue_aliases = re.search(r"revenue: \[([^\]]+)\]", self.worker)
+        # Scoped to the alias table itself: other Worker modules have their own "revenue: [...]" lists.
+        revenue_aliases = re.search(
+            r"revenue: \[([^\]]+)\]", definition_source(WORKER, "MANAGEMENT_COMMENTARY_TOPIC_ALIASES")
+        )
         self.assertIsNotNone(revenue_aliases)
         revenue_aliases_text = revenue_aliases.group(1)
         self.assertIn('"revenue growth"', revenue_aliases_text)

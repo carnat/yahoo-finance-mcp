@@ -5,20 +5,23 @@ from __future__ import annotations
 
 import pathlib
 import re
+import sys
 import unittest
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-TOOLS_TS = ROOT / "worker" / "src" / "tools.ts"
-YF_TS = ROOT / "worker" / "src" / "yahoo-finance.ts"
+sys.path.append(str(ROOT / "scripts"))
+from source_text import worker_runtime_source  # noqa: E402
+
 EARNINGS_PERIOD_TS = ROOT / "worker" / "src" / "earnings-period.ts"
 
 
 class TestSecReliabilityWorker(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls.tools = TOOLS_TS.read_text(encoding="utf-8")
-        cls.worker = YF_TS.read_text(encoding="utf-8")
+        # Every Worker runtime module (scripts/source_text.py), wherever the code lives.
+        cls.tools = worker_runtime_source()
+        cls.worker = worker_runtime_source()
 
     def test_shared_filing_resolver_has_explicit_wrong_type_status(self) -> None:
         self.assertIn("async function resolveSecFiling", self.worker)

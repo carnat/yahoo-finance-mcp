@@ -25,6 +25,7 @@ ESBUILD = WORKER / "node_modules" / ".bin" / "esbuild"
 sys.path.insert(0, str(ROOT))
 
 from yfmcp import evidence as ev  # noqa: E402
+from scripts.source_text import worker_runtime_source  # noqa: E402
 
 AS_OF = "2026-09-26T08:00:00.000Z"
 
@@ -982,8 +983,8 @@ class TestAuthorityBoundaryOnEveryResult(unittest.TestCase):
         catalog = (ROOT / "tool_catalog.json").read_text(encoding="utf-8")
         for action in ev.EVIDENCE_ONLY_ACTIONS:
             self.assertIn(f'"{action}"', catalog, action)
-        tools_ts = (WORKER / "src" / "tools.ts").read_text(encoding="utf-8")
-        self.assertIn("raw = withAuthorityBoundary(name, await _dispatchTool(name, args));", tools_ts)
+        # Every Worker runtime module (scripts/source_text.py), wherever the dispatcher lives.
+        self.assertIn("raw = withAuthorityBoundary(name, await _dispatchTool(name, args));", worker_runtime_source())
 
 
 if __name__ == "__main__":

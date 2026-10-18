@@ -10,7 +10,6 @@ import os
 import sys
 import unittest
 import urllib.error
-from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -18,6 +17,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import server as srv  # noqa: E402
 from yfmcp.cache import _tool_cache  # noqa: E402
 from yfmcp.clients.market_providers import ProviderJsonResult, fetch_alpha_vantage_json  # noqa: E402
+
+_SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
+if _SCRIPTS_DIR not in sys.path:
+    sys.path.append(_SCRIPTS_DIR)
+from source_text import worker_runtime_source  # noqa: E402
 
 
 def _run(coro):  # type: ignore[no-untyped-def]
@@ -231,10 +235,9 @@ class ProviderGapRoutingTests(unittest.TestCase):
         self.assertEqual(coverage["truncatedSources"][0]["source"], "finnhub")
 
     def test_worker_contract_contains_equivalent_routing_and_diagnostics(self):
-        root = Path(__file__).resolve().parent.parent
-        # yahoo-finance.ts plus news.ts: the news code moved to news.ts in Phase 3
-        worker = (root / "worker" / "src" / "yahoo-finance.ts").read_text(encoding="utf-8") + "\n" + (root / "worker" / "src" / "news.ts").read_text(encoding="utf-8")
-        tools = (root / "worker" / "src" / "tools.ts").read_text(encoding="utf-8")
+        # Every Worker runtime module (scripts/source_text.py), wherever the code lives.
+        worker = worker_runtime_source()
+        tools = worker
         for marker in (
             "getHistoricalPutCallRatio",
             "getExpandedInstitutionalOwnership",

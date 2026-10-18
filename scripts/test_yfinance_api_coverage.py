@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-from pathlib import Path
 import sys
 import unittest
 
@@ -12,6 +11,7 @@ import pandas as pd
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import server as srv  # noqa: E402
+from scripts.source_text import worker_runtime_source  # noqa: E402
 
 
 def _run(coro):
@@ -236,8 +236,7 @@ class TestYfinanceApiCoverage(unittest.TestCase):
         self.assertEqual(data["confirmationStatus"], "UNVERIFIED")
 
     def test_worker_contains_parity_guards(self):
-        root = Path(__file__).resolve().parents[1]
-        worker = (root / "worker" / "src" / "yahoo-finance.ts").read_text(encoding="utf-8")
+        worker = worker_runtime_source()  # every Worker runtime module (scripts/source_text.py)
         self.assertIn("events=div%2Csplit%2CcapitalGains", worker)
         self.assertIn("ttm_income_stmt", worker)
         self.assertIn('lineItem: humanize(baseType)', worker)

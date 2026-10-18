@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Offline source-level schema checks for get_option_chain.
 
-Reads worker/src/tools.ts and server.py directly (no network, no imports)
-to assert that the schema for get_option_chain contains all required fields
+Reads every Worker and Python runtime module through scripts/source_text.py
+(no network, no runtime imports) to assert that the schema for get_option_chain contains all required fields
 and correct defaults introduced in PR #48.
 
 Run: python scripts/test_source_discovery_schema.py
@@ -16,8 +16,8 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-TOOLS_TS = ROOT / "worker" / "src" / "tools.ts"
-SERVER_PY = ROOT / "server.py"
+sys.path.append(str(ROOT / "scripts"))
+from source_text import python_runtime_source, worker_runtime_source  # noqa: E402
 
 
 # Generous slice of source after the tool name declaration; 4000 chars is
@@ -26,17 +26,13 @@ _TOOL_BLOCK_SIZE = 4000
 
 
 def _ts_source() -> str:
-    return TOOLS_TS.read_text(encoding="utf-8")
+    """Every Worker runtime module, wherever the tool schemas live."""
+    return worker_runtime_source()
 
 
 def _py_source() -> str:
-    """Return combined Python source covering server.py and all yfmcp/tools/*.py modules."""
-    parts = [SERVER_PY.read_text(encoding="utf-8")]
-    tools_dir = ROOT / "yfmcp" / "tools"
-    if tools_dir.is_dir():
-        for path in sorted(tools_dir.glob("*.py")):
-            parts.append(path.read_text(encoding="utf-8"))
-    return "\n".join(parts)
+    """Every Python runtime module (server.py, tool_groups.py, yfmcp/**), wherever the tools live."""
+    return python_runtime_source()
 
 
 class TestGetOptionChainWorkerSchema(unittest.TestCase):

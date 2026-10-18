@@ -20,10 +20,12 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+sys.path.append(str(ROOT / "scripts"))
+from source_text import python_runtime_files  # noqa: E402
 
 THIS_FILE = Path(__file__).resolve()
-SCAN_ROOTS = [ROOT / "yfmcp", ROOT / "scripts"]
-SCAN_FILES = [ROOT / "server.py", ROOT / "tool_groups.py"]
+# Every Python runtime module (server.py, tool_groups.py, yfmcp/**, via scripts/source_text.py) plus scripts/.
+SCAN_ROOTS = [ROOT / "scripts"]
 
 PRIVATE_NAMES = re.compile(r"\b(_tool_manager|_mcp_server|_lowlevel_server)\b")
 SDK_CLASSES = r"(?:FastMCP|MCPServer|YfmcpServer)"
@@ -37,7 +39,7 @@ CLASS_PATCHING = [
 
 
 def _python_files() -> list[Path]:
-    files = list(SCAN_FILES)
+    files = list(python_runtime_files())
     for root in SCAN_ROOTS:
         files.extend(sorted(root.rglob("*.py")))
     return [f for f in files if f.resolve() != THIS_FILE and "__pycache__" not in f.parts]

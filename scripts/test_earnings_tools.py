@@ -19,6 +19,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import server as srv  # noqa: E402
 from yfmcp.tools import earnings as earnings_tools  # noqa: E402
 
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+from source_text import python_runtime_source, worker_runtime_source  # noqa: E402
+
 
 def _run(coro):  # type: ignore[no-untyped-def]
     return asyncio.run(coro)
@@ -429,13 +432,9 @@ class TestCompareActualVsEstimate(unittest.TestCase):
 
 class TestPublicWording(unittest.TestCase):
     def test_no_private_terms_in_new_tool_descriptions(self):
-        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        with open(os.path.join(root, "server.py"), encoding="utf-8") as fh:
-            server_text = fh.read()
-        with open(os.path.join(root, "yfmcp", "tools", "earnings.py"), encoding="utf-8") as fh:
-            earnings_text = fh.read()
-        with open(os.path.join(root, "worker", "src", "tools.ts"), encoding="utf-8") as fh:
-            tools_text = fh.read()
+        # Every runtime module of each runtime (scripts/source_text.py), wherever the tools are registered.
+        server_text = python_runtime_source()
+        tools_text = worker_runtime_source()
         private_terms = ("Commander", "portfolio state", "doctrine", "DC-", "TPS", "PCCE")
         names = [
             "get_latest_earnings_release",
@@ -450,7 +449,7 @@ class TestPublicWording(unittest.TestCase):
             self.assertGreaterEqual(idx, 0)
             return text[max(0, idx - span): idx + span]
         for name in names:
-            s_win = _window(server_text + "\n" + earnings_text, f'name="{name}"')
+            s_win = _window(server_text, f'name="{name}"')
             t_win = _window(tools_text, f'name: "{name}"')
             for term in private_terms:
                 self.assertNotRegex(s_win, re.escape(term))

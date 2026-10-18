@@ -5,7 +5,6 @@ import asyncio
 import datetime
 import json
 import os
-import pathlib
 import sys
 import unittest
 from unittest.mock import patch
@@ -17,6 +16,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import server as srv  # noqa: E402
 from scripts import test_deployed_canaries as deployed_canaries  # noqa: E402
 from yfmcp.tools import pricing  # noqa: E402
+
+_SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
+if _SCRIPTS_DIR not in sys.path:
+    sys.path.append(_SCRIPTS_DIR)
+from source_text import definition_source, worker_runtime_source  # noqa: E402
 
 
 def _run(coro):
@@ -751,12 +755,8 @@ class TestPr2DataQuality(unittest.TestCase):
         self.assertEqual(result["recommendedNextAction"], "RETRY")
 
     def test_worker_price_slope_pairs_each_close_with_its_timestamp(self):
-        worker_source = (
-            pathlib.Path(__file__).resolve().parents[1] / "worker" / "src" / "yahoo-finance.ts"
-        ).read_text(encoding="utf-8")
-        slope_source = worker_source.split("export async function getPriceSlope", 1)[1].split(
-            "export async function getVolumeRatio", 1
-        )[0]
+        worker_source = worker_runtime_source()
+        slope_source = definition_source("worker", "getPriceSlope")
 
         self.assertIn("timestamp: parsedTimestamp", worker_source)
         self.assertIn("endRawClose: endObservation.rawClose", slope_source)
@@ -769,27 +769,17 @@ class TestPr2DataQuality(unittest.TestCase):
         self.assertNotIn("const priceSeries =", slope_source)
 
     def test_worker_daily_derived_tools_share_completed_bar_selector(self):
-        worker_source = (
-            pathlib.Path(__file__).resolve().parents[1] / "worker" / "src" / "yahoo-finance.ts"
-        ).read_text(encoding="utf-8")
-        for start, end in (
-            ("export async function getTechnicalIndicators", "export async function getPriceSlope"),
-            ("export async function getVolumeRatio", "export async function getMaPosition"),
-            ("export async function getVolumeGate", "export async function getMarketSnapshot"),
-        ):
-            section = worker_source.split(start, 1)[1].split(end, 1)[0]
+        worker_source = worker_runtime_source()
+        for name in ("getTechnicalIndicators", "getVolumeRatio", "getVolumeGate"):
+            section = definition_source("worker", name)
             self.assertIn("prepareCompletedDailySeries", section)
             self.assertIn("excludedIncompleteBar", section)
-        volume_section = worker_source.split(
-            "export async function getVolumeRatio", 1
-        )[1].split("export async function getMaPosition", 1)[0]
+        volume_section = definition_source("worker", "getVolumeRatio")
         self.assertNotIn("fastInfo.lastVolume", volume_section)
         self.assertIn("initialLatestRow?.volume == null", volume_section)
         self.assertIn('status: "PARTIAL"', volume_section)
         self.assertIn('barStatus: "INCOMPLETE"', volume_section)
-        gate_section = worker_source.split(
-            "export async function getVolumeGate", 1
-        )[1].split("export async function getMarketSnapshot", 1)[0]
+        gate_section = definition_source("worker", "getVolumeGate")
         self.assertIn("initialLatestRow?.volume == null", gate_section)
         self.assertIn("initialLatestRow?.rawClose == null", gate_section)
         self.assertIn('status: "PARTIAL"', gate_section)
@@ -801,17 +791,8 @@ class TestPr2DataQuality(unittest.TestCase):
         )
 
     def test_options_realized_volatility_uses_completed_bar_selector_in_both_runtimes(self):
-        root = pathlib.Path(__file__).resolve().parents[1]
-        worker_source = (root / "worker" / "src" / "yahoo-finance.ts").read_text(
-            encoding="utf-8"
-        )
-        python_source = (root / "server.py").read_text(encoding="utf-8")
-        worker_section = worker_source.split(
-            "export async function getOptionsFlowScan", 1
-        )[1].split("export async function getPriceTargetBracket", 1)[0]
-        python_section = python_source.split(
-            "async def get_options_flow_scan", 1
-        )[1].split("async def get_price_target_bracket", 1)[0]
+        worker_section = definition_source("worker", "getOptionsFlowScan")
+        python_section = definition_source("python", "get_options_flow_scan")
         self.assertIn("prepareCompletedDailySeries", worker_section)
         self.assertIn("historicalBarStatus", worker_section)
         self.assertIn("_load_completed_daily_history", python_section)
