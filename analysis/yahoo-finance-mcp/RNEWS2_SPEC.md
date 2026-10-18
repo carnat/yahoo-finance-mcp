@@ -89,7 +89,14 @@ Disabled sources are not recorded. Telemetry stays as it is.
 4. **`get_sec_recent_events` is not affected.** It is an explicit SEC filing tool and selects no news sources. The docs say so.
 5. **`get_company_press_releases`:** the disabled report (row, warning, failedSources entry) is attached once, in the tool's final payload, keyed by the source name. The inner `collectCompanyEvents` call must not add a second copy.
 6. **Advertised defaults.** The `get_company_news` and `search_company_news` schemas update their `default` lists and description text to the new defaults (sec included) in both runtimes, keeping `check_tool_sync` green. The `tools/list` change is expected in this minor release.
-7. **Tickers SEC does not cover, defaults only.**
-   - When `sec` came from the defaults and the ticker has no SEC CIK (most foreign listings), `sec` is reported the way an ineligible Finnhub ticker is: skipped, not failed. Reuse that existing skipped status and warning shape, with `reasonCode: null`. Coverage does not drop to PARTIAL because of it.
-   - An explicitly requested `sec`, or a real SEC fetch failure for a ticker that has a CIK, keeps today's behaviour (`PROVIDER_ERROR`, PARTIAL).
-   - If the Finnhub skip shape cannot be reused without a new value, STOP and report.
+7. **Tickers SEC does not cover (revised 2026-10-18; supersedes the first version of this point).**
+   - Reusing the Finnhub skip shape always gives PARTIAL: `NOT_ELIGIBLE` is a limiting status, as pinned by `news.coverage.not_eligible_source_makes_coverage_partial`. The planner accepts that rather than special-casing coverage.
+   - **Rule:** when the ticker has no SEC CIK, `sec` is reported as not eligible, whether it came from the defaults or was requested explicitly:
+     - `sourceStatus.sec.status = "NOT_ELIGIBLE"` (the existing status) with `reasonCode: null`;
+     - the existing `SOURCE_NOT_ELIGIBLE` warning, with the message "SEC has no filings for <TICKER> (no SEC CIK).";
+     - the existing coverage, action and failureMode handling for `NOT_ELIGIBLE` (PARTIAL, `CHECK_OFFICIAL_RELEASES`, failureMode `SOURCE_NOT_ELIGIBLE`).
+   - **Splitting the warning:** `collectSecEvents` / `_collect_sec_events` split "no CIK" (this rule) from "submissions fetch failed", which stays `PROVIDER_ERROR` with "SEC submissions source unavailable.".
+   - **Why:** foreign listings already read PARTIAL through Finnhub ineligibility, so this is consistent and never overstates. It also stops reporting a missing CIK as a provider error.
+   - **Accepted from the Worker step:**
+     - press-release status branches use only the active (not disabled) sources, and all-disabled gives `SOURCE_LIMITED_NOT_FOUND`;
+     - a disabled Yahoo is not counted as limited by the Marketaux gate, because Marketaux already runs on `HIGHER_PRIORITY_EMPTY`.
