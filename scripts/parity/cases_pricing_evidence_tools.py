@@ -847,11 +847,8 @@ CASES += [
     # rejected) and every required evidence field must be non-blank after trimming.
     _grade_case("shr.decision_grade.array_xbrl_context_diverges", ["BR-SHR-001"], {**GOOD_PAYLOAD, "xbrlContext": []},
                 GOOD_EVIDENCE, "FOUND", False),
-    # TODO(python-mirror): flip to equal (R4B1_SPEC section 2), expect=False, once Python trims evidence fields.
     _grade_case("shr.decision_grade.whitespace_only_evidence_field_diverges", ["BR-SHR-001"], GOOD_PAYLOAD,
-                {**GOOD_EVIDENCE, "concept": "   "}, "FOUND", mode="pinned",
-                decision="FINDING: Python accepts a whitespace-only evidence field, the Worker trims it and rejects",
-                expect_py=True, expect_ts=False),
+                {**GOOD_EVIDENCE, "concept": "   "}, "FOUND", False),
 ]
 
 

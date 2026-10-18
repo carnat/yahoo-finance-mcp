@@ -39,7 +39,6 @@ CASES: list[Case] = []
 ROW_KEYS = ["url", "sourceType", "filingType", "accessionNumber", "filingDate", "publishedAt", "retrievedAt", "excerpt",
             "concept", "periodEnd", "tableIndex", "rowLabel", "columnLabel", "rawRow"]
 NULL_ROW = {k: None for k in ROW_KEYS}
-SECTION_4 = "R4B1_SPEC section 4b: table evidence in the enricher (2.14.0), Worker first; Python follows in the same release"
 
 
 def _row(**fields) -> dict:
@@ -105,28 +104,19 @@ CASES += [
 
 CASES += [
     # 4b: table evidence survives standardisation.
-    # TODO(python-mirror): flip to equal (R4B1_SPEC section 4b), expect=[_row(tableIndex=2, rowLabel="China",
-    # rawRow="China | 300 | 1,000")].
     _enrich_case("evidence.table.source_rows_of_strings_fill_table_index_row_label_and_raw_row",
                  {"sectionHeading": "Revenue by geography", "sourceTableId": 2, "sourceRows": ["China", "300", "1,000"],
                   "sourceColumns": ["2025"]},
-                 _evidence, mode="pinned", decision=SECTION_4,
-                 expect_py=None, expect_ts=[_row(tableIndex=2, rowLabel="China", rawRow="China | 300 | 1,000")]),
+                 _evidence, expect=[_row(tableIndex=2, rowLabel="China", rawRow="China | 300 | 1,000")]),
     # The geographic producer's sourceRows are rows of cells (a list of lists).
-    # TODO(python-mirror): flip to equal (R4B1_SPEC section 4b), expect=[_row(tableIndex=1, rowLabel="China",
-    # rawRow="China | 300; Total revenue | 1,000")].
     _enrich_case("evidence.table.nested_source_rows_fill_table_index_row_label_and_raw_row",
-                 GEO_TABLE_EVIDENCE, _evidence, mode="pinned", decision=SECTION_4,
-                 expect_py=None, expect_ts=[_row(tableIndex=1, rowLabel="China", rawRow="China | 300; Total revenue | 1,000")]),
-    # TODO(python-mirror): flip to equal (R4B1_SPEC section 4b), expect=[_row(url=DOC, filingType="10-K",
-    # accessionNumber=ACCN, filingDate="2026-02-15", tableIndex=1, rowLabel="China", rawRow=...)] (section 4c).
+                 GEO_TABLE_EVIDENCE, _evidence,
+                 expect=[_row(tableIndex=1, rowLabel="China", rawRow="China | 300; Total revenue | 1,000")]),
     _enrich_case("evidence.table.geographic_evidence_with_its_filing_names_document_and_table",
                  {**GEO_TABLE_EVIDENCE, "documentUrl": "https://www.sec.gov/Archives/edgar/data/1158114/000115811426000010/aaoi-20251231.htm",
                   "filingType": "10-K", "accessionNumber": "0001158114-26-000010", "filingDate": "2026-02-15"},
-                 _evidence, mode="pinned", decision=SECTION_4,
-                 expect_py=[_row(url="https://www.sec.gov/Archives/edgar/data/1158114/000115811426000010/aaoi-20251231.htm",
-                                 filingType="10-K", accessionNumber="0001158114-26-000010", filingDate="2026-02-15")],
-                 expect_ts=[_row(url="https://www.sec.gov/Archives/edgar/data/1158114/000115811426000010/aaoi-20251231.htm",
+                 _evidence,
+                 expect=[_row(url="https://www.sec.gov/Archives/edgar/data/1158114/000115811426000010/aaoi-20251231.htm",
                                  filingType="10-K", accessionNumber="0001158114-26-000010", filingDate="2026-02-15", tableIndex=1,
                                  rowLabel="China", rawRow="China | 300; Total revenue | 1,000")]),
 ]
@@ -164,13 +154,11 @@ def _fact_evidence_view(v: dict) -> dict:
 
 _AAOI_BASE = {"ok": True, "extractionMethod": "PARSED_TABLE", "confidence": "HIGH", "value": 300000000}
 CASES += [
-    # TODO(python-mirror): flip to equal (R4B1_SPEC section 4c), expect={**_AAOI_BASE, "evidence": [AAOI_ROW]}.
     _tool_case("evidence.aaoi.extract_sec_filing_fact_parsed_table_evidence_names_its_document",
                "extract_sec_filing_fact", {"ticker": "AAOI", "fact_type": "geographic_revenue", "region": "China"},
                lambda: server.extract_sec_filing_fact("AAOI", fact_type=FilingFactType.geographic_revenue, region="China"),
                _fact_evidence_view, routes=AAOI_ROUTES, ids=("BR-EVD-001", "R4-AAOI-EVIDENCE"),
-               mode="pinned", decision="R4B1_SPEC section 4c: the geographic PARSED_TABLE evidence names its filing (2.14.0), Worker first",
-               expect_py={**_AAOI_BASE, "evidence": None}, expect_ts={**_AAOI_BASE, "evidence": [AAOI_ROW]}),
+               expect={**_AAOI_BASE, "evidence": [AAOI_ROW]}),
 ]
 
 
@@ -208,12 +196,8 @@ def _radar_case(name: str, action: str, from_grade: str, to_grade: str, prior: f
 CASES += [
     _radar_case("shr.analyst.upgrade_with_a_cut_target_is_mixed", "up", "Hold", "Buy", 120.0, 100.0,
                 expect=[{"signal": "UPGRADE", "ptDirection": "LOWERED", "mixedSignal": True, "strengthFlag": "MIXED"}]),
-    # TODO(python-mirror): flip to equal (R4B1_SPEC section 5), expect=[{"signal": "DOWNGRADE", "ptDirection": "RAISED",
-    # "mixedSignal": True, "strengthFlag": "MIXED"}].
     _radar_case("shr.analyst.downgrade_with_a_raised_target_is_mixed", "down", "Buy", "Hold", 100.0, 120.0,
-                mode="pinned", decision="R4B1_SPEC section 5: mixedSignal is tested before DOWNGRADE (2.14.0), Worker first",
-                expect_py=[{"signal": "DOWNGRADE", "ptDirection": "RAISED", "mixedSignal": True, "strengthFlag": "BEARISH"}],
-                expect_ts=[{"signal": "DOWNGRADE", "ptDirection": "RAISED", "mixedSignal": True, "strengthFlag": "MIXED"}]),
+                expect=[{"signal": "DOWNGRADE", "ptDirection": "RAISED", "mixedSignal": True, "strengthFlag": "MIXED"}]),
     _radar_case("shr.analyst.downgrade_without_a_mixed_signal_is_bearish", "down", "Buy", "Hold", 120.0, 100.0,
                 expect=[{"signal": "DOWNGRADE", "ptDirection": "LOWERED", "mixedSignal": False, "strengthFlag": "BEARISH"}]),
     _radar_case("shr.analyst.upgrade_without_a_mixed_signal_is_bullish", "up", "Hold", "Buy", 100.0, 120.0,

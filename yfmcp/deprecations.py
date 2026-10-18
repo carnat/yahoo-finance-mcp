@@ -63,7 +63,7 @@ PRICE_TARGET_LABEL_FIELDS = ["bracket", "inferredTag", "tag", "tagNote"]
 PRICE_TARGET_LABEL_DEPRECATION = _deprecated_field_warning(
     PRICE_TARGET_LABEL_FIELDS,
     "priceAtOrAboveTarget",
-    f"{_field_list(PRICE_TARGET_LABEL_FIELDS)} deprecated and {_REMOVAL}; use priceAtOrAboveTarget and referenceTargetPct.",
+    f"{_field_list(PRICE_TARGET_LABEL_FIELDS)} deprecated and {_REMOVAL}; use priceAtOrAboveTarget (direction); referenceTargetPct gives the price/target ratio.",
 )
 
 # N3b: the fixed $10M liquidity gate on check_volume_liquidity_threshold.
