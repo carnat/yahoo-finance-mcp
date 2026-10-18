@@ -8530,6 +8530,11 @@ function outlineFailure(code: string, message: string): string {
   return JSON.stringify({ ok: false, error: { code, message } });
 }
 
+/** A failed outline read: a 429 stays RATE_LIMIT and a timeout PROVIDER_TIMEOUT (same classifier as the envelope), else PROVIDER_ERROR. */
+function outlineReadFailure(message: string): string {
+  return outlineFailure(classifyErrorMessage(message)?.code ?? ErrorCode.PROVIDER_ERROR, message);
+}
+
 /**
  * One outline shape in both runtimes (2.15.0, R4-OUTLINE-SHAPE): ticker, accessionNumber (the resolved filing's, the
  * accession given with a document_url, or null when only a document_url was given), documentUrl (the document read),
@@ -8553,7 +8558,7 @@ export async function getFilingOutline(ticker: string, accessionNumber: string |
       return outlineFailure(ErrorCode.INPUT_VALIDATION_ERROR, "Invalid SEC URL: must start with 'https://www.sec.gov/Archives/'.");
     }
     const doc = await fetchSecDocument(documentUrl);
-    if (!doc.ok) return outlineFailure(ErrorCode.PROVIDER_ERROR, `HTTP ${doc.status}`);
+    if (!doc.ok) return outlineReadFailure(`HTTP ${doc.status}`);
     const html = sanitizeSecHtml(doc.text);
 
     const outline: { level: number; title: string }[] = [];
@@ -8585,7 +8590,7 @@ export async function getFilingOutline(ticker: string, accessionNumber: string |
         : [],
     });
   } catch (e) {
-    return outlineFailure(ErrorCode.PROVIDER_ERROR, `${e instanceof Error ? e.message : String(e)}`);
+    return outlineReadFailure(`${e instanceof Error ? e.message : String(e)}`);
   }
 }
 
