@@ -72,6 +72,7 @@ FAKE_ALPHA_KEY = "FAKEALPHAKEY0000"  # placeholder
 PROVIDER_ENV_VARS = (
     "FINNHUB_API_KEY", "FINNHUB_TOKEN", "ALPHA_VANTAGE_API_KEY", "ALPHAVANTAGE_API_KEY",
     "MARKETAUX_API_TOKEN", "MARKETAUX_API_KEY",
+    "NEWS_SOURCES_DISABLED",  # 2.16.0 operator off switch: never inherited from the host environment
 )
 
 YAHOO_AUTH_ROUTES = {
@@ -2755,4 +2756,621 @@ CASES += [
                    "sec": {"status": "OK", "rawCount": 1, "filteredCount": 1},
                    "items": [["yahoo_finance_news", "yahoo_finance_news", None], ["SEC", "sec_filing", "8-K"]],
                    "status": "PARTIAL", "coverage": "PARTIAL"}),
+]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+# Operator off switch NEWS_SOURCES_DISABLED (2.16.0, RNEWS2 §2 / §8 / §6)
+# Each case returns the tool result plus a fetch spy: the non-Yahoo hosts fetched (Worker fetch, Python urllib) and
+# whether the Yahoo feed was read (Worker fetch to a Yahoo host, Python's Yahoo search helper).
+# Python ignores the setting until its port, so cases that depend on it are pinned with TODO(python-mirror).
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+from urllib.parse import urlparse as _urlparse  # noqa: E402
+import urllib.request as _urllib_request  # noqa: E402
+
+_OFF_RECENT = _sec_recent(["8-K"], [2])
+_OFF_INFO = {"shortName": "Acme Corp", "longName": "Acme Corp"}
+_OFF_NEWS = [_yn("ACME shares rise", when=_days_ago(1))]
+_OFF_KEYS = {**FINNHUB_ENV, **MARKETAUX_ENV}
+_OFF_ROUTES = {**_sec_routes(SEC_CIK, "ACME", "Acme Corp", _OFF_RECENT), **_finnhub([]), MARKETAUX_PREFIX: {"json": {"data": []}}}
+# Provider hosts the spy reports (the SEC ticker map on www.sec.gov is an identity lookup the runtimes make differently).
+_SPY_PROVIDER_HOSTS = {"finnhub.io", "api.marketaux.com", "data.sec.gov"}
+_SPY_JS = """
+const __hosts = new Set(); let __yahoo = false; const __realFetch = globalThis.fetch;
+globalThis.fetch = async (input, init) => {
+  const u = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+  if (u.hostname.includes("yahoo") && u.pathname.startsWith("/v1/finance/search")) __yahoo = true; else __hosts.add(u.hostname);
+  return __realFetch(input, init);
+};
+try {
+  const __result = JSON.parse(await %s);
+  return { result: __result, fetchedHosts: [...__hosts].filter(h => %s.includes(h)).sort(), yahooFetched: __yahoo };
+} finally { globalThis.fetch = __realFetch; }
+"""
+
+
+_OFF_EXPECT = {'news.off_switch.disabled_default_finnhub_is_not_fetched_and_reported': {'py': {'attempted': ['yahoo_finance_news',
+                                                                                               'yahoo_finance_press_releases',
+                                                                                               'finnhub'],
+                                                                                 'coverage': 'FULL',
+                                                                                 'failed': [],
+                                                                                 'fetchedHosts': ['finnhub.io'],
+                                                                                 'marketaux': {'fallbackReason': None,
+                                                                                               'status': 'NOT_NEEDED'},
+                                                                                 'sourceStatus': {'finnhub': 'EMPTY_RESULT',
+                                                                                                  'marketaux': 'NOT_NEEDED',
+                                                                                                  'yahoo_finance_news': 'OK',
+                                                                                                  'yahoo_finance_press_releases': 'EMPTY_RESULT'},
+                                                                                 'sourcesUsed': ['yahoo_finance_news',
+                                                                                                 'yahoo_finance_press_releases',
+                                                                                                 'finnhub'],
+                                                                                 'status': None,
+                                                                                 'warnings': [],
+                                                                                 'yahooFetched': True},
+                                                                          'ts': {'attempted': ['sec',
+                                                                                               'yahoo_finance_news',
+                                                                                               'yahoo_finance_press_releases',
+                                                                                               'marketaux'],
+                                                                                 'coverage': 'PARTIAL',
+                                                                                 'failed': [['finnhub', 'UNCONFIGURED', False, None]],
+                                                                                 'fetchedHosts': ['api.marketaux.com', 'data.sec.gov'],
+                                                                                 'marketaux': {'fallbackReason': 'HIGHER_PRIORITY_COVERAGE_LIMITED',
+                                                                                               'status': 'EMPTY_RESULT'},
+                                                                                 'sourceStatus': {'finnhub': {'attempted': False,
+                                                                                                              'filteredCount': 0,
+                                                                                                              'rawCount': 0,
+                                                                                                              'status': 'UNCONFIGURED'},
+                                                                                                  'marketaux': 'EMPTY_RESULT',
+                                                                                                  'sec': 'OK',
+                                                                                                  'yahoo_finance_news': 'OK',
+                                                                                                  'yahoo_finance_press_releases': 'EMPTY_RESULT'},
+                                                                                 'sourcesUsed': ['sec',
+                                                                                                 'yahoo_finance_news',
+                                                                                                 'yahoo_finance_press_releases',
+                                                                                                 'marketaux'],
+                                                                                 'status': 'PARTIAL',
+                                                                                 'warnings': [['SOURCE_UNAVAILABLE',
+                                                                                               'info',
+                                                                                               'finnhub',
+                                                                                               'Source finnhub is disabled by the server '
+                                                                                               'operator.']],
+                                                                                 'yahooFetched': True}},
+ 'news.off_switch.empty_setting_changes_nothing': {'expect': {'attempted': ['yahoo_finance_news', 'finnhub'],
+                                                              'coverage': 'FULL',
+                                                              'failed': [],
+                                                              'fetchedHosts': ['finnhub.io'],
+                                                              'marketaux': {'fallbackReason': None, 'status': 'NOT_NEEDED'},
+                                                              'sourceStatus': {'finnhub': 'EMPTY_RESULT',
+                                                                               'marketaux': 'NOT_NEEDED',
+                                                                               'yahoo_finance_news': 'OK'},
+                                                              'sourcesUsed': ['yahoo_finance_news', 'finnhub'],
+                                                              'status': None,
+                                                              'warnings': [],
+                                                              'yahooFetched': True}},
+ 'news.off_switch.every_default_source_disabled_fetches_nothing': {'py': {'attempted': ['yahoo_finance_news',
+                                                                                        'yahoo_finance_press_releases',
+                                                                                        'finnhub'],
+                                                                          'coverage': 'FULL',
+                                                                          'failed': [],
+                                                                          'fetchedHosts': ['finnhub.io'],
+                                                                          'marketaux': {'fallbackReason': None, 'status': 'NOT_NEEDED'},
+                                                                          'sourceStatus': {'finnhub': 'EMPTY_RESULT',
+                                                                                           'marketaux': 'NOT_NEEDED',
+                                                                                           'yahoo_finance_news': 'OK',
+                                                                                           'yahoo_finance_press_releases': 'EMPTY_RESULT'},
+                                                                          'sourcesUsed': ['yahoo_finance_news',
+                                                                                          'yahoo_finance_press_releases',
+                                                                                          'finnhub'],
+                                                                          'status': None,
+                                                                          'warnings': [],
+                                                                          'yahooFetched': True},
+                                                                   'ts': {'attempted': [],
+                                                                          'coverage': 'PARTIAL',
+                                                                          'failed': [['sec', 'UNCONFIGURED', False, None],
+                                                                                     ['yahoo_finance_news', 'UNCONFIGURED', False, None],
+                                                                                     ['yahoo_finance_press_releases',
+                                                                                      'UNCONFIGURED',
+                                                                                      False,
+                                                                                      None],
+                                                                                     ['finnhub', 'UNCONFIGURED', False, None],
+                                                                                     ['marketaux', 'UNCONFIGURED', False, None]],
+                                                                          'fetchedHosts': [],
+                                                                          'marketaux': {'fallbackReason': None, 'status': 'UNCONFIGURED'},
+                                                                          'sourceStatus': {'finnhub': {'attempted': False,
+                                                                                                       'filteredCount': 0,
+                                                                                                       'rawCount': 0,
+                                                                                                       'status': 'UNCONFIGURED'},
+                                                                                           'marketaux': {'attempted': False,
+                                                                                                         'filteredCount': 0,
+                                                                                                         'rawCount': 0,
+                                                                                                         'status': 'UNCONFIGURED'},
+                                                                                           'sec': {'attempted': False,
+                                                                                                   'filteredCount': 0,
+                                                                                                   'rawCount': 0,
+                                                                                                   'status': 'UNCONFIGURED'},
+                                                                                           'yahoo_finance_news': {'attempted': False,
+                                                                                                                  'filteredCount': 0,
+                                                                                                                  'rawCount': 0,
+                                                                                                                  'status': 'UNCONFIGURED'},
+                                                                                           'yahoo_finance_press_releases': {'attempted': False,
+                                                                                                                            'filteredCount': 0,
+                                                                                                                            'rawCount': 0,
+                                                                                                                            'status': 'UNCONFIGURED'}},
+                                                                          'sourcesUsed': [],
+                                                                          'status': 'SOURCE_LIMITED_NOT_FOUND',
+                                                                          'warnings': [['SOURCE_UNAVAILABLE',
+                                                                                        'info',
+                                                                                        'yahoo_finance_news',
+                                                                                        'Source yahoo_finance_news is disabled by the '
+                                                                                        'server operator.'],
+                                                                                       ['SOURCE_UNAVAILABLE',
+                                                                                        'info',
+                                                                                        'yahoo_finance_press_releases',
+                                                                                        'Source yahoo_finance_press_releases is disabled '
+                                                                                        'by the server operator.'],
+                                                                                       ['SOURCE_UNAVAILABLE',
+                                                                                        'info',
+                                                                                        'sec',
+                                                                                        'Source sec is disabled by the server operator.'],
+                                                                                       ['SOURCE_UNAVAILABLE',
+                                                                                        'info',
+                                                                                        'finnhub',
+                                                                                        'Source finnhub is disabled by the server '
+                                                                                        'operator.'],
+                                                                                       ['SOURCE_UNAVAILABLE',
+                                                                                        'info',
+                                                                                        'marketaux',
+                                                                                        'Source marketaux is disabled by the server '
+                                                                                        'operator.']],
+                                                                          'yahooFetched': False}},
+ 'news.off_switch.every_requested_source_disabled_fetches_nothing': {'py': {'attempted': ['finnhub', 'marketaux'],
+                                                                            'coverage': 'FULL',
+                                                                            'failed': [],
+                                                                            'fetchedHosts': ['api.marketaux.com', 'finnhub.io'],
+                                                                            'marketaux': {'fallbackReason': 'HIGHER_PRIORITY_EMPTY',
+                                                                                          'status': 'EMPTY_RESULT'},
+                                                                            'sourceStatus': {'finnhub': 'EMPTY_RESULT',
+                                                                                             'marketaux': 'EMPTY_RESULT'},
+                                                                            'sourcesUsed': ['finnhub', 'marketaux'],
+                                                                            'status': 'NOT_FOUND',
+                                                                            'warnings': [],
+                                                                            'yahooFetched': False},
+                                                                     'ts': {'attempted': [],
+                                                                            'coverage': 'PARTIAL',
+                                                                            'failed': [['finnhub', 'UNCONFIGURED', False, None],
+                                                                                       ['marketaux', 'UNCONFIGURED', False, None]],
+                                                                            'fetchedHosts': [],
+                                                                            'marketaux': {'fallbackReason': None, 'status': 'UNCONFIGURED'},
+                                                                            'sourceStatus': {'finnhub': {'attempted': False,
+                                                                                                         'filteredCount': 0,
+                                                                                                         'rawCount': 0,
+                                                                                                         'status': 'UNCONFIGURED'},
+                                                                                             'marketaux': {'attempted': False,
+                                                                                                           'filteredCount': 0,
+                                                                                                           'rawCount': 0,
+                                                                                                           'status': 'UNCONFIGURED'}},
+                                                                            'sourcesUsed': [],
+                                                                            'status': 'SOURCE_LIMITED_NOT_FOUND',
+                                                                            'warnings': [['SOURCE_UNAVAILABLE',
+                                                                                          'info',
+                                                                                          'finnhub',
+                                                                                          'Source finnhub is disabled by the server '
+                                                                                          'operator.'],
+                                                                                         ['SOURCE_UNAVAILABLE',
+                                                                                          'info',
+                                                                                          'marketaux',
+                                                                                          'Source marketaux is disabled by the server '
+                                                                                          'operator.']],
+                                                                            'yahooFetched': False}},
+ 'news.off_switch.explicit_disabled_source_gets_the_same_report': {'py': {'attempted': ['yahoo_finance_news', 'finnhub'],
+                                                                          'coverage': 'FULL',
+                                                                          'failed': [],
+                                                                          'fetchedHosts': ['finnhub.io'],
+                                                                          'marketaux': None,
+                                                                          'sourceStatus': {'finnhub': 'EMPTY_RESULT',
+                                                                                           'yahoo_finance_news': 'OK'},
+                                                                          'sourcesUsed': ['yahoo_finance_news', 'finnhub'],
+                                                                          'status': None,
+                                                                          'warnings': [],
+                                                                          'yahooFetched': True},
+                                                                   'ts': {'attempted': ['yahoo_finance_news'],
+                                                                          'coverage': 'PARTIAL',
+                                                                          'failed': [['finnhub', 'UNCONFIGURED', False, None]],
+                                                                          'fetchedHosts': [],
+                                                                          'marketaux': None,
+                                                                          'sourceStatus': {'finnhub': {'attempted': False,
+                                                                                                       'filteredCount': 0,
+                                                                                                       'rawCount': 0,
+                                                                                                       'status': 'UNCONFIGURED'},
+                                                                                           'yahoo_finance_news': 'OK'},
+                                                                          'sourcesUsed': ['yahoo_finance_news'],
+                                                                          'status': 'PARTIAL',
+                                                                          'warnings': [['SOURCE_UNAVAILABLE',
+                                                                                        'info',
+                                                                                        'finnhub',
+                                                                                        'Source finnhub is disabled by the server '
+                                                                                        'operator.']],
+                                                                          'yahooFetched': True}},
+ 'news.off_switch.marketaux_disabled_skips_the_fallback': {'py': {'attempted': ['yahoo_finance_news',
+                                                                                'yahoo_finance_press_releases',
+                                                                                'finnhub'],
+                                                                  'coverage': 'FULL',
+                                                                  'failed': [],
+                                                                  'fetchedHosts': ['finnhub.io'],
+                                                                  'marketaux': {'fallbackReason': None, 'status': 'NOT_NEEDED'},
+                                                                  'sourceStatus': {'finnhub': 'EMPTY_RESULT',
+                                                                                   'marketaux': 'NOT_NEEDED',
+                                                                                   'yahoo_finance_news': 'OK',
+                                                                                   'yahoo_finance_press_releases': 'EMPTY_RESULT'},
+                                                                  'sourcesUsed': ['yahoo_finance_news',
+                                                                                  'yahoo_finance_press_releases',
+                                                                                  'finnhub'],
+                                                                  'status': None,
+                                                                  'warnings': [],
+                                                                  'yahooFetched': True},
+                                                           'ts': {'attempted': ['sec',
+                                                                                'yahoo_finance_news',
+                                                                                'yahoo_finance_press_releases'],
+                                                                  'coverage': 'PARTIAL',
+                                                                  'failed': [['finnhub', 'UNCONFIGURED', False, None],
+                                                                             ['marketaux', 'UNCONFIGURED', False, None]],
+                                                                  'fetchedHosts': ['data.sec.gov'],
+                                                                  'marketaux': {'fallbackReason': None, 'status': 'UNCONFIGURED'},
+                                                                  'sourceStatus': {'finnhub': {'attempted': False,
+                                                                                               'filteredCount': 0,
+                                                                                               'rawCount': 0,
+                                                                                               'status': 'UNCONFIGURED'},
+                                                                                   'marketaux': {'attempted': False,
+                                                                                                 'filteredCount': 0,
+                                                                                                 'rawCount': 0,
+                                                                                                 'status': 'UNCONFIGURED'},
+                                                                                   'sec': 'OK',
+                                                                                   'yahoo_finance_news': 'OK',
+                                                                                   'yahoo_finance_press_releases': 'EMPTY_RESULT'},
+                                                                  'sourcesUsed': ['sec',
+                                                                                  'yahoo_finance_news',
+                                                                                  'yahoo_finance_press_releases'],
+                                                                  'status': 'PARTIAL',
+                                                                  'warnings': [['SOURCE_UNAVAILABLE',
+                                                                                'info',
+                                                                                'finnhub',
+                                                                                'Source finnhub is disabled by the server operator.'],
+                                                                               ['SOURCE_UNAVAILABLE',
+                                                                                'info',
+                                                                                'marketaux',
+                                                                                'Source marketaux is disabled by the server operator.']],
+                                                                  'yahooFetched': True}},
+ 'news.off_switch.press_releases_report_a_disabled_source_once': {'py': {'attempted': ['sec', 'yahoo_finance_press_releases'],
+                                                                         'coverage': 'FULL',
+                                                                         'coverageStatus': 'SEC_8K_FOUND_EX99_NOT_FOUND',
+                                                                         'failed': [],
+                                                                         'fetchedHosts': ['data.sec.gov'],
+                                                                         'marketaux': None,
+                                                                         'sourceStatus': {'sec': 'OK',
+                                                                                          'yahoo_finance_press_releases': 'EMPTY_RESULT'},
+                                                                         'sourcesUsed': ['sec', 'yahoo_finance_press_releases'],
+                                                                         'status': 'SEC_8K_FOUND_EX99_NOT_FOUND',
+                                                                         'warnings': [['SEC_8K_FOUND_EX99_NOT_FOUND',
+                                                                                       'warning',
+                                                                                       None,
+                                                                                       'SEC 8-K filing(s) were found, but no EX-99.1 '
+                                                                                       'press-release exhibit was resolved.']],
+                                                                         'yahooFetched': True},
+                                                                  'ts': {'attempted': ['yahoo_finance_press_releases'],
+                                                                         'coverage': 'PARTIAL',
+                                                                         'coverageStatus': 'NO_OFFICIAL_RELEASE_SOURCE',
+                                                                         'failed': [['sec', 'UNCONFIGURED', False, None]],
+                                                                         'fetchedHosts': [],
+                                                                         'marketaux': None,
+                                                                         'sourceStatus': {'sec': {'attempted': False,
+                                                                                                  'filteredCount': 0,
+                                                                                                  'rawCount': 0,
+                                                                                                  'status': 'UNCONFIGURED'},
+                                                                                          'yahoo_finance_press_releases': 'EMPTY_RESULT'},
+                                                                         'sourcesUsed': ['yahoo_finance_press_releases'],
+                                                                         'status': 'NO_YAHOO_PRESS_RELEASE',
+                                                                         'warnings': [['SOURCE_UNAVAILABLE',
+                                                                                       'info',
+                                                                                       'sec',
+                                                                                       'Source sec is disabled by the server operator.'],
+                                                                                      ['NO_OFFICIAL_RELEASE_SOURCE',
+                                                                                       'warning',
+                                                                                       None,
+                                                                                       'No company-originated or official release source '
+                                                                                       'found in requested window.']],
+                                                                         'yahooFetched': True}},
+ 'news.off_switch.press_releases_with_every_default_disabled_are_source_limited': {'py': {'attempted': ['sec',
+                                                                                                        'yahoo_finance_press_releases',
+                                                                                                        'company_ir_page'],
+                                                                                          'coverage': 'PARTIAL',
+                                                                                          'coverageStatus': 'SEC_8K_FOUND_EX99_NOT_FOUND',
+                                                                                          'failed': [['company_ir_page',
+                                                                                                      'NOT_REGISTERED',
+                                                                                                      True,
+                                                                                                      None]],
+                                                                                          'fetchedHosts': ['data.sec.gov'],
+                                                                                          'marketaux': None,
+                                                                                          'sourceStatus': {'company_ir_page': 'NOT_REGISTERED',
+                                                                                                           'sec': 'OK',
+                                                                                                           'yahoo_finance_press_releases': 'EMPTY_RESULT'},
+                                                                                          'sourcesUsed': ['sec',
+                                                                                                          'yahoo_finance_press_releases'],
+                                                                                          'status': 'SEC_8K_FOUND_EX99_NOT_FOUND',
+                                                                                          'warnings': [['SEC_8K_FOUND_EX99_NOT_FOUND',
+                                                                                                        'warning',
+                                                                                                        None,
+                                                                                                        'SEC 8-K filing(s) were found, but '
+                                                                                                        'no EX-99.1 press-release exhibit '
+                                                                                                        'was resolved.']],
+                                                                                          'yahooFetched': True},
+                                                                                   'ts': {'attempted': [],
+                                                                                          'coverage': 'PARTIAL',
+                                                                                          'coverageStatus': 'NO_OFFICIAL_RELEASE_SOURCE',
+                                                                                          'failed': [['sec', 'UNCONFIGURED', False, None],
+                                                                                                     ['yahoo_finance_press_releases',
+                                                                                                      'UNCONFIGURED',
+                                                                                                      False,
+                                                                                                      None],
+                                                                                                     ['company_ir_page',
+                                                                                                      'UNCONFIGURED',
+                                                                                                      False,
+                                                                                                      None]],
+                                                                                          'fetchedHosts': [],
+                                                                                          'marketaux': None,
+                                                                                          'sourceStatus': {'company_ir_page': {'attempted': False,
+                                                                                                                               'filteredCount': 0,
+                                                                                                                               'rawCount': 0,
+                                                                                                                               'status': 'UNCONFIGURED'},
+                                                                                                           'sec': {'attempted': False,
+                                                                                                                   'filteredCount': 0,
+                                                                                                                   'rawCount': 0,
+                                                                                                                   'status': 'UNCONFIGURED'},
+                                                                                                           'yahoo_finance_press_releases': {'attempted': False,
+                                                                                                                                            'filteredCount': 0,
+                                                                                                                                            'rawCount': 0,
+                                                                                                                                            'status': 'UNCONFIGURED'}},
+                                                                                          'sourcesUsed': [],
+                                                                                          'status': 'SOURCE_LIMITED_NOT_FOUND',
+                                                                                          'warnings': [['SOURCE_UNAVAILABLE',
+                                                                                                        'info',
+                                                                                                        'sec',
+                                                                                                        'Source sec is disabled by the '
+                                                                                                        'server operator.'],
+                                                                                                       ['SOURCE_UNAVAILABLE',
+                                                                                                        'info',
+                                                                                                        'company_ir_page',
+                                                                                                        'Source company_ir_page is '
+                                                                                                        'disabled by the server operator.'],
+                                                                                                       ['SOURCE_UNAVAILABLE',
+                                                                                                        'info',
+                                                                                                        'yahoo_finance_press_releases',
+                                                                                                        'Source '
+                                                                                                        'yahoo_finance_press_releases is '
+                                                                                                        'disabled by the server operator.'],
+                                                                                                       ['NO_OFFICIAL_RELEASE_SOURCE',
+                                                                                                        'warning',
+                                                                                                        None,
+                                                                                                        'No company-originated or official '
+                                                                                                        'release source found in requested '
+                                                                                                        'window.']],
+                                                                                          'yahooFetched': False}},
+ 'news.off_switch.sec_recent_events_ignore_a_disabled_sec': {'expect': {'fetchedHosts': ['data.sec.gov'],
+                                                                        'items': ['8-K'],
+                                                                        'sourcesUsed': ['sec'],
+                                                                        'warnings': []}},
+ 'news.off_switch.timeline_reports_a_disabled_source': {'py': {'attempted': ['sec', 'finnhub'],
+                                                               'coverage': 'FULL',
+                                                               'failed': [],
+                                                               'fetchedHosts': ['data.sec.gov', 'finnhub.io'],
+                                                               'marketaux': None,
+                                                               'sourceStatus': {'finnhub': 'EMPTY_RESULT', 'sec': 'OK'},
+                                                               'sourcesUsed': ['sec', 'finnhub'],
+                                                               'status': None,
+                                                               'warnings': [],
+                                                               'yahooFetched': False},
+                                                        'ts': {'attempted': ['sec'],
+                                                               'coverage': 'PARTIAL',
+                                                               'failed': [['finnhub', 'UNCONFIGURED', False, None]],
+                                                               'fetchedHosts': ['data.sec.gov'],
+                                                               'marketaux': None,
+                                                               'sourceStatus': {'finnhub': {'attempted': False,
+                                                                                            'filteredCount': 0,
+                                                                                            'rawCount': 0,
+                                                                                            'status': 'UNCONFIGURED'},
+                                                                                'sec': 'OK'},
+                                                               'sourcesUsed': ['sec'],
+                                                               'status': 'PARTIAL',
+                                                               'warnings': [['SOURCE_UNAVAILABLE',
+                                                                             'info',
+                                                                             'finnhub',
+                                                                             'Source finnhub is disabled by the server operator.']],
+                                                               'yahooFetched': False}},
+ 'news.off_switch.unknown_names_are_ignored': {'expect': {'attempted': ['yahoo_finance_news', 'finnhub'],
+                                                          'coverage': 'FULL',
+                                                          'failed': [],
+                                                          'fetchedHosts': ['finnhub.io'],
+                                                          'marketaux': {'fallbackReason': None, 'status': 'NOT_NEEDED'},
+                                                          'sourceStatus': {'finnhub': 'EMPTY_RESULT',
+                                                                           'marketaux': 'NOT_NEEDED',
+                                                                           'yahoo_finance_news': 'OK'},
+                                                          'sourcesUsed': ['yahoo_finance_news', 'finnhub'],
+                                                          'status': None,
+                                                          'warnings': [],
+                                                          'yahooFetched': True}},
+ 'news.off_switch.unset_baseline_for_the_two_cases_above': {'expect': {'attempted': ['yahoo_finance_news', 'finnhub'],
+                                                                       'coverage': 'FULL',
+                                                                       'failed': [],
+                                                                       'fetchedHosts': ['finnhub.io'],
+                                                                       'marketaux': {'fallbackReason': None, 'status': 'NOT_NEEDED'},
+                                                                       'sourceStatus': {'finnhub': 'EMPTY_RESULT',
+                                                                                        'marketaux': 'NOT_NEEDED',
+                                                                                        'yahoo_finance_news': 'OK'},
+                                                                       'sourcesUsed': ['yahoo_finance_news', 'finnhub'],
+                                                                       'status': None,
+                                                                       'warnings': [],
+                                                                       'yahooFetched': True}},
+ 'news.off_switch.verify_company_event_reports_a_disabled_source': {'py': {'attempted': ['yahoo_finance_news', 'finnhub'],
+                                                                           'coverage': 'FULL',
+                                                                           'failed': [],
+                                                                           'failureMode': None,
+                                                                           'fetchedHosts': ['finnhub.io'],
+                                                                           'marketaux': None,
+                                                                           'sourceStatus': {'finnhub': 'EMPTY_RESULT',
+                                                                                            'yahoo_finance_news': 'OK'},
+                                                                           'sourcesUsed': None,
+                                                                           'status': 'PARTIAL',
+                                                                           'warnings': [],
+                                                                           'yahooFetched': True},
+                                                                    'ts': {'attempted': ['yahoo_finance_news'],
+                                                                           'coverage': 'PARTIAL',
+                                                                           'failed': [['finnhub', 'UNCONFIGURED', False, None]],
+                                                                           'failureMode': None,
+                                                                           'fetchedHosts': [],
+                                                                           'marketaux': None,
+                                                                           'sourceStatus': {'finnhub': {'attempted': False,
+                                                                                                        'filteredCount': 0,
+                                                                                                        'rawCount': 0,
+                                                                                                        'status': 'UNCONFIGURED'},
+                                                                                            'yahoo_finance_news': 'OK'},
+                                                                           'sourcesUsed': None,
+                                                                           'status': 'PARTIAL',
+                                                                           'warnings': [['SOURCE_UNAVAILABLE',
+                                                                                         'info',
+                                                                                         'finnhub',
+                                                                                         'Source finnhub is disabled by the server '
+                                                                                         'operator.']],
+                                                                           'yahooFetched': True}}}
+
+
+def _off_case(name, ids, py_call, ts_call, disabled, *, env=None, news=None, info=None, routes=None, submissions=None, select=None, **kw) -> Case:
+    full_env = {**(env if env is not None else _OFF_KEYS)}
+    if disabled is not None:
+        full_env["NEWS_SOURCES_DISABLED"] = disabled
+    news = _OFF_NEWS if news is None else news
+    info = _OFF_INFO if info is None else info
+    submissions = _py_sec(SEC_CIK, "Acme Corp", _OFF_RECENT) if submissions is None else submissions
+
+    def py():
+        hosts: set = set()
+        yahoo = [False]
+        with _py_news_env(news=news, info=info, env=full_env, submissions=submissions):
+            orig_urlopen, orig_open = _urllib_request.urlopen, _urllib_request.OpenerDirector.open
+            orig_search = yahoo_provider._yahoo_search_news
+
+            def _host(req):
+                return _urlparse(req if isinstance(req, str) else req.full_url).hostname
+
+            def spy_urlopen(req, *a, **k):
+                hosts.add(_host(req))
+                return orig_urlopen(req, *a, **k)
+
+            def spy_open(self, req, *a, **k):
+                hosts.add(_host(req))
+                return orig_open(self, req, *a, **k)
+
+            def spy_search(ticker):
+                yahoo[0] = True
+                return orig_search(ticker)
+
+            async def spy_submissions(*_a, **_k):
+                hosts.add("data.sec.gov")  # Python serves SEC submissions from a stub; the Worker fetches data.sec.gov
+                return submissions
+
+            with patch.object(_urllib_request, "urlopen", spy_urlopen), \
+                    patch.object(_urllib_request.OpenerDirector, "open", spy_open), \
+                    patch.object(yahoo_provider, "_yahoo_search_news", spy_search), \
+                    patch.object(news_tools, "_get_submissions_for_ticker", spy_submissions), \
+                    patch.object(sec_provider, "_get_submissions_for_ticker", spy_submissions):
+                result = json.loads(asyncio.run(py_call()))
+        return {"result": result, "fetchedHosts": sorted(h for h in hosts if h in _SPY_PROVIDER_HOSTS), "yahooFetched": yahoo[0]}
+
+    all_routes = {**_yahoo_routes(news, info), **(_OFF_ROUTES if routes is None else routes)}
+    js = _worker_js(_SPY_JS % (ts_call, json.dumps(sorted(_SPY_PROVIDER_HOSTS))), full_env)
+    return Case(name=name, ids=ids, py=py, ts={"js": js, "isolate": True}, routes=all_routes, select=select, **kw)
+
+
+def _off_view(v):
+    r = v["result"]
+    return {"sourceStatus": {k: (s if s.get("status") == "UNCONFIGURED" and s.get("attempted") is False else s.get("status"))
+                             for k, s in r["sourceStatus"].items()},
+            "warnings": [[w["code"], w.get("severity"), w.get("source"), w.get("message")] for w in r["warnings"]],
+            "coverage": r["coverage"]["state"], "failed": [[f["source"], f["status"], f["attempted"], f["reasonCode"]] for f in r["coverage"]["failedSources"]],
+            "status": r.get("status"), "sourcesUsed": (r.get("meta") or {}).get("sourcesUsed", r.get("sourcesUsed")),
+            "attempted": [a["sourceType"] for a in r.get("attemptedSources", [])],
+            "marketaux": {k: (r["sourceStatus"].get("marketaux") or {}).get(k) for k in ("status", "fallbackReason")} if "marketaux" in r["sourceStatus"] else None,
+            "fetchedHosts": v["fetchedHosts"], "yahooFetched": v["yahooFetched"]}
+
+
+def _off_news(disabled, sources=None, **kw):
+    py_sources = "" if sources is None else f", {sources!r}"
+    ts_sources = "" if sources is None else f", {json.dumps(sources)}"
+    py_call = (lambda: server.get_company_news("ACME", 10, 14)) if sources is None else (lambda: server.get_company_news("ACME", 10, 14, sources))
+    return py_call, f'm.yahooFinance.getCompanyNews("ACME", 10, 14{ts_sources})'
+
+
+CASES += [
+    # §6: one disabled default source (finnhub). No Finnhub fetch; the row is UNCONFIGURED/attempted false; one info warning;
+    # failedSources gains it and coverage reads PARTIAL. A disabled finnhub counts as limited, so the Marketaux fallback runs
+    # (HIGHER_PRIORITY_COVERAGE_LIMITED). TODO(python-mirror): flip to equal with expect = the expect_ts value.
+    _off_case("news.off_switch.disabled_default_finnhub_is_not_fetched_and_reported", ["RNEWS2-2", "RNEWS2-8.3"],
+              *_off_news("finnhub"), "finnhub", select=_off_view, mode="pinned", decision=_RNEWS2_PENDING,
+              expect_py=_OFF_EXPECT["news.off_switch.disabled_default_finnhub_is_not_fetched_and_reported"]["py"], expect_ts=_OFF_EXPECT["news.off_switch.disabled_default_finnhub_is_not_fetched_and_reported"]["ts"]),
+    # §6: an explicitly requested disabled source gets the same reporting. TODO(python-mirror): flip to equal (expect_ts).
+    _off_case("news.off_switch.explicit_disabled_source_gets_the_same_report", ["RNEWS2-2"],
+              *_off_news("finnhub", ["yahoo_finance_news", "finnhub"]), "finnhub", select=_off_view, mode="pinned",
+              decision=_RNEWS2_PENDING, expect_py=_OFF_EXPECT["news.off_switch.explicit_disabled_source_gets_the_same_report"]["py"], expect_ts=_OFF_EXPECT["news.off_switch.explicit_disabled_source_gets_the_same_report"]["ts"]),
+    # §2 / §8.3: finnhub and marketaux both disabled: no provider fetch, the fallback is skipped and reported as disabled.
+    # Names are trimmed and lower-cased. TODO(python-mirror): flip to equal (expect_ts).
+    _off_case("news.off_switch.marketaux_disabled_skips_the_fallback", ["RNEWS2-2", "RNEWS2-8.3"],
+              *_off_news(None), " Finnhub , MARKETAUX ", select=_off_view, mode="pinned", decision=_RNEWS2_PENDING,
+              expect_py=_OFF_EXPECT["news.off_switch.marketaux_disabled_skips_the_fallback"]["py"], expect_ts=_OFF_EXPECT["news.off_switch.marketaux_disabled_skips_the_fallback"]["ts"]),
+    # §6: every requested source disabled: no fetch at all, source-limited status, never NOT_FOUND.
+    # TODO(python-mirror): flip to equal (expect_ts).
+    _off_case("news.off_switch.every_requested_source_disabled_fetches_nothing", ["RNEWS2-2"],
+              *_off_news(None, ["finnhub", "marketaux"]), "finnhub,marketaux", select=_off_view, mode="pinned",
+              decision=_RNEWS2_PENDING, expect_py=_OFF_EXPECT["news.off_switch.every_requested_source_disabled_fetches_nothing"]["py"], expect_ts=_OFF_EXPECT["news.off_switch.every_requested_source_disabled_fetches_nothing"]["ts"]),
+    _off_case("news.off_switch.every_default_source_disabled_fetches_nothing", ["RNEWS2-2"],
+              *_off_news(None), "yahoo_finance_news,yahoo_finance_press_releases,sec,finnhub,marketaux", select=_off_view,
+              mode="pinned", decision=_RNEWS2_PENDING, expect_py=_OFF_EXPECT["news.off_switch.every_default_source_disabled_fetches_nothing"]["py"], expect_ts=_OFF_EXPECT["news.off_switch.every_default_source_disabled_fetches_nothing"]["ts"]),
+    # §6: unknown names are ignored and an empty setting changes nothing (equal today and after the port: same as unset).
+    _off_case("news.off_switch.unknown_names_are_ignored", ["RNEWS2-2"],
+              *_off_news(None, ["yahoo_finance_news", "finnhub", "marketaux"]), "bloomberg, ,reuters", select=_off_view,
+              expect=_OFF_EXPECT["news.off_switch.unknown_names_are_ignored"]["expect"]),
+    _off_case("news.off_switch.empty_setting_changes_nothing", ["RNEWS2-2"],
+              *_off_news(None, ["yahoo_finance_news", "finnhub", "marketaux"]), "", select=_off_view, expect=_OFF_EXPECT["news.off_switch.empty_setting_changes_nothing"]["expect"]),
+    _off_case("news.off_switch.unset_baseline_for_the_two_cases_above", ["RNEWS2-2"],
+              *_off_news(None, ["yahoo_finance_news", "finnhub", "marketaux"]), None, select=_off_view, expect=_OFF_EXPECT["news.off_switch.unset_baseline_for_the_two_cases_above"]["expect"]),
+    # §8.5: get_company_press_releases attaches the disabled report once (row, warning, failedSources entry).
+    # TODO(python-mirror): flip to equal (expect_ts).
+    _off_case("news.off_switch.press_releases_report_a_disabled_source_once", ["RNEWS2-2", "RNEWS2-8.5"],
+              lambda: server.get_company_press_releases("ACME", 90, 20, ["sec", "yahoo_finance_press_releases"]),
+              'm.yahooFinance.getCompanyPressReleases("ACME", 90, 20, ["sec", "yahoo_finance_press_releases"])', "sec",
+              select=lambda v: {**_off_view(v), "coverageStatus": v["result"].get("coverageStatus")}, mode="pinned",
+              decision=_RNEWS2_PENDING, expect_py=_OFF_EXPECT["news.off_switch.press_releases_report_a_disabled_source_once"]["py"], expect_ts=_OFF_EXPECT["news.off_switch.press_releases_report_a_disabled_source_once"]["ts"]),
+    _off_case("news.off_switch.press_releases_with_every_default_disabled_are_source_limited", ["RNEWS2-2", "RNEWS2-8.5"],
+              lambda: server.get_company_press_releases("ACME", 90, 20),
+              'm.yahooFinance.getCompanyPressReleases("ACME", 90, 20)', "sec,company_ir_page,yahoo_finance_press_releases",
+              select=lambda v: {**_off_view(v), "coverageStatus": v["result"].get("coverageStatus")}, mode="pinned",
+              decision=_RNEWS2_PENDING, expect_py=_OFF_EXPECT["news.off_switch.press_releases_with_every_default_disabled_are_source_limited"]["py"], expect_ts=_OFF_EXPECT["news.off_switch.press_releases_with_every_default_disabled_are_source_limited"]["ts"]),
+    # §2: the timeline and verification use the same shared selection. TODO(python-mirror): flip to equal (expect_ts).
+    _off_case("news.off_switch.verify_company_event_reports_a_disabled_source", ["RNEWS2-2"],
+              lambda: server.verify_company_event("ACME", "shares rise", "", "", ["yahoo_finance_news", "finnhub"]),
+              'm.yahooFinance.verifyCompanyEvent("ACME", "shares rise", "", "", ["yahoo_finance_news", "finnhub"])', "finnhub",
+              # Python's verify reads SEC submissions for identity whatever the sources, so data.sec.gov is left out here.
+              select=lambda v: {**_off_view(v), "fetchedHosts": [h for h in v["fetchedHosts"] if h != "data.sec.gov"],
+                                "failureMode": v["result"].get("failureMode")},
+              mode="pinned", decision=_RNEWS2_PENDING, expect_py=_OFF_EXPECT["news.off_switch.verify_company_event_reports_a_disabled_source"]["py"], expect_ts=_OFF_EXPECT["news.off_switch.verify_company_event_reports_a_disabled_source"]["ts"]),
+    _off_case("news.off_switch.timeline_reports_a_disabled_source", ["RNEWS2-2"],
+              lambda: server.get_public_event_timeline("ACME", "", "", ["sec", "finnhub"]),
+              'm.yahooFinance.getPublicEventTimeline("ACME", "", "", ["sec", "finnhub"])', "finnhub",
+              select=lambda v: {k: x for k, x in _off_view(v).items()}, mode="pinned", decision=_RNEWS2_PENDING,
+              expect_py=_OFF_EXPECT["news.off_switch.timeline_reports_a_disabled_source"]["py"], expect_ts=_OFF_EXPECT["news.off_switch.timeline_reports_a_disabled_source"]["ts"]),
+    # §8.4: get_sec_recent_events selects no news sources, so a disabled sec does not affect it (equal today and after).
+    _off_case("news.off_switch.sec_recent_events_ignore_a_disabled_sec", ["RNEWS2-8.4"],
+              lambda: server.get_sec_recent_events("ACME", ["8-K"], 90, 20),
+              'm.yahooFinance.getSecRecentEvents("ACME", ["8-K"], 90, 20)', "sec",
+              select=lambda v: {"sourcesUsed": v["result"]["meta"]["sourcesUsed"], "warnings": [w["code"] for w in v["result"]["warnings"]],
+                                "items": [i["filingType"] for i in v["result"]["items"]], "fetchedHosts": v["fetchedHosts"]},
+              expect=_OFF_EXPECT["news.off_switch.sec_recent_events_ignore_a_disabled_sec"]["expect"]),
 ]
