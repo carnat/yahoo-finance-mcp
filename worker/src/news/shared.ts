@@ -4,7 +4,7 @@
  * Moved out of news.ts in 2.15.1 (pure restructure); providers never import news.ts.
  */
 
-import { iso, stripHtmlTags, _str } from "../yahoo-finance.js";
+import { stripHtmlTags, _str } from "../yahoo-finance.js";
 
 /** Parse a single HTML <table> into a list of rows (each row is a list of plain-text cells). */
 export function parseHtmlTable(tableHtml: string): string[][] {
@@ -30,39 +30,78 @@ export function sourceDecisionUse(sourceType: unknown): string {
   }
   return "CONTEXT_ONLY";
 }
+/** An ISO 8601 UTC string without ".000" when the milliseconds are zero, as Python's isoformat writes it (2.17.0). */
+export function withoutZeroMillis(value: string): string {
+  return value.replace(/\.000Z$/, "Z");
+}
+/** The news ISO formatter (2.17.0): `Date.toISOString()` with zero milliseconds dropped ("...:00Z", not "...:00.000Z"). */
+export function isoUtc(date: Date): string {
+  return withoutZeroMillis(date.toISOString());
+}
+/** Epoch seconds as a news ISO timestamp (isoUtc). */
+export function isoFromEpochSeconds(ts: number): string {
+  return isoUtc(new Date(ts * 1000));
+}
 export function normalizeIso(raw: unknown): string | null {
   if (raw == null) return null;
-  if (typeof raw === "number" && Number.isFinite(raw)) return iso(raw);
+  if (typeof raw === "number" && Number.isFinite(raw)) return isoFromEpochSeconds(raw);
   if (typeof raw !== "string") return null;
   const v = raw.trim();
   if (!v) return null;
   if (/^\d{14}$/.test(v)) return `${v.slice(0, 4)}-${v.slice(4, 6)}-${v.slice(6, 8)}T${v.slice(8, 10)}:${v.slice(10, 12)}:${v.slice(12, 14)}Z`;
   if (/^\d{8}$/.test(v)) return `${v.slice(0, 4)}-${v.slice(4, 6)}-${v.slice(6, 8)}T00:00:00Z`;
   const d = new Date(v);
-  return Number.isNaN(d.getTime()) ? null : d.toISOString();
+  return Number.isNaN(d.getTime()) ? null : isoUtc(d);
 }
 export function shortText(value: unknown, maxLen = 220): string | null {
   const s = _str(value).replace(/\s+/g, " ").trim();
-  return s ? s.slice(0, maxLen) : null;
+  // Cut at code points, as Python does, so an astral character is never split into a lone surrogate (2.17.0).
+  return s ? Array.from(s).slice(0, maxLen).join("") : null;
 }
+/**
+ * Event-type keyword table, shared with Python (yfmcp/news/shared.py): Python's list, the superset (2.17.0).
+ * Groups are tested in order and the first group with a whole-word match (optional s/es/d/ed/ing suffix) wins.
+ */
+const EVENT_TYPE_KEYWORDS: Array<[string, string[]]> = [
+  ["earnings", ["earnings", "eps", "quarterly", "10-q", "10-k", "annual report"]],
+  ["guidance", ["guidance", "outlook", "forecast", "reaffirm", "raises", "lowers"]],
+  ["contract", ["contract", "agreement", "deal", "partnership"]],
+  ["financing", ["offering", "financing", "debt", "credit facility", "note"]],
+  ["product", ["launch", "product", "introduce", "announces new"]],
+  ["analyst", ["analyst", "rating", "upgrade", "downgrade", "price target"]],
+  ["macro", ["macro", "inflation", "rates", "fomc", "cpi"]],
+  ["litigation", ["lawsuit", "litigation", "court", "settlement"]],
+  ["insider", ["insider", "director", "officer", "form 4"]],
+  ["regulatory", ["sec", "regulatory", "8-k", "10-q", "10-k", "filing"]],
+];
+const EVENT_TYPE_PATTERNS: Array<[string, RegExp]> = EVENT_TYPE_KEYWORDS.map(([eventType, keywords]) => [
+  eventType,
+  // Whole words with an optional inflection on the last word (planner decision 1, 2.17.0): 'launches', 'notes' and
+  // 'announced' match; 'sector', 'dealer' and 'steps' do not hit 'sec', 'deal' and 'eps'.
+  new RegExp(`\\b(?:${keywords.map(k => k.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})(?:s|es|d|ed|ing)?\\b`),
+]);
 export function eventTypeFromKeywords(title: string, summary: string): string {
   const text = `${title} ${summary}`.toLowerCase();
-  if (/earnings|eps|quarterly|10-q|10-k/.test(text)) return "earnings";
-  if (/guidance|outlook|forecast|reaffirm|raises|lowers/.test(text)) return "guidance";
-  if (/contract|agreement|deal|partnership/.test(text)) return "contract";
-  if (/offering|financing|debt|notes?/.test(text)) return "financing";
-  if (/launch|product|introduce/.test(text)) return "product";
-  if (/analyst|rating|upgrade|downgrade|price target/.test(text)) return "analyst";
-  if (/macro|inflation|rates|fomc|cpi/.test(text)) return "macro";
-  if (/lawsuit|litigation|court|settlement/.test(text)) return "litigation";
-  if (/insider|director|officer|form 4/.test(text)) return "insider";
-  if (/sec|regulatory|8-k|filing/.test(text)) return "regulatory";
+  for (const [eventType, pattern] of EVENT_TYPE_PATTERNS) {
+    if (pattern.test(text)) return eventType;
+  }
   return "other";
+}
+/**
+ * Whether the ticker appears in the text (case-insensitive). A single-letter ticker must be a whole token, so 'A' is
+ * not found inside 'MARKETS' (2.17.0); longer tickers keep the substring test.
+ */
+export function tickerInText(text: string, ticker: string): boolean {
+  const tickerU = ticker.toUpperCase();
+  const textU = text.toUpperCase();
+  if (tickerU.length === 1) return new RegExp(`\\b${tickerU.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`).test(textU);
+  return textU.includes(tickerU);
 }
 function normalizedEventTitleStem(ticker: string, title: string | null): string {
   const stop = new Set(["yahoo", "finance", "finnhub", "globenewswire", "press", "release", "inc", "corp", "corporation", "company", "plc", "ltd", "llc"]);
   const tickerLower = ticker.toLowerCase();
-  return _str(title)
+  // HTML entities are decoded before the stem, so "&amp;" and "&" titles group (2.17.0).
+  return decodeXmlText(_str(title))
     .toLowerCase()
     .replace(/https?:\/\/\S+/g, " ")
     .replace(/[^a-z0-9]+/g, " ")
@@ -80,6 +119,18 @@ export function makeDupGroupId(ticker: string, title: string | null, publishedAt
   const s = `${normTitle}|${day}|${entity}`;
   for (let i = 0; i < s.length; i++) h = ((h << 5) - h + s.charCodeAt(i)) | 0;
   return (h >>> 0).toString(16).padStart(8, "0");
+}
+/**
+ * Round half away from zero to `digits` decimals, decimal-safe (2.17.0): the number's shortest decimal form is shifted,
+ * so 1.005 rounds to 1.01 and -0.125 to -0.13, as Python's Decimal(str(x)).quantize(..., ROUND_HALF_UP) does.
+ */
+export function roundHalfAwayFromZero(value: number, digits: number): number {
+  // Past 2^52 at this scale a double has no fraction left to round.
+  if (!Number.isFinite(value) || Math.abs(value) * 10 ** digits >= 2 ** 52) return value;
+  const [mantissa, exponent] = Math.abs(value).toExponential().split("e");
+  const shifted = Math.round(Number(`${mantissa}e${Number(exponent) + digits}`));
+  const rounded = shifted / 10 ** digits;
+  return value < 0 && rounded !== 0 ? -rounded : rounded;
 }
 export function withinDateWindow(publishedAt: string | null, startDate = "", endDate = "", lookbackDays?: number): boolean {
   if (!publishedAt) return false;
@@ -107,12 +158,19 @@ export function extractXmlTag(xml: string, tagName: string): string {
   const m = xml.match(new RegExp(`<${escaped}(?:\\s[^>]*)?>([\\s\\S]*?)<\\/${escaped}>`, "i"));
   return m ? decodeXmlText(m[1]).trim() : "";
 }
+/**
+ * The exchange normaliser shared by every news exchange check (Yahoo ticker prefixes, Marketaux entities, GlobeNewswire
+ * stock categories) and by Python (2.17.0): NYSE American / AMEX / exact ASE are tested before NYSE, and GS / NMS / NGM /
+ * NCM count only as whole tokens or exact codes.
+ */
+const NASDAQ_EXCHANGE_CODES = new Set(["GS", "NMS", "NGM", "NCM"]);
 export function normalizeExchange(exch: string | null | undefined): string | null {
   if (!exch) return null;
   const e = exch.toUpperCase();
-  if (e.includes("NASDAQ") || e.includes("NMS") || e.includes("NGM") || e.includes("NCM") || e.includes("GS")) return "NASDAQ";
+  const tokens = e.split(/[^A-Z0-9]+/).filter(Boolean);
+  if (e.includes("NASDAQ") || tokens.some(token => NASDAQ_EXCHANGE_CODES.has(token))) return "NASDAQ";
+  if (e.includes("NYSE AMERICAN") || e.includes("AMEX") || e === "ASE") return "NYSEAMERICAN";
   if (e.includes("NYSE") || e === "NYQ") return "NYSE";
-  if (e.includes("AMEX") || e.includes("NYSE AMERICAN") || e === "ASE") return "NYSEAMERICAN";
   if (e.includes("TSXV") || e.includes("CVE")) return "TSXV";
   if (e.includes("TSX") || e.includes("TOR")) return "TSX";
   return null;

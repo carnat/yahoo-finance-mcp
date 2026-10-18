@@ -53,6 +53,7 @@ from yfmcp.news.shared import (
     _event_type_from_keywords,
     _make_duplicate_group_id,
     _normalize_exchange,
+    _ticker_in_text,
     _normalized_event_title_stem,
     _short_text,
     _within_date_window,
@@ -198,7 +199,14 @@ def _url_provenance_for(item: dict) -> str:
     url = str(item.get("url") or "")
     if not url:
         return "UNKNOWN"
-    host = _urlparse.urlparse(url).hostname or ""
+    # A URL that does not parse as an absolute URL is UNKNOWN (the Worker's `new URL()` throws), 2.17.0.
+    try:
+        parsed = _urlparse.urlparse(url)
+        host = parsed.hostname or ""
+    except ValueError:
+        return "UNKNOWN"
+    if not parsed.scheme or (parsed.scheme.lower() in {"http", "https", "ftp", "ws", "wss"} and not host):
+        return "UNKNOWN"
     if host.lower().endswith(("finance.yahoo.com", "finnhub.io")):
         return "PROVIDER"
     return "PUBLISHER"
@@ -1192,6 +1200,17 @@ async def _collect_company_events(
     # Direct GlobeNewswire RSS is an explicitly selected shallow snapshot and
     # runs after the bounded API sources so its cold latency cannot delay them.
     if "newswire" in selected_sources:
+        # The stock-category exchange check reads the company exchange; resolved on demand when no Yahoo pass ran (2.17.0).
+        gnw_identity = yahoo_identity
+        if gnw_identity is None:
+            try:
+                with _url_policy.budget_watch() as gnw_identity_watch:
+                    gnw_info = await asyncio.to_thread(lambda: yf.Ticker(ticker).info)
+                gnw_identity = _yahoo_news_identity_from_info(ticker, gnw_info)
+                if gnw_identity_watch.starved:
+                    budget_starved.add("yahoo_finance_identity")
+            except Exception:
+                gnw_identity = None
         gnw_items, gnw_warnings, gnw_used = await _watched(["newswire"], _collect_globenewswire_events(
             ticker,
             retrieved_at=retrieved_at,
@@ -1199,6 +1218,7 @@ async def _collect_company_events(
             start_date=start_date,
             end_date=end_date,
             lookback_days=lookback,
+            exchange=(gnw_identity or {}).get("exchange"),
         ))
         if gnw_used:
             sources_used.append("newswire")
@@ -1226,17 +1246,17 @@ async def _collect_company_events(
             if name in source_diagnostics
         ]
         if yahoo_diagnostics:
-            rejection_counts: dict[str, int] = {}
-            for diagnostic in yahoo_diagnostics:
-                for reason, count in (diagnostic.get("rejectionCounts") or {}).items():
-                    rejection_counts[reason] = rejection_counts.get(reason, 0) + int(count or 0)
+            # Both passes read the same Yahoo feed, so the legacy aggregate counts it once (2.17.0): the news pass accepts
+            # every row the press-release pass accepts and rejects the rest for the same reasons, so its counts are the
+            # feed's. A failed news pass falls back to the press-release pass's counts.
+            feed_read = next((diagnostic for diagnostic in yahoo_diagnostics if diagnostic.get("completed") is True), yahoo_diagnostics[0])
             source_diagnostics["yahoo_finance"] = {
-                "rawCount": sum(int(diagnostic.get("rawCount") or 0) for diagnostic in yahoo_diagnostics),
-                "retrievedCount": sum(int(diagnostic.get("retrievedCount") or 0) for diagnostic in yahoo_diagnostics),
-                "filteredCount": sum(int(diagnostic.get("filteredCount") or 0) for diagnostic in yahoo_diagnostics),
-                "acceptedCount": sum(int(diagnostic.get("acceptedCount") or 0) for diagnostic in yahoo_diagnostics),
-                "rejectedCount": sum(int(diagnostic.get("rejectedCount") or 0) for diagnostic in yahoo_diagnostics),
-                "rejectionCounts": rejection_counts,
+                "rawCount": int(feed_read.get("rawCount") or 0),
+                "retrievedCount": int(feed_read.get("retrievedCount") or 0),
+                "filteredCount": int(feed_read.get("filteredCount") or 0),
+                "acceptedCount": int(feed_read.get("acceptedCount") or 0),
+                "rejectedCount": int(feed_read.get("rejectedCount") or 0),
+                "rejectionCounts": dict(feed_read.get("rejectionCounts") or {}),
                 "identityStatus": (yahoo_identity or {}).get("status") or "UNAVAILABLE",
                 "attempted": True,
                 "completed": all(diagnostic.get("completed") is True for diagnostic in yahoo_diagnostics),
@@ -1606,14 +1626,7 @@ async def get_sec_recent_events(
             max_results=_coerce_max_results(max_results, 20),
             lookback_days=_coerce_lookback_days(lookback_days, 90),
         )
-    for item in items:
-        if not _safe_sec_url(item.get("url")):
-            item["confidence"] = "LOW"
-            warnings.append({
-                "code": "SEC_URL_INVALID",
-                "message": "SEC event URL missing or invalid SEC Archives URL.",
-                "severity": "warning",
-            })
+    # SEC_URL_INVALID is raised by the SEC provider's item builder (the news path and this tool share it, 2.17.0).
     items = [_enrich_news_item_for_llm(item) for item in items]
     status = _build_collection_status(items, ["sec"] if used else [], warnings)
     source_status = _mark_budget_starved_sources(
@@ -1868,17 +1881,14 @@ async def verify_company_event(
 
     def _relevance_score(ev: dict) -> str:
         """Return 'HIGH', 'MEDIUM', or 'LOW' based on ticker/entity presence."""
-        # 1. Check explicit tickers list
-        ev_tickers = ev.get("tickers") or []
-        if any(str(t).upper() == ticker_upper for t in ev_tickers):
-            return "HIGH"
-            
-        # 2. Check source type
+        # Relevance is scored from the evidence text and issuer, never from the item's tickers list: every collector
+        # injects the queried ticker there, which made LOW_RELEVANCE_EVIDENCE unreachable (2.17.0).
+        # 1. Check source type
         source_type = str(ev.get("sourceType") or "")
         if source_type in ("sec_filing", "sec", "company_ir", "sec_ex99_found"):
             return "HIGH"
             
-        # 3. Check text content
+        # 2. Check text content
         hay = " ".join([
             str(ev.get("title") or ""),
             str(ev.get("summary") or ""),
@@ -1897,8 +1907,7 @@ async def verify_company_event(
             return "HIGH"
             
         # Check issuer field explicitly
-        ev_issuer = str(ev.get("issuer") or "").upper()
-        if ticker_upper in ev_issuer:
+        if _ticker_in_text(str(ev.get("issuer") or ""), ticker_upper):
             return "HIGH"
             
         return "LOW"

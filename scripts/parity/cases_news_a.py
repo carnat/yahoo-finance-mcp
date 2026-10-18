@@ -512,19 +512,37 @@ AGREED_EVENT_TITLES = {
     "Acme files 10-K": "earnings",                                # '10-k' sits in the earnings list, so the regulatory entry is unreachable
     "Acme CEO resigns": "other",
 }
-# Finding (Q7, for triage): matching is by substring in both runtimes, so 'steps' -> earnings, 'sector' -> regulatory,
-# 'dealer' -> contract, 'operates' -> macro, 'notebook' -> financing; eventType drives decisionUse.
+# R-news Batch A (2.17.0, A-G1 / B-G13 / call #6): keywords match whole words, so 'steps', 'sector', 'dealer', 'operates' and
+# 'notebook' no longer hit 'eps', 'sec', 'deal', 'rates' and 'note'; 'notebook line launch' falls through to 'launch' (product).
+WHOLE_WORD_EVENT_TITLES = {
+    **AGREED_EVENT_TITLES,
+    "Acme second-quarter steps announced": "other",
+    "Acme sector update": "other",
+    "Acme dealer network expands": "other",
+    "Acme operates new facility": "other",
+    "Acme notebook line launch": "product",
+}
 CASES += [
-    _yahoo_titles_case("news.event_type.keyword_priority_and_substring_matching_agree", ["BR-NWS-130", "BR-NWS-120", "BR-NWS-253"],
-                       list(AGREED_EVENT_TITLES), _event_types, expect=AGREED_EVENT_TITLES),
-    # Python's list has extra phrases ('announces new', 'annual report', 'credit facility') the Worker's lacks.
-    _yahoo_titles_case("news.event_type.python_only_phrases_differ_from_worker", ["BR-NWS-120", "BR-NWS-130"],
+    _yahoo_titles_case("news.event_type.keyword_priority_and_whole_word_matching_agree", ["BR-NWS-130", "BR-NWS-120", "BR-NWS-253"],
+                       list(AGREED_EVENT_TITLES), _event_types,
+                       expect=WHOLE_WORD_EVENT_TITLES),
+    # 2.17.0: one keyword table, Python's superset, so 'announces new', 'annual report' and 'credit facility' type in both runtimes.
+    _yahoo_titles_case("news.event_type.python_superset_phrases_type_in_both", ["BR-NWS-120", "BR-NWS-130"],
                        ["Acme announces new CEO", "Acme files annual report", "Acme closes $50M credit facility"], _event_types,
-                       mode="pinned", decision="FINDING: Python event-type keywords include 'announces new', 'annual report' and 'credit facility'; the Worker's do not",
-                       expect_py={"Acme announces new CEO": "product", "Acme files annual report": "earnings",
-                                  "Acme closes $50M credit facility": "financing"},
-                       expect_ts={"Acme announces new CEO": "other", "Acme files annual report": "other",
-                                  "Acme closes $50M credit facility": "other"}),
+                       expect={"Acme announces new CEO": "product", "Acme files annual report": "earnings",
+                               "Acme closes $50M credit facility": "financing"}),
+    # 2.17.0 (planner decision 1): a keyword with an s/es/d/ed/ing suffix (on the last word of a phrase) still matches, so these
+    # headlines type as they did with substring matching, in both runtimes.
+    _yahoo_titles_case("news.event_type.inflected_keywords_type_as_before", ["BR-NWS-120", "BR-NWS-130", "BR-NWS-253"],
+                       ["Acme launches chip", "Acme introduces platform", "Acme issues notes", "Acme files annual reports",
+                        "Acme rating upgraded", "Acme deals signed"], _event_types,
+                       expect={"Acme launches chip": "product", "Acme introduces platform": "product", "Acme issues notes": "financing",
+                               "Acme files annual reports": "earnings", "Acme rating upgraded": "analyst", "Acme deals signed": "contract"}),
+    # 2.17.0: whole-word keywords still match on their own, in either case and next to punctuation.
+    _yahoo_titles_case("news.event_type.whole_word_keywords_still_match", ["BR-NWS-120", "BR-NWS-130", "BR-NWS-253"],
+                       ["Acme SEC probe widens", "Acme deal closes", "Acme EPS beat", "Acme (8-K) filed", "Acme rates review"], _event_types,
+                       expect={"Acme SEC probe widens": "regulatory", "Acme deal closes": "contract", "Acme EPS beat": "earnings",
+                               "Acme (8-K) filed": "regulatory", "Acme rates review": "macro"}),
 ]
 
 
@@ -577,16 +595,14 @@ CASES += [
                       "warnings": ["SOURCE_IDENTITY_UNAVAILABLE"], "identity": IDENTITY_UNAVAILABLE_ROW, "status": "PARTIAL",
                       "coverage": {"sourceCoverage": "PARTIAL", "state": "PARTIAL", "failed": [["yahoo_finance_identity", "IDENTITY_UNAVAILABLE"]],
                                    "skipped": [], "truncated": [], "action": "CHECK_OFFICIAL_RELEASES"}}),
-    # Card 139: a Yahoo shortName that is just the ticker. Python takes it as an issuer alias (RESOLVED); the Worker
-    # drops an alias equal to the ticker, so its identity is UNAVAILABLE, a warning is raised and coverage is PARTIAL.
-    tool_case("news.identity.ticker_only_short_name_resolves_in_python_not_in_worker", ["BR-NWS-139"], "news",
+    # Card 139: a Yahoo shortName that is just the ticker. Both runtimes drop an alias equal to the ticker (2.17.0, A-G2;
+    # before, Python took it as an issuer alias), so the identity is UNAVAILABLE, a warning is raised and coverage is PARTIAL.
+    tool_case("news.identity.ticker_only_short_name_is_not_issuer_identity", ["BR-NWS-139"], "news",
               ["TSTX", 10, 14, ["yahoo_finance_news"]],
               {"info": {"shortName": "TSTX"}, "news": [yahoo_row("TSTX wins order", "2026-10-14T09:00:00Z")]},
               select=lambda v: {"identityStatus": _yahoo_state(v)["identityStatus"], "warnings": codes(v), "status": v.get("status"),
                                 "coverageState": v["coverage"]["state"], "titles": [it["title"] for it in v["items"]]},
-              mode="pinned", decision="FINDING: Worker excludes a ticker-equal Yahoo shortName from issuer aliases (identity UNAVAILABLE); Python accepts it (RESOLVED)",
-              expect_py={"identityStatus": "RESOLVED", "warnings": [], "status": None, "coverageState": "FULL", "titles": ["TSTX wins order"]},
-              expect_ts={"identityStatus": "UNAVAILABLE", "warnings": ["SOURCE_IDENTITY_UNAVAILABLE"], "status": "PARTIAL",
+              expect={"identityStatus": "UNAVAILABLE", "warnings": ["SOURCE_IDENTITY_UNAVAILABLE"], "status": "PARTIAL",
                          "coverageState": "PARTIAL", "titles": ["TSTX wins order"]}),
 ]
 
@@ -702,15 +718,15 @@ CASES += [
               expect={"items": [{"title": "Acme wins supply contract", "source": "newswire", "publishedAt": "2026-10-10T10:00:00Z",
                                  "refs": [{"source": "yahoo_finance_news", "sourceType": "yahoo_finance_news", "publishedAt": "2026-10-10T10:05:00Z"}]}],
                       "variance": [{"code": "TIMESTAMP_VARIANCE", "statusImpact": False}]}),
-    # Card 118 / 251: Python unescapes HTML entities before building the stem; the Worker does not ('amp' stays in its stem).
-    tool_case("news.dedupe.html_entity_in_title_groups_in_python_not_in_worker", ["BR-NWS-118", "BR-NWS-251"], "news",
+    # Card 118 / 251: HTML entities are decoded before the stem (Python html.unescape, the Worker decodeXmlText since 2.17.0),
+    # so the '&amp;' and '&' titles are one story.
+    tool_case("news.dedupe.html_entity_in_title_groups_in_both", ["BR-NWS-118", "BR-NWS-251"], "news",
               ["SMCO", 10, 14, FINNHUB_AND_YAHOO],
               {"env": FAKE_FINNHUB, "info": {"shortName": "Smith & Co"},
                "news": [yahoo_row("Smith & Co. wins contract", "2026-10-10T13:00:00Z")],
                "routes": {FINNHUB_NEWS: {"json": [finnhub_row("Smith &amp; Co. wins contract", "2026-10-10T13:00:00Z")]}}},
               select=lambda v: {"sources": sorted(it["source"] for it in v["items"]), "count": len(v["items"])},
-              mode="pinned", decision="FINDING: Python HTML-unescapes titles before the dedupe stem and the Worker does not, so the same story stays two items in the Worker",
-              expect_py={"sources": ["finnhub"], "count": 1}, expect_ts={"sources": ["finnhub", "yahoo_finance_news"], "count": 2}),
+              expect={"sources": ["finnhub"], "count": 1}),
 ]
 
 # Cards 114 / 119: the group id itself. Python = first 16 hex of sha256 over "stem|day|ISSUER-or-TICKER"; the Worker = a
@@ -742,9 +758,9 @@ CASES += [
                       ("Acme beta story 3", "finnhub", "2026-10-13T15:00:00Z")]),
 ]
 
-# Card 136: epoch seconds -> '...Z' in Python, '....000Z' in the Worker; compact 8-digit dates agree.
+# Card 136: epoch seconds -> '...Z' in both runtimes (the Worker drops zero milliseconds since 2.17.0); compact 8-digit dates agree.
 CASES += [
-    tool_case("news.timestamp.epoch_publishedat_has_milliseconds_only_in_the_worker", ["BR-NWS-136"], "news",
+    tool_case("news.timestamp.epoch_publishedat_has_no_zero_milliseconds", ["BR-NWS-136"], "news",
               ["ACME", 10, 14, ["finnhub"]],
               {"env": FAKE_FINNHUB, "now": "2025-10-10T00:00:00Z",
                "routes": {FINNHUB_NEWS: {"json": [{"headline": "Acme epoch story", "summary": "", "source": "Wire", "datetime": 1760000000,
@@ -752,9 +768,7 @@ CASES += [
                                                   {"headline": "Acme compact story", "summary": "", "source": "Wire", "datetime": "20251008",
                                                    "url": "https://finnhub.io/api/news/compact"}]}}},
               select=lambda v: {it["title"]: it["publishedAt"] for it in v["items"]},
-              mode="pinned", decision="FINDING: publishedAt carries milliseconds ('.000Z') in the Worker and none in Python for epoch input",
-              expect_py={"Acme epoch story": "2025-10-09T08:53:20Z", "Acme compact story": "2025-10-08T00:00:00Z"},
-              expect_ts={"Acme epoch story": "2025-10-09T08:53:20.000Z", "Acme compact story": "2025-10-08T00:00:00Z"}),
+              expect={"Acme epoch story": "2025-10-09T08:53:20Z", "Acme compact story": "2025-10-08T00:00:00Z"}),
 ]
 
 # Card 132: requested vs attempted source accounting (direct: sourceRequestFields is a Worker export).
@@ -917,9 +931,10 @@ CASES += [
                     "CHECK_OFFICIAL_RELEASES"),
 ]
 
-# Card 121: 'NYSE American' normalises to NYSE (the NYSE test runs before the AMEX test), so an 'AMEX' entity is a mismatch
-# and a 'NYSE' entity is not. Unknown exchanges ('LSE') and a missing exchange skip the check.
-# Finding (Q7, for triage): NYSE American-listed issuers are indistinguishable from NYSE ones in both runtimes.
+# Card 121: unknown exchanges ('LSE') and a missing exchange skip the check. Until 2.17.0 'NYSE American' normalised to NYSE in
+# both runtimes (the NYSE test ran first), so an 'AMEX' entity was a mismatch and a 'NYSE' entity was not. R-news Batch A
+# (B-G4 / A-G11): the shared normaliser tests NYSE American / AMEX / exact ASE before NYSE, so the AMEX row is kept and the
+# NYSE row rejected (both runtimes).
 _NYSEA_ROWS = [mx_row("Row with NYSE entity", "2026-10-12T09:00:00Z", symbol="NYSA", exchange="NYSE", uuid="b1"),
                mx_row("Row with AMEX entity", "2026-10-12T10:00:00Z", symbol="NYSA", exchange="AMEX", uuid="b2"),
                mx_row("Row with LSE entity", "2026-10-12T11:00:00Z", symbol="NYSA", exchange="LSE", uuid="b3"),
@@ -931,9 +946,9 @@ CASES += [
                "news": [], "routes": {mx_url(symbol="NYSA"): {"json": {"data": _NYSEA_ROWS}}}},
               select=lambda v: {"accepted": sorted(it["title"] for it in v["items"]),
                                 "marketaux": status_row(v["sourceStatus"]["marketaux"], "acceptedCount", "rejectedCount", "rejectionCounts", "fallbackReason")},
-              expect={"accepted": ["Row with LSE entity", "Row with NYSE entity", "Row with no exchange"],
-                      "marketaux": {"acceptedCount": 3, "rejectedCount": 1, "rejectionCounts": {"ENTITY_EXCHANGE_MISMATCH": 1},
-                                    "fallbackReason": "HIGHER_PRIORITY_EMPTY"}}),
+              expect={"accepted": ["Row with AMEX entity", "Row with LSE entity", "Row with no exchange"],
+                         "marketaux": {"acceptedCount": 3, "rejectedCount": 1, "rejectionCounts": {"ENTITY_EXCHANGE_MISMATCH": 1},
+                                       "fallbackReason": "HIGHER_PRIORITY_EMPTY"}}),
 ]
 
 
@@ -1006,14 +1021,12 @@ CASES += [
                                for n, f in enumerate(["S-3", "424B", "424B5", "DEF14A", "10-K"], start=1)]),
               select=lambda v: {it["filingType"]: it["eventType"] for it in v["items"]},
               expect={"S-3": "financing", "424B": "financing", "424B5": "other", "DEF14A": "regulatory", "10-K": "earnings"}),
-    # An item with no accession/document has no archive URL: confidence LOW. In the news path the Worker also warns
-    # SEC_URL_INVALID and Python does not (get_sec_recent_events warns in both).
-    tool_case("news.sec.filing_without_url_warns_only_in_the_worker_news_path", ["BR-NWS-133"], "news",
+    # An item with no accession/document has no archive URL: confidence LOW. Both runtimes warn SEC_URL_INVALID, in the news path
+    # (2.17.0, A-G4; before, Python did not) and in get_sec_recent_events.
+    tool_case("news.sec.filing_without_url_warns_in_both_runtimes_from_the_news_path", ["BR-NWS-133"], "news",
               ["SECD", 10, 30, ["sec"]], sec_scn(910104, [sec_filing("8-K", "", "", accepted=None)]),
               select=lambda v: {"items": [{"url": it["url"], "confidence": it["confidence"]} for it in v["items"]], "warnings": codes(v)},
-              mode="pinned", decision="FINDING: the Worker raises SEC_URL_INVALID for an SEC event without an archive URL in the news path; Python does not",
-              expect_py={"items": [{"url": None, "confidence": "LOW"}], "warnings": ["PUBLISHED_AT_ESTIMATED"]},
-              expect_ts={"items": [{"url": None, "confidence": "LOW"}], "warnings": ["PUBLISHED_AT_ESTIMATED", "SEC_URL_INVALID"]}),
+              expect={"items": [{"url": None, "confidence": "LOW"}], "warnings": ["PUBLISHED_AT_ESTIMATED", "SEC_URL_INVALID"]}),
     tool_case("news.sec.filing_without_url_warns_in_both_runtimes_from_get_sec_recent_events", ["BR-NWS-133"], "sec",
               ["SECE", ["8-K"], 30, 10], sec_scn(910105, [sec_filing("8-K", "", "", accepted=None)]),
               select=lambda v: {"items": [{"url": it["url"], "confidence": it["confidence"]} for it in v["items"]], "warnings": codes(v)},
@@ -1122,11 +1135,19 @@ CASES += [
                         "tx": tx(code="A", label="Grant/Award", shares=500, price=0, value=0)},
                        {"title": "Form 4: Sale by Doe Jane", "summary": "Sale by Doe Jane: 1,500 shares, value $18,518.",
                         "tx": tx(code="S", label="Sale", shares=1500, price=12.345, value=18517.5)}]),
-    # Card 128 defect: on an exact half-cent product Python's round() goes to even (0.12), the Worker's Math.round goes up (0.13).
-    form4_case("news.form4.half_cent_value_rounds_differently", ["BR-NWS-128"], 910206, [f4_xml(rows=f4_row("S", "1", "0.125"))],
+    # Card 128: on an exact half-cent product Python's round() went to even (0.12), the Worker's Math.round up (0.13).
+    # R-news Batch A (A-G5a): both round half away from zero, decimal-safe; the Worker value is unchanged (0.13).
+    form4_case("news.form4.half_cent_value_rounds_half_away_from_zero", ["BR-NWS-128"], 910206, [f4_xml(rows=f4_row("S", "1", "0.125"))],
                select=lambda v: [it["insiderTransaction"]["value"] for it in v["items"]],
-               mode="pinned", decision="FINDING: Python round() takes 0.125 to 0.12 (half-even); the Worker's Math.round takes it to 0.13",
-               expect_py=[0.12], expect_ts=[0.13]),
+               expect=[0.13]),
+    # 2.17.0 (A-G5a/b, B-G9): the value rounds half away from zero to cents from the product's shortest decimal form, so the float
+    # 1.005 rounds to 1.01 (Math.round(x*100)/100 gave 1.00) and -0.125 to -0.13; the summary rounds with the same helper
+    # ($-3 for -2.5, where Python's :,.0f gives $-2).
+    form4_case("news.form4.value_and_summary_round_half_away_from_zero_decimal_safe", ["BR-NWS-128", "BR-NWS-255"], 910210,
+               [f4_xml(rows=f4_row("S", "1", "1.005")), f4_xml(rows=f4_row("S", "-1", "0.125")), f4_xml(rows=f4_row("S", "-1", "2.5"))],
+               select=lambda v: [[it["insiderTransaction"]["value"], it["summary"]] for it in v["items"]],
+               expect=[[1.01, "Sale by Doe Jane: 1 shares, value $1."], [-0.13, "Sale by Doe Jane: -1 shares, value $0."],
+                          [-2.5, "Sale by Doe Jane: -1 shares, value $-3."]]),
 ]
 
 _XHTML_FORM4 = (
@@ -1157,14 +1178,12 @@ CASES += [
                         "tx": tx(role="director", code="P", label="Purchase", shares=12, price=1234.5, value=14814)},
                        {"title": "Form 4: Sale by Doe Jane", "summary": "Sale by Doe Jane: -500 shares, value $-5,000.",
                         "tx": tx(role="director", code="S", label="Sale", shares=-500, price=10, value=-5000)}]),
-    # Card 123 defect: a well-formed XHTML primary document with no <nonDerivativeTransaction> node. Python falls back to the
-    # HTML parser only when XML parsing raises, so it reports nothing; the Worker falls back whenever the XML node is missing.
-    form4_case("news.form4.well_formed_xhtml_document_is_parsed_only_by_the_worker", ["BR-NWS-123"], 910209, [_XHTML_FORM4],
+    # Card 123: a well-formed XHTML primary document with no <nonDerivativeTransaction> node. Both runtimes fall back to the
+    # HTML parser whenever the XML node is missing (2.17.0, A-G5c; Python used to fall back only when XML parsing raised).
+    form4_case("news.form4.well_formed_xhtml_document_is_parsed_in_both", ["BR-NWS-123"], 910209, [_XHTML_FORM4],
                select=lambda v: {"parsed": [bool(it.get("insiderTransaction")) for it in v["items"]], "warnings": codes(v),
                                  "titles": [it["title"] for it in v["items"]]},
-               mode="pinned", decision="FINDING: Python falls back to the HTML Form 4 parser only when XML parsing raises; the Worker whenever no XML transaction node exists",
-               expect_py={"parsed": [False], "warnings": ["FORM4_PARSE_UNAVAILABLE"], "titles": ["4 filed"]},
-               expect_ts={"parsed": [True], "warnings": [], "titles": ["Form 4: Sale by Doe Jane"]}),
+               expect={"parsed": [True], "warnings": [], "titles": ["Form 4: Sale by Doe Jane"]}),
 ]
 
 
@@ -2006,14 +2025,12 @@ CASES += [
               mode="pinned", decision=RSS_DECISION,
               expect_py={"row": "EMPTY_RESULT", "items": []},
               expect_ts={"row": "NOT_REGISTERED", "items": []}),
-    # Card 182: Python refuses any feed containing a DOCTYPE; the Worker refuses only <!ENTITY and checks the RSS structure instead.
-    tool_case("newswire.doctype_in_a_feed_is_refused_only_by_python", ["BR-NWS-182", "BR-NWS-154"], "news",
+    # Card 182: both runtimes refuse any feed containing a DOCTYPE (the Worker since 2.17.0; before, it refused only <!ENTITY).
+    tool_case("newswire.doctype_in_a_feed_is_refused_in_both", ["BR-NWS-182", "BR-NWS-154"], "news",
               ["ACME", 10, 14, ["newswire"]],
               {"info": ACME_INFO,
                "routes": {GNW_FEEDS[0][1]: {"body": "<!DOCTYPE rss>" + _GNW_PUBLIC}, GNW_ALL: {"body": rss([])}}},
               select=lambda v: {"titles": [it["title"] for it in v["items"]], "row": v["sourceStatus"]["newswire"]["status"], "codes": codes(v),
                                 "sourcesUsed": v["meta"]["sourcesUsed"]},
-              mode="pinned", decision="FINDING: Python rejects a feed with a DOCTYPE (parse error); the Worker rejects only <!ENTITY, so the same feed yields items there",
-              expect_py={"titles": [], "row": "PROVIDER_ERROR", "codes": ["SOURCE_UNAVAILABLE"], "sourcesUsed": []},
-              expect_ts={"titles": ["Acme public companies story one", "Acme public companies story two"], "row": "OK", "codes": [], "sourcesUsed": ["newswire"]}),
+              expect={"titles": [], "row": "PROVIDER_ERROR", "codes": ["SOURCE_UNAVAILABLE"], "sourcesUsed": []}),
 ]

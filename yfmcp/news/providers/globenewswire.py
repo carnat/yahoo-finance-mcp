@@ -21,6 +21,7 @@ from yfmcp.clients.market_providers import _PROVIDER_USER_AGENT
 from yfmcp.news.shared import (
     _event_type_from_keywords,
     _make_duplicate_group_id,
+    _normalize_exchange,
     _short_text,
     _within_date_window,
 )
@@ -136,11 +137,29 @@ def _globenewswire_category_values(rss_item: _ET.Element, domain: str) -> list[s
     return values
 
 
-def _globenewswire_stock_category_matches(ticker: str, stock_categories: list[str]) -> bool:
+def _exchange_compatible_with_stock_category(exchange: str | None, category: str) -> bool:
+    """A stock category 'Nasdaq:NVDA' names the listing exchange; the company exchange goes through the shared
+    normaliser (2.17.0), so 'NYSE American' reads as NYSE American, not NYSE. Mirrors the Worker."""
+    expected = _normalize_exchange(str(exchange or ""))
+    if not expected:
+        return True
+    prefix = category.split(":", 1)[0].strip().upper()
+    if not prefix or prefix == category.upper():
+        return True
+    if expected == "NASDAQ":
+        return prefix == "NASDAQ"
+    if expected == "NYSE":
+        return prefix == "NYSE"
+    if expected == "NYSEAMERICAN":
+        return prefix in ("NYSEAMERICAN", "NYSE AMERICAN", "AMEX")
+    return True
+
+
+def _globenewswire_stock_category_matches(ticker: str, stock_categories: list[str], exchange: str | None = None) -> bool:
     ticker_u = ticker.upper()
     for category in stock_categories:
         symbol = category.rsplit(":", 1)[-1].strip().upper()
-        if symbol == ticker_u:
+        if symbol == ticker_u and _exchange_compatible_with_stock_category(exchange, category):
             return True
     return False
 
@@ -160,6 +179,7 @@ async def _collect_globenewswire_events(
     end_date: str = "",
     lookback_days: int | None = None,
     filter_low_relevance: bool = True,
+    exchange: str | None = None,
 ) -> tuple[list[dict], list[dict], bool]:
     """Fetch GlobeNewswire RSS feeds and return exact stock-category matches.
 
@@ -227,7 +247,7 @@ async def _collect_globenewswire_events(
                 rss_item,
                 _GLOBENEWSWIRE_STOCK_CATEGORY_DOMAIN,
             )
-            if not _globenewswire_stock_category_matches(ticker_u, stock_categories):
+            if not _globenewswire_stock_category_matches(ticker_u, stock_categories, exchange):
                 continue
             relevance = "HIGH"
 

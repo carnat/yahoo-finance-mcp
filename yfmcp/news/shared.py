@@ -6,37 +6,65 @@ imports no provider and never imports yfmcp.tools.news.
 """
 
 import datetime
+import decimal as _decimal
 import hashlib
 import html as _html_module
+import math as _math
 import re as _re
 
 
 _DEDUP_TITLE_MAX_LEN = 80
 
 
+# Event-type keyword table, shared with the Worker (worker/src/news/shared.ts EVENT_TYPE_KEYWORDS). Groups are tested in
+# order and the first group with a whole-word match (optional s/es/d/ed/ing suffix on the last word) wins.
+_EVENT_TYPE_KEYWORDS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("earnings", ("earnings", "eps", "quarterly", "10-q", "10-k", "annual report")),
+    ("guidance", ("guidance", "outlook", "forecast", "reaffirm", "raises", "lowers")),
+    ("contract", ("contract", "agreement", "deal", "partnership")),
+    ("financing", ("offering", "financing", "debt", "credit facility", "note")),
+    ("product", ("launch", "product", "introduce", "announces new")),
+    ("analyst", ("analyst", "rating", "upgrade", "downgrade", "price target")),
+    ("macro", ("macro", "inflation", "rates", "fomc", "cpi")),
+    ("litigation", ("lawsuit", "litigation", "court", "settlement")),
+    ("insider", ("insider", "director", "officer", "form 4")),
+    ("regulatory", ("sec", "regulatory", "8-k", "10-q", "10-k", "filing")),
+)
+# re.ASCII keeps \b the same as JavaScript's, so 'sector', 'dealer' and 'steps' do not hit 'sec', 'deal' and 'eps'.
+_EVENT_TYPE_PATTERNS = tuple(
+    (event_type, _re.compile(r"\b(?:" + "|".join(_re.escape(k) for k in keywords) + r")(?:s|es|d|ed|ing)?\b", _re.ASCII))
+    for event_type, keywords in _EVENT_TYPE_KEYWORDS
+)
+
+
 def _event_type_from_keywords(text: str) -> str:
     t = (text or "").lower()
-    if any(k in t for k in ("earnings", "eps", "quarterly", "10-q", "10-k", "annual report")):
-        return "earnings"
-    if any(k in t for k in ("guidance", "outlook", "forecast", "reaffirm", "raises", "lowers")):
-        return "guidance"
-    if any(k in t for k in ("contract", "agreement", "deal", "partnership")):
-        return "contract"
-    if any(k in t for k in ("offering", "financing", "debt", "credit facility", "note")):
-        return "financing"
-    if any(k in t for k in ("launch", "product", "introduce", "announces new")):
-        return "product"
-    if any(k in t for k in ("analyst", "rating", "upgrade", "downgrade", "price target")):
-        return "analyst"
-    if any(k in t for k in ("macro", "inflation", "rates", "fomc", "cpi")):
-        return "macro"
-    if any(k in t for k in ("lawsuit", "litigation", "court", "settlement")):
-        return "litigation"
-    if any(k in t for k in ("insider", "director", "officer", "form 4")):
-        return "insider"
-    if any(k in t for k in ("sec", "regulatory", "8-k", "10-q", "10-k", "filing")):
-        return "regulatory"
+    for event_type, pattern in _EVENT_TYPE_PATTERNS:
+        if pattern.search(t):
+            return event_type
     return "other"
+
+
+def _ticker_in_text(text: object, ticker: str) -> bool:
+    """Whether the ticker appears in the text (case-insensitive). A single-letter ticker must be a whole token, so 'A' is
+    not found inside 'MARKETS' (2.17.0); longer tickers keep the substring test. Mirrors the Worker's tickerInText."""
+    ticker_u = str(ticker or "").upper()
+    text_u = str(text or "").upper()
+    if len(ticker_u) == 1:
+        return _re.search(r"\b" + _re.escape(ticker_u) + r"\b", text_u, _re.ASCII) is not None
+    return ticker_u in text_u
+
+
+def _round_half_away_from_zero(value: float, digits: int) -> float:
+    """Round half away from zero to `digits` decimals, decimal-safe (2.17.0): the number's shortest decimal form is
+    rounded, so 1.005 gives 1.01 and -0.125 gives -0.13 (the Worker's roundHalfAwayFromZero). A result of zero is 0.0."""
+    value = float(value)
+    # Past 2^52 at this scale a double has no fraction left to round.
+    if not _math.isfinite(value) or abs(value) * 10 ** digits >= 2 ** 52:
+        return value
+    quantum = _decimal.Decimal(1).scaleb(-digits)
+    rounded = float(_decimal.Decimal(repr(abs(value))).quantize(quantum, rounding=_decimal.ROUND_HALF_UP))
+    return -rounded if value < 0 and rounded != 0 else rounded
 
 
 def _normalized_event_title_stem(ticker: str, title: str | None) -> str:
@@ -97,16 +125,22 @@ def _within_date_window(
     return True
 
 
+_NASDAQ_EXCHANGE_CODES = frozenset({"GS", "NMS", "NGM", "NCM"})
+
+
 def _normalize_exchange(exch: str | None) -> str | None:
+    """The exchange normaliser shared by every news exchange check and by the Worker (2.17.0): NYSE American / AMEX / exact
+    ASE are tested before NYSE, and GS / NMS / NGM / NCM count only as whole tokens or exact codes."""
     if not exch:
         return None
     exch = str(exch).upper()
-    if any(x in exch for x in ("NASDAQ", "NMS", "NGM", "NCM", "GS")):
+    tokens = [token for token in _re.split(r"[^A-Z0-9]+", exch) if token]
+    if "NASDAQ" in exch or any(token in _NASDAQ_EXCHANGE_CODES for token in tokens):
         return "NASDAQ"
+    if "NYSE AMERICAN" in exch or "AMEX" in exch or exch == "ASE":
+        return "NYSEAMERICAN"
     if "NYSE" in exch or exch == "NYQ":
         return "NYSE"
-    if any(x in exch for x in ("AMEX", "NYSE AMERICAN", "ASE")):
-        return "NYSEAMERICAN"
     if "TSXV" in exch or "CVE" in exch:
         return "TSXV"
     if "TSX" in exch or "TOR" in exch:

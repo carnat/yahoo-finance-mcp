@@ -31,7 +31,7 @@ import { collectGlobeNewswireEvents } from "./news/providers/globenewswire.js";
 import { MARKETAUX_WIRE_DOMAINS, MARKETAUX_MAX_ITEMS, collectMarketauxEvents } from "./news/providers/marketaux.js";
 import { collectSecEvents } from "./news/providers/sec.js";
 import { yahooNewsIdentityFor, yahooDecisionUse, collectYahooEvents } from "./news/providers/yahoo.js";
-import { sourceDecisionUse, shortText, withinDateWindow } from "./news/shared.js";
+import { sourceDecisionUse, shortText, withinDateWindow, isoUtc, tickerInText } from "./news/shared.js";
 import newsSourceRegistry from "./news-source-registry.json";
 import { getWorkerVar } from "./response.js";
 // Names other modules and tests import from news.ts (2.15.1 provider move).
@@ -688,7 +688,7 @@ async function collectCompanyEvents(
 ): Promise<CompanyEventCollectionResult> {
   const safeMax = clampInt(maxResults, 10, 1, 100);
   const safeLookback = clampInt(lookbackDays, 14, 1, 3650);
-  const watermark = new Date().toISOString();
+  const watermark = isoUtc(new Date());
   const { selected: requestedSelection, warnings: sourceWarnings } = normalizeSources(sources, [
     "sec", "company_ir_page", "company_ir",
     "yahoo_finance", "yahoo_finance_news", "yahoo_finance_press_releases",
@@ -809,19 +809,17 @@ async function collectCompanyEvents(
   }
 
   if (selected.includes("yahoo_finance") && yahooDiagnostics.length) {
-    const rejectionCounts: Record<string, number> = {};
-    for (const diagnostic of yahooDiagnostics) {
-      for (const [reason, count] of Object.entries((diagnostic.rejectionCounts as Record<string, number>) ?? {})) {
-        rejectionCounts[reason] = (rejectionCounts[reason] ?? 0) + count;
-      }
-    }
+    // Both passes read the same Yahoo feed, so the legacy aggregate counts it once (2.17.0): the news pass accepts every
+    // row the press-release pass accepts and rejects the rest for the same reasons, so its counts are the feed's. A
+    // failed news pass falls back to the press-release pass's counts.
+    const feedRead = yahooDiagnostics.find(diagnostic => diagnostic.completed === true) ?? yahooDiagnostics[0];
     sourceDiagnostics.yahoo_finance = {
-      rawCount: yahooDiagnostics.reduce((sum, diagnostic) => sum + Number(diagnostic.rawCount ?? 0), 0),
-      retrievedCount: yahooDiagnostics.reduce((sum, diagnostic) => sum + Number(diagnostic.retrievedCount ?? 0), 0),
-      filteredCount: yahooDiagnostics.reduce((sum, diagnostic) => sum + Number(diagnostic.filteredCount ?? 0), 0),
-      acceptedCount: yahooDiagnostics.reduce((sum, diagnostic) => sum + Number(diagnostic.acceptedCount ?? 0), 0),
-      rejectedCount: yahooDiagnostics.reduce((sum, diagnostic) => sum + Number(diagnostic.rejectedCount ?? 0), 0),
-      rejectionCounts,
+      rawCount: Number(feedRead.rawCount ?? 0),
+      retrievedCount: Number(feedRead.retrievedCount ?? 0),
+      filteredCount: Number(feedRead.filteredCount ?? 0),
+      acceptedCount: Number(feedRead.acceptedCount ?? 0),
+      rejectedCount: Number(feedRead.rejectedCount ?? 0),
+      rejectionCounts: { ...((feedRead.rejectionCounts as Record<string, number>) ?? {}) },
       identityStatus: yahooIdentity?.status ?? "UNAVAILABLE",
       attempted: true,
       completed: yahooDiagnostics.every(diagnostic => diagnostic.completed === true),
@@ -1030,7 +1028,7 @@ export async function getCompanyPressReleases(
     items: [],
     sourcesUsed: [],
     warnings: [],
-    watermark: new Date().toISOString(),
+    watermark: isoUtc(new Date()),
     sourceDiagnostics: {},
   });
   const primary = primarySources.length > 0
@@ -1216,7 +1214,7 @@ export async function getSecRecentEvents(
   lookbackDays = 90,
   maxResults = 20
 ): Promise<string> {
-  const watermark = new Date().toISOString();
+  const watermark = isoUtc(new Date());
   const { result: sec, starved } = await withBudgetWatch(() => collectSecEvents(ticker, filingTypes, clampInt(maxResults, 20, 1, 100), watermark, "", "", clampInt(lookbackDays, 90, 1, 3650)));
   const status = collectionStatus(sec.items, sec.used ? ["sec"] : [], sec.warnings);
   const sourceStatus = markBudgetStarvedSources(
@@ -1397,20 +1395,16 @@ export async function verifyCompanyEvent(
   const tickerUpper = ticker.toUpperCase();
   const tickerPattern = new RegExp(`\\b${tickerUpper}\\b`, "i");
 
+  // Relevance is scored from the evidence text and issuer, never from the item's tickers list: every collector
+  // injects the queried ticker there, which made LOW_RELEVANCE_EVIDENCE unreachable (2.17.0).
   const relevanceScore = (ev: Record<string, unknown>): string => {
-    // 1. Check explicit tickers list
-    const evTickers = Array.isArray(ev.tickers) ? ev.tickers.map(String) : [];
-    if (evTickers.some(t => t.toUpperCase() === tickerUpper)) {
-      return "HIGH";
-    }
-
-    // 2. Check source type
+    // 1. Check source type
     const sourceType = _str(ev.sourceType);
     if (["sec_filing", "sec", "company_ir", "company_ir_page", "sec_ex99_found"].includes(sourceType)) {
       return "HIGH";
     }
 
-    // 3. Check text content
+    // 2. Check text content
     const hay = `${_str(ev.title)} ${_str(ev.summary)} ${_str(ev.evidenceText)} ${_str(ev.issuer)}`.toLowerCase();
     if (tickerPattern.test(hay)) {
       return "HIGH";
@@ -1424,8 +1418,7 @@ export async function verifyCompanyEvent(
     }
 
     // Check issuer field explicitly
-    const evIssuer = _str(ev.issuer).toUpperCase();
-    if (evIssuer.includes(tickerUpper)) {
+    if (tickerInText(_str(ev.issuer), tickerUpper)) {
       return "HIGH";
     }
 

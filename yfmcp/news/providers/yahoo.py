@@ -17,6 +17,7 @@ from yfmcp.news.shared import (
     _make_duplicate_group_id,
     _normalize_exchange,
     _short_text,
+    _ticker_in_text,
     _within_date_window,
 )
 
@@ -52,7 +53,8 @@ def _yahoo_news_identity_from_info(ticker: str, info: dict | None) -> dict:
             continue
         stripped = _strip_yahoo_news_legal_suffix(normalized)
         for alias in (normalized, stripped):
-            if len(alias) >= 3:
+            # A shortName that falls back to the ticker is not issuer identity.
+            if len(alias) >= 3 and alias != ticker.lower():
                 aliases.add(alias)
         initials = "".join(
             word[0] for word in stripped.split()
@@ -140,8 +142,7 @@ def _build_yahoo_event_item(
             "severity": "warning",
         })
     ticker_u = ticker.upper()
-    text_blob = f"{title} {summary}".upper()
-    ticker_relevance = "HIGH" if ticker_u in text_blob else "LOW"
+    ticker_relevance = "HIGH" if _ticker_in_text(f"{title} {summary}", ticker_u) else "LOW"
     confidence = "MEDIUM"
     if not url:
         confidence = "LOW"
@@ -289,11 +290,8 @@ async def _collect_yahoo_events(
         if not _within_date_window(item.get("publishedAt"), start_date=start_date, end_date=end_date, lookback_days=lookback_days):
             _reject("DATE_WINDOW")
             continue
-        match = _yahoo_news_match_for(
-            f"{item.get('title') or ''} {item.get('summary') or ''} {item.get('evidenceText') or ''}",
-            ticker,
-            identity,
-        )
+        # Identity and ticker matching read the title only; the summary is for display (planner call #13, 2.17.0).
+        match = _yahoo_news_match_for(str(item.get("title") or ""), ticker, identity)
         if match is None:
             _reject("IDENTITY_UNAVAILABLE_TICKER_NOT_FOUND" if identity.get("status") == "UNAVAILABLE" else "IDENTITY_MISMATCH")
             continue
