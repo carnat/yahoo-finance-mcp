@@ -1,0 +1,80 @@
+# R-news part 2 (2.16.0): news source registry, operator off switch, SEC in the defaults
+
+**Source:** the approved Q3i triage, §3a part 2 (owner, 2026-10-18), and the owner's default-sources decision of the same date.
+**Version:** 2.16.0 (minor). The default sources change, and a new operator setting is added.
+
+**Rule zero:** apart from the effects listed in §4, every output is byte-identical. That covers explicit `sources` requests and every news tool when no source is disabled.
+
+## 1. Source registry (data, both runtimes)
+
+**New file `worker/src/news-source-registry.json`.** Python reads it from there, just as it already reads `news-source-capabilities.json` (Phase 6 moves shared data). Shape:
+
+```json
+{
+  "schemaVersion": "2026-10-18",
+  "defaultSources": ["yahoo_finance_news", "yahoo_finance_press_releases", "sec", "finnhub", "marketaux"],
+  "sources": {
+    "<name>": { "tier": "official" | "aggregator", "requiresKey": ["ENV_NAME", ...] | [], "approxSubrequests": <int>, "description": "<one line>" }
+  }
+}
+```
+
+- **One entry per source name** that `normalizeSources` / `_normalize_sources` accept today:
+  - `sec`, `company_ir`, `company_ir_page`, `newswire`: tier `official`;
+  - `yahoo_finance`, `yahoo_finance_news`, `yahoo_finance_press_releases`, `finnhub`, `marketaux`: tier `aggregator`.
+  - `requiresKey` is taken from the code: the Finnhub key name and the Marketaux token names.
+  - `approxSubrequests` holds a measured cold count for one ticker (see §5); round it up.
+- **Defaults come from the registry:** `DEFAULT_NEWS_SOURCES` / `_DEFAULT_NEWS_SOURCES` are read from `defaultSources`. The two runtime constants are removed or derived from it.
+- **The `sec` position** in the list is right after `yahoo_finance_press_releases` (planner decision).
+- **Consistency test:** the registry names equal each runtime's accepted source names, and both runtimes load the same defaults.
+
+## 2. Operator off switch
+
+**Setting: `NEWS_SOURCES_DISABLED`.**
+- **Where it is set:** a Worker var read with `getWorkerVar`, or a Python environment variable.
+- **Value:** a comma-separated list of names, each trimmed and lower-cased. Unknown names are ignored. Empty or unset means nothing is disabled.
+- **Not set in `wrangler.toml` by default.** The docs show how to add it.
+
+**A disabled source is applied** in the shared source selection that every news tool uses (`get_company_news`, `search_company_news`, `get_company_press_releases`, `get_public_event_timeline`, `verify_company_event`, `get_sec_recent_events` where it selects sources), whether the source came from the defaults or from an explicit `sources` list:
+- It is never fetched and costs no subrequests.
+- `sourceStatus[<name>] = { status: "SOURCE_UNCONFIGURED", attempted: false, reasonCode: null, ...the same zero counters that an unconfigured provider reports today }`. Reuse the existing unconfigured shape for that source family.
+- One warning per disabled source that was selected: `{ code: "SOURCE_UNAVAILABLE", severity: "info", source: "<name>", message: "Source <name> is disabled by the server operator." }`. Use the existing warning shape.
+- `coverage.failedSources` gains `{ source, status: "SOURCE_UNCONFIGURED", attempted: false, reasonCode: null }`, so `coverage.state` reads PARTIAL. A disabled source never yields NOT_FOUND on its own: the collection status follows the existing source-limited path.
+- The fallback order is unchanged for the remaining sources. If `marketaux` is disabled, the fallback is skipped and reported as above.
+
+**No new code:** no new status, warning code, reasonCode or field (Q3i rule P4).
+
+## 3. Telemetry
+
+Disabled sources are not recorded. Telemetry stays as it is.
+
+## 4. Intended output changes
+
+1. **Default calls include SEC.** `get_company_news` and `search_company_news` with no `sources` now include `sec`: SEC items, `sourceStatus.sec`, `sourcesUsed`, `attemptedSources` and `requestedSources` handling as for an explicit `sec`.
+2. **Disabled sources** are reported as described in §2, only when the operator sets the variable.
+
+## 5. Budget guard
+
+- **Measure first:** run the Worker bundle locally against live upstream with an empty cache stub and a fetch counter, as the 2.12.0 snapshot measurement did. Measure the cold subrequests for default `get_company_news` (one ticker), before and after adding SEC.
+- **STOP condition:** if the after count exceeds **40** (the 45 budget minus headroom), stop and report.
+- **Recording:** put the numbers in the registry (`approxSubrequests`) and in the PR body.
+
+## 6. Tests (both runtimes, mode equal in the parity harness)
+
+- The defaults include `sec`, and a default call shows `sourceStatus.sec`.
+- One disabled default source (`finnhub`): no fetch (fetch spy), `SOURCE_UNCONFIGURED`, the warning, coverage PARTIAL.
+- An explicitly requested disabled source gets the same reporting.
+- Every requested source disabled: no fetch, source-limited status, never NOT_FOUND.
+- Unknown names in the setting are ignored, and an empty setting changes nothing.
+- The registry consistency test.
+- Update the existing default-source cases to the new defaults, listing each changed case.
+
+## 7. Release
+
+- **Docs section "News Source Registry and Off Switch (2.16.0)":** the registry, how to disable a source in `wrangler.toml` `[vars]` and locally, the new defaults, and the budget numbers.
+- **Live checks:**
+  - `health_check` reports 2.16.0;
+  - default `get_company_news` AAPL shows `sourceStatus.sec`;
+  - an explicit `sources:["finnhub"]` call still works;
+  - the canaries pass.
+  - The off switch is checked offline only: production does not set it.
