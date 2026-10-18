@@ -972,7 +972,8 @@ def doc_url(cik: int, accession: str, doc: str) -> str:
 
 
 CASES += [
-    # Cards 159/160: SEC selected, no CIK / no submissions -> PROVIDER_ERROR (not absence); the empty result is source-limited.
+    # Cards 159/160: SEC selected, no CIK resolved / no submissions -> PROVIDER_ERROR (not absence); the empty result is source-limited.
+    # 2.16.0: no SEC ticker-index stub here, so the lookup failed rather than finding no CIK (RNEWS2 §8.7 keeps PROVIDER_ERROR).
     tool_case("news.sec.no_cik_is_provider_error_and_empty_result_is_source_limited", ["BR-NWS-160", "BR-NWS-159"], "news",
               ["ZZSEC", 10, 14, ["sec"]], {"info": {}},
               select=lambda v: {"sec": v["sourceStatus"]["sec"], "status": v.get("status"), "coverage": coverage_view(v),

@@ -3374,3 +3374,183 @@ CASES += [
                                 "items": [i["filingType"] for i in v["result"]["items"]], "fetchedHosts": v["fetchedHosts"]},
               expect=_OFF_EXPECT["news.off_switch.sec_recent_events_ignore_a_disabled_sec"]["expect"]),
 ]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+# SEC on a ticker SEC has no CIK for (2.16.0, RNEWS2 §8.7): NOT_ELIGIBLE with reasonCode null and a SOURCE_NOT_ELIGIBLE
+# warning, for default-applied and explicit sec alike (PARTIAL accepted). "No CIK" means SEC's ticker index was read and
+# holds no entry; a failed submissions fetch stays PROVIDER_ERROR "SEC submissions source unavailable.".
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+_NO_CIK_ROUTES = {SEC_TICKERS_URL: {"json": {"0": {"cik_str": 320193, "ticker": "AAPL", "title": "Apple Inc."}}}}
+_SUBMISSIONS_DOWN_ROUTES = {SEC_TICKERS_URL: {"json": {"0": {"cik_str": SEC_CIK, "ticker": "ACME", "title": "Acme Corp"}}},
+                            f"https://data.sec.gov/submissions/CIK{SEC_CIK:010d}.json": {"status": 500, "body": "{}"}}
+
+
+_NO_CIK_EXPECT = {'news.sec.no_cik_default_call_reports_sec_not_eligible': {'py': {'action': 'CHECK_OFFICIAL_RELEASES',
+                                                                  'attempted': ['yahoo_finance_news', 'yahoo_finance_press_releases'],
+                                                                  'coverage': 'PARTIAL',
+                                                                  'failed': [['finnhub', 'UNCONFIGURED'], ['marketaux', 'UNCONFIGURED']],
+                                                                  'sec': None,
+                                                                  'skipped': [],
+                                                                  'status': 'PARTIAL',
+                                                                  'warnings': [['SOURCE_UNAVAILABLE',
+                                                                                None,
+                                                                                'Finnhub company-news source is not configured; skipped.',
+                                                                                None,
+                                                                                None],
+                                                                               ['SOURCE_UNAVAILABLE',
+                                                                                'marketaux',
+                                                                                'Marketaux wire fallback is not configured; set '
+                                                                                'MARKETAUX_API_TOKEN to enable it.',
+                                                                                None,
+                                                                                None]]},
+                                                           'ts': {'action': 'CHECK_OFFICIAL_RELEASES',
+                                                                  'attempted': ['yahoo_finance_news', 'yahoo_finance_press_releases'],
+                                                                  'coverage': 'PARTIAL',
+                                                                  'failed': [['finnhub', 'UNCONFIGURED'], ['marketaux', 'UNCONFIGURED']],
+                                                                  'sec': {'attempted': False,
+                                                                          'filteredCount': 0,
+                                                                          'rawCount': 0,
+                                                                          'reasonCode': None,
+                                                                          'status': 'NOT_ELIGIBLE'},
+                                                                  'skipped': [['sec', 'NOT_ELIGIBLE', False, None]],
+                                                                  'status': 'PARTIAL',
+                                                                  'warnings': [['SOURCE_NOT_ELIGIBLE',
+                                                                                'sec',
+                                                                                'SEC has no filings for ACME (no SEC CIK).',
+                                                                                False,
+                                                                                None],
+                                                                               ['SOURCE_UNAVAILABLE',
+                                                                                None,
+                                                                                'Finnhub company-news source is not configured; skipped.',
+                                                                                None,
+                                                                                None],
+                                                                               ['SOURCE_UNAVAILABLE',
+                                                                                'marketaux',
+                                                                                'Marketaux wire fallback is not configured; set '
+                                                                                'MARKETAUX_API_TOKEN to enable it.',
+                                                                                None,
+                                                                                None]]}},
+ 'news.sec.no_cik_explicit_sec_reports_not_eligible': {'py': {'action': 'CHECK_OFFICIAL_RELEASES',
+                                                              'attempted': ['sec'],
+                                                              'coverage': 'PARTIAL',
+                                                              'failed': [['sec', 'PROVIDER_ERROR']],
+                                                              'sec': {'filteredCount': 0, 'rawCount': 0, 'status': 'PROVIDER_ERROR'},
+                                                              'skipped': [],
+                                                              'status': 'SOURCE_LIMITED_NOT_FOUND',
+                                                              'warnings': [['SOURCE_UNAVAILABLE',
+                                                                            None,
+                                                                            'SEC submissions source unavailable.',
+                                                                            None,
+                                                                            None]]},
+                                                       'ts': {'action': 'CHECK_OFFICIAL_RELEASES',
+                                                              'attempted': [],
+                                                              'coverage': 'PARTIAL',
+                                                              'failed': [],
+                                                              'sec': {'attempted': False,
+                                                                      'filteredCount': 0,
+                                                                      'rawCount': 0,
+                                                                      'reasonCode': None,
+                                                                      'status': 'NOT_ELIGIBLE'},
+                                                              'skipped': [['sec', 'NOT_ELIGIBLE', False, None]],
+                                                              'status': 'SOURCE_LIMITED_NOT_FOUND',
+                                                              'warnings': [['SOURCE_NOT_ELIGIBLE',
+                                                                            'sec',
+                                                                            'SEC has no filings for ACME (no SEC CIK).',
+                                                                            False,
+                                                                            None]]}},
+ 'news.sec.no_cik_verify_failure_mode_is_source_not_eligible': {'py': {'action': 'CHECK_OFFICIAL_RELEASES',
+                                                                       'attempted': ['sec'],
+                                                                       'coverage': 'PARTIAL',
+                                                                       'failed': [['sec', 'PROVIDER_ERROR']],
+                                                                       'failureMode': 'PROVIDER_ERROR',
+                                                                       'sec': {'filteredCount': 0,
+                                                                               'rawCount': 0,
+                                                                               'status': 'PROVIDER_ERROR'},
+                                                                       'skipped': [],
+                                                                       'status': 'SOURCE_LIMITED_NOT_FOUND',
+                                                                       'warnings': [['SOURCE_UNAVAILABLE',
+                                                                                     None,
+                                                                                     'SEC submissions source unavailable.',
+                                                                                     None,
+                                                                                     None]]},
+                                                                'ts': {'action': 'CHECK_OFFICIAL_RELEASES',
+                                                                       'attempted': [],
+                                                                       'coverage': 'PARTIAL',
+                                                                       'failed': [],
+                                                                       'failureMode': 'SOURCE_NOT_ELIGIBLE',
+                                                                       'sec': {'attempted': False,
+                                                                               'filteredCount': 0,
+                                                                               'rawCount': 0,
+                                                                               'reasonCode': None,
+                                                                               'status': 'NOT_ELIGIBLE'},
+                                                                       'skipped': [['sec', 'NOT_ELIGIBLE', False, None]],
+                                                                       'status': 'SOURCE_LIMITED_NOT_FOUND',
+                                                                       'warnings': [['SOURCE_NOT_ELIGIBLE',
+                                                                                     'sec',
+                                                                                     'SEC has no filings for ACME (no SEC CIK).',
+                                                                                     False,
+                                                                                     None]]}},
+ 'news.sec.submissions_fetch_failure_stays_provider_error': {'expect': {'action': 'CHECK_OFFICIAL_RELEASES',
+                                                                        'attempted': ['sec'],
+                                                                        'coverage': 'PARTIAL',
+                                                                        'failed': [['sec', 'PROVIDER_ERROR']],
+                                                                        'sec': {'filteredCount': 0,
+                                                                                'rawCount': 0,
+                                                                                'status': 'PROVIDER_ERROR'},
+                                                                        'skipped': [],
+                                                                        'status': 'SOURCE_LIMITED_NOT_FOUND',
+                                                                        'warnings': [['SOURCE_UNAVAILABLE',
+                                                                                      None,
+                                                                                      'SEC submissions source unavailable.',
+                                                                                      None,
+                                                                                      None]]}}}
+
+
+def _sec_eligibility_view(v):
+    return {"sec": v["sourceStatus"].get("sec"),
+            "warnings": [[w["code"], w.get("source"), w.get("message"), w.get("attempted"), w.get("reasonCode")] for w in v["warnings"]
+                         if w["code"] in ("SOURCE_NOT_ELIGIBLE", "SOURCE_UNAVAILABLE")],
+            "coverage": v["coverage"]["state"], "action": v["coverage"]["recommendedNextAction"],
+            "skipped": [[s["source"], s["status"], s["attempted"], s["reasonCode"]] for s in v["coverage"]["skippedSources"]],
+            "failed": [[s["source"], s["status"]] for s in v["coverage"]["failedSources"]],
+            "attempted": [a["sourceType"] for a in v.get("attemptedSources", [])], "status": v.get("status"),
+            **({"failureMode": v.get("failureMode")} if "failureMode" in v else {})}
+
+
+CASES += [
+    # Default call on a no-CIK ticker. TODO(python-mirror): flip to equal with expect = the expect_ts value below.
+    _scenario(
+        "news.sec.no_cik_default_call_reports_sec_not_eligible", ["RNEWS2-8.7"],
+        lambda: server.get_company_news("ACME", 10, 14), 'm.yahooFinance.getCompanyNews("ACME", 10, 14)',
+        news=[_yn("ACME shares rise", when=_days_ago(1))], info={"shortName": "Acme Corp", "longName": "Acme Corp"},
+        submissions=(None, None), routes=_NO_CIK_ROUTES, select=_sec_eligibility_view,
+        mode="pinned", decision=_RNEWS2_PENDING, expect_py=_NO_CIK_EXPECT["news.sec.no_cik_default_call_reports_sec_not_eligible"]["py"], expect_ts=_NO_CIK_EXPECT["news.sec.no_cik_default_call_reports_sec_not_eligible"]["ts"]),
+    # Explicit sec on a no-CIK ticker: the same report. TODO(python-mirror): flip to equal (expect_ts).
+    _scenario(
+        "news.sec.no_cik_explicit_sec_reports_not_eligible", ["RNEWS2-8.7"],
+        lambda: server.get_company_news("ACME", 10, 14, ["sec"]), 'm.yahooFinance.getCompanyNews("ACME", 10, 14, ["sec"])',
+        submissions=(None, None), routes=_NO_CIK_ROUTES, select=_sec_eligibility_view,
+        mode="pinned", decision=_RNEWS2_PENDING, expect_py=_NO_CIK_EXPECT["news.sec.no_cik_explicit_sec_reports_not_eligible"]["py"], expect_ts=_NO_CIK_EXPECT["news.sec.no_cik_explicit_sec_reports_not_eligible"]["ts"]),
+    # verify_company_event: NOT_ELIGIBLE gives failureMode SOURCE_NOT_ELIGIBLE. TODO(python-mirror): flip to equal (expect_ts).
+    _scenario(
+        "news.sec.no_cik_verify_failure_mode_is_source_not_eligible", ["RNEWS2-8.7"],
+        lambda: server.verify_company_event("ACME", "acquisition", "", "", ["sec"]),
+        'm.yahooFinance.verifyCompanyEvent("ACME", "acquisition", "", "", ["sec"])',
+        submissions=(None, None), routes=_NO_CIK_ROUTES, select=_sec_eligibility_view,
+        mode="pinned", decision=_RNEWS2_PENDING, expect_py=_NO_CIK_EXPECT["news.sec.no_cik_verify_failure_mode_is_source_not_eligible"]["py"], expect_ts=_NO_CIK_EXPECT["news.sec.no_cik_verify_failure_mode_is_source_not_eligible"]["ts"]),
+    # A ticker with a CIK whose submissions fetch fails keeps PROVIDER_ERROR and the unavailable warning.
+    _scenario(
+        "news.sec.submissions_fetch_failure_stays_provider_error", ["RNEWS2-8.7", "BR-NWS-195"],
+        lambda: server.get_company_news("ACME", 10, 14, ["sec"]), 'm.yahooFinance.getCompanyNews("ACME", 10, 14, ["sec"])',
+        submissions=(f"{SEC_CIK:010d}", None), routes=_SUBMISSIONS_DOWN_ROUTES, select=_sec_eligibility_view,
+        expect=_NO_CIK_EXPECT["news.sec.submissions_fetch_failure_stays_provider_error"]["expect"]),
+    # get_sec_recent_events keeps its own reporting for a no-CIK ticker (§8.4: not a news-source selection).
+    _scenario(
+        "news.sec.no_cik_sec_recent_events_reporting_is_unchanged", ["RNEWS2-8.4", "BR-NWS-195"],
+        lambda: server.get_sec_recent_events("ACME", ["8-K"], 90, 20), 'm.yahooFinance.getSecRecentEvents("ACME", ["8-K"], 90, 20)',
+        submissions=(None, None), routes=_NO_CIK_ROUTES, select=_sec_view,
+        expect={"items": [], "warnings": [["SOURCE_UNAVAILABLE", "SEC submissions source unavailable."]],
+                "status": "SOURCE_LIMITED_NOT_FOUND", "sourcesUsed": []}),
+]

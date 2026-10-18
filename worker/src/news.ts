@@ -385,7 +385,12 @@ function computeSourceStatus(
     result.yahoo_finance_identity = identityDiagnostic;
   }
   if (selectedSources.includes("sec")) {
-    if (sourcesUsed.includes("sec")) {
+    const secDiagnostic = (sourceDiagnostics.sec && typeof sourceDiagnostics.sec === "object")
+      ? sourceDiagnostics.sec as Record<string, unknown>
+      : {};
+    if (_str(secDiagnostic.status) === "NOT_ELIGIBLE") {
+      result.sec = { status: "NOT_ELIGIBLE", rawCount: 0, filteredCount: 0, ...secDiagnostic };
+    } else if (sourcesUsed.includes("sec")) {
       result.sec = { status: secItems.length > 0 ? "OK" : "EMPTY_RESULT", rawCount: secItems.length, filteredCount: secItems.length };
     } else if (warningMsgs.some(m => m.includes("sec submissions"))) {
       result.sec = { status: "PROVIDER_ERROR", rawCount: 0, filteredCount: 0 };
@@ -718,7 +723,20 @@ async function collectCompanyEvents(
     const sec = await watched(["sec"], () => collectSecEvents(ticker, secFilingTypes, safeMax, watermark, startDate, endDate, safeLookback));
     if (sec.used) sourcesUsed.push("sec");
     items.push(...sec.items);
-    warnings.push(...sec.warnings);
+    if (sec.noCik) {
+      // A ticker SEC has no CIK for is not eligible, as an ineligible Finnhub ticker is (RNEWS2 §8.7).
+      sourceDiagnostics.sec = { status: "NOT_ELIGIBLE", attempted: false, reasonCode: null };
+      warnings.push({
+        code: "SOURCE_NOT_ELIGIBLE",
+        message: `SEC has no filings for ${ticker.toUpperCase()} (no SEC CIK).`,
+        severity: "warning",
+        source: "sec",
+        attempted: false,
+        reasonCode: null,
+      });
+    } else {
+      warnings.push(...sec.warnings);
+    }
   }
 
   if (selected.includes("company_ir")) {
