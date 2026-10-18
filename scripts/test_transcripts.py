@@ -114,10 +114,11 @@ class TestFilterParagraphsByTopics(unittest.TestCase):
 class TestListSecFilingExhibits(unittest.TestCase):
     def test_returns_exhibits(self):
         with patch("yfmcp.tools.earnings._edgar_cik_from_accession", return_value=12345), \
-             patch("yfmcp.tools.earnings._edgar_list_exhibits_from_index", new_callable=AsyncMock) as mock_list:
-            mock_list.return_value = [
+             patch("yfmcp.tools.earnings._edgar_read_exhibit_index", new_callable=AsyncMock) as mock_read:
+            # 2.15.0: the tool reads (exhibits, not_found) so a 404 index is ACCESSION_NOT_FOUND.
+            mock_read.return_value = ([
                 {"sequence": "1", "description": "Press Release", "document": "ex99-1.htm", "type": "EX-99.1", "size": "50000"},
-            ]
+            ], False)
             raw = _run(srv.list_sec_filing_exhibits(ticker="AAPL", accessionNumber="0000320193-24-000081"))
         data = _parse(raw)
         self.assertEqual(data["ticker"], "AAPL")

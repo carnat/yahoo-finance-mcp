@@ -104,7 +104,7 @@ R-news ships in three parts, in this order:
      - coverage reads PARTIAL, never NOT_FOUND;
      - an explicit request for it gets the same reporting.
    - **Planner decision on the status label:** reuse the existing `SOURCE_UNCONFIGURED` status and `SOURCE_UNAVAILABLE` warning, so no new status value is added (rule P4).
-   - Changing the default sources, for example adding `sec`, remains a separate owner decision. It is not part of this release.
+   - **Default sources (owner, 2026-10-18):** add `sec` to the `get_company_news` defaults. This ships in R-news, after the registry exists, and the default list lives in the registry.
 3. **The Q3i news repairs** from §2, each landing in its own adapter or in the shared pipeline.
 
 The pinned harness cases flip to `equal` as each fix lands. Preserve-document rows get a line in `docs/provider-runtime-guidance.md`.
@@ -116,3 +116,20 @@ Q3i triage — Approved by: repository owner (carnat), in session  Date: 2026-10
 Owner's words, verbatim: "agree, add it to R-news and approve Q3i triage"
 Overrides: none. Addition: R-news provider adapters, source registry and NEWS_SOURCES_DISABLED off switch (§3a).
 ```
+
+## 5. Findings after approval (to be triaged at the next review, not yet scheduled)
+
+These came up while implementing R4b. None is a regression.
+- **F1. Public `get_sec_filing_outline` without `document_url`.**
+  - The Worker routes the call to the index-backed outline (`secIndexOutlinePayload`: `filingType`, `filingDate`, items with `sectionId`).
+  - Python resolves the latest primary document instead, and ignores `accession_number` when `period=latest`.
+  - The 2.15.0 shape unification covers the document path only. Proposed home: the Phase 5 SEC-retrieval unit, which owns the index.
+- **F2. Outline titles strip inner tags differently.** The Worker inserts a space ("Item 1") and Python inserts nothing ("Item1"). Text only.
+- **F3. `query_sec_filing_index` china query with an older accession.** The evidence names the latest 10-K, because the revenue read is not pinned. Same class as R4-ACC-GEO.
+- **F4. A pinned geographic read with no XBRL revenue fact of the requested form.** It returns `NO_FACT_FOR_ACCESSION` without reading that filing's table, so a 20-F accession asked for as `filing_type` 10-K never reaches the table read.
+- **F5. `extract_sec_filing_fact` meta vs payload `decisionGrade`.**
+  - `meta.decisionGrade` is a static capability flag (true), while the payload says false for a PARSED_TABLE figure. The tool note explains this, but the two read as contradictory.
+  - Options: rename or retire the meta flag in Phase 6, or derive it per call.
+- **F6. Telemetry.**
+  - Analytics Engine counts about 15 preview-canary requests per deploy that Workers Logs never shows.
+  - The Phase 4 baseline comparison should exclude them, by filtering out deploy-hour canary actions or by tagging the preview version.

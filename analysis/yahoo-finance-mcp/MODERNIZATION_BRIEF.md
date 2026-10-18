@@ -262,7 +262,16 @@ Every PR follows `CLAUDE.md`: the TS change first, then the `python-mirror` port
   - Risk 1: auth locks out a client that can't send headers. *Mitigation:* V1 gate, plus a token-issued grace release before enforcement.
   - Risk 2: the allow-list blocks legitimate URLs (the IR registry is empty). *Mitigation:* `raw_text` escape hatch, plus approving registry entries through the existing bot and review flow.
 
-### Phase 1b — Multi-user access for trusted, non-commercial sharing (CANDIDATE: added 2026-10-16, not yet approved)
+### Phase 1b — Multi-user access for trusted, non-commercial sharing (APPROVED 2026-10-18)
+- **Approval (owner, 2026-10-18):** "1b approved". The names were accepted as proposed:
+  - **KV namespace:** `yfmcp_access_keys`, binding `ACCESS_KEYS`.
+  - **Key record:** stored under the key's SHA-256 hash, with the fields `id` (an 8-character hash prefix), `label`, `createdAt`, `status` (active or revoked), `dailyLimit`, `perMinuteLimit` and `paidProviders`.
+  - **Admin script:** `scripts/manage_access_keys.py` with `issue`, `list`, `revoke` and `set-limits`.
+  - **`health_check`:** shows no label.
+  - **Errors:** the new error code `KEY_RATE_LIMITED` for a key over its limits. A revoked or unknown key gets the existing `AUTH_REQUIRED`.
+  - **Owner key:** `MCP_TOKEN` stays the owner key.
+  - **Constraints accepted:** about 100,000 requests per day are shared across all users, and the data is for non-commercial, personal use only.
+  - **Scheduling:** it ships after R4 (2.15.0), alongside R-news. It gates nothing.
 - **Purpose:** the owner wants to share the hosted MCP with a few trusted people, non-commercially. Phase 1's single shared `MCP_TOKEN` can't tell callers apart, can't cut off one person, and puts everyone on one quota.
 - **Command:** `/modernize-harden yahoo-finance-mcp`, as a follow-on release to Phase 1. Worker only: the local Python server is stdio and single-user.
 - **Scope:**
@@ -280,8 +289,8 @@ Every PR follows `CLAUDE.md`: the TS change first, then the `python-mirror` port
 - **Not in scope:** commercial use, billing and metering, OAuth sign-in, self-service sign-up. Commercial use additionally needs licensed market data, because Yahoo's terms generally prohibit redistribution and the key-gated providers' free tiers are non-commercial, plus the Workers Paid plan (reopens Q12).
 - **Entry criteria:**
   - [ ] Phase 1 enforcement release is live and verified.
-  - [ ] The owner approves this phase and the new names (KV namespace, key record fields, the `scripts/manage_access_keys.py` commands, any new `health_check` field and any new error code such as a per-key rate-limit code), per the Q11 process.
-  - [ ] The owner accepts the sharing constraints: about 100,000 requests per day are **shared across all users** on the Free plan (Q12), and the data stays **non-commercial and personal-use only** under the upstream providers' terms. Each person is told this.
+  - [x] The owner approves this phase and the new names (KV namespace, key record fields, the `scripts/manage_access_keys.py` commands, any new `health_check` field and any new error code such as a per-key rate-limit code), per the Q11 process.
+  - [x] The owner accepts the sharing constraints: about 100,000 requests per day are **shared across all users** on the Free plan (Q12), and the data stays **non-commercial and personal-use only** under the upstream providers' terms. Each person is told this.
 - **Exit criteria:**
   - [ ] Per-key auth, revocation and limits are tested in the Worker test suite: valid, revoked, unknown, over-limit, owner key.
   - [ ] No key or label appears in any response, log, error or telemetry. Telemetry shows the key id only.
@@ -372,6 +381,7 @@ Each R-release is a set of **separately released** behaviour changes that must b
       - A coverage guard could flag when Analytics Engine counts requests but Workers Logs counts 0.
       - `wrangler.toml` sets `[observability] enabled = false` alongside `[observability.logs] enabled = true`.
       - Logged invocations (45) are fewer than Analytics Engine requests (68), and 3 outcomes are `unknown`.
+- **R-news default sources (owner, 2026-10-18):** `sec` joins the default sources of `get_company_news`, next to Yahoo news, Yahoo press releases, Finnhub and Marketaux. It ships in R-news after the source registry.
 - **R-news (after the R4 triage; gates no move):** the news divergences triaged as "repair" ship as one release, each flipping its pinned case to equal.
 - **Phase 4 inner release:** Q3g, the `MarketInputs` contract. It ships right after the Yahoo-client move PR and before any valuation work.
 - **R5-‹unit› (before each Phase 5 unit), the repairs tagged for that unit's domain in `BUSINESS_RULES.md` §3:**

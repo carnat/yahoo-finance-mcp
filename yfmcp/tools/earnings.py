@@ -40,6 +40,7 @@ from yfmcp.clients.edgar import (
     _edgar_cik_from_accession,
     _edgar_get_html,
     _edgar_list_exhibits_from_index,
+    _edgar_read_exhibit_index,
     _get_submissions_for_ticker,
 )
 from yfmcp.clients.market_providers import fetch_alpha_vantage_json
@@ -861,6 +862,16 @@ async def compare_earnings_actual_vs_estimate(ticker: str, period: str = "latest
 # ---------------------------------------------------------------------------
 
 
+def _exhibit_accession_not_found(tool: str, ticker: str, accession_number: str) -> str:
+    """The Worker's accessionNotFoundEnvelope(accessionNotFoundError(..., recentOnly=false)): the filing index is 404."""
+    return json.dumps({"ok": False, "error": {
+        "code": ErrorCode.ACCESSION_NOT_FOUND,
+        "message": f"Accession {accession_number} was not found in {ticker.upper()}'s SEC filings.",
+        "requestedAccession": accession_number,
+        "retryable": False,
+    }})
+
+
 @yfinance_server.tool(
     name="list_sec_filing_exhibits",
     description="List all exhibits/documents attached to a specific SEC filing by accession number.",
@@ -882,7 +893,11 @@ async def list_sec_filing_exhibits(ticker: str, accessionNumber: str) -> str:
         return _wrap_envelope_v2("list_sec_filing_exhibits", None, error=f"Could not resolve CIK for ticker '{ticker}'.", error_code=ErrorCode.TICKER_NOT_FOUND)
 
     index_url, _ = _edgar_build_filing_urls(cik, accessionNumber, None)
-    exhibits = await _edgar_list_exhibits_from_index(index_url)
+    exhibits, not_found = await _edgar_read_exhibit_index(index_url)
+    # SEC has no filing index for (CIK, accession): the accession is not that company's filing, never an empty
+    # exhibit list. Older accessions outside the recent-filings list still read (2.15.0, R4-ACC-EXHIBITS).
+    if not_found:
+        return _exhibit_accession_not_found("list_sec_filing_exhibits", ticker, accessionNumber)
     return _wrap_envelope_v2("list_sec_filing_exhibits", {
         "ticker": ticker.upper(),
         "accessionNumber": accessionNumber,
@@ -915,6 +930,10 @@ async def get_sec_filing_exhibit_content(ticker: str, accessionNumber: str, file
     doc_url = f"https://www.sec.gov/Archives/edgar/data/{cik}/{accession_nodash}/{fileName}"
     html = await _edgar_get_html(doc_url, max_bytes=5_000_000)
     if not html:
+        # No filing index for (CIK, accession): the accession is not that company's filing (2.15.0, R4-ACC-EXHIBITS).
+        _, index_not_found = await _edgar_read_exhibit_index(_edgar_build_filing_urls(cik, accessionNumber, None)[0])
+        if index_not_found:
+            return _exhibit_accession_not_found("get_sec_filing_exhibit_content", ticker, accessionNumber)
         return _wrap_envelope_v2("get_sec_filing_exhibit_content", None, error=f"Could not fetch exhibit '{fileName}'.", error_code="FETCH_ERROR")
 
     clean_text = _strip_html_tags(_sanitize_sec_html(html))

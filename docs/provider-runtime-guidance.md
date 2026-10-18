@@ -2929,6 +2929,36 @@ F-024, F-026, F-029). Both runtimes change alike.
   `unknown`. The Phase 4 baseline should discount preview-canary requests.
 - **Rollback:** revert the release.
 
+## Requested Accessions, Outline Shape and Evidence Listing (2.15.0)
+
+- **Why:** R4b-2, the last R4 release, from the approved Q3i triage. Release type: minor.
+- **`extract_geographic_revenue`:** a non-empty `accession_number` is honoured. The figure, the evidence and the
+  optional index (`detailLevel=raw`) come from that filing.
+  - A miss returns `ACCESSION_NOT_FOUND` with message "Accession <acc> was not found in <TICKER>'s recent SEC
+    filings.", `requestedAccession` and `retryable: false`. There is no fallback to the latest filing.
+  - When pinned, the 20-F retry runs only if the pinned filing is a 20-F.
+  - Unpinned calls are unchanged.
+  - `extract_sec_filing_fact`'s structured pinned path keeps its 2.13.0 behaviour.
+  - `query_sec_filing_index` geographic queries inherit this.
+- **Exhibits:** `list_sec_filing_exhibits` and `get_sec_filing_exhibit_content` return `ACCESSION_NOT_FOUND`
+  ("... was not found in <TICKER>'s SEC filings.") when the filing index returns HTTP 404, instead of an empty
+  success. Older real accessions still work (there is no recent-filings check). 5xx responses and timeouts are
+  unchanged.
+- **`get_sec_filing_outline` (document path):** one shape in both runtimes: `ticker`, `accessionNumber`,
+  `documentUrl`, `outline`, `status` (`OK`, `OUTLINE_NOT_PARSED` or `EMPTY`), `tableCount` and `warnings`
+  (`TABLES_FOUND_OUTLINE_EMPTY`).
+  - The item-heading fallback exists in both runtimes, and Python's HTML sanitiser now also runs in the Worker.
+  - `accessionNumber` is the resolved filing's, else the one given with `document_url`, else null.
+  - Errors use the standard `ok:false` envelope. Missing or invalid inputs give `INPUT_VALIDATION_ERROR`. A failed
+    read gives `RATE_LIMIT` for a 429, `PROVIDER_TIMEOUT` for a timeout, else `PROVIDER_ERROR` with message
+    "HTTP <status>".
+  - Known remaining differences: the public tool called without `document_url` still uses the Worker's index-backed
+    outline (finding F1, scheduled for the Phase 5 SEC unit), and outline titles strip inner tags differently (F2).
+- **Evidence store listing:** the listing now reads fully (up to 10 pages of 1,000 keys) and keeps the newest
+  `limit` entries (1,000 cuts, 400 history days), oldest first. Previously the newest entries could disappear
+  beyond the cap. No new field.
+- **Rollback:** revert the release.
+
 ## Non-US Primary Filings
 
 - `get_uk_company_filings` reads Companies House, the UK statutory registry:

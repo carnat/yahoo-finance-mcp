@@ -46,7 +46,7 @@ def _verify_hash(pack: dict) -> str:
 
 _ENTRY = """
 export { buildValuationEvidencePack, getConsensusForecastCurve, getEpsRevisions, getEvidenceCut, getEvidenceQuality, listEvidenceCuts } from "./src/evidence-pack.ts";
-export { memoryEvidenceStore, setEvidenceStoreForTests } from "./src/evidence-store.ts";
+export { getEvidenceStore, memoryEvidenceStore, setEvidenceBucket, setEvidenceStoreForTests } from "./src/evidence-store.ts";
 export { mcpSuccess, setWorkerEnv } from "./src/response.ts";
 """
 
@@ -117,6 +117,28 @@ out.noStorePack = JSON.parse(await m.buildValuationEvidencePack("ASTS", 2));
 out.noStoreGet = JSON.parse(await m.getEvidenceCut(out.pack.evidenceCut.evidenceCutId));
 out.noStoreObservation = JSON.parse(await m.getConsensusForecastCurve("ASTS", 5, 3, 10, observedOn));
 out.noStoreList = JSON.parse(await m.listEvidenceCuts("ASTS"));
+// 2.15.0 (BR-EVD-041): the R2 store pages through the listing (1,000 keys a page) and keeps the newest `limit` keys,
+// ascending; it reads at most 10 pages, then keeps the newest of the keys read.
+const fakeBucket = (keys) => ({
+  calls: [], put: async () => {}, get: async () => null, head: async () => null,
+  async list({ prefix, cursor, limit }) {
+    this.calls.push(limit);
+    const all = keys.filter((k) => k.startsWith(prefix));
+    const start = cursor ? Number(cursor) : 0;
+    const page = all.slice(start, start + limit);
+    const next = start + page.length;
+    return { objects: page.map((key) => ({ key })), truncated: next < all.length, cursor: next < all.length ? String(next) : undefined };
+  },
+});
+const r2Keys = (n) => Array.from({ length: n }, (_, i) => `evidence-cuts/R2T/${String(i).padStart(5, "0")}.json`);
+m.setEvidenceStoreForTests(undefined);
+const paged = fakeBucket(r2Keys(2500));
+m.setEvidenceBucket(paged);
+out.r2Paged = { keys: await m.getEvidenceStore().list("evidence-cuts/R2T/", 3), calls: paged.calls };
+const capped = fakeBucket(r2Keys(10500));
+m.setEvidenceBucket(capped);
+out.r2Capped = { keys: await m.getEvidenceStore().list("evidence-cuts/R2T/", 2), calls: capped.calls.length };
+m.setEvidenceBucket(null);
 console.log(JSON.stringify(out));
 """
 
@@ -234,6 +256,15 @@ class TestWorkerEvidenceTools(_PackAssertions, unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.out = _run_worker()
+
+    def test_r2_listing_pages_through_and_keeps_the_newest(self) -> None:
+        # 2.15.0 (BR-EVD-041): all 2,500 keys are read in pages of 1,000; the newest 3 come back, ascending.
+        self.assertEqual(self.out["r2Paged"], {
+            "keys": [f"evidence-cuts/R2T/{i:05d}.json" for i in (2497, 2498, 2499)], "calls": [1000, 1000, 1000]})
+
+    def test_r2_listing_reads_at_most_ten_pages(self) -> None:
+        # Beyond 10 pages of 1,000 the newest of the keys read are kept. Listings have no truncation flag; whether to add one is open (R4B2_SPEC §3).
+        self.assertEqual(self.out["r2Capped"], {"keys": ["evidence-cuts/R2T/09998.json", "evidence-cuts/R2T/09999.json"], "calls": 10})
 
     def test_envelope_passes_evidence_through_verbatim(self) -> None:
         env = self.out["envelope"]
@@ -357,6 +388,30 @@ class TestPythonEvidenceTools(_PackAssertions, unittest.TestCase):
             self.assertEqual((store.get(key), store.exists(key), store.list("evidence-cuts/ASTS/", 10)), ("{}", True, [key]))
             with self.assertRaises(ValueError):
                 store.get("evidence-cuts/../../x.json")
+
+    def test_listing_returns_the_newest_limit_keys_oldest_first(self) -> None:
+        # 2.15.0 (BR-EVD-041): a store holding more than `limit` entries returns the newest `limit`, ascending.
+        from yfmcp import evidence_store as es
+
+        keys = [f"consensus-history/ASTS/2026-01-{d:02d}.json" for d in range(1, 11)]
+        newest = keys[-3:]
+        memory = es.MemoryStore()
+        for key in reversed(keys):
+            memory.put(key, "{}", {})
+        self.assertEqual(memory.list("consensus-history/ASTS/", 3), newest)
+        self.assertEqual(memory.list("consensus-history/ASTS/", 50), keys)
+        with tempfile.TemporaryDirectory() as tmp:
+            local = es.LocalDirStore(tmp)
+            for key in keys:
+                local.put(key, "{}", {})
+            self.assertEqual(local.list("consensus-history/ASTS/", 3), newest)
+            self.assertEqual(local.list("consensus-history/ASTS/", 50), keys)
+
+    def test_listing_reads_at_most_ten_pages_of_a_thousand(self) -> None:
+        from yfmcp import evidence_store as es
+
+        keys = [f"evidence-cuts/R2T/{i:05d}.json" for i in range(10500)]
+        self.assertEqual(es.newest_keys(keys[:es.LIST_PAGE_SIZE * es.LIST_MAX_PAGES], 2), keys[9998:10000])
 
 
 if __name__ == "__main__":
