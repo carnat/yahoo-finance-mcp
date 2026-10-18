@@ -151,6 +151,18 @@ function isPriceBar(val: Record<string, unknown>): boolean {
   return "open" in val && "high" in val && "low" in val && "close" in val;
 }
 
+/**
+ * Table evidence rows as cell strings (2.14.0). A flat list of strings is one row;
+ * a list of lists is several rows. Other shapes give no rows.
+ */
+function sourceRowsAsCells(sourceRows: unknown): string[][] {
+  if (!Array.isArray(sourceRows) || sourceRows.length === 0) return [];
+  const cell = (c: unknown): string => (c === null || c === undefined ? "" : String(c));
+  if (sourceRows.every((r) => typeof r === "string")) return [sourceRows.map(cell)];
+  if (sourceRows.every((r) => Array.isArray(r))) return (sourceRows as unknown[][]).map((r) => r.map(cell));
+  return [];
+}
+
 function enrichFacts(val: any, parentSourceType: string | null = null, parentConfidence: string | null = null, isMetric = false): any {
   if (val && typeof val === "object") {
     if (Array.isArray(val)) {
@@ -212,10 +224,12 @@ function enrichFacts(val: any, parentSourceType: string | null = null, parentCon
           if (ev && typeof ev === "object") {
             const url = ev.url || ev.documentUrl || null;
             if (url) urls.push(String(url));
-            const sourceRows = Array.isArray(ev.sourceRows) ? ev.sourceRows : null;
-            const firstSourceRow = sourceRows && typeof sourceRows[0] === "string" ? sourceRows[0] : null;
-            const joinedSourceRows = sourceRows && sourceRows.length > 0 && sourceRows.every((r: unknown) => typeof r === "string")
-              ? sourceRows.join(" | ")
+            // sourceRows is either one flat row of cells (string[]) or a list of rows (cell[][]).
+            // rowLabel = first cell of the first row; rawRow = cells joined " | ", rows joined "; ".
+            const tableRows = sourceRowsAsCells(ev.sourceRows);
+            const firstSourceRow = tableRows.length > 0 && tableRows[0][0] ? tableRows[0][0] : null;
+            const joinedSourceRows = tableRows.length > 0
+              ? tableRows.map((row) => row.join(" | ")).join("; ") || null
               : null;
             return {
               url,

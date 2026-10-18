@@ -7,8 +7,8 @@ standardised evidence row of 14 keys, in this order:
     tableIndex, rowLabel, columnLabel, rawRow
 
 with falsy values read as null. Table evidence (no tableIndex / rowLabel / rawRow of its own) fills tableIndex from
-sourceTableId, rowLabel from the first element of sourceRows when it is a string, and rawRow from sourceRows joined
-with " | " when it is a non-empty list of strings. `extract_sec_filing_fact`'s geographic PARSED_TABLE evidence names the
+sourceTableId, rowLabel from the first cell of the first row, and rawRow from the rows (cells joined " | ", rows joined
+"; "). sourceRows is one flat row of cells (a list of strings) or a list of rows (a list of lists). `extract_sec_filing_fact`'s geographic PARSED_TABLE evidence names the
 filing the table came from (documentUrl, filingType, accessionNumber, filingDate), so its row carries a url.
 
 The enricher cases run a fact payload through each runtime's V2 envelope (Python `_envelope_tool_result`, Worker
@@ -112,13 +112,14 @@ CASES += [
                   "sourceColumns": ["2025"]},
                  _evidence, mode="pinned", decision=SECTION_4,
                  expect_py=None, expect_ts=[_row(tableIndex=2, rowLabel="China", rawRow="China | 300 | 1,000")]),
-    # The geographic producer's sourceRows are rows of cells (a list of lists), so only tableIndex is filled.
-    # TODO(python-mirror): flip to equal (R4B1_SPEC section 4b), expect=[_row(tableIndex=1)].
-    _enrich_case("evidence.table.nested_source_rows_keep_the_table_index",
+    # The geographic producer's sourceRows are rows of cells (a list of lists).
+    # TODO(python-mirror): flip to equal (R4B1_SPEC section 4b), expect=[_row(tableIndex=1, rowLabel="China",
+    # rawRow="China | 300; Total revenue | 1,000")].
+    _enrich_case("evidence.table.nested_source_rows_fill_table_index_row_label_and_raw_row",
                  GEO_TABLE_EVIDENCE, _evidence, mode="pinned", decision=SECTION_4,
-                 expect_py=None, expect_ts=[_row(tableIndex=1)]),
+                 expect_py=None, expect_ts=[_row(tableIndex=1, rowLabel="China", rawRow="China | 300; Total revenue | 1,000")]),
     # TODO(python-mirror): flip to equal (R4B1_SPEC section 4b), expect=[_row(url=DOC, filingType="10-K",
-    # accessionNumber=ACCN, filingDate="2026-02-15", tableIndex=1)] (the geographic evidence object of section 4c).
+    # accessionNumber=ACCN, filingDate="2026-02-15", tableIndex=1, rowLabel="China", rawRow=...)] (section 4c).
     _enrich_case("evidence.table.geographic_evidence_with_its_filing_names_document_and_table",
                  {**GEO_TABLE_EVIDENCE, "documentUrl": "https://www.sec.gov/Archives/edgar/data/1158114/000115811426000010/aaoi-20251231.htm",
                   "filingType": "10-K", "accessionNumber": "0001158114-26-000010", "filingDate": "2026-02-15"},
@@ -126,7 +127,8 @@ CASES += [
                  expect_py=[_row(url="https://www.sec.gov/Archives/edgar/data/1158114/000115811426000010/aaoi-20251231.htm",
                                  filingType="10-K", accessionNumber="0001158114-26-000010", filingDate="2026-02-15")],
                  expect_ts=[_row(url="https://www.sec.gov/Archives/edgar/data/1158114/000115811426000010/aaoi-20251231.htm",
-                                 filingType="10-K", accessionNumber="0001158114-26-000010", filingDate="2026-02-15", tableIndex=1)]),
+                                 filingType="10-K", accessionNumber="0001158114-26-000010", filingDate="2026-02-15", tableIndex=1,
+                                 rowLabel="China", rawRow="China | 300; Total revenue | 1,000")]),
 ]
 
 
@@ -150,7 +152,8 @@ AAOI_ROUTES = {
     "https://data.sec.gov/api/xbrl/*": {"status": 404, "json": {"message": "Not Found"}},
     AAOI_DOC: {"body": AAOI_HTML},
 }
-AAOI_ROW = _row(url=AAOI_DOC, filingType="10-K", accessionNumber=AAOI_ACCN, filingDate="2026-02-15", tableIndex=1)
+AAOI_ROW = _row(url=AAOI_DOC, filingType="10-K", accessionNumber=AAOI_ACCN, filingDate="2026-02-15", tableIndex=1,
+                rowLabel="China", rawRow="China | 300; Total revenue | 1,000")
 
 
 def _fact_evidence_view(v: dict) -> dict:
