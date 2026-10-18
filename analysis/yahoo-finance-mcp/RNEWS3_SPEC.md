@@ -60,3 +60,20 @@
 
 1. Worker first, then the Python port, then release. Each batch gets its own PR and version.
 2. Live checks per batch, using calls whose output the batch changes. Batch A, for example: the AAPL "tech sector" item is no longer `regulatory`, and `.000Z` disappears from timestamps.
+
+## Planner decisions taken during execution (2026-10-18)
+
+### Batch A
+1. **Whole-word event typing keeps simple inflections.**
+   - Each keyword matches as `\b<keyword>(?:s|es|d|ed|ing)?\b`. For multi-word phrases the suffix applies to the last word.
+   - So "launches", "introduces", "notes" and "announced" still match, while "sector", "dealer" and "steps" no longer hit `sec`, `deal` or `eps`.
+   - Python uses `re.ASCII` so that `\b` matches JavaScript's.
+2. **Counting the legacy `yahoo_finance` feed once:** its counts are the single read of the feed, which is the news pass (raw, retrieved, accepted, rejected). Example: 20 stories give raw 20, not 40.
+3. **Ticker in text:** only single-letter tickers change to whole-token matching, as the batch table says. Longer tickers keep the substring test.
+4. **"LSE GS" still reads as NASDAQ:** GS is a whole token there. Accepted.
+5. **Notes for the Python port:** a Form 4 value that rounds to zero prints "$0", never "-0". Python's `html.unescape` decodes more entities than the Worker's decoder. Python keeps `html.unescape`, because the case set compares only the common entities.
+
+### Moved to Batch B (the verify fixes)
+6. **Verify relevance issuer names.**
+   - Both runtimes use one name set: Yahoo `longName`, `shortName` and the SEC submissions `name`, excluding any alias equal to the ticker. This is the same rule as call #16.
+   - A `company_ir_page` source counts as an official, HIGH source type in both runtimes (Worker behaviour). It is the official tier in the registry.
