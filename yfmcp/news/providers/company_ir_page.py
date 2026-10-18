@@ -1,0 +1,282 @@
+"""company_ir_page provider: approved company IR page registry entries, the page fetch and the
+JSON / HTML adapters.
+
+Adapter contract (unchanged by the move): each ``_collect_*_events`` keeps its current signature and
+return value. The return value is the items plus the per-source status/diagnostics; warnings are
+appended to the caller's ``warnings`` list. There is no provider registry yet (2.15.1 is a pure
+restructure; the registry and the off switch are part 2).
+"""
+
+import asyncio
+import datetime
+import html as _html_module
+import json
+from pathlib import Path
+import re as _re
+import urllib.parse as _urlparse
+import urllib.request as _urlrequest
+
+from yfmcp import url_policy as _url_policy
+from yfmcp.util import _to_iso_utc
+from yfmcp.parsing.html import _strip_html_tags
+from yfmcp.news.shared import (
+    _event_type_from_keywords,
+    _make_duplicate_group_id,
+    _short_text,
+    _within_date_window,
+)
+
+
+_COMPANY_IR_PAGE_REGISTRY_PATH = Path(__file__).resolve().parents[3] / "worker" / "src" / "company-ir-page-registry.json"
+
+
+_COMPANY_IR_PAGE_MAX_BYTES = 750 * 1024
+
+
+def _load_company_ir_page_registry() -> dict:
+    try:
+        return json.loads(_COMPANY_IR_PAGE_REGISTRY_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {"schemaVersion": "unknown", "registryVersion": "unknown", "sources": []}
+
+
+def _company_ir_page_entry(ticker: str) -> dict | None:
+    ticker_u = str(ticker or "").upper()
+    registry = _load_company_ir_page_registry()
+    for entry in registry.get("sources") or []:
+        if isinstance(entry, dict) and str(entry.get("ticker") or "").upper() == ticker_u:
+            return dict(entry, registryVersion=registry.get("registryVersion"), registrySchemaVersion=registry.get("schemaVersion"))
+    return None
+
+
+def _host_without_www(host: str) -> str:
+    return str(host or "").lower().removeprefix("www.")
+
+
+def _company_ir_page_url_allowed(entry: dict, raw_url: str) -> bool:
+    try:
+        parsed = _urlparse.urlparse(str(raw_url or ""))
+    except Exception:
+        return False
+    if parsed.scheme.lower() != "https":
+        return False
+    host = _host_without_www(parsed.hostname or "")
+    allowed_hosts = {_host_without_www(h) for h in entry.get("allowedHosts") or []}
+    prefixes = [str(p) for p in entry.get("allowedPathPrefixes") or [] if str(p)]
+    return host in allowed_hosts and any(parsed.path.startswith(prefix) for prefix in prefixes)
+
+
+def _company_ir_page_registry_fresh(entry: dict) -> bool:
+    raw = entry.get("revalidateAfter")
+    if not raw:
+        return True
+    try:
+        deadline = datetime.datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        if deadline.tzinfo is None:
+            deadline = deadline.replace(tzinfo=datetime.timezone.utc)
+        return deadline >= datetime.datetime.now(datetime.timezone.utc)
+    except Exception:
+        return False
+
+
+def _company_ir_page_item(
+    ticker: str,
+    entry: dict,
+    title: str,
+    summary: str,
+    raw_url: str | None,
+    published_at: str | None,
+    retrieved_at: str,
+    final_url: str,
+) -> dict | None:
+    url = _urlparse.urljoin(final_url, raw_url or final_url)
+    if not _company_ir_page_url_allowed(entry, url):
+        return None
+    ticker_u = ticker.upper()
+    issuer = str(entry.get("issuerName") or ticker_u)
+    duplicate_group_id = _make_duplicate_group_id(ticker_u, title, published_at, issuer, url)
+    return {
+        "title": title,
+        "source": "company_ir_page",
+        "originalSource": issuer,
+        "sourceType": "company_ir_page",
+        "provider": "company_ir_page_registry",
+        "discoveredVia": "approved_company_ir_page_registry",
+        "adapter": entry.get("adapter"),
+        "canonicalUrl": entry.get("canonicalUrl"),
+        "registryVersion": entry.get("registryVersion"),
+        "approvalStatus": "approved",
+        "publishedAt": published_at,
+        "retrievedAt": retrieved_at,
+        "url": url,
+        "issuer": issuer,
+        "tickers": [ticker_u],
+        "eventType": _event_type_from_keywords(f"{title} {summary}"),
+        "summary": _short_text(summary or title, 240),
+        "evidenceText": _short_text(summary or title, 180),
+        "confidence": "HIGH",
+        "tickerRelevance": "HIGH",
+        "duplicateGroupId": duplicate_group_id,
+    }
+
+
+def _company_ir_page_json_records(payload: object) -> list[dict]:
+    if not isinstance(payload, dict):
+        return []
+    candidates = [
+        payload.get("items"),
+        payload.get("releases"),
+        payload.get("pressReleases"),
+        payload.get("news"),
+        payload.get("data"),
+    ]
+    feed = payload.get("feed")
+    if isinstance(feed, dict):
+        candidates.append(feed.get("items"))
+    data = payload.get("data")
+    if isinstance(data, dict):
+        candidates.extend(data.values())
+    for candidate in candidates:
+        if isinstance(candidate, list):
+            records = [r for r in candidate if isinstance(r, dict)]
+            if records:
+                return records
+    return []
+
+
+def _parse_company_ir_page_json(ticker: str, entry: dict, text: str, retrieved_at: str, final_url: str) -> list[dict]:
+    try:
+        payload = json.loads(text)
+    except Exception:
+        return []
+    items: list[dict] = []
+    for raw in _company_ir_page_json_records(payload):
+        title = str(raw.get("title") or raw.get("headline") or raw.get("name") or "").strip()
+        if not title:
+            continue
+        summary = str(raw.get("summary") or raw.get("description") or raw.get("excerpt") or raw.get("content") or "").strip()
+        raw_url = str(raw.get("url") or raw.get("link") or raw.get("external_url") or raw.get("permalink") or "").strip() or None
+        published_at = _to_iso_utc(raw.get("publishedAt") or raw.get("published_at") or raw.get("datePublished") or raw.get("date_published") or raw.get("date") or raw.get("pubDate"))
+        item = _company_ir_page_item(ticker, entry, title, summary, raw_url, published_at, retrieved_at, final_url)
+        if item:
+            items.append(item)
+    return items
+
+
+def _html_attr(attrs: str, name: str) -> str:
+    match = _re.search(rf'\b{_re.escape(name)}\s*=\s*["\']([^"\']+)["\']', attrs or "", flags=_re.I)
+    return _html_module.unescape(match.group(1)) if match else ""
+
+
+def _parse_company_ir_page_html(ticker: str, entry: dict, html_text: str, retrieved_at: str, final_url: str) -> list[dict]:
+    blocks = _re.findall(r"<article\b[^>]*>[\s\S]*?</article>", html_text or "", flags=_re.I)
+    if not blocks:
+        blocks = [
+            m.group(0)
+            for m in _re.finditer(r"<li\b[^>]*>[\s\S]*?</li>", html_text or "", flags=_re.I)
+            if _re.search(r"press release|news release|earnings|results|announces|reports", _strip_html_tags(m.group(0)), flags=_re.I)
+        ]
+    items: list[dict] = []
+    for block in blocks[:50]:
+        heading = _re.search(r"<h[1-4]\b[^>]*>([\s\S]*?)</h[1-4]>", block, flags=_re.I)
+        anchor = _re.search(r"<a\b([^>]*)>([\s\S]*?)</a>", block, flags=_re.I)
+        title = _strip_html_tags((heading.group(1) if heading else anchor.group(2) if anchor else "") or "").strip()
+        if len(title) < 6:
+            continue
+        href = _html_attr(anchor.group(1), "href") if anchor else ""
+        time_match = _re.search(r"<time\b([^>]*)>([\s\S]*?)</time>", block, flags=_re.I)
+        datetime_raw = ""
+        if time_match:
+            datetime_raw = _html_attr(time_match.group(1), "datetime") or _strip_html_tags(time_match.group(2))
+        item = _company_ir_page_item(
+            ticker,
+            entry,
+            title,
+            _strip_html_tags(block),
+            href or None,
+            _to_iso_utc(datetime_raw),
+            retrieved_at,
+            final_url,
+        )
+        if item:
+            items.append(item)
+    return items
+
+
+async def _fetch_company_ir_page(entry: dict) -> tuple[str, str, str]:
+    canonical_url = str(entry.get("canonicalUrl") or "")
+    if not _company_ir_page_url_allowed(entry, canonical_url):
+        raise ValueError("registry canonical URL is outside its allow-list")
+    if str(entry.get("status") or "") != "approved":
+        # Only approved entries are fetched. The Worker reaches the same refusal because the fetch allow-list
+        # holds the hosts of approved entries only.
+        raise _url_policy.UrlPolicyError("URL host not allowed")
+
+    def _fetch() -> tuple[str, str, str]:
+        req = _urlrequest.Request(
+            canonical_url,
+            headers={
+                "User-Agent": "yahoo-finance-mcp/ir-page-registry",
+                "Accept": "application/json, application/xml, text/xml, text/html;q=0.9",
+            },
+        )
+        with _url_policy.urlopen(req, timeout=15) as resp:
+            final_url = resp.geturl()
+            if not _company_ir_page_url_allowed(entry, final_url):
+                raise ValueError("redirect target is outside registry allow-list")
+            content_type = str(resp.headers.get("content-type") or "").lower()
+            data = resp.read(_COMPANY_IR_PAGE_MAX_BYTES + 1)
+            if len(data) > _COMPANY_IR_PAGE_MAX_BYTES:
+                raise ValueError("response exceeded size limit")
+            return data.decode("utf-8", errors="replace"), final_url, content_type
+
+    return await asyncio.to_thread(_fetch)
+
+
+async def _collect_company_ir_page_events(
+    ticker: str,
+    *,
+    retrieved_at: str,
+    max_results: int,
+    start_date: str = "",
+    end_date: str = "",
+    lookback_days: int | None = None,
+) -> tuple[list[dict], list[dict], bool]:
+    entry = _company_ir_page_entry(ticker)
+    if not entry:
+        return [], [], False
+    status = str(entry.get("status") or "")
+    warning_base = {
+        "canonicalUrl": entry.get("canonicalUrl"),
+        "registryVersion": entry.get("registryVersion"),
+        "approvalStatus": status,
+    }
+    if status == "disabled":
+        return [], [{**warning_base, "code": "COMPANY_IR_PAGE_DISABLED", "message": "Company IR page registry entry is disabled.", "severity": "info"}], False
+    if status == "candidate":
+        candidate = {
+            "ticker": entry.get("ticker"),
+            "issuerName": entry.get("issuerName"),
+            "canonicalUrl": entry.get("canonicalUrl"),
+            "adapter": entry.get("adapter"),
+            "candidateReason": entry.get("candidateReason"),
+            "discoveredAt": entry.get("discoveredAt"),
+            "decisionGrade": False,
+        }
+        return [], [{**warning_base, "code": "COMPANY_IR_PAGE_CANDIDATE_AVAILABLE", "message": "Company IR page candidate is available for review but was not fetched.", "severity": "info", "candidate": candidate}], False
+    if not _company_ir_page_registry_fresh(entry):
+        return [], [{**warning_base, "code": "COMPANY_IR_PAGE_REVALIDATION_DUE", "message": "Approved company IR page is past its revalidation date; skipped until reviewed.", "severity": "warning"}], False
+    try:
+        text, final_url, content_type = await _fetch_company_ir_page(entry)
+        adapter = str(entry.get("adapter") or "")
+        if adapter == "structured" or "json" in content_type:
+            items = _parse_company_ir_page_json(ticker, entry, text, retrieved_at, final_url)
+        else:
+            items = _parse_company_ir_page_html(ticker, entry, text, retrieved_at, final_url)
+        items = [
+            item for item in items
+            if _within_date_window(item.get("publishedAt"), start_date=start_date, end_date=end_date, lookback_days=lookback_days)
+        ][:max_results]
+        return items, [], True
+    except Exception as exc:
+        return [], [{**warning_base, "code": "COMPANY_IR_PAGE_VALIDATION_FAILED", "message": f"Approved company IR page validation failed: {exc}", "severity": "warning"}], False

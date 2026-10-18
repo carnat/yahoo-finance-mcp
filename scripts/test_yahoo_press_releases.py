@@ -53,7 +53,7 @@ def _python(feed: str) -> dict:
     class _Ticker:
         info = INFO
 
-    with patch("yfmcp.tools.news.yf") as mock_yf, patch("yfmcp.tools.news._yahoo_search_news", return_value=NEWS):
+    with patch("yfmcp.news.providers.yahoo.yf") as mock_yf, patch("yfmcp.news.providers.yahoo._yahoo_search_news", return_value=NEWS):
         mock_yf.Ticker.return_value = _Ticker()
         items, warnings, used, diagnostics = asyncio.run(srv._collect_yahoo_events(
             "AEHR", retrieved_at=_retrieved(), max_results=10, feed=feed, include_diagnostics=True))

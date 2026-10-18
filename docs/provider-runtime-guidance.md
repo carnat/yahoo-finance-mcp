@@ -2959,6 +2959,26 @@ F-024, F-026, F-029). Both runtimes change alike.
   beyond the cap. No new field.
 - **Rollback:** revert the release.
 
+## News Provider Adapters (2.15.1)
+
+- **Why:** R-news part 1 from the approved Q3i triage (§3a). Release type: patch. This is a pure restructure with no behaviour change.
+- **Worker layout:** each news source has its own module under `worker/src/news/providers/`:
+  - the sources are `yahoo`, `sec`, `company-ir`, `company-ir-page`, `globenewswire`, `finnhub` and `marketaux`;
+  - helpers shared by providers and the pipeline are in `worker/src/news/shared.ts`;
+  - the adapter result types are in `types.ts`;
+  - `worker/src/news.ts` keeps the pipeline (source lists, dedupe, coverage, collection status, `collectCompanyEvents`, ranking, tool functions) and re-exports every name it exported before. It went from about 3,100 lines to about 1,450.
+- **Python layout:**
+  - the same split is in `yfmcp/news/providers/*.py` and `yfmcp/news/shared.py`;
+  - `yfmcp/tools/news.py` keeps the pipeline and re-imports every moved name, so `yfmcp.tools.news.<name>` and `server.<name>` still resolve. It went from about 3,400 lines to about 2,000.
+  - Python has no separate `company_ir` collector: the pipeline still serves it inline, and `company_ir.py` is a placeholder until the R-news repairs port the Worker's registry-only collector.
+- **Adapter contract:** every collector keeps its signature and its result (`items`, `warnings`, `used`, and per-source diagnostics where it has them). Providers never import the pipeline.
+- **Proof of no change:**
+  - All 1,155 parity cases and `tools/list` (expanded and grouped) were serialised in both runtimes before and after the move, and the dumps are identical.
+  - The parity harness passes with no case edited.
+  - Tests that stub a provider helper now patch it in the provider module.
+- **CI:** the Python syntax-check step now covers `yfmcp/news/`.
+- **Rollback:** revert the release.
+
 ## Non-US Primary Filings
 
 - `get_uk_company_filings` reads Companies House, the UK statutory registry:

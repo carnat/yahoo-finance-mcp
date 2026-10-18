@@ -57,6 +57,8 @@ from yfmcp import capital_structure as cs
 from yfmcp import url_policy
 from yfmcp.clients import edgar
 from yfmcp.tools import news as news_tools
+from yfmcp.news import shared as news_shared
+from yfmcp.news.providers import company_ir_page as ir_page_provider, finnhub as finnhub_provider, marketaux as marketaux_provider, sec as sec_provider, yahoo as yahoo_provider
 
 CASES: list[Case] = []
 
@@ -122,7 +124,9 @@ def _python_world(scn: dict):
         for var in _PROVIDER_ENV:
             os.environ.pop(var, None)
         os.environ.update(scn.get("env", {}))
-        stack.enter_context(patch.object(news_tools, "datetime", _frozen_datetime_module(now)))
+        frozen = _frozen_datetime_module(now)
+        for clock_owner in (news_tools, news_shared, ir_page_provider, finnhub_provider, marketaux_provider):
+            stack.enter_context(patch.object(clock_owner, "datetime", frozen))
         stack.enter_context(patch.object(news_tools, "_utc_now_iso", lambda: now))
         stack.enter_context(patch.dict(server._tool_cache._store, {}, clear=True))
         for cache in (edgar._FILING_CIK_CACHE, edgar._EDGAR_SUBS_CACHE, edgar._EDGAR_HTML_CACHE):
@@ -138,10 +142,10 @@ def _python_world(scn: dict):
                 raise news
             return copy.deepcopy(news)
 
-        stack.enter_context(patch.object(news_tools, "_yahoo_search_news", search))
+        stack.enter_context(patch.object(yahoo_provider, "_yahoo_search_news", search))
         if scn.get("registry") is not None:
             registry = scn["registry"]
-            stack.enter_context(patch.object(news_tools, "_load_company_ir_page_registry", lambda: copy.deepcopy(registry)))
+            stack.enter_context(patch.object(ir_page_provider, "_load_company_ir_page_registry", lambda: copy.deepcopy(registry)))
             stack.enter_context(url_policy.registry_override(registry))     # the fetch allow-list holds approved registry hosts
         yield
 
