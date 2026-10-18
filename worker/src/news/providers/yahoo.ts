@@ -3,7 +3,7 @@
  * Moved out of news.ts in 2.15.1 (pure restructure); providers never import news.ts.
  */
 
-import { yGet, enc, iso, _str, type NewsCompanyIdentity } from "../../yahoo-finance.js";
+import { yGet, enc, _str, type NewsCompanyIdentity } from "../../yahoo-finance.js";
 import {
   sourceDecisionUse,
   normalizeIso,
@@ -12,13 +12,16 @@ import {
   makeDupGroupId,
   withinDateWindow,
   normalizeExchange,
+  isoUtc,
+  isoFromEpochSeconds,
+  tickerInText,
 } from "../shared.js";
 import type { NewsProviderResultWithDiagnostics } from "./types.js";
 
 const YAHOO_ALLOWED_CONTENT_TYPES = new Set(["STORY", "ARTICLE", "PRESS_RELEASE"]);
 
 export async function getNews(ticker: string): Promise<string> {
-  const retrievedAt = new Date().toISOString();
+  const retrievedAt = isoUtc(new Date());
   const d = (await yGet(
     `https://query1.finance.yahoo.com/v1/finance/search?q=${enc(ticker)}&quotesCount=0&newsCount=20&enableFuzzyQuery=false`,
     false
@@ -28,14 +31,19 @@ export async function getNews(ticker: string): Promise<string> {
   const tickerUpper = ticker.toUpperCase();
   const items = news.map((n) => {
     const title = String(n.title ?? "");
+    const content = (n.content && typeof n.content === "object") ? n.content as Record<string, unknown> : {};
     return {
       title,
       publisher: String(n.publisher ?? ""),
       url: String(n.link ?? ""),
-      publishedAt: n.providerPublishTime ? iso(Number(n.providerPublishTime)) : null,
+      // A providerPublishTime of 0 or none falls back to content.pubDate, as in Python (2.17.0).
+      publishedAt: n.providerPublishTime ? isoFromEpochSeconds(Number(n.providerPublishTime)) : normalizeIso(content.pubDate),
       retrievedAt,
       sourceType: "yahoo_finance",
-      tickerRelevance: title.toUpperCase().includes(tickerUpper) ? "HIGH" : "UNKNOWN",
+      // Passed through for the collector's CONTENT_TYPE filter and PRESS_RELEASE relabel, and for display (2.17.0).
+      contentType: _str(content.contentType || n.contentType),
+      summary: _str(content.summary || n.summary),
+      tickerRelevance: tickerInText(title, tickerUpper) ? "HIGH" : "UNKNOWN",
     };
   });
   return JSON.stringify({
@@ -152,7 +160,7 @@ function buildYfEventItem(
     sourceKey = contentType === "PRESS_RELEASE" ? "yahoo_finance_press_releases" : "yahoo_finance_news";
   }
 
-  const relevance = `${title} ${summary}`.toUpperCase().includes(ticker.toUpperCase()) ? "HIGH" : "LOW";
+  const relevance = tickerInText(`${title} ${summary}`, ticker) ? "HIGH" : "LOW";
   const confidence = !url || relevance !== "HIGH" ? "LOW" : "MEDIUM";
   const duplicateGroupId = makeDupGroupId(ticker, title, publishedAt, null);
   if (!duplicateGroupId) {
@@ -242,7 +250,9 @@ export async function collectYahooEvents(
     const rejectionCounts = diagnostics.rejectionCounts as Record<string, number>;
     rejectionCounts[reason] = (rejectionCounts[reason] ?? 0) + 1;
   };
-  const feedSource = feed === "press_releases" ? "yahoo_finance_press_releases" : "yahoo_finance_news";
+  // The news feed labels each row by its contentType (PRESS_RELEASE -> yahoo_finance_press_releases), as Python does;
+  // the press-releases feed labels every row a press release (2.17.0).
+  const feedSource = feed === "press_releases" ? "yahoo_finance_press_releases" : undefined;
   try {
     // Yahoo retired its press-releases tab endpoint (/xhr/ncp?queryRef=pressRelease: HTTP 404 for every ticker,
     // 2.5.33), so both feeds read the news search feed; press releases are the issuer's own wire releases in it.
@@ -265,7 +275,8 @@ export async function collectYahooEvents(
         reject("DATE_WINDOW");
         continue;
       }
-      const match = yahooNewsMatchFor(`${_str(item.title)} ${_str(item.summary)} ${_str(item.evidenceText)}`, ticker, identity);
+      // Identity and ticker matching read the title only; the summary is for display (planner call #13, 2.17.0).
+      const match = yahooNewsMatchFor(_str(item.title), ticker, identity);
       if (!match) {
         reject(identity.status === "UNAVAILABLE" ? "IDENTITY_UNAVAILABLE_TICKER_NOT_FOUND" : "IDENTITY_MISMATCH");
         continue;

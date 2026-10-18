@@ -15,6 +15,7 @@ import {
   withinDateWindow,
   decodeXmlText,
   extractXmlTag,
+  normalizeExchange,
 } from "../shared.js";
 import type { NewsProviderResult } from "./types.js";
 
@@ -66,17 +67,9 @@ const GLOBENEWSWIRE_STOCK_CATEGORY_DOMAIN = "https://www.globenewswire.com/rss/s
 const GLOBENEWSWIRE_ISIN_CATEGORY_DOMAIN = "https://www.globenewswire.com/rss/ISIN";
 const GLOBENEWSWIRE_CACHE_MAX = 40;
 const globenewswireCache = new Map<string, { value: string; storedAt: number }>();
-function normalizedExchangeCode(exchange: string | null | undefined): string | null {
-  const e = _str(exchange).toUpperCase();
-  if (!e) return null;
-  const eUpper = e.toUpperCase();
-  if (eUpper.includes("NASDAQ") || eUpper.includes("NMS") || eUpper.includes("NGM") || eUpper.includes("NCM")) return "NASDAQ";
-  if (eUpper.includes("NYSE") || eUpper === "NYQ") return "NYSE";
-  if (eUpper.includes("AMEX") || eUpper.includes("NYSE AMERICAN") || eUpper === "ASE") return "NYSEAMERICAN";
-  return null;
-}
+// The company exchange goes through the shared normaliser (2.17.0), so 'NYSE American' reads as NYSE American, not NYSE.
 function exchangeCompatibleWithStockCategory(exchange: string | null | undefined, category: string): boolean {
-  const expected = normalizedExchangeCode(exchange);
+  const expected = normalizeExchange(_str(exchange));
   if (!expected) return true;
   const prefix = category.split(":")[0]?.trim().toUpperCase();
   if (!prefix || prefix === category.toUpperCase()) return true;
@@ -174,8 +167,9 @@ export async function collectGlobeNewswireEvents(
     }
 
     try {
-      if (/<!entity/i.test(xml)) {
-        throw new Error("unsupported XML entity declaration in GlobeNewswire RSS");
+      // A DOCTYPE or ENTITY declaration is refused, as in Python (2.17.0): no DTD is ever parsed.
+      if (/<!doctype|<!entity/i.test(xml)) {
+        throw new Error("unsupported XML declaration in GlobeNewswire RSS");
       }
       if (!/<rss\b/i.test(xml) || !/<channel\b/i.test(xml) || !/<\/rss>/i.test(xml)) {
         throw new Error("invalid GlobeNewswire RSS XML");

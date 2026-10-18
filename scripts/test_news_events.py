@@ -2400,7 +2400,9 @@ class TestGlobeNewswireRSS(unittest.TestCase):
             worker_text = f.read()
 
         self.assertIn("function exchangeCompatibleWithStockCategory", worker_text)
-        self.assertIn("normalizedExchangeCode", worker_text)
+        # 2.17.0 (R-news Batch A, B-G4): the company exchange goes through the shared news normaliser.
+        self.assertIn("const expected = normalizeExchange(_str(exchange));", worker_text)
+        self.assertNotIn("normalizedExchangeCode", worker_text)
         self.assertIn("globenewswireStockCategoryMatches(tickerU, stockCategories, exchange)", worker_text)
         self.assertIn("collectGlobeNewswireEvents(ticker, safeMax, watermark, startDate, endDate, safeLookback, identity?.exchange ?? null)", worker_text)
 
@@ -2469,17 +2471,16 @@ class TestGlobeNewswireRSS(unittest.TestCase):
         self.assertIn("recommendedAction", worker_text)
         self.assertIn("SOURCE_LIMITED_NOT_FOUND", tools_text)
 
-    def test_worker_company_ir_xml_safety_check_relaxed(self):
-        """Worker XML safety check should be relaxed to support standard DOCTYPEs but reject ENTITYs."""
+    def test_worker_company_ir_xml_safety_check_refuses_doctype_and_entity(self):
+        """2.17.0 (R-news Batch A, A-G14 / B-G15): the Worker refuses DOCTYPE and ENTITY declarations, as Python does, with Python's text."""
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         with _open_worker_yahoo_news(root) as f:
             worker_text = f.read()
 
-        # Confirm safety check is now specific to ENTITY declarations
-        self.assertIn("unsupported XML entity declaration in company IR RSS/Atom", worker_text)
-        self.assertIn("unsupported XML entity declaration in GlobeNewswire RSS", worker_text)
-        self.assertNotIn("unsupported XML declaration in company IR RSS/Atom", worker_text)
-        self.assertNotIn("unsupported XML declaration in GlobeNewswire RSS", worker_text)
+        self.assertEqual(worker_text.count("/<!doctype|<!entity/i.test(xml)"), 2)
+        self.assertIn("unsupported XML declaration in company IR RSS/Atom", worker_text)
+        self.assertIn("unsupported XML declaration in GlobeNewswire RSS", worker_text)
+        self.assertNotIn("unsupported XML entity declaration", worker_text)
 
         # 2.10.0: discovery candidate paths were removed with the fetch allow-list
         self.assertNotIn('"/rss-news-feeds"', worker_text)

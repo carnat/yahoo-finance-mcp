@@ -13,6 +13,7 @@ import {
   eventTypeFromKeywords,
   makeDupGroupId,
   withinDateWindow,
+  tickerInText,
 } from "../shared.js";
 import type { NewsProviderResultWithDiagnostics } from "./types.js";
 
@@ -91,7 +92,7 @@ export async function collectFinnhubEvents(
       if (!duplicateGroupId) {
         warnings.push({ code: "DEDUPE_WEAK_KEY", message: "Weak dedupe key for at least one item.", severity: "warning" });
       }
-      const relevance = `${title} ${summary}`.toUpperCase().includes(tickerU) ? "HIGH" : "LOW";
+      const relevance = tickerInText(`${title} ${summary}`, tickerU) ? "HIGH" : "LOW";
       const item: Record<string, unknown> = {
         title,
         source: "finnhub",

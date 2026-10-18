@@ -15,7 +15,7 @@ import {
   _str,
   toIsoUtc,
 } from "../../yahoo-finance.js";
-import { shortText, eventTypeFromKeywords, makeDupGroupId, withinDateWindow, normalizeExchange } from "../shared.js";
+import { shortText, eventTypeFromKeywords, makeDupGroupId, withinDateWindow, normalizeExchange, withoutZeroMillis } from "../shared.js";
 import type { NewsProviderResultWithDiagnostics } from "./types.js";
 
 const MARKETAUX_NEWS_API = "https://api.marketaux.com/v1/news/all";
@@ -197,7 +197,8 @@ export async function collectMarketauxEvents(
       reject("ENTITY_EXCHANGE_MISMATCH");
       continue;
     }
-    const publishedAt = toIsoUtc(row.published_at);
+    const parsedAt = toIsoUtc(row.published_at);
+    const publishedAt = parsedAt ? withoutZeroMillis(parsedAt) : null;
     if (!withinDateWindow(publishedAt, startDate, endDate, lookbackDays)) {
       reject("DATE_OUTSIDE_WINDOW");
       continue;

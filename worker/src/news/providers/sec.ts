@@ -11,6 +11,7 @@ import {
   shortText,
   makeDupGroupId,
   withinDateWindow,
+  roundHalfAwayFromZero,
 } from "../shared.js";
 import type { NewsProviderResult } from "./types.js";
 
@@ -81,7 +82,7 @@ function form4Payload(
     transactionLabel: FORM4_TRANSACTION_LABELS[_str(code).toUpperCase()] ?? "Other/Unclassified",
     shares,
     price,
-    value: shares != null && price != null ? Math.round(shares * price * 100) / 100 : null,
+    value: shares != null && price != null ? roundHalfAwayFromZero(shares * price, 2) : null,
     ownershipForm,
     transactionDate,
   };
@@ -189,8 +190,9 @@ async function tryAttachForm4Transaction(item: Record<string, unknown>, filing: 
   item.insiderTransaction = parsed;
   const label = _str(parsed.transactionLabel) || "Insider transaction";
   const owner = _str(parsed.owner) || "reporting owner";
-  const shares = typeof parsed.shares === "number" ? `${Math.round(parsed.shares).toLocaleString("en-US")} shares` : "shares unavailable";
-  const value = typeof parsed.value === "number" ? `, value $${Math.round(parsed.value).toLocaleString("en-US")}` : "";
+  // The summary rounds with the same helper as the value (2.17.0).
+  const shares = typeof parsed.shares === "number" ? `${roundHalfAwayFromZero(parsed.shares, 0).toLocaleString("en-US")} shares` : "shares unavailable";
+  const value = typeof parsed.value === "number" ? `, value $${roundHalfAwayFromZero(parsed.value, 0).toLocaleString("en-US")}` : "";
   item.title = `Form 4: ${label} by ${owner}`;
   item.summary = shortText(`${label} by ${owner}: ${shares}${value}.`);
   item.evidenceText = shortText(`SEC Form 4 transaction code ${_str(parsed.transactionCode) || "unknown"} on ${_str(parsed.transactionDate) || _str(item.filingDate)}.`);

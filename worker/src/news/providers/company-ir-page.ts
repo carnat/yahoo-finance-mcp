@@ -346,7 +346,8 @@ export async function collectCompanyIrPageEvents(
   }
 }
 function parseCompanyIrFeedItems(xml: string): { feedTitle: string | null; itemXmls: Array<{ kind: "rss" | "atom"; xml: string }> } {
-  if (/<!entity/i.test(xml)) throw new Error("unsupported XML entity declaration in company IR RSS/Atom");
+  // Same guard as the GlobeNewswire feed (2.17.0): a DOCTYPE or ENTITY declaration is refused.
+  if (/<!doctype|<!entity/i.test(xml)) throw new Error("unsupported XML declaration in company IR RSS/Atom");
   if (!looksLikeFeed(xml)) throw new Error("invalid company IR RSS/Atom XML");
   const feedTitle = extractXmlTag(xml, "title") || null;
   const itemXmls: Array<{ kind: "rss" | "atom"; xml: string }> = [];
