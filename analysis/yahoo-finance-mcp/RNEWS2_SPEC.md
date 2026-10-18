@@ -78,3 +78,18 @@ Disabled sources are not recorded. Telemetry stays as it is.
   - an explicit `sources:["finnhub"]` call still works;
   - the canaries pass.
   - The off switch is checked offline only: production does not set it.
+
+## 8. Planner decisions taken during execution (2026-10-18)
+
+1. **Status value.** A disabled source's `sourceStatus` row uses the news pipeline's existing `"UNCONFIGURED"` status, not `SOURCE_UNCONFIGURED`. The existing coverage sets already treat `UNCONFIGURED` as failed, which gives `failedSources` and PARTIAL. `failedSources[].status` is `UNCONFIGURED` as well. This replaces `SOURCE_UNCONFIGURED` throughout §2.
+2. **One row shape for every disabled source:** `{ status: "UNCONFIGURED", rawCount: 0, filteredCount: 0, attempted: false }`. All four fields already exist in the news rows. Do not copy the family-specific unconfigured rows: Marketaux's `configure_marketaux_api_token` advice would be wrong for an operator disable.
+3. **Message matching.**
+   - A disabled source's row is always the row in point 2. Message-based status inference, such as "finnhub" in a `SOURCE_UNAVAILABLE` message giving `PROVIDER_ERROR`, must not override it.
+   - Disabling `finnhub` counts as limited for `marketauxFallbackReason`, so the Marketaux fallback runs unless `marketaux` is disabled too.
+4. **`get_sec_recent_events` is not affected.** It is an explicit SEC filing tool and selects no news sources. The docs say so.
+5. **`get_company_press_releases`:** the disabled report (row, warning, failedSources entry) is attached once, in the tool's final payload, keyed by the source name. The inner `collectCompanyEvents` call must not add a second copy.
+6. **Advertised defaults.** The `get_company_news` and `search_company_news` schemas update their `default` lists and description text to the new defaults (sec included) in both runtimes, keeping `check_tool_sync` green. The `tools/list` change is expected in this minor release.
+7. **Tickers SEC does not cover, defaults only.**
+   - When `sec` came from the defaults and the ticker has no SEC CIK (most foreign listings), `sec` is reported the way an ineligible Finnhub ticker is: skipped, not failed. Reuse that existing skipped status and warning shape, with `reasonCode: null`. Coverage does not drop to PARTIAL because of it.
+   - An explicitly requested `sec`, or a real SEC fetch failure for a ticker that has a CIK, keeps today's behaviour (`PROVIDER_ERROR`, PARTIAL).
+   - If the Finnhub skip shape cannot be reused without a new value, STOP and report.
