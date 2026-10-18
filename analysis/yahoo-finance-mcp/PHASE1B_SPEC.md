@@ -94,3 +94,28 @@ Section "Per-Person Access Keys (2.18.0)":
 - what a user must not do: no redistribution, non-commercial and personal use only, and the daily capacity is shared;
 - the telemetry key id;
 - the owner action in §6.
+
+## 9. Decisions taken during execution (2026-10-18)
+
+1. **Applying the Durable Object migration (owner: "One-time workflow").**
+   - **Why:** the release pipeline only runs `wrangler versions upload` / `versions deploy`, and those never apply Durable Object migrations. Cloudflare requires `wrangler deploy` for that.
+   - **Two steps:**
+     - **2.18.0 (this release):**
+       - The `KeyUsage` class is exported and all 1b code ships.
+       - `wrangler.toml` is unchanged: no `USAGE` binding, no migration, no KV binding.
+       - Personal keys need both `ACCESS_KEYS` and `USAGE`. With either missing, only the owner key works.
+       - The normal pipeline deploys it as usual.
+     - **Activation (follow-up PR, once the owner gives the KV namespace ID):**
+       - Add the `[[kv_namespaces]]` `ACCESS_KEYS` entry, the `[[durable_objects.bindings]]` `USAGE` entry and the `new_sqlite_classes` migration.
+       - Add `.github/workflows/apply-do-migration.yml`: `workflow_dispatch` only, input `ref`. It checks out that ref, runs `npx wrangler deploy`, then the production canaries and the live discovery audit, with the same secrets and SHA-pinned actions as the deploy workflow.
+       - **Order:**
+         1. The PR is green.
+         2. The planner dispatches the migration workflow on the PR's head ref.
+         3. It succeeds with canaries green.
+         4. Merge. The normal pipeline then re-deploys the same code through `versions upload`.
+       - `deploy-worker.yml` and `test_smoke_architecture.py` are unchanged, and a test asserts the new workflow is dispatch-only.
+2. **Cached provider data:** a key without `paidProviders` may be served provider data already in cache. The flag protects the shared free quotas, and a cache hit spends no quota. Documented; no change to the cache sites.
+3. **Telemetry `keyId`:** once a personal key is identified, its id is recorded on every outcome for that request, including 429 and any later rejection. `-` only when no key is identified: anonymous requests, 401, or rejections before auth.
+4. **The counter's subrequest** comes from the 5-request reserve outside the 45 budget. Documented.
+5. **Failures:** if KV or the Durable Object throws, or a record is malformed, the request fails closed through the existing exception path: status 500, telemetry outcome `exception`. It never fails open. The owner key is unaffected.
+6. **Path form with `MCP_TOKEN` unset:** stays 404 as today. Production always sets `MCP_TOKEN`.
