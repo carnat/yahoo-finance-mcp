@@ -1229,10 +1229,18 @@ CASES += [
         news=_VOD_FEED, info=_VOD_INFO,
         select=lambda v: {"requested": v["requestedSources"], "defaultApplied": v["defaultSourcesApplied"], "attempted": v["attemptedSources"],
                           "sourceStatus": {k: s.get("status") for k, s in v["sourceStatus"].items()}},
-        expect={"requested": None, "defaultApplied": True,
-                "attempted": [{"sourceType": "yahoo_finance_news", "status": "OK"}, {"sourceType": "yahoo_finance_press_releases", "status": "EMPTY_RESULT"}],
-                "sourceStatus": {"yahoo_finance_news": "OK", "yahoo_finance_press_releases": "EMPTY_RESULT", "finnhub": "NOT_ELIGIBLE",
-                                 "marketaux": "UNCONFIGURED"}}),
+        # 2.16.0 (RNEWS2 §4.1): the defaults include sec; VOD.L has no CIK, so sec is attempted and reports PROVIDER_ERROR.
+        # TODO(python-mirror): flip to equal with expect = the expect_ts value below once Python reads the registry defaults.
+        mode="pinned", decision="RNEWS2 2.16.0 (python-mirror port pending)",
+        expect_py={"requested": None, "defaultApplied": True,
+                   "attempted": [{"sourceType": "yahoo_finance_news", "status": "OK"}, {"sourceType": "yahoo_finance_press_releases", "status": "EMPTY_RESULT"}],
+                   "sourceStatus": {"yahoo_finance_news": "OK", "yahoo_finance_press_releases": "EMPTY_RESULT", "finnhub": "NOT_ELIGIBLE",
+                                    "marketaux": "UNCONFIGURED"}},
+        expect_ts={"requested": None, "defaultApplied": True,
+                   "attempted": [{"sourceType": "sec", "status": "PROVIDER_ERROR"}, {"sourceType": "yahoo_finance_news", "status": "OK"},
+                                 {"sourceType": "yahoo_finance_press_releases", "status": "EMPTY_RESULT"}],
+                   "sourceStatus": {"sec": "PROVIDER_ERROR", "yahoo_finance_news": "OK", "yahoo_finance_press_releases": "EMPTY_RESULT",
+                                    "finnhub": "NOT_ELIGIBLE", "marketaux": "UNCONFIGURED"}}),
     # Card 238: names are trimmed and lower-cased, duplicates dropped, unsupported names warned once. ['bloomberg'] alone selects
     # nothing (the defaults are NOT applied: an explicit list is used as given), so the result is source-limited.
     _scenario(
@@ -2687,4 +2695,64 @@ CASES += [
         "news.company_ir.feed_with_an_entity_declaration_is_a_parse_error", ["BR-NWS-207", "BR-NWS-228"], "https://www.acmeinc.com", _ACMEINC,
         routes=_ENTITY_FEED_ROUTES, decision=_WORKER_ONLY,
         expect_ts=_TS_NOT_REGISTERED),
+]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+# News source registry and the default sources (2.16.0, RNEWS2 §1 / §4.1 / §6)
+# worker/src/news-source-registry.json holds defaultSources; both runtimes read it.
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+_NEWS_SOURCE_REGISTRY = json.loads((WORKER / "src" / "news-source-registry.json").read_text(encoding="utf-8"))
+_DEFAULTS_2150 = ["yahoo_finance_news", "yahoo_finance_press_releases", "finnhub", "marketaux"]
+_DEFAULTS_2160 = ["yahoo_finance_news", "yahoo_finance_press_releases", "sec", "finnhub", "marketaux"]
+_RNEWS2_PENDING = "RNEWS2 2.16.0 (python-mirror port pending)"
+
+
+def _default_sec_view(v):
+    return {"requested": v["requestedSources"], "defaultApplied": v["defaultSourcesApplied"],
+            "attempted": [[a["sourceType"], a["status"]] for a in v["attemptedSources"]],
+            "sourcesUsed": v["meta"]["sourcesUsed"],
+            "sourceStatus": {k: s.get("status") for k, s in v["sourceStatus"].items()},
+            "sec": _status_rows(v, "sec", ("status", "rawCount", "filteredCount")),
+            "items": [[i.get("source"), i.get("sourceType"), i.get("filingType")] for i in v["items"]],
+            "status": v.get("status"), "coverage": v["coverage"]["state"]}
+
+
+CASES += [
+    # §1: the default news sources are the registry's defaultSources, with sec right after yahoo_finance_press_releases.
+    # TODO(python-mirror): flip to equal with expect=_DEFAULTS_2160 once _DEFAULT_NEWS_SOURCES is read from the registry.
+    Case(name="news.registry.default_news_sources_come_from_the_registry", ids=["RNEWS2-1", "BR-NWS-269"],
+         py=lambda: list(news_tools._DEFAULT_NEWS_SOURCES),
+         ts={"js": "return [...m.yahooFinance.DEFAULT_NEWS_SOURCES];"},
+         mode="pinned", decision=_RNEWS2_PENDING,
+         expect_py=_DEFAULTS_2150, expect_ts=_DEFAULTS_2160),
+    # §1: the registry file itself carries the planner's default order (data shared by both runtimes, so equal today).
+    Case(name="news.registry.default_sources_order_in_the_registry_file", ids=["RNEWS2-1"],
+         py=lambda: _NEWS_SOURCE_REGISTRY["defaultSources"],
+         ts={"js": "return [...m.yahooFinance.DEFAULT_NEWS_SOURCES];"},
+         expect=_DEFAULTS_2160),
+    # §4.1 / §6: a default get_company_news call includes sec as an explicit sec would: SEC items, sourceStatus.sec,
+    # sourcesUsed and attemptedSources. TODO(python-mirror): flip to equal with expect = the expect_ts value below.
+    _sec_scenario(
+        "news.sources.default_call_includes_sec_status_and_items", ["RNEWS2-4.1", "BR-NWS-269"],
+        lambda: server.get_company_news("ACME", 10, 14),
+        'm.yahooFinance.getCompanyNews("ACME", 10, 14)',
+        _sec_recent(["8-K"], [2]), info={"shortName": "Acme Corp", "longName": "Acme Corp"},
+        news=[_yn("ACME shares rise", when=_days_ago(1))], select=_default_sec_view,
+        mode="pinned", decision=_RNEWS2_PENDING,
+        expect_py={"requested": None, "defaultApplied": True,
+                   "attempted": [["yahoo_finance_news", "OK"], ["yahoo_finance_press_releases", "EMPTY_RESULT"]],
+                   "sourcesUsed": ["yahoo_finance_news", "yahoo_finance_press_releases"],
+                   "sourceStatus": {"yahoo_finance_news": "OK", "yahoo_finance_press_releases": "EMPTY_RESULT",
+                                    "finnhub": "UNCONFIGURED", "marketaux": "UNCONFIGURED"},
+                   "sec": {}, "items": [["yahoo_finance_news", "yahoo_finance_news", None]], "status": "PARTIAL", "coverage": "PARTIAL"},
+        expect_ts={"requested": None, "defaultApplied": True,
+                   "attempted": [["sec", "OK"], ["yahoo_finance_news", "OK"], ["yahoo_finance_press_releases", "EMPTY_RESULT"]],
+                   "sourcesUsed": ["sec", "yahoo_finance_news", "yahoo_finance_press_releases"],
+                   "sourceStatus": {"sec": "OK", "yahoo_finance_news": "OK", "yahoo_finance_press_releases": "EMPTY_RESULT",
+                                    "finnhub": "UNCONFIGURED", "marketaux": "UNCONFIGURED"},
+                   "sec": {"status": "OK", "rawCount": 1, "filteredCount": 1},
+                   "items": [["yahoo_finance_news", "yahoo_finance_news", None], ["SEC", "sec_filing", "8-K"]],
+                   "status": "PARTIAL", "coverage": "PARTIAL"}),
 ]

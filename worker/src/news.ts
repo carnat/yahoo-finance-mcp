@@ -32,6 +32,7 @@ import { MARKETAUX_WIRE_DOMAINS, MARKETAUX_MAX_ITEMS, collectMarketauxEvents } f
 import { collectSecEvents } from "./news/providers/sec.js";
 import { yahooNewsIdentityFor, yahooDecisionUse, collectYahooEvents } from "./news/providers/yahoo.js";
 import { sourceDecisionUse, shortText, withinDateWindow } from "./news/shared.js";
+import newsSourceRegistry from "./news-source-registry.json";
 // Names other modules and tests import from news.ts (2.15.1 provider move).
 export { parseHtmlTable } from "./news/shared.js";
 export { getNews, yahooItemIssuer, collectYahooEvents } from "./news/providers/yahoo.js";
@@ -85,7 +86,8 @@ function confidenceForSourceType(sourceType: unknown, fallback: unknown = "LOW")
 }
 // Default source sets the news tools apply when `sources` is omitted or null (Q3h, 2.7.0).
 // An explicit array, including [], is used as given: [] attempts no source.
-export const DEFAULT_NEWS_SOURCES = ["yahoo_finance_news", "yahoo_finance_press_releases", "finnhub", "marketaux"];
+// 2.16.0: the news defaults come from the shared source registry (news-source-registry.json), which Python reads too.
+export const DEFAULT_NEWS_SOURCES: string[] = [...newsSourceRegistry.defaultSources];
 export const DEFAULT_PRESS_RELEASE_SOURCES = ["sec", "company_ir_page", "yahoo_finance_press_releases"];
 export const DEFAULT_EVENT_SOURCES = ["sec", "company_ir_page", "company_ir", "yahoo_finance_news", "yahoo_finance_press_releases", "finnhub", "marketaux"];
 const NOT_ATTEMPTED_SOURCE_STATUSES = new Set(["NOT_ELIGIBLE", "NOT_NEEDED", "UNCONFIGURED"]);

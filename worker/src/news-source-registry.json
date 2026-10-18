@@ -1,0 +1,72 @@
+{
+  "schemaVersion": "2026-10-18",
+  "defaultSources": [
+    "yahoo_finance_news",
+    "yahoo_finance_press_releases",
+    "sec",
+    "finnhub",
+    "marketaux"
+  ],
+  "sources": {
+    "sec": {
+      "tier": "official",
+      "requiresKey": [],
+      "approxSubrequests": 7,
+      "description": "SEC EDGAR submissions for the issuer: recent 8-K, 10-Q, 10-K, S-3 and DEF 14A filings."
+    },
+    "company_ir": {
+      "tier": "official",
+      "requiresKey": [],
+      "approxSubrequests": 0,
+      "description": "Company investor-relations source, served from approved company IR registry entries only."
+    },
+    "company_ir_page": {
+      "tier": "official",
+      "requiresKey": [],
+      "approxSubrequests": 0,
+      "description": "Approved company IR page from the reviewed company IR page registry."
+    },
+    "newswire": {
+      "tier": "official",
+      "requiresKey": [],
+      "approxSubrequests": 17,
+      "description": "GlobeNewswire issuer releases."
+    },
+    "yahoo_finance": {
+      "tier": "aggregator",
+      "requiresKey": [],
+      "approxSubrequests": 8,
+      "description": "Legacy Yahoo Finance source: the news and press releases tabs together."
+    },
+    "yahoo_finance_news": {
+      "tier": "aggregator",
+      "requiresKey": [],
+      "approxSubrequests": 8,
+      "description": "Yahoo Finance news tab."
+    },
+    "yahoo_finance_press_releases": {
+      "tier": "aggregator",
+      "requiresKey": [],
+      "approxSubrequests": 8,
+      "description": "Yahoo Finance press releases tab."
+    },
+    "finnhub": {
+      "tier": "aggregator",
+      "requiresKey": [
+        "FINNHUB_API_KEY",
+        "FINNHUB_TOKEN"
+      ],
+      "approxSubrequests": 1,
+      "description": "Finnhub company news for eligible US-listed tickers."
+    },
+    "marketaux": {
+      "tier": "aggregator",
+      "requiresKey": [
+        "MARKETAUX_API_TOKEN",
+        "MARKETAUX_API_KEY"
+      ],
+      "approxSubrequests": 2,
+      "description": "Marketaux entity news, used as a fallback when higher-priority sources are limited or empty."
+    }
+  }
+}
