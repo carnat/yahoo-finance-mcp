@@ -2959,6 +2959,40 @@ F-024, F-026, F-029). Both runtimes change alike.
   beyond the cap. No new field.
 - **Rollback:** revert the release.
 
+## News Repairs, Batch A (2.17.0)
+
+- **Why:** R-news part 3, Batch A of the approved Q3i triage (`analysis/yahoo-finance-mcp/RNEWS3_SPEC.md`). Release type: minor. News outputs change in both runtimes, identically.
+- **Yahoo feed (Worker):** the Worker now passes through `contentType`, `summary` and the `content.pubDate` fallback.
+  - Yahoo videos are filtered out.
+  - Yahoo's own press-release rows are relabelled and leave a news-only selection.
+  - A row with a zero publish time keeps its date.
+  - **Both runtimes:** the summary is shown, but issuer and ticker matching read the title only.
+- **Event typing:**
+  - One keyword table in both runtimes (adding "announces new", "annual report" and "credit facility" to the Worker).
+  - Matching is whole-word, with simple endings (-s, -es, -d, -ed, -ing), and the first group still wins.
+  - For example, "sector" no longer counts as `sec` (regulatory) and "dealer" no longer counts as `deal`, while "launches", "introduces" and "notes" still type as before.
+- **Dedupe:** both runtimes decode HTML entities in titles before grouping, so `&amp;` and `&` titles merge.
+- **Identity and tickers:**
+  - A short name equal to the ticker is not issuer identity.
+  - A single-letter ticker matches only as a whole word.
+  - Verify relevance is scored from the evidence text and issuer, not the injected tickers list, so `LOW_RELEVANCE_EVIDENCE` can fire.
+- **Exchanges:**
+  - One normaliser: NYSE American, AMEX and exact ASE are tested before NYSE, and GS/NMS/NGM/NCM count as NASDAQ only as whole tokens.
+  - Python gains the GlobeNewswire exchange check.
+- **Counts:** the legacy `yahoo_finance` source counts its feed once (raw 20 for 20 stories, not 40).
+- **Form 4:**
+  - Values and the summary round half away from zero to cents, decimal-safe, so the same figure appears in both runtimes.
+  - Python parses a well-formed XHTML Form 4 through its HTML parser when the XML has no transaction node.
+- **Parsing and format:**
+  - Timestamps drop `.000` milliseconds.
+  - Python parses RFC 2822 provider dates.
+  - Text is cut at 240 code points.
+  - An unparseable URL has provenance `UNKNOWN`.
+  - GlobeNewswire and company IR feeds containing `<!DOCTYPE` are refused, with one message: "unsupported XML declaration".
+  - The Python news path flags an SEC filing without a URL (`SEC_URL_INVALID`).
+- **Documented as intentional:** the `duplicateGroupId` hash format differs between runtimes. It is an opaque id.
+- **Rollback:** revert the release.
+
 ## News Source Registry and Off Switch (2.16.0)
 
 - **Why:** R-news part 2 from the approved Q3i triage (§3a), plus the owner's 2026-10-18 decision to add SEC to the default news sources. Release type: minor.

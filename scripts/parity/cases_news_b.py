@@ -1857,7 +1857,7 @@ CASES += [
                    "newswire": {"status": "OK", "rawCount": 2, "filteredCount": 2}, "warnings": [], "sourcesUsed": ["newswire"], "status": None}),
     # Card 223 edge: an exchange name 'ASE' maps to NYSEAMERICAN in both runtimes, which then accept 'NYSE American:' and 'AMEX:' tags.
     _gnw_case(
-        "news.gnw.ase_exchange_name_maps_to_nyse_american_in_the_worker", ["BR-NWS-223"], "UUUU",
+        "news.gnw.ase_exchange_name_maps_to_nyse_american_in_both", ["BR-NWS-223"], "UUUU",
         {"shortName": "Energy Fuels", "longName": "Energy Fuels Inc.", "exchange": "ASE"},
         [_gitem(1, "Energy Fuels news", ["NYSE American:UUUU"]), _gitem(2, "Energy Fuels nasdaq", ["NASDAQ:UUUU"]), _gitem(3, "Energy Fuels amex", ["AMEX:UUUU"])],
         select=_gnw_view, expect={"items": [_gnw_row("Energy Fuels news", ["NYSE American:UUUU"], "id1"), _gnw_row("Energy Fuels amex", ["AMEX:UUUU"], "id3")],
@@ -2524,7 +2524,7 @@ CASES += [
     # runtimes summed the passes (rawCount and retrievedCount 40, and the press-release pass's 20 NOT_ISSUER_WIRE_RELEASE rejections of
     # stories the news pass accepted). R-news Batch A (B-G12b): the shared feed is counted once (both runtimes).
     _scenario(
-        "news.yahoo.legacy_aggregate_counts_the_same_feed_twice", ["BR-NWS-257"],
+        "news.yahoo.legacy_aggregate_counts_the_feed_once", ["BR-NWS-257"],
         lambda: server.get_company_news("AMD", 100, 14, ["yahoo_finance"]), 'm.yahooFinance.getCompanyNews("AMD", 100, 14, ["yahoo_finance"])',
         news=[_yn(f"AMD story {i}", when=_days_ago(1 + i % 10)) for i in range(20)], info=AMD_INFO,
         select=lambda v: {"returned": len(v["items"]), **{k: v["sourceStatus"]["yahoo_finance"][k] for k in
