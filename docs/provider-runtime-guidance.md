@@ -2959,6 +2959,45 @@ F-024, F-026, F-029). Both runtimes change alike.
   beyond the cap. No new field.
 - **Rollback:** revert the release.
 
+## Per-Person Access Keys (2.18.0)
+
+- **Why:** Phase 1b, approved by the owner on 2026-10-18, for sharing the hosted MCP with a few trusted people, non-commercially. Release type: minor. Worker only: the local Python server is single-user stdio.
+- **Status: shipped inactive.** Personal keys need two bindings, the KV namespace `ACCESS_KEYS` (`yfmcp_access_keys`) and the Durable Object `USAGE` (class `KeyUsage`). This release adds neither, so only the owner key (`MCP_TOKEN`) works. Activation is a follow-up; see below.
+- **Owner key:** unchanged. It is compared in constant time first, with no limits, no key store and no counter call, and it keeps full provider access.
+- **Personal keys:**
+  - **Format:** `yfk_` followed by 43 base64url characters. Accepted as `Authorization: Bearer <key>` or `/mcp/<key>`.
+  - **Storage:** only as a SHA-256 hash, under KV key `key:<sha256>`, with the record `{id, label, createdAt, status, dailyLimit, perMinuteLimit, paidProviders}`. `id` is the first 8 hex characters of the hash; `label` is a non-secret name.
+  - **Unknown or revoked keys** get the existing `AUTH_REQUIRED` 401, byte-identical to a wrong token.
+  - **Lookup cache:** results are cached in the isolate for 60 seconds, so a revoke takes effect within a minute.
+- **Limits:**
+  - **Defaults:** `perMinuteLimit` 30 and `dailyLimit` 2000 (UTC day), counted in the `KeyUsage` Durable Object, one per key.
+  - **Over a limit:** HTTP 429 with a `Retry-After` header and the body `{"jsonrpc":"2.0","id":null,"error":{"code":-32029,"message":"Key rate limit reached.","data":{"code":"KEY_RATE_LIMITED","retryAfterSeconds":N}}}`. Refused requests are not counted.
+  - **Shared capacity:** all users share the Free plan's roughly 100,000 requests a day, so keep the sum of daily limits well below that.
+  - **Subrequests:** the counter call is one subrequest, taken from the 5-request reserve outside the 45 budget.
+- **Provider access:** a key with `paidProviders: false` (the default) sees the Finnhub, Marketaux and Alpha Vantage credentials as unset. Those providers then report as unconfigured through their existing paths, which protects the shared free quotas. Data already in the cache may still be served, which costs no quota.
+- **Failures:** if the key store or the counter fails, or a record is malformed, the request fails closed (500, telemetry outcome `exception`). It never fails open, and the owner key is unaffected.
+- **Telemetry:**
+  - Blob 12 is `keyId`: `owner`, a personal key's 8-hex id, or `-` when no key is identified. The key and the label are never recorded.
+  - An over-limit request records `rejected:key_limit` with `KEY_RATE_LIMITED`.
+  - The daily export groups requests by `keyId`.
+- **Admin script `scripts/manage_access_keys.py`** (needs the `ACCESS_KEYS` binding):
+  - `issue --label NAME [--daily N] [--per-minute N] [--paid-providers]` prints the new key once; send it to the person privately.
+  - `list` shows ids, labels, status and limits. It never shows keys or hashes.
+  - `revoke --id ID`.
+  - `set-limits --id ID [...]`.
+  - To rotate a key, issue a new one and revoke the old.
+- **Rules for each person given a key:**
+  - personal, non-commercial use only;
+  - no redistribution of data, because of the upstream providers' terms;
+  - do not share the key;
+  - the daily capacity is shared with others.
+- **Activation (follow-up):**
+  1. The owner creates the KV namespace `yfmcp_access_keys` and gives its ID (not a secret).
+  2. A PR adds the `ACCESS_KEYS` and `USAGE` bindings, the `new_sqlite_classes` migration, and a dispatch-only workflow, `apply-do-migration.yml`.
+  3. The planner runs that workflow once on the PR's head. It runs `wrangler deploy`, because Cloudflare applies Durable Object migrations only that way, then the production canaries.
+  4. After that the PR merges, and the normal versioned pipeline continues as before.
+- **Rollback:** revert the release. Before activation there is nothing to undo.
+
 ## News Repairs, Batch A (2.17.0)
 
 - **Why:** R-news part 3, Batch A of the approved Q3i triage (`analysis/yahoo-finance-mcp/RNEWS3_SPEC.md`). Release type: minor. News outputs change in both runtimes, identically.
