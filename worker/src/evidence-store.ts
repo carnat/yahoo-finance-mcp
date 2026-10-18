@@ -14,6 +14,7 @@ export interface EvidenceStore {
   get(key: string): Promise<string | null>;
   exists(key: string): Promise<boolean>;
   put(key: string, body: string, metadata: Record<string, string>): Promise<void>;
+  /** The newest `limit` keys under prefix, in ascending key order (2.15.0, BR-EVD-041). */
   list(prefix: string, limit: number): Promise<string[]>;
 }
 
@@ -35,6 +36,20 @@ export function assertListPrefix(prefix: string): void {
   ) {
     throw new Error("invalid evidence list prefix");
   }
+}
+
+/** R2 list page size, and the most pages one listing reads (2.15.0, BR-EVD-041). */
+const LIST_PAGE_SIZE = 1000;
+const LIST_MAX_PAGES = 10;
+
+/**
+ * The newest `limit` keys, in ascending key order (oldest first), the order callers already expect. Keys sort by
+ * date (consensus-history/<T>/<YYYY-MM-DD>.json, evidence-cuts/<T>/<cutoff>/<sha>.json), so the newest sort last
+ * (2.15.0, BR-EVD-041).
+ */
+function newestKeys(keys: string[], limit: number): string[] {
+  const sorted = [...keys].sort();
+  return limit > 0 ? sorted.slice(Math.max(0, sorted.length - limit)) : [];
 }
 
 let injected: EvidenceStore | null | undefined;
@@ -65,14 +80,19 @@ function r2Store(b: R2Bucket): EvidenceStore {
     },
     async list(prefix, limit) {
       assertListPrefix(prefix);
+      // R2 lists in ascending key order, oldest first: page through the whole listing, then keep the newest
+      // `limit` keys (2.15.0, BR-EVD-041). At most LIST_MAX_PAGES pages are read; beyond that the newest of the
+      // keys read are kept.
       const keys: string[] = [];
       let cursor: string | undefined;
+      let pages = 0;
       do {
-        const page = await b.list({ prefix, cursor, limit: Math.min(1000, limit - keys.length) });
+        const page = await b.list({ prefix, cursor, limit: LIST_PAGE_SIZE });
+        pages++;
         keys.push(...page.objects.map((o) => o.key));
         cursor = page.truncated ? page.cursor : undefined;
-      } while (cursor && keys.length < limit);
-      return keys;
+      } while (cursor && pages < LIST_MAX_PAGES);
+      return newestKeys(keys, limit);
     },
   };
 }
@@ -98,7 +118,7 @@ export function memoryEvidenceStore(): EvidenceStore & { objects: Map<string, st
     },
     async list(prefix, limit) {
       assertListPrefix(prefix);
-      return [...objects.keys()].filter((k) => k.startsWith(prefix)).sort().slice(0, limit);
+      return newestKeys([...objects.keys()].filter((k) => k.startsWith(prefix)), limit);
     },
   };
 }

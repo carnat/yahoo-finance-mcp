@@ -5112,9 +5112,14 @@ export async function edgarGetHtml(url: string, maxBytes = 5_000_000): Promise<s
       return null;
     }
   }
+  return (await edgarStreamHtml(url, maxBytes)).text;
+}
+
+/** A streamed EDGAR read of at most maxBytes, with the HTTP status of a failed response (null when none came back). */
+async function edgarStreamHtml(url: string, maxBytes: number): Promise<{ text: string | null; httpStatus: number | null }> {
   try {
     const resp = await edgarFetch(url);
-    if (!resp.ok || !resp.body) { await resp.body?.cancel(); return null; }
+    if (!resp.ok || !resp.body) { await resp.body?.cancel(); return { text: null, httpStatus: resp.status }; }
     const reader = resp.body.getReader();
     const chunks: Uint8Array[] = [];
     let totalBytes = 0;
@@ -5139,9 +5144,9 @@ export async function edgarGetHtml(url: string, maxBytes = 5_000_000): Promise<s
     const combined = new Uint8Array(totalBytes);
     let offset = 0;
     for (const chunk of chunks) { combined.set(chunk, offset); offset += chunk.byteLength; }
-    return new TextDecoder("utf-8", { fatal: false, ignoreBOM: true }).decode(combined);
+    return { text: new TextDecoder("utf-8", { fatal: false, ignoreBOM: true }).decode(combined), httpStatus: null };
   } catch {
-    return null;
+    return { text: null, httpStatus: null };
   }
 }
 
@@ -5200,8 +5205,19 @@ function edgarDocumentUrlFromIndexUrl(indexUrl: string, rawRef: string): string 
 }
 
 async function edgarListExhibitsFromIndex(indexUrl: string): Promise<Record<string, unknown>[]> {
-  const html = await edgarGetHtml(indexUrl, 500_000);
-  if (!html) return [];
+  return (await edgarReadExhibitIndex(indexUrl)).exhibits;
+}
+
+/**
+ * The exhibits a filing index lists, and whether SEC answered the index with HTTP 404 (the accession is not a filing
+ * of that CIK). Any other failed read is not notFound (2.15.0, R4-ACC-EXHIBITS).
+ */
+async function edgarReadExhibitIndex(indexUrl: string): Promise<{ exhibits: Record<string, unknown>[]; notFound: boolean }> {
+  const read = await edgarStreamHtml(indexUrl, 500_000);
+  return { exhibits: read.text ? parseExhibitIndexHtml(indexUrl, read.text) : [], notFound: read.httpStatus === 404 };
+}
+
+function parseExhibitIndexHtml(indexUrl: string, html: string): Record<string, unknown>[] {
   const exhibits: Record<string, unknown>[] = [];
   for (const rowM of html.matchAll(/<tr[^>]*>([\s\S]*?)<\/tr>/gi)) {
     const rowHtml = rowM[1];
@@ -5428,10 +5444,11 @@ function filingNotFoundPayload(ticker: string, requestedFilingType: string, avai
  * An explicit accession that is not among the company's recent SEC filings (submissions filings.recent, about the
  * last 1,000): the action fails closed, never falling back to the latest filing or another form (2.13.0, R4 Q3a).
  */
-function accessionNotFoundError(ticker: string, accessionNumber: string): Record<string, unknown> {
+function accessionNotFoundError(ticker: string, accessionNumber: string, recentOnly = true): Record<string, unknown> {
   return {
     code: ErrorCode.ACCESSION_NOT_FOUND,
-    message: `Accession ${accessionNumber} was not found in ${ticker.toUpperCase()}'s recent SEC filings.`,
+    // The exhibit readers check SEC's filing index, not the recent-filings list, so their miss is any filing (2.15.0).
+    message: `Accession ${accessionNumber} was not found in ${ticker.toUpperCase()}'s ${recentOnly ? "recent " : ""}SEC filings.`,
     requestedAccession: accessionNumber,
     retryable: false,
   };
@@ -8497,8 +8514,31 @@ export async function listSecCompanyFilings(ticker: string, filingType: string =
 
 // ── get_filing_outline ────────────────────────────────────────────────────────
 
+/**
+ * Python's _sanitize_sec_html (yfmcp/validation.py), exactly: script and style blocks and on* event-handler attributes
+ * are removed before outline headings are read, so their text never reaches a title (2.15.0, R4-OUTLINE-SHAPE).
+ */
+export function sanitizeSecHtml(html: string): string {
+  return html
+    .replace(/<script[^>]*>[\s\S]*?<\/script[^>]*>/gi, "")
+    .replace(/<style[^>]*>[\s\S]*?<\/style[^>]*>/gi, "")
+    .replace(/\s+on\w+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, "");
+}
+
+/** The standard ok:false error envelope, with the codes Python's get_filing_outline uses (2.15.0). */
+function outlineFailure(code: string, message: string): string {
+  return JSON.stringify({ ok: false, error: { code, message } });
+}
+
+/**
+ * One outline shape in both runtimes (2.15.0, R4-OUTLINE-SHAPE): ticker, accessionNumber (the resolved filing's, the
+ * accession given with a document_url, or null when only a document_url was given), documentUrl (the document read),
+ * outline, status (OK / OUTLINE_NOT_PARSED / EMPTY), tableCount and warnings. Failures are the standard ok:false
+ * envelope; an accession miss stays ACCESSION_NOT_FOUND.
+ */
 export async function getFilingOutline(ticker: string, accessionNumber: string | null, documentUrl: string | null): Promise<string> {
   try {
+    let resolvedAccession: string | null = accessionNumber || null;
     if (!documentUrl && accessionNumber) {
       // An explicit accession without document_url: the outline of that filing's primary document, found by the
       // same resolver as the filing index; a miss is ACCESSION_NOT_FOUND (2.13.0, R4 Q3a). document_url wins when given.
@@ -8506,14 +8546,15 @@ export async function getFilingOutline(ticker: string, accessionNumber: string |
       if (!resolved.ok && isAccessionNotFound(resolved.error)) return accessionNotFoundEnvelope(resolved.error);
       if (!resolved.ok) return JSON.stringify({ ok: false, error: resolved.error, ...resolved.error });
       documentUrl = resolved.filing.documentUrl;
+      resolvedAccession = resolved.filing.accessionNumber;
     }
-    if (!documentUrl) return JSON.stringify({ error: true, message: "document_url is required" });
+    if (!documentUrl) return outlineFailure(ErrorCode.INPUT_VALIDATION_ERROR, "Either accession_number or document_url is required");
     if (!documentUrl.startsWith("https://www.sec.gov/Archives/")) {
-      return JSON.stringify({ error: true, message: "Invalid SEC URL" });
+      return outlineFailure(ErrorCode.INPUT_VALIDATION_ERROR, "Invalid SEC URL: must start with 'https://www.sec.gov/Archives/'.");
     }
     const doc = await fetchSecDocument(documentUrl);
-    if (!doc.ok) return JSON.stringify({ error: true, message: `HTTP ${doc.status}` });
-    const html = doc.text;
+    if (!doc.ok) return outlineFailure(ErrorCode.PROVIDER_ERROR, `HTTP ${doc.status}`);
+    const html = sanitizeSecHtml(doc.text);
 
     const outline: { level: number; title: string }[] = [];
     const headingRe = /<h([1-6])[^>]*>([\s\S]*?)<\/h\1>/gi;
@@ -8534,6 +8575,7 @@ export async function getFilingOutline(ticker: string, accessionNumber: string |
     const tableCount = (html.match(/<table\b/gi) ?? []).length;
     return JSON.stringify({
       ticker,
+      accessionNumber: resolvedAccession,
       documentUrl,
       outline,
       status: outline.length > 0 ? "OK" : (tableCount > 0 ? "OUTLINE_NOT_PARSED" : "EMPTY"),
@@ -8543,7 +8585,7 @@ export async function getFilingOutline(ticker: string, accessionNumber: string |
         : [],
     });
   } catch (e) {
-    return JSON.stringify({ error: true, message: `${e instanceof Error ? e.message : String(e)}` });
+    return outlineFailure(ErrorCode.PROVIDER_ERROR, `${e instanceof Error ? e.message : String(e)}`);
   }
 }
 
@@ -9768,11 +9810,15 @@ export async function listSecFilingExhibits(ticker: string, accessionNumber: str
   }
 
   const { edgarIndexUrl } = edgarBuildFilingUrls(cik, accessionNumber, null);
+  const index = await edgarReadExhibitIndex(edgarIndexUrl);
+  // SEC has no filing index for (CIK, accession): the accession is not that company's filing, never an empty
+  // exhibit list (2.15.0, R4-ACC-EXHIBITS). Older accessions outside the recent-filings list still read.
+  if (index.notFound) return accessionNotFoundEnvelope(accessionNotFoundError(ticker, accessionNumber, false));
   return JSON.stringify({
     ticker: ticker.toUpperCase(),
     accessionNumber,
     indexUrl: edgarIndexUrl,
-    exhibits: await edgarListExhibitsFromIndex(edgarIndexUrl),
+    exhibits: index.exhibits,
   });
 }
 
@@ -9804,7 +9850,10 @@ export async function getSecFilingExhibitContent(
   if (!html) {
     const requestedFileName = edgarDocumentFileName(fileName).toLowerCase();
     const requestedUrl = documentUrl?.toLowerCase() ?? "";
-    const exhibits = await edgarListExhibitsFromIndex(edgarIndexUrl);
+    const index = await edgarReadExhibitIndex(edgarIndexUrl);
+    // No filing index for (CIK, accession): the accession is not that company's filing (2.15.0, R4-ACC-EXHIBITS).
+    if (index.notFound) return accessionNotFoundEnvelope(accessionNotFoundError(ticker, accessionNumber, false));
+    const exhibits = index.exhibits;
     const matched = exhibits.find((exhibit) => {
       const document = String(exhibit.document ?? "").toLowerCase();
       const exhibitUrl = String(exhibit.documentUrl ?? "").toLowerCase();
@@ -11270,7 +11319,16 @@ export async function extractGeographicRevenue(
       warnings: [{ code: "INPUT_VALIDATION_ERROR", message: "region is required", severity: "error" }],
     });
   }
-  const payload = parseObjectJson(await getFilingData(ticker, "geographic_revenue", region, filingType, period));
+  // An explicit accession is the filing read: the figure, the evidence and the raw index all come from it, and a
+  // miss fails closed with no fallback to the latest filing (2.15.0, R4-ACC-GEO).
+  const pinned = accessionNumber != null && accessionNumber.trim() !== "";
+  let pinnedFilingForm: string | null = null;
+  if (pinned) {
+    const resolved = await resolveSecFiling(ticker, filingType, accessionNumber);
+    if (!resolved.ok && isAccessionNotFound(resolved.error)) return accessionNotFoundEnvelope(resolved.error);
+    pinnedFilingForm = String(resolved.ok ? resolved.filing.filingType : (resolved.error.filingType ?? "")).toUpperCase();
+  }
+  const payload = parseObjectJson(await getFilingData(ticker, "geographic_revenue", region, filingType, period, "auto", pinned ? accessionNumber : null));
   const detail = String(detailLevel).toLowerCase();
   const needsIndex = detail === "raw";
   const idx = needsIndex ? parseObjectJson(await getSecFilingIndex(ticker, filingType, period, accessionNumber)) : {};
@@ -11320,12 +11378,15 @@ export async function extractGeographicRevenue(
     const evidenceObj = out.evidence as Record<string, unknown>;
     const evidenceFilingType = String(evidenceObj?.filingType ?? "").toUpperCase();
     let possible20F = evidenceFilingType === "20-F";
-    if (!possible20F && (evidenceFilingType === "" || evidenceFilingType === "10-K")) {
+    if (pinned) {
+      // A pinned read stays pinned: the 20-F retry reads the same filing, and only when that filing is a 20-F (2.15.0).
+      possible20F = pinnedFilingForm === "20-F";
+    } else if (!possible20F && (evidenceFilingType === "" || evidenceFilingType === "10-K")) {
       possible20F = await mayBe20FFiler(ticker);
     }
     if (possible20F) {
       // Automatic 20-F fallback: retry extraction with 20-F filing type
-      const fallbackPayload = parseObjectJson(await getFilingData(ticker, "geographic_revenue", region, "20-F", period));
+      const fallbackPayload = parseObjectJson(await getFilingData(ticker, "geographic_revenue", region, "20-F", period, "auto", pinned ? accessionNumber : null));
       const fallbackIdx = parseObjectJson(await getSecFilingIndex(ticker, "20-F", period, accessionNumber));
       if (fallbackPayload.value != null) {
         // 20-F extraction succeeded — replace output with fallback data
@@ -13290,6 +13351,10 @@ export async function querySecFilingIndex(
     const region = String(params.region ?? "").trim();
     if (!region) return missingParam("region");
     const geo = parseObjectJson(await extractGeographicRevenue(ticker, region, filingType, period, accessionNumber, detail));
+    // An explicit accession that is not among the company's recent filings fails closed here too (2.15.0, R4-ACC-QUERY).
+    if (geo.ok === false && geo.error && typeof geo.error === "object" && isAccessionNotFound(geo.error as Record<string, unknown>)) {
+      return accessionNotFoundEnvelope(geo.error as Record<string, unknown>);
+    }
     const evidenceObj = geo.evidence && typeof geo.evidence === "object" ? geo.evidence as Record<string, unknown> : {};
     const evidence = Object.keys(evidenceObj).length > 0 ? [shapeEvidence(evidenceObj)] : [];
     let status = geo.value != null ? "ANSWERED" : normalizeStatus(geo);
