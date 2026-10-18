@@ -848,15 +848,13 @@ CASES += [
     # Cards 184/186/190: Yahoo and Finnhub found evidence and nothing is limited -> no Marketaux call, no quota spent.
     # 2.16.0 (RNEWS2 §4.1): the defaults now include sec. ACME has no SEC ticker-map stub, so the Worker reports
     # sec PROVIDER_ERROR (as for an explicit sec on a ticker without a CIK) and coverage reads PARTIAL; the Marketaux
-    # gate is unchanged. TODO(python-mirror): flip to equal with expect=_NOT_CALLED_EXPECT_2160 once Python reads the
-    # registry defaults.
+    # gate is unchanged. Both runtimes read the registry defaults.
     tool_case("news.marketaux.not_called_when_higher_priority_sources_found_evidence",
               ["BR-NWS-184", "BR-NWS-186", "BR-NWS-190"], "news", ["ACME", 10, 14, None],
               {"env": {**FAKE_FINNHUB, **FAKE_MARKETAUX}, "info": ACME_INFO,
                "news": [yahoo_row(f"Acme story {w}", f"2026-10-1{n}T09:00:00Z") for n, w in ((4, "alpha"), (3, "beta"), (2, "gamma"))],
                "routes": {FINNHUB_NEWS: {"json": []}}},
-              select=mx_view, mode="pinned", decision="RNEWS2 2.16.0 (python-mirror port pending)",
-              expect_py=_NOT_CALLED_EXPECT_2150, expect_ts=_NOT_CALLED_EXPECT_2160),
+              select=mx_view, expect=_NOT_CALLED_EXPECT_2160),
     # Card 168: a Finnhub NOT_ELIGIBLE skip (a deliberate policy skip) still counts as limited coverage and spends a Marketaux call.
     tool_case("news.marketaux.finnhub_policy_skip_forces_the_fallback_even_with_yahoo_evidence", ["BR-NWS-168", "BR-NWS-186"], "news",
               ["ERIC-B.ST", 10, 14, None],
@@ -866,14 +864,9 @@ CASES += [
               select=lambda v: {"marketaux": status_row(v["sourceStatus"]["marketaux"], "status", "attempted", "fallbackReason", "reasonCode", "quotaPolicy"),
                                 "finnhub": status_row(v["sourceStatus"]["finnhub"], "status", "attempted"),
                                 "warnings": codes(v), "items": [it["title"] for it in v["items"]]},
-              # 2.16.0 (RNEWS2 §4.1): the default sec source has no CIK for ERIC-B.ST, so the Worker adds its SOURCE_UNAVAILABLE
-              # warning first. TODO(python-mirror): flip to equal with expect = the expect_ts value below.
-              mode="pinned", decision="RNEWS2 2.16.0 (python-mirror port pending)",
-              expect_py={"marketaux": {"status": "EMPTY_RESULT", "attempted": True, "fallbackReason": "HIGHER_PRIORITY_COVERAGE_LIMITED",
-                                       "reasonCode": None, "quotaPolicy": MX_QUOTA},
-                         "finnhub": {"status": "NOT_ELIGIBLE", "attempted": False},
-                         "warnings": ["SOURCE_NOT_ELIGIBLE"], "items": ["ERIC-B.ST story alpha", "ERIC-B.ST story beta"]},
-              expect_ts={"marketaux": {"status": "EMPTY_RESULT", "attempted": True, "fallbackReason": "HIGHER_PRIORITY_COVERAGE_LIMITED",
+              # 2.16.0 (RNEWS2 §4.1): the default sec source has no CIK for ERIC-B.ST, so both runtimes add the SOURCE_UNAVAILABLE
+              # warning first.
+              expect={"marketaux": {"status": "EMPTY_RESULT", "attempted": True, "fallbackReason": "HIGHER_PRIORITY_COVERAGE_LIMITED",
                                        "reasonCode": None, "quotaPolicy": MX_QUOTA},
                          "finnhub": {"status": "NOT_ELIGIBLE", "attempted": False},
                          "warnings": ["SOURCE_UNAVAILABLE", "SOURCE_NOT_ELIGIBLE"], "items": ["ERIC-B.ST story alpha", "ERIC-B.ST story beta"]}),

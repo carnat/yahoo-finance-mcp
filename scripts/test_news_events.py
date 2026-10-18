@@ -162,7 +162,7 @@ class TestPhase6BCompanyNews(unittest.TestCase):
             self.assertEqual(data.get("sourceStatus", {}).get("finnhub", {}).get("status"), "OK")
 
     def test_get_company_news_default_sources_use_priority_routing(self):
-        """Defaults expose fine-grained Yahoo, Finnhub, and Marketaux fallback status."""
+        """Defaults expose fine-grained Yahoo, SEC, Finnhub, and Marketaux fallback status."""
         yf_items = [
             {
                 "title": "Apple reports record sales",
@@ -207,14 +207,14 @@ class TestPhase6BCompanyNews(unittest.TestCase):
             data = _parse(_run(srv.get_company_news("AAPL")))
             # Must return 2 items from Yahoo even though Finnhub is absent
             self.assertEqual(len(data.get("items", [])), 2)
-            # sourceStatus must include both Yahoo lanes, Finnhub, and the Marketaux fallback.
+            # sourceStatus must include both Yahoo lanes, SEC (a default since 2.16.0), Finnhub, and the Marketaux fallback.
             source_status = data.get("sourceStatus", {})
+            self.assertIn("sec", source_status)
             self.assertIn("yahoo_finance_news", source_status)
             self.assertIn("yahoo_finance_press_releases", source_status)
             self.assertIn("finnhub", source_status)
             self.assertIn("marketaux", source_status)
-            # sec, company_ir, newswire, legacy yahoo_finance must NOT appear in default sourceStatus
-            self.assertNotIn("sec", source_status)
+            # company_ir, newswire, legacy yahoo_finance must NOT appear in default sourceStatus
             self.assertNotIn("company_ir", source_status)
             self.assertNotIn("newswire", source_status)
             self.assertNotIn("yahoo_finance", source_status)
@@ -2544,8 +2544,6 @@ class TestNewsSourceRegistry(unittest.TestCase):
         self.assertIn('from "./news-source-registry.json"', worker_runtime_source())
         self.assertIn("newsSourceRegistry.defaultSources", definition_source("worker", "DEFAULT_NEWS_SOURCES"))
 
-    # TODO(python-mirror): remove expectedFailure once _DEFAULT_NEWS_SOURCES is read from the registry.
-    @unittest.expectedFailure
     def test_python_defaults_equal_the_registry(self):
         from yfmcp.tools import news as news_tools
         self.assertEqual(list(news_tools._DEFAULT_NEWS_SOURCES), self.registry["defaultSources"])

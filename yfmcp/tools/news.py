@@ -282,6 +282,7 @@ _COMPANY_IR_URL_MARKERS = ("investor.", "investors.", "/investor", "/news-releas
 
 
 _NEWS_SOURCE_CAPABILITIES_PATH = Path(__file__).resolve().parents[2] / "worker" / "src" / "news-source-capabilities.json"
+_NEWS_SOURCE_REGISTRY_PATH = Path(__file__).resolve().parents[2] / "worker" / "src" / "news-source-registry.json"
 
 
 
@@ -328,7 +329,8 @@ def _normalize_event_sources(sources: list[str] | None, default_sources: list[st
 
 # Default source sets the news tools apply when ``sources`` is omitted or None (Q3h).
 # An explicit list, including [], is used as given: [] attempts no source.
-_DEFAULT_NEWS_SOURCES = ["yahoo_finance_news", "yahoo_finance_press_releases", "finnhub", "marketaux"]
+# 2.16.0: the news defaults come from the shared source registry (news-source-registry.json), which the Worker reads too.
+_DEFAULT_NEWS_SOURCES = list(json.loads(_NEWS_SOURCE_REGISTRY_PATH.read_text(encoding="utf-8"))["defaultSources"])
 _DEFAULT_PRESS_RELEASE_SOURCES = ["sec", "company_ir_page", "yahoo_finance_press_releases"]
 _DEFAULT_EVENT_SOURCES = [
     "sec", "company_ir_page", "company_ir", "yahoo_finance_news", "yahoo_finance_press_releases", "finnhub", "marketaux",
@@ -340,6 +342,39 @@ _SOURCES_DEFAULT_DESCRIPTION = (
     'Omit for the default set; an explicit list is used as given, and [] attempts no source. requestedSources, defaultSourcesApplied and attemptedSources report what was asked for and tried.'
 )
 _NOT_ATTEMPTED_SOURCE_STATUSES = frozenset({"NOT_ELIGIBLE", "NOT_NEEDED", "UNCONFIGURED"})
+
+
+def _disabled_news_sources() -> set[str]:
+    """Operator off switch (2.16.0): NEWS_SOURCES_DISABLED is a comma-separated list of source names, each trimmed
+    and lower-cased; unknown names are ignored and an empty or unset value disables nothing."""
+    raw = os.environ.get("NEWS_SOURCES_DISABLED") or ""
+    return {name for name in (part.strip().lower() for part in raw.split(",")) if name in _PHASE6B_SUPPORTED_SOURCES}
+
+
+def _split_disabled_sources(selected: list[str]) -> tuple[list[str], list[str]]:
+    """Selected sources split into (active, disabled) by the operator switch; selection order kept."""
+    off = _disabled_news_sources()
+    return [src for src in selected if src not in off], [src for src in selected if src in off]
+
+
+def _disabled_source_warnings(disabled: list[str]) -> list[dict]:
+    """One info warning per disabled source that was selected (existing SOURCE_UNAVAILABLE shape)."""
+    return [
+        {
+            "code": "SOURCE_UNAVAILABLE",
+            "message": f"Source {source} is disabled by the server operator.",
+            "severity": "info",
+            "source": source,
+        }
+        for source in disabled
+    ]
+
+
+def _mark_disabled_sources(source_status: dict, disabled: list[str]) -> dict:
+    """A disabled source's row always replaces whatever message inference produced (RNEWS2 8.2/8.3)."""
+    for source in disabled:
+        source_status[source] = {"status": "UNCONFIGURED", "rawCount": 0, "filteredCount": 0, "attempted": False}
+    return source_status
 
 
 def _source_request_fields(requested_sources: list[str] | None, source_status: dict) -> dict:
@@ -590,6 +625,7 @@ def _compute_source_status(
     selected_sources: list[str] | None = None,
     source_diagnostics: dict | None = None,
     budget_starved_sources: list[str] | None = None,
+    disabled_sources: list[str] | None = None,
 ) -> dict:
     """Build per-source status dict from collection results.
 
@@ -601,7 +637,7 @@ def _compute_source_status(
     warning_codes = {w.get("code") for w in warnings if isinstance(w, dict)}
     sec_items = [it for it in items if "sec" in str(it.get("sourceType", "")).lower()]
     sources = (
-        ["yahoo_finance_news", "yahoo_finance_press_releases", "finnhub", "marketaux"]
+        list(_DEFAULT_NEWS_SOURCES)
         if selected_sources is None
         else selected_sources
     )
@@ -677,7 +713,10 @@ def _compute_source_status(
         }
 
     if "sec" in sources:
-        if "sec" in sources_used:
+        sec_diagnostic = diagnostics.get("sec") if isinstance(diagnostics.get("sec"), dict) else {}
+        if str(sec_diagnostic.get("status") or "") == "NOT_ELIGIBLE":
+            result["sec"] = {"status": "NOT_ELIGIBLE", "rawCount": 0, "filteredCount": 0, **sec_diagnostic}
+        elif "sec" in sources_used:
             result["sec"] = {"status": "OK" if sec_items else "EMPTY_RESULT", "rawCount": len(sec_items), "filteredCount": len(sec_items)}
         elif any("sec submissions" in m.lower() for m in warning_msgs):
             result["sec"] = {"status": "PROVIDER_ERROR", "rawCount": 0, "filteredCount": 0}
@@ -835,7 +874,9 @@ def _compute_source_status(
             result["newswire"] = {"status": "EMPTY_RESULT", "rawCount": 0, "filteredCount": 0}
     if budget_starved_sources is None:
         budget_starved_sources = list(getattr(source_diagnostics, "budget_starved", None) or [])
-    return _mark_budget_starved_sources(result, budget_starved_sources)
+    if disabled_sources is None:
+        disabled_sources = list(getattr(source_diagnostics, "disabled_sources", None) or [])
+    return _mark_disabled_sources(_mark_budget_starved_sources(result, budget_starved_sources), disabled_sources)
 
 
 # A source whose collection had a fetch refused for the subrequest budget and did not end OK reports
@@ -857,10 +898,12 @@ class _SourceDiagnostics(dict):
     """Per-source diagnostics plus the sources whose collection had a fetch refused for budget (never serialized)."""
 
     budget_starved: list[str]
+    disabled_sources: list[str]
 
     def __init__(self) -> None:
         super().__init__()
         self.budget_starved = []
+        self.disabled_sources = []
 
 
 def _compute_source_coverage(source_status: dict) -> str:
@@ -922,10 +965,13 @@ async def _collect_company_events(
     keep_all: bool = False,
 ) -> tuple:
     retrieved_at = _utc_now_iso()
-    selected_sources, warnings = _normalize_event_sources(
+    requested_selection, warnings = _normalize_event_sources(
         sources,
         ["sec", "company_ir_page", "company_ir", "yahoo_finance_news", "yahoo_finance_press_releases", "finnhub", "marketaux"],
     )
+    # A source the operator disabled is never collected (2.16.0); it is reported instead.
+    selected_sources, disabled_sources = _split_disabled_sources(requested_selection)
+    warnings.extend(_disabled_source_warnings(disabled_sources))
     items: list[dict] = []
     sources_used: list[str] = []
     source_diagnostics: dict[str, dict] = _SourceDiagnostics()
@@ -1010,7 +1056,19 @@ async def _collect_company_events(
         if used:
             sources_used.append("sec")
         items.extend(sec_items)
-        warnings.extend(sec_warnings)
+        if getattr(sec_result, "no_cik", False):
+            # A ticker SEC has no CIK for is not eligible, as an ineligible Finnhub ticker is (RNEWS2 8.7).
+            source_diagnostics["sec"] = {"status": "NOT_ELIGIBLE", "attempted": False, "reasonCode": None}
+            warnings.append({
+                "code": "SOURCE_NOT_ELIGIBLE",
+                "message": f"SEC has no filings for {ticker.upper()} (no SEC CIK).",
+                "severity": "warning",
+                "source": "sec",
+                "attempted": False,
+                "reasonCode": None,
+            })
+        else:
+            warnings.extend(sec_warnings)
 
     if page_result is not None:
         page_items, page_warnings, page_used = page_result
@@ -1088,8 +1146,9 @@ async def _collect_company_events(
         })
 
     if "marketaux" in selected_sources:
+        # The requested selection, disabled sources included: a disabled finnhub counts as limited coverage (RNEWS2 8.3).
         fallback_reason = _marketaux_fallback_reason(
-            selected_sources,
+            requested_selection,
             items,
             warnings,
             source_diagnostics,
@@ -1183,6 +1242,7 @@ async def _collect_company_events(
                 "completed": all(diagnostic.get("completed") is True for diagnostic in yahoo_diagnostics),
             }
     source_diagnostics.budget_starved = sorted(budget_starved)
+    source_diagnostics.disabled_sources = list(disabled_sources)
     if include_diagnostics:
         return deduped, sources_used, unique_warnings, retrieved_at, source_diagnostics
     return deduped, sources_used, unique_warnings, retrieved_at
@@ -1209,7 +1269,7 @@ def _rank_news_items_by_relevance(items: list[dict]) -> list[dict]:
     name="search_company_news",
     description="""Search public company news/events for a ticker and query string.
 
-Defaults use Yahoo Finance, eligible Finnhub, then one quota-bounded Marketaux
+Defaults use Yahoo Finance, SEC filings and eligible Finnhub, then one quota-bounded Marketaux
 wire-domain fallback only when higher-priority coverage is empty or limited.
 Marketaux never paginates automatically and remains contextual evidence; inspect
 coverage and sourceStatus before treating an empty result as absence.
@@ -1303,7 +1363,9 @@ async def get_company_press_releases(
     err = _validate_ticker(ticker)
     if err:
         return _mcp_failure("get_company_press_releases", ErrorCode.INPUT_VALIDATION_ERROR, err)
-    selected_sources, source_warnings = _normalize_event_sources(sources, _DEFAULT_PRESS_RELEASE_SOURCES)
+    requested_selection, source_warnings = _normalize_event_sources(sources, _DEFAULT_PRESS_RELEASE_SOURCES)
+    # Disabled sources are dropped here, so the inner collections never see them; the report is attached once below (2.16.0).
+    selected_sources, disabled_sources = _split_disabled_sources(requested_selection)
     primary_sources = [src for src in selected_sources if src in ("sec", "company_ir_page")]
     optional_sources = [src for src in selected_sources if src not in ("sec", "company_ir_page")]
     safe_max = _coerce_max_results(max_results, 20)
@@ -1392,7 +1454,7 @@ async def get_company_press_releases(
     optional_diagnostics: dict = {}
     if optional_sources:
         optional_items, optional_used, optional_warnings, _optional_retrieved_at, optional_diagnostics = optional_result
-    warnings = source_warnings + primary_warnings + optional_warnings
+    warnings = source_warnings + _disabled_source_warnings(disabled_sources) + primary_warnings + optional_warnings
     modified_release_items = _dedupe_event_items(
         modified_primary_items + [it for it in optional_items if str(it.get("sourceType")) in release_types],
         warnings,
@@ -1433,7 +1495,8 @@ async def get_company_press_releases(
         elif "company_ir" in selected_sources:
             status = "COMPANY_IR_NOT_FOUND"
         else:
-            status = "NOT_FOUND"
+            # A disabled source never yields NOT_FOUND: the source-limited path applies (2.16.0).
+            status = _build_collection_status(modified_release_items, sources_used, warnings) if disabled_sources else "NOT_FOUND"
     else:
         status = _build_collection_status(modified_release_items, sources_used, warnings)
 
@@ -1441,12 +1504,13 @@ async def get_company_press_releases(
         sources_used,
         warnings,
         modified_release_items,
-        selected_sources,
+        requested_selection,
         {**primary_diagnostics, **optional_diagnostics},
         sorted({
             *getattr(primary_diagnostics, "budget_starved", []),
             *getattr(optional_diagnostics, "budget_starved", []),
         }),
+        disabled_sources,
     )
     source_coverage = _compute_source_coverage(source_status)
     coverage_status = (
@@ -1927,6 +1991,10 @@ BATCH_LIMIT_EXCEEDED). For an array, each
 ticker is fetched independently and results are returned as a per-ticker keyed
 object (a union of per-ticker results), so low-news conditions for one ticker
 never zero out the others.
+
+The default sources are Yahoo Finance, SEC filings and eligible Finnhub, then one
+quota-bounded Marketaux wire-domain fallback only when higher-priority coverage
+is empty or limited.
 
 Returns deduplicated source-backed items with precise source labels
 (``yahoo_finance_news``, ``yahoo_finance_press_releases``, ``finnhub``,

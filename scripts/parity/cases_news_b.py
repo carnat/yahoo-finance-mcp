@@ -148,6 +148,9 @@ def _py_news_env(*, news=None, info=None, env=None, submissions=None, clock=True
                 stack.enter_context(patch.object(submissions_owner, "_get_submissions_for_ticker", stub_submissions))
         saved = dict(pycache._tool_cache._store)
         saved_html = dict(edgar._EDGAR_HTML_CACHE)
+        # The SEC ticker index is process state: start every case unloaded (a no-CIK ticker reads it; 2.16.0).
+        saved_tickers = (edgar._EDGAR_TICKERS, edgar._EDGAR_TICKERS_LOADED_AT)
+        edgar._EDGAR_TICKERS, edgar._EDGAR_TICKERS_LOADED_AT = None, 0.0
         if gnw_cache_clear:
             for key in [k for k in pycache._tool_cache._store if k.startswith("gnw_rss:")]:
                 del pycache._tool_cache._store[key]
@@ -159,6 +162,7 @@ def _py_news_env(*, news=None, info=None, env=None, submissions=None, clock=True
             pycache._tool_cache._store.update(saved)
             edgar._EDGAR_HTML_CACHE.clear()
             edgar._EDGAR_HTML_CACHE.update(saved_html)
+            edgar._EDGAR_TICKERS, edgar._EDGAR_TICKERS_LOADED_AT = saved_tickers
 
 
 def _worker_js(body: str, env: dict | None = None, clock: bool = True) -> str:
@@ -1231,13 +1235,7 @@ CASES += [
         select=lambda v: {"requested": v["requestedSources"], "defaultApplied": v["defaultSourcesApplied"], "attempted": v["attemptedSources"],
                           "sourceStatus": {k: s.get("status") for k, s in v["sourceStatus"].items()}},
         # 2.16.0 (RNEWS2 §4.1): the defaults include sec; VOD.L has no CIK, so sec is attempted and reports PROVIDER_ERROR.
-        # TODO(python-mirror): flip to equal with expect = the expect_ts value below once Python reads the registry defaults.
-        mode="pinned", decision="RNEWS2 2.16.0 (python-mirror port pending)",
-        expect_py={"requested": None, "defaultApplied": True,
-                   "attempted": [{"sourceType": "yahoo_finance_news", "status": "OK"}, {"sourceType": "yahoo_finance_press_releases", "status": "EMPTY_RESULT"}],
-                   "sourceStatus": {"yahoo_finance_news": "OK", "yahoo_finance_press_releases": "EMPTY_RESULT", "finnhub": "NOT_ELIGIBLE",
-                                    "marketaux": "UNCONFIGURED"}},
-        expect_ts={"requested": None, "defaultApplied": True,
+        expect={"requested": None, "defaultApplied": True,
                    "attempted": [{"sourceType": "sec", "status": "PROVIDER_ERROR"}, {"sourceType": "yahoo_finance_news", "status": "OK"},
                                  {"sourceType": "yahoo_finance_press_releases", "status": "EMPTY_RESULT"}],
                    "sourceStatus": {"sec": "PROVIDER_ERROR", "yahoo_finance_news": "OK", "yahoo_finance_press_releases": "EMPTY_RESULT",
@@ -2705,9 +2703,7 @@ CASES += [
 # ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 _NEWS_SOURCE_REGISTRY = json.loads((WORKER / "src" / "news-source-registry.json").read_text(encoding="utf-8"))
-_DEFAULTS_2150 = ["yahoo_finance_news", "yahoo_finance_press_releases", "finnhub", "marketaux"]
 _DEFAULTS_2160 = ["yahoo_finance_news", "yahoo_finance_press_releases", "sec", "finnhub", "marketaux"]
-_RNEWS2_PENDING = "RNEWS2 2.16.0 (python-mirror port pending)"
 
 
 def _default_sec_view(v):
@@ -2722,33 +2718,24 @@ def _default_sec_view(v):
 
 CASES += [
     # §1: the default news sources are the registry's defaultSources, with sec right after yahoo_finance_press_releases.
-    # TODO(python-mirror): flip to equal with expect=_DEFAULTS_2160 once _DEFAULT_NEWS_SOURCES is read from the registry.
     Case(name="news.registry.default_news_sources_come_from_the_registry", ids=["RNEWS2-1", "BR-NWS-269"],
          py=lambda: list(news_tools._DEFAULT_NEWS_SOURCES),
          ts={"js": "return [...m.yahooFinance.DEFAULT_NEWS_SOURCES];"},
-         mode="pinned", decision=_RNEWS2_PENDING,
-         expect_py=_DEFAULTS_2150, expect_ts=_DEFAULTS_2160),
+         expect=_DEFAULTS_2160),
     # §1: the registry file itself carries the planner's default order (data shared by both runtimes, so equal today).
     Case(name="news.registry.default_sources_order_in_the_registry_file", ids=["RNEWS2-1"],
          py=lambda: _NEWS_SOURCE_REGISTRY["defaultSources"],
          ts={"js": "return [...m.yahooFinance.DEFAULT_NEWS_SOURCES];"},
          expect=_DEFAULTS_2160),
     # §4.1 / §6: a default get_company_news call includes sec as an explicit sec would: SEC items, sourceStatus.sec,
-    # sourcesUsed and attemptedSources. TODO(python-mirror): flip to equal with expect = the expect_ts value below.
+    # sourcesUsed and attemptedSources.
     _sec_scenario(
         "news.sources.default_call_includes_sec_status_and_items", ["RNEWS2-4.1", "BR-NWS-269"],
         lambda: server.get_company_news("ACME", 10, 14),
         'm.yahooFinance.getCompanyNews("ACME", 10, 14)',
         _sec_recent(["8-K"], [2]), info={"shortName": "Acme Corp", "longName": "Acme Corp"},
         news=[_yn("ACME shares rise", when=_days_ago(1))], select=_default_sec_view,
-        mode="pinned", decision=_RNEWS2_PENDING,
-        expect_py={"requested": None, "defaultApplied": True,
-                   "attempted": [["yahoo_finance_news", "OK"], ["yahoo_finance_press_releases", "EMPTY_RESULT"]],
-                   "sourcesUsed": ["yahoo_finance_news", "yahoo_finance_press_releases"],
-                   "sourceStatus": {"yahoo_finance_news": "OK", "yahoo_finance_press_releases": "EMPTY_RESULT",
-                                    "finnhub": "UNCONFIGURED", "marketaux": "UNCONFIGURED"},
-                   "sec": {}, "items": [["yahoo_finance_news", "yahoo_finance_news", None]], "status": "PARTIAL", "coverage": "PARTIAL"},
-        expect_ts={"requested": None, "defaultApplied": True,
+        expect={"requested": None, "defaultApplied": True,
                    "attempted": [["sec", "OK"], ["yahoo_finance_news", "OK"], ["yahoo_finance_press_releases", "EMPTY_RESULT"]],
                    "sourcesUsed": ["sec", "yahoo_finance_news", "yahoo_finance_press_releases"],
                    "sourceStatus": {"sec": "OK", "yahoo_finance_news": "OK", "yahoo_finance_press_releases": "EMPTY_RESULT",
@@ -2763,7 +2750,7 @@ CASES += [
 # Operator off switch NEWS_SOURCES_DISABLED (2.16.0, RNEWS2 §2 / §8 / §6)
 # Each case returns the tool result plus a fetch spy: the non-Yahoo hosts fetched (Worker fetch, Python urllib) and
 # whether the Yahoo feed was read (Worker fetch to a Yahoo host, Python's Yahoo search helper).
-# Python ignores the setting until its port, so cases that depend on it are pinned with TODO(python-mirror).
+# Both runtimes apply the setting (Python ported in 2.16.0), so these cases run in mode equal.
 # ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 from urllib.parse import urlparse as _urlparse  # noqa: E402
@@ -3312,27 +3299,22 @@ def _off_news(disabled, sources=None, **kw):
 CASES += [
     # §6: one disabled default source (finnhub). No Finnhub fetch; the row is UNCONFIGURED/attempted false; one info warning;
     # failedSources gains it and coverage reads PARTIAL. A disabled finnhub counts as limited, so the Marketaux fallback runs
-    # (HIGHER_PRIORITY_COVERAGE_LIMITED). TODO(python-mirror): flip to equal with expect = the expect_ts value.
+    # (HIGHER_PRIORITY_COVERAGE_LIMITED).
     _off_case("news.off_switch.disabled_default_finnhub_is_not_fetched_and_reported", ["RNEWS2-2", "RNEWS2-8.3"],
-              *_off_news("finnhub"), "finnhub", select=_off_view, mode="pinned", decision=_RNEWS2_PENDING,
-              expect_py=_OFF_EXPECT["news.off_switch.disabled_default_finnhub_is_not_fetched_and_reported"]["py"], expect_ts=_OFF_EXPECT["news.off_switch.disabled_default_finnhub_is_not_fetched_and_reported"]["ts"]),
-    # §6: an explicitly requested disabled source gets the same reporting. TODO(python-mirror): flip to equal (expect_ts).
+              *_off_news("finnhub"), "finnhub", select=_off_view, expect=_OFF_EXPECT["news.off_switch.disabled_default_finnhub_is_not_fetched_and_reported"]["ts"]),
+    # §6: an explicitly requested disabled source gets the same reporting.
     _off_case("news.off_switch.explicit_disabled_source_gets_the_same_report", ["RNEWS2-2"],
-              *_off_news("finnhub", ["yahoo_finance_news", "finnhub"]), "finnhub", select=_off_view, mode="pinned",
-              decision=_RNEWS2_PENDING, expect_py=_OFF_EXPECT["news.off_switch.explicit_disabled_source_gets_the_same_report"]["py"], expect_ts=_OFF_EXPECT["news.off_switch.explicit_disabled_source_gets_the_same_report"]["ts"]),
+              *_off_news("finnhub", ["yahoo_finance_news", "finnhub"]), "finnhub", select=_off_view, expect=_OFF_EXPECT["news.off_switch.explicit_disabled_source_gets_the_same_report"]["ts"]),
     # §2 / §8.3: finnhub and marketaux both disabled: no provider fetch, the fallback is skipped and reported as disabled.
-    # Names are trimmed and lower-cased. TODO(python-mirror): flip to equal (expect_ts).
+    # Names are trimmed and lower-cased.
     _off_case("news.off_switch.marketaux_disabled_skips_the_fallback", ["RNEWS2-2", "RNEWS2-8.3"],
-              *_off_news(None), " Finnhub , MARKETAUX ", select=_off_view, mode="pinned", decision=_RNEWS2_PENDING,
-              expect_py=_OFF_EXPECT["news.off_switch.marketaux_disabled_skips_the_fallback"]["py"], expect_ts=_OFF_EXPECT["news.off_switch.marketaux_disabled_skips_the_fallback"]["ts"]),
+              *_off_news(None), " Finnhub , MARKETAUX ", select=_off_view, expect=_OFF_EXPECT["news.off_switch.marketaux_disabled_skips_the_fallback"]["ts"]),
     # §6: every requested source disabled: no fetch at all, source-limited status, never NOT_FOUND.
-    # TODO(python-mirror): flip to equal (expect_ts).
     _off_case("news.off_switch.every_requested_source_disabled_fetches_nothing", ["RNEWS2-2"],
-              *_off_news(None, ["finnhub", "marketaux"]), "finnhub,marketaux", select=_off_view, mode="pinned",
-              decision=_RNEWS2_PENDING, expect_py=_OFF_EXPECT["news.off_switch.every_requested_source_disabled_fetches_nothing"]["py"], expect_ts=_OFF_EXPECT["news.off_switch.every_requested_source_disabled_fetches_nothing"]["ts"]),
+              *_off_news(None, ["finnhub", "marketaux"]), "finnhub,marketaux", select=_off_view, expect=_OFF_EXPECT["news.off_switch.every_requested_source_disabled_fetches_nothing"]["ts"]),
     _off_case("news.off_switch.every_default_source_disabled_fetches_nothing", ["RNEWS2-2"],
               *_off_news(None), "yahoo_finance_news,yahoo_finance_press_releases,sec,finnhub,marketaux", select=_off_view,
-              mode="pinned", decision=_RNEWS2_PENDING, expect_py=_OFF_EXPECT["news.off_switch.every_default_source_disabled_fetches_nothing"]["py"], expect_ts=_OFF_EXPECT["news.off_switch.every_default_source_disabled_fetches_nothing"]["ts"]),
+              expect=_OFF_EXPECT["news.off_switch.every_default_source_disabled_fetches_nothing"]["ts"]),
     # §6: unknown names are ignored and an empty setting changes nothing (equal today and after the port: same as unset).
     _off_case("news.off_switch.unknown_names_are_ignored", ["RNEWS2-2"],
               *_off_news(None, ["yahoo_finance_news", "finnhub", "marketaux"]), "bloomberg, ,reuters", select=_off_view,
@@ -3342,30 +3324,26 @@ CASES += [
     _off_case("news.off_switch.unset_baseline_for_the_two_cases_above", ["RNEWS2-2"],
               *_off_news(None, ["yahoo_finance_news", "finnhub", "marketaux"]), None, select=_off_view, expect=_OFF_EXPECT["news.off_switch.unset_baseline_for_the_two_cases_above"]["expect"]),
     # §8.5: get_company_press_releases attaches the disabled report once (row, warning, failedSources entry).
-    # TODO(python-mirror): flip to equal (expect_ts).
     _off_case("news.off_switch.press_releases_report_a_disabled_source_once", ["RNEWS2-2", "RNEWS2-8.5"],
               lambda: server.get_company_press_releases("ACME", 90, 20, ["sec", "yahoo_finance_press_releases"]),
               'm.yahooFinance.getCompanyPressReleases("ACME", 90, 20, ["sec", "yahoo_finance_press_releases"])', "sec",
-              select=lambda v: {**_off_view(v), "coverageStatus": v["result"].get("coverageStatus")}, mode="pinned",
-              decision=_RNEWS2_PENDING, expect_py=_OFF_EXPECT["news.off_switch.press_releases_report_a_disabled_source_once"]["py"], expect_ts=_OFF_EXPECT["news.off_switch.press_releases_report_a_disabled_source_once"]["ts"]),
+              select=lambda v: {**_off_view(v), "coverageStatus": v["result"].get("coverageStatus")}, expect=_OFF_EXPECT["news.off_switch.press_releases_report_a_disabled_source_once"]["ts"]),
     _off_case("news.off_switch.press_releases_with_every_default_disabled_are_source_limited", ["RNEWS2-2", "RNEWS2-8.5"],
               lambda: server.get_company_press_releases("ACME", 90, 20),
               'm.yahooFinance.getCompanyPressReleases("ACME", 90, 20)', "sec,company_ir_page,yahoo_finance_press_releases",
-              select=lambda v: {**_off_view(v), "coverageStatus": v["result"].get("coverageStatus")}, mode="pinned",
-              decision=_RNEWS2_PENDING, expect_py=_OFF_EXPECT["news.off_switch.press_releases_with_every_default_disabled_are_source_limited"]["py"], expect_ts=_OFF_EXPECT["news.off_switch.press_releases_with_every_default_disabled_are_source_limited"]["ts"]),
-    # §2: the timeline and verification use the same shared selection. TODO(python-mirror): flip to equal (expect_ts).
+              select=lambda v: {**_off_view(v), "coverageStatus": v["result"].get("coverageStatus")}, expect=_OFF_EXPECT["news.off_switch.press_releases_with_every_default_disabled_are_source_limited"]["ts"]),
+    # §2: the timeline and verification use the same shared selection.
     _off_case("news.off_switch.verify_company_event_reports_a_disabled_source", ["RNEWS2-2"],
               lambda: server.verify_company_event("ACME", "shares rise", "", "", ["yahoo_finance_news", "finnhub"]),
               'm.yahooFinance.verifyCompanyEvent("ACME", "shares rise", "", "", ["yahoo_finance_news", "finnhub"])', "finnhub",
               # Python's verify reads SEC submissions for identity whatever the sources, so data.sec.gov is left out here.
               select=lambda v: {**_off_view(v), "fetchedHosts": [h for h in v["fetchedHosts"] if h != "data.sec.gov"],
                                 "failureMode": v["result"].get("failureMode")},
-              mode="pinned", decision=_RNEWS2_PENDING, expect_py=_OFF_EXPECT["news.off_switch.verify_company_event_reports_a_disabled_source"]["py"], expect_ts=_OFF_EXPECT["news.off_switch.verify_company_event_reports_a_disabled_source"]["ts"]),
+              expect=_OFF_EXPECT["news.off_switch.verify_company_event_reports_a_disabled_source"]["ts"]),
     _off_case("news.off_switch.timeline_reports_a_disabled_source", ["RNEWS2-2"],
               lambda: server.get_public_event_timeline("ACME", "", "", ["sec", "finnhub"]),
               'm.yahooFinance.getPublicEventTimeline("ACME", "", "", ["sec", "finnhub"])', "finnhub",
-              select=lambda v: {k: x for k, x in _off_view(v).items()}, mode="pinned", decision=_RNEWS2_PENDING,
-              expect_py=_OFF_EXPECT["news.off_switch.timeline_reports_a_disabled_source"]["py"], expect_ts=_OFF_EXPECT["news.off_switch.timeline_reports_a_disabled_source"]["ts"]),
+              select=lambda v: {k: x for k, x in _off_view(v).items()}, expect=_OFF_EXPECT["news.off_switch.timeline_reports_a_disabled_source"]["ts"]),
     # §8.4: get_sec_recent_events selects no news sources, so a disabled sec does not affect it (equal today and after).
     _off_case("news.off_switch.sec_recent_events_ignore_a_disabled_sec", ["RNEWS2-8.4"],
               lambda: server.get_sec_recent_events("ACME", ["8-K"], 90, 20),
@@ -3520,26 +3498,26 @@ def _sec_eligibility_view(v):
 
 
 CASES += [
-    # Default call on a no-CIK ticker. TODO(python-mirror): flip to equal with expect = the expect_ts value below.
+    # Default call on a no-CIK ticker.
     _scenario(
         "news.sec.no_cik_default_call_reports_sec_not_eligible", ["RNEWS2-8.7"],
         lambda: server.get_company_news("ACME", 10, 14), 'm.yahooFinance.getCompanyNews("ACME", 10, 14)',
         news=[_yn("ACME shares rise", when=_days_ago(1))], info={"shortName": "Acme Corp", "longName": "Acme Corp"},
         submissions=(None, None), routes=_NO_CIK_ROUTES, select=_sec_eligibility_view,
-        mode="pinned", decision=_RNEWS2_PENDING, expect_py=_NO_CIK_EXPECT["news.sec.no_cik_default_call_reports_sec_not_eligible"]["py"], expect_ts=_NO_CIK_EXPECT["news.sec.no_cik_default_call_reports_sec_not_eligible"]["ts"]),
-    # Explicit sec on a no-CIK ticker: the same report. TODO(python-mirror): flip to equal (expect_ts).
+        expect=_NO_CIK_EXPECT["news.sec.no_cik_default_call_reports_sec_not_eligible"]["ts"]),
+    # Explicit sec on a no-CIK ticker: the same report.
     _scenario(
         "news.sec.no_cik_explicit_sec_reports_not_eligible", ["RNEWS2-8.7"],
         lambda: server.get_company_news("ACME", 10, 14, ["sec"]), 'm.yahooFinance.getCompanyNews("ACME", 10, 14, ["sec"])',
         submissions=(None, None), routes=_NO_CIK_ROUTES, select=_sec_eligibility_view,
-        mode="pinned", decision=_RNEWS2_PENDING, expect_py=_NO_CIK_EXPECT["news.sec.no_cik_explicit_sec_reports_not_eligible"]["py"], expect_ts=_NO_CIK_EXPECT["news.sec.no_cik_explicit_sec_reports_not_eligible"]["ts"]),
-    # verify_company_event: NOT_ELIGIBLE gives failureMode SOURCE_NOT_ELIGIBLE. TODO(python-mirror): flip to equal (expect_ts).
+        expect=_NO_CIK_EXPECT["news.sec.no_cik_explicit_sec_reports_not_eligible"]["ts"]),
+    # verify_company_event: NOT_ELIGIBLE gives failureMode SOURCE_NOT_ELIGIBLE.
     _scenario(
         "news.sec.no_cik_verify_failure_mode_is_source_not_eligible", ["RNEWS2-8.7"],
         lambda: server.verify_company_event("ACME", "acquisition", "", "", ["sec"]),
         'm.yahooFinance.verifyCompanyEvent("ACME", "acquisition", "", "", ["sec"])',
         submissions=(None, None), routes=_NO_CIK_ROUTES, select=_sec_eligibility_view,
-        mode="pinned", decision=_RNEWS2_PENDING, expect_py=_NO_CIK_EXPECT["news.sec.no_cik_verify_failure_mode_is_source_not_eligible"]["py"], expect_ts=_NO_CIK_EXPECT["news.sec.no_cik_verify_failure_mode_is_source_not_eligible"]["ts"]),
+        expect=_NO_CIK_EXPECT["news.sec.no_cik_verify_failure_mode_is_source_not_eligible"]["ts"]),
     # A ticker with a CIK whose submissions fetch fails keeps PROVIDER_ERROR and the unavailable warning.
     _scenario(
         "news.sec.submissions_fetch_failure_stays_provider_error", ["RNEWS2-8.7", "BR-NWS-195"],
