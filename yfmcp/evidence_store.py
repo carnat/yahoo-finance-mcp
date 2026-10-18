@@ -67,7 +67,18 @@ class LocalDirStore:
         if not base.exists():
             return []
         keys = sorted(str(p.relative_to(self.root)).replace(os.sep, "/") for p in base.rglob("*.json"))
-        return keys[:limit]
+        # Like the Worker's R2 listing: at most LIST_MAX_PAGES pages of LIST_PAGE_SIZE keys are read, then the newest kept.
+        return newest_keys(keys[:LIST_PAGE_SIZE * LIST_MAX_PAGES], limit)
+
+
+LIST_PAGE_SIZE = 1000
+LIST_MAX_PAGES = 10
+
+
+def newest_keys(keys: list[str], limit: int) -> list[str]:
+    """The newest `limit` keys, in ascending key order (oldest first); keys sort by date (2.15.0, BR-EVD-041)."""
+    ordered = sorted(keys)
+    return ordered[max(0, len(ordered) - limit):] if limit > 0 else []
 
 
 class MemoryStore:
@@ -87,7 +98,7 @@ class MemoryStore:
 
     def list(self, prefix: str, limit: int) -> list[str]:
         assert_list_prefix(prefix)
-        return sorted(k for k in self.objects if k.startswith(prefix))[:limit]
+        return newest_keys([k for k in self.objects if k.startswith(prefix)], limit)
 
 
 _UNSET = object()

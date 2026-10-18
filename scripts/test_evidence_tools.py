@@ -389,6 +389,30 @@ class TestPythonEvidenceTools(_PackAssertions, unittest.TestCase):
             with self.assertRaises(ValueError):
                 store.get("evidence-cuts/../../x.json")
 
+    def test_listing_returns_the_newest_limit_keys_oldest_first(self) -> None:
+        # 2.15.0 (BR-EVD-041): a store holding more than `limit` entries returns the newest `limit`, ascending.
+        from yfmcp import evidence_store as es
+
+        keys = [f"consensus-history/ASTS/2026-01-{d:02d}.json" for d in range(1, 11)]
+        newest = keys[-3:]
+        memory = es.MemoryStore()
+        for key in reversed(keys):
+            memory.put(key, "{}", {})
+        self.assertEqual(memory.list("consensus-history/ASTS/", 3), newest)
+        self.assertEqual(memory.list("consensus-history/ASTS/", 50), keys)
+        with tempfile.TemporaryDirectory() as tmp:
+            local = es.LocalDirStore(tmp)
+            for key in keys:
+                local.put(key, "{}", {})
+            self.assertEqual(local.list("consensus-history/ASTS/", 3), newest)
+            self.assertEqual(local.list("consensus-history/ASTS/", 50), keys)
+
+    def test_listing_reads_at_most_ten_pages_of_a_thousand(self) -> None:
+        from yfmcp import evidence_store as es
+
+        keys = [f"evidence-cuts/R2T/{i:05d}.json" for i in range(10500)]
+        self.assertEqual(es.newest_keys(keys[:es.LIST_PAGE_SIZE * es.LIST_MAX_PAGES], 2), keys[9998:10000])
+
 
 if __name__ == "__main__":
     unittest.main()
