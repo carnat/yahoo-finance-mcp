@@ -1,6 +1,6 @@
 {
   "name": "yahoo-finance-mcp-worker",
-  "version": "2.15.1",
+  "version": "2.16.0",
   "private": true,
   "scripts": {
     "dev": "wrangler dev",
