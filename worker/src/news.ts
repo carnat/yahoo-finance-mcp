@@ -35,6 +35,7 @@ import { yahooNewsIdentityFor, yahooDecisionUse, collectYahooEvents } from "./ne
 import { sourceDecisionUse, shortText, withinDateWindow, isoUtc, tickerInText } from "./news/shared.js";
 import newsSourceRegistry from "./news-source-registry.json";
 import { ErrorCode, getWorkerVar, mcpFailure } from "./response.js";
+import { validateTicker } from "./validate.js";
 // Names other modules and tests import from news.ts (2.15.1 provider move).
 export { parseHtmlTable } from "./news/shared.js";
 export { getNews, yahooItemIssuer, collectYahooEvents } from "./news/providers/yahoo.js";
@@ -218,7 +219,17 @@ function enrichNewsItemForLlm(item: Record<string, unknown>): Record<string, unk
     decisionUse,
   };
 }
-export function buildCoverage(sourceStatus: Record<string, unknown>, resolvedAction: string | null = null): Record<string, unknown> {
+/**
+ * `callerLimit` is the caller's effective max_results (after clamping), for the tools that take one. R-news Batch C
+ * (decision 10, #19): a source already listed in truncatedSources whose returnedCount is below that limit was cut by the
+ * pool cap, a provider limit or dedupe, not by the caller, so coverage.state becomes PARTIAL. A source cut only to the
+ * caller's own max_results leaves the state as it is. The limit is a parameter, never an emitted field.
+ */
+export function buildCoverage(
+  sourceStatus: Record<string, unknown>,
+  resolvedAction: string | null = null,
+  callerLimit: number | null = null,
+): Record<string, unknown> {
   const failedStatuses = new Set(["UNCONFIGURED", "PROVIDER_ERROR", "AUTH_ERROR", "RATE_LIMITED", "TIMEOUT", "PROVIDER_BUDGET_EXHAUSTED", "PROVIDER_CHANGED", "IDENTITY_UNAVAILABLE", "WEBSITE_NOT_AVAILABLE", "DISCOVERY_NOT_FOUND", "DISCOVERY_BUDGET_EXHAUSTED", "FEED_NOT_FOUND", "PARSE_ERROR", "CANDIDATE_AVAILABLE", "NOT_REGISTERED", "DISABLED", "REVALIDATION_DUE", "SOURCE_VALIDATION_FAILED"]);
   const failedSources: Record<string, unknown>[] = [];
   const skippedSources: Record<string, unknown>[] = [];
@@ -247,7 +258,10 @@ export function buildCoverage(sourceStatus: Record<string, unknown>, resolvedAct
         ? "CHECK_OFFICIAL_RELEASES"
         : (truncatedSources.length ? "RETRY_TRUNCATED_SOURCE" : "USE_RETURNED_CONTEXT"))
   );
-  return { state: computeSourceCoverage(sourceStatus), failedSources, skippedSources, truncatedSources, recommendedNextAction };
+  const cutBelowCallerLimit = callerLimit !== null
+    && truncatedSources.some(entry => Number(entry.returnedCount ?? 0) < callerLimit);
+  const state = cutBelowCallerLimit ? "PARTIAL" : computeSourceCoverage(sourceStatus);
+  return { state, failedSources, skippedSources, truncatedSources, recommendedNextAction };
 }
 export function hostWithoutWww(host: string): string {
   return host.toLowerCase().replace(/^www\./, "");
@@ -954,6 +968,11 @@ export async function getCompanyNews(
   if (Array.isArray(ticker)) {
     return runPartialBatch(ticker, (t) => getCompanyNews(t, maxResults, lookbackDays, requestedSources), tickerCap("get_company_news"));
   }
+  // R-news Batch C (decision 15, A-G12): Python's _validate_ticker rule and message. The tool-call gate already rejects a
+  // malformed ticker; this check makes each symbol of a batch an INPUT_VALIDATION_ERROR entry (an error in __batchMeta),
+  // as Python's batch path does.
+  const tickerErr = validateTicker(ticker);
+  if (tickerErr) return mcpFailure("get_company_news", ErrorCode.INPUT_VALIDATION_ERROR, tickerErr);
   // Collect a wider pool, then keep the most relevant items: an item that
   // only mentions the company in passing should not displace one about it.
   const safeMax = clampInt(maxResults, 10, 1, 100);
@@ -962,7 +981,7 @@ export async function getCompanyNews(
   const status = collectionStatus(out.items, out.sourcesUsed, out.warnings);
   const sourceStatus = computeSourceStatus(out.sourcesUsed, out.warnings, out.items, sources, out.sourceDiagnostics, out.budgetStarvedSources, out.disabledSources);
   const sourceCoverage = computeSourceCoverage(sourceStatus);
-  const coverage = buildCoverage(sourceStatus);
+  const coverage = buildCoverage(sourceStatus, null, safeMax);
   const payload: Record<string, unknown> = {
     ticker: ticker.toUpperCase(),
     items: out.items,
@@ -999,11 +1018,12 @@ export async function searchCompanyNews(
   const matchedAll = q
     ? out.items.filter(item => `${_str(item.title)} ${_str(item.summary)} ${_str(item.source)} ${_str(item.eventType)} ${_str(item.evidenceText)}`.toLowerCase().includes(q))
     : out.items;
-  const matched = rankNewsItemsByRelevance(matchedAll).slice(0, clampInt(maxResults, 10, 1, 100));
+  const safeMax = clampInt(maxResults, 10, 1, 100);
+  const matched = rankNewsItemsByRelevance(matchedAll).slice(0, safeMax);
   const status = collectionStatus(matched, out.sourcesUsed, out.warnings);
   const sourceStatus = computeSourceStatus(out.sourcesUsed, out.warnings, matched, sources, out.sourceDiagnostics, out.budgetStarvedSources, out.disabledSources);
   const sourceCoverage = computeSourceCoverage(sourceStatus);
-  const coverage = buildCoverage(sourceStatus);
+  const coverage = buildCoverage(sourceStatus, null, safeMax);
   const payload: Record<string, unknown> = {
     ticker: ticker.toUpperCase(),
     query,
@@ -1291,7 +1311,7 @@ export async function getPublicEventTimeline(
   const status = collectionStatus(out.items, out.sourcesUsed, out.warnings);
   const sourceStatus = computeSourceStatus(out.sourcesUsed, out.warnings, out.items, sources, out.sourceDiagnostics, out.budgetStarvedSources, out.disabledSources);
   const sourceCoverage = computeSourceCoverage(sourceStatus);
-  const coverage = buildCoverage(sourceStatus);
+  const coverage = buildCoverage(sourceStatus, null, clampInt(maxResults, 50, 1, 100));
   const payload: Record<string, unknown> = {
     ticker: ticker.toUpperCase(),
     timeline,
