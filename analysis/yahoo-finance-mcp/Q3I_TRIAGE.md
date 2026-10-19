@@ -139,4 +139,6 @@ These came up while implementing R4b. None is a regression.
 - **F10. Structured IR-page feeds** (found in 2.19.0). The Worker parses RSS/Atom bodies for structured entries, and Python does not. The difference predates 2.19.0.
 - **F11. IR-page row for an unregistered page** (found in 2.19.0). The Worker fills `registryVersion` and `approvalStatus: "not_registered"`; Python leaves them null.
 
-F8 to F11 are proposed for R-news Batch C, as align-to-Worker fixes that use existing values.
+- **F12. Verify stop words** (found in 2.19.0 live checks). `verify_company_event` drops only event-noise words (announce, news, results ...) and terms shorter than 3 letters. English function words such as "the" and "and" count as meaningful, so the query "the and of" gives meaningfulTerms ["the","and"] and skips the `INPUT_VALIDATION_ERROR` guard. The list is shared, so this is not a parity issue. Widening it changes the matching threshold, which makes it a planner call.
+
+F8 to F11 are included in R-news Batch C (RNEWS3_SPEC decision 16). F12 waits for the next triage.

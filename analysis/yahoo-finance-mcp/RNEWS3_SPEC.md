@@ -89,3 +89,30 @@
    - An undated match counts as in range.
    - B-G11's invalid-ticker case completes in Batch C, with A-G12 ticker validation.
 9. **New finding, for the next triage:** F8. Python raises `RATING_CHANGES_UNAVAILABLE` when the analyst radar call throws, and the Worker does not.
+
+### Batch C decisions (2026-10-19)
+10. **#19 truncation coverage.**
+    - The rule only reads sources already listed in `coverage.truncatedSources`. No new entries are added, and no new emitted field.
+    - `coverage.state` becomes PARTIAL when a listed source was cut below the caller's effective `max_results`: its `returnedCount` is lower than that limit, as with the pool cap of 100 or the Marketaux 3-row limit. A source cut only by the caller's own `max_results` leaves the state as it is.
+    - Any internal marker the pipeline needs to tell the two apart is stripped before output.
+    - `status`, `failureMode`, `failedSources` and the `recommendedNextAction` logic are unchanged.
+11. **Finnhub message templates (both runtimes).**
+    - 401/403: `Finnhub auth error: HTTP <n>`
+    - 429: `Finnhub rate limited: HTTP 429`
+    - any other HTTP status: `Finnhub source unavailable: HTTP <n>`
+    - non-array payload: `Finnhub provider changed: unexpected response format`
+    - non-HTTP exceptions keep `Finnhub source unavailable: <error message>` (network error text cannot be aligned).
+    - Internal `FINNHUB_*` tags never reach a message. Message-based status inference must keep giving the same statuses; check every reader of these messages.
+12. **Marketaux message templates (both runtimes).**
+    - HTTP failure: `Marketaux wire fallback returned HTTP <n> (<STATUS>).`
+    - non-HTTP failure: `Marketaux wire fallback unavailable (<STATUS>).`
+    - The Worker reads every row after the 3-row limit, so `acceptedCount` and the rejection counts cover all rows (Python behaviour).
+13. **Zero inputs.** In every news tool, `max_results` / `lookback_days` of 0 clamp to 1 in Python. A missing value still means the default.
+14. **Fail closed (A-G13).** If the policy file cannot be read or parsed, `provider_gaps._finnhub_eligible` and `news._finnhub_eligibility` return not eligible with the bundled policy's existing `reasonCode` (`FINNHUB_MARKET_NOT_ELIGIBLE` when absent). There is no new reason code.
+15. **Batch ticker validation (A-G12).** The Worker applies Python's `_validate_ticker` rule (same regex, same message) to each batch symbol. A malformed symbol gets an `INPUT_VALIDATION_ERROR` entry and is counted as an error in `__batchMeta`. Single-symbol Worker tools that already validate keep their behaviour; if a single-symbol news tool does not validate, align it in the same way.
+16. **F8 to F11 are included** (align-to-Worker fixes with existing values, except F8):
+    - **F8:** the Worker adds Python's `RATING_CHANGES_UNAVAILABLE` warning when the analyst radar call throws. It uses the same shape and message. The code already exists in Python output (P2).
+    - **F9:** Python rejects a structured IR-page entry whose content type is not json/xml/rss/atom/text/plain, as the Worker does, with the same status and warning.
+    - **F10:** Python parses RSS/Atom bodies for structured IR-page entries, as the Worker does. If the port needs more than one parser function, STOP and report.
+    - **F11:** Python fills `registryVersion` and `approvalStatus: "not_registered"` on the unregistered IR-page row.
+17. **F12 (stop words) is not in this batch.** It is logged in `Q3I_TRIAGE.md` §5. Changing the meaningful-term rule changes the verify matching threshold, so it goes to the next triage.
