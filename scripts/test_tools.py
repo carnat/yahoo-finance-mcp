@@ -83,8 +83,7 @@ TEST_CASES: list[TestCase] = [
         "get_company_news",
         {"ticker": "AAPL"},
         [
-            # get_yahoo_finance_news is a deprecated alias for get_company_news,
-            # so the response follows the getCompanyNews schema (not the old getNews schema).
+            # The response follows the getCompanyNews schema.
             ("ticker", "AAPL"),
             ("items", NOT_NULL),
             ("meta.sourcesUsed", NOT_NULL),

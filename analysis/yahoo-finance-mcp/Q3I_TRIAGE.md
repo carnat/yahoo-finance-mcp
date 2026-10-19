@@ -136,8 +136,8 @@ These came up while implementing R4b. None is a regression.
 - **F7. Python EDGAR ticker index after a failed load** (found in 2.16.0). `_load_edgar_tickers` caches `{}` with load time 0.0. While machine uptime is under 24 h, that passes the TTL check, so a failed index load is not retried for up to a day, and CIK lookups via the index miss in the meantime. The 2.16.0 NOT_ELIGIBLE path is safe, because `_edgar_ticker_map_loaded` requires a non-empty map with a load time. The fix is to treat an empty map as not cached. Check the Worker's equivalent at the same time.
 - **F8. Analyst radar failure warning** (found in 2.19.0). Python raises `RATING_CHANGES_UNAVAILABLE` when the radar call throws, and the Worker does not.
 - **F9. Structured IR-page content type** (found in 2.19.0). The Worker rejects a structured entry whose content type is not json/xml/rss/atom/text/plain; Python accepts it. No parity case covers it.
-- **F10. Structured IR-page feeds** (found in 2.19.0). The Worker parses RSS/Atom bodies for structured entries, and Python does not. The difference predates 2.19.0.
-- **F11. IR-page row for an unregistered page** (found in 2.19.0). The Worker fills `registryVersion` and `approvalStatus: "not_registered"`; Python leaves them null.
+- **F10. Structured IR-page feeds** (found in 2.19.0). The Worker parses RSS/Atom bodies for structured entries, and Python does not. The difference predates 2.19.0. Deferred from 2.20.0 (RNEWS3 decision 21): the port needs four new Python parser functions.
+- **F11. IR-page row for an unregistered page** (found in 2.19.0). The Worker fills `registryVersion` and `approvalStatus: "not_registered"`; Python leaves them null. Aligned in 2.20.0. Still open: the Worker row has `registrySchemaVersion` and no `canonicalUrl` key, while Python has `canonicalUrl: null` and no `registrySchemaVersion`.
 
 - **F12. Verify stop words** (found in 2.19.0 live checks). `verify_company_event` drops only event-noise words (announce, news, results ...) and terms shorter than 3 letters. English function words such as "the" and "and" count as meaningful, so the query "the and of" gives meaningfulTerms ["the","and"] and skips the `INPUT_VALIDATION_ERROR` guard. The list is shared, so this is not a parity issue. Widening it changes the matching threshold, which makes it a planner call.
 
@@ -147,4 +147,4 @@ These came up while implementing R4b. None is a regression.
   - Also, under `MCP_ENVELOPE_V2=false` a Worker batch error entry reads `PROVIDER_ERROR`, because `normalizeBatchSymbolResult` ignores `code` on legacy errors.
 - **F14. Unadvertised optional params** (found in 2.20.0). 25 actions in 8 groups accept params that their `tool_catalog.json` Params line omits. They are frozen in `_KNOWN_UNADVERTISED_PARAMS` in `scripts/test_grouped_contract_parity.py`. `get_analyst_recommendations` and `get_ownership_holders` have no Params line at all.
 
-F8 to F11 are included in R-news Batch C (RNEWS3_SPEC decision 16). F12 waits for the next triage.
+F8, F9 and F11 were fixed in R-news Batch C (2.20.0), and F10 was deferred. F12 waits for the next triage.

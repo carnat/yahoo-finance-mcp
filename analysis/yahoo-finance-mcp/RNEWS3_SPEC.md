@@ -126,3 +126,9 @@
     - The Marketaux HTTP 404 status (Worker `NOT_FOUND`, Python `PROVIDER_ERROR`) and the non-object body status (Worker `PROVIDER_ERROR`, Python `PROVIDER_CHANGED`) become finding F13.
     - Under the legacy envelope (`MCP_ENVELOPE_V2=false`), a Worker batch error entry reads `PROVIDER_ERROR`. This is part of finding F13.
     - The 25 unadvertised params in other groups, frozen in `_KNOWN_UNADVERTISED_PARAMS`, become finding F14.
+
+### Batch C decisions after the Python step (2026-10-19)
+20. **Fail-closed reason code.** An unreadable policy uses `MARKET_NOT_ENABLED_BY_DEPLOYED_ENTITLEMENT`, the bundled policy's existing `reasonCode`, which is the first choice in decision 14. Python hard-codes it because the file cannot be read in that branch. A readable policy with no `reasonCode` keeps `FINNHUB_MARKET_NOT_ELIGIBLE`.
+21. **F10 deferred.** Porting the Worker's RSS/Atom handling for structured IR-page entries needs four new Python functions, a different dispatch order and a changed `Accept` header. That is past decision 16's one-function limit. F10 stays open for the next triage.
+22. **F11 remainder.** The Worker's NOT_REGISTERED row has no `canonicalUrl` key but has `registrySchemaVersion`; Python's row has the opposite. F11 is extended with this, and it is not changed now.
+23. **B-G19, Worker side.** The dead `get_yahoo_finance_news` key in the `worker/src/tools.ts` output-schema map is removed too. The Worker already answered "Unknown tool name.".

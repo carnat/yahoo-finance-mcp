@@ -624,15 +624,6 @@ const MANIFEST_DIAGNOSTICS_OUTPUT_SCHEMA: Tool["outputSchema"] = {
   },
   additionalProperties: false,
 };
-const NEWS_OUTPUT_SCHEMA: Tool["outputSchema"] = {
-  type: "object",
-  properties: {
-    ticker: { type: "string" },
-    items: { type: "array" },
-    meta: { type: "object" },
-  },
-  additionalProperties: true,
-};
 const ENVELOPE_V2_OUTPUT_SCHEMA: Tool["outputSchema"] = {
   type: "object",
   properties: {
@@ -793,7 +784,6 @@ const OUTPUT_SCHEMAS: Record<string, Tool["outputSchema"]> = {
   get_stock_info: SIMPLE_OBJECT_SCHEMA,
   get_etf_info: FUND_PROFILE_OUTPUT_SCHEMA,
   get_fund_profile: FUND_PROFILE_OUTPUT_SCHEMA,
-  get_yahoo_finance_news: NEWS_OUTPUT_SCHEMA,
   get_stock_actions: SIMPLE_OBJECT_SCHEMA,
   get_financial_statement: SIMPLE_OBJECT_SCHEMA,
   get_holder_info: SIMPLE_OBJECT_SCHEMA,

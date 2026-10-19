@@ -231,8 +231,8 @@ class TestPhase6BCompanyNews(unittest.TestCase):
             # Top-level status: items present + SOURCE_UNAVAILABLE warning → PARTIAL (not SOURCE_LIMITED_NOT_FOUND)
             self.assertIn(data.get("status"), ("PARTIAL", None))
 
-    def test_get_yahoo_finance_news_returns_yahoo_items_when_finnhub_absent(self):
-        """Regression: get_yahoo_finance_news must return Yahoo items even when Finnhub key is absent."""
+    def test_default_yahoo_sources_return_items_when_finnhub_absent(self):
+        """Regression: the Yahoo news sources must return items even when Finnhub key is absent."""
         yf_items = [
             {
                 "title": "Apple hits all-time high",
