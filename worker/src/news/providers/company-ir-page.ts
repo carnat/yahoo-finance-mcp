@@ -293,13 +293,15 @@ export async function collectCompanyIrPageEvents(
     allowedPathPrefixes: entry.allowedPathPrefixes,
     revalidateAfter: entry.revalidateAfter ?? null,
   };
+  // Registry states that are not fetched raise Python's info warnings (2.19.0, R-news Batch B A-G9 / B-G3), so the empty
+  // collection reads as source-limited rather than a provider error.
+  const warningBase = { canonicalUrl: entry.canonicalUrl, registryVersion: companyIrPageRegistry.registryVersion, approvalStatus: entry.status };
   if (entry.status === "disabled") {
-    return { items: [], warnings, used: false, diagnostics: { ...diagnostics, status: "DISABLED", allowedAction: "none" } };
+    warnings.push({ ...warningBase, code: "COMPANY_IR_PAGE_DISABLED", message: "Company IR page registry entry is disabled.", severity: "info" });
+    return { items: [], warnings, used: false, diagnostics: { ...diagnostics, status: "DISABLED", allowedAction: "registry_review_required" } };
   }
   if (entry.status === "candidate") {
-    diagnostics.status = "CANDIDATE_AVAILABLE";
-    diagnostics.allowedAction = "review_and_promote";
-    diagnostics.candidates = [{
+    const candidate = {
       ticker: entry.ticker,
       issuerName: entry.issuerName,
       canonicalUrl: entry.canonicalUrl,
@@ -307,7 +309,17 @@ export async function collectCompanyIrPageEvents(
       candidateReason: entry.candidateReason ?? null,
       discoveredAt: entry.discoveredAt ?? null,
       decisionGrade: false,
-    }];
+    };
+    diagnostics.status = "CANDIDATE_AVAILABLE";
+    diagnostics.allowedAction = "review_and_promote";
+    diagnostics.candidates = [candidate];
+    warnings.push({
+      ...warningBase,
+      code: "COMPANY_IR_PAGE_CANDIDATE_AVAILABLE",
+      message: "Company IR page candidate is available for review but was not fetched.",
+      severity: "info",
+      candidate,
+    });
     return { items: [], warnings, used: false, diagnostics };
   }
   if (!registryFresh(entry)) {
@@ -317,11 +329,13 @@ export async function collectCompanyIrPageEvents(
       severity: "warning",
       canonicalUrl: entry.canonicalUrl,
     });
-    return { items: [], warnings, used: false, diagnostics: { ...diagnostics, status: "REVALIDATION_DUE", allowedAction: "revalidate" } };
+    return { items: [], warnings, used: false, diagnostics: { ...diagnostics, status: "REVALIDATION_DUE", allowedAction: "registry_review_required" } };
   }
 
   try {
     const { text, finalUrl } = await fetchApprovedCompanyIrPage(entry);
+    // An html_article entry is approved for HTML only: a feed body fails validation (2.19.0, call #17).
+    if (entry.adapter === "html_article" && looksLikeFeed(text)) throw new Error("unexpected feed body for html_article adapter");
     let parsed = looksLikeFeed(text)
       ? companyIrPageFeedItems(tickerU, entry, text, retrievedAt, finalUrl)
       : entry.adapter === "structured"
@@ -342,7 +356,7 @@ export async function collectCompanyIrPageEvents(
       severity: "warning",
       canonicalUrl: entry.canonicalUrl,
     });
-    return { items: [], warnings, used: false, diagnostics: { ...diagnostics, status: "SOURCE_VALIDATION_FAILED", allowedAction: "review_registry_entry" } };
+    return { items: [], warnings, used: false, diagnostics: { ...diagnostics, status: "SOURCE_VALIDATION_FAILED", allowedAction: "registry_review_required" } };
   }
 }
 function parseCompanyIrFeedItems(xml: string): { feedTitle: string | null; itemXmls: Array<{ kind: "rss" | "atom"; xml: string }> } {

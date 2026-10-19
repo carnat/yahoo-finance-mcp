@@ -397,6 +397,8 @@ CASES += [
     # PRESS_RELEASE rows are relabelled yahoo_finance_press_releases and dropped from a news-only selection (accepted 7,
     # returned 5). company_ir still differs (R-news Batch B): Python serves it from the Yahoo feed, the Worker (2.10.0) from
     # approved company IR registry entries only (none for AMD, so NOT_REGISTERED and nothing).
+    # TODO(python-mirror): R-news Batch B (A-G10 / B-G2) ports the registry-only company_ir; flip to equal with expect=<the expect_ts
+    # below> (every selection then agrees).
     _multi_scenario(
         "news.yahoo.source_selector_item_sets", ["BR-NWS-198", "BR-NWS-246"],
         [(label, (lambda s=srcs: server.get_company_news("AMD", 10, 14, s)),
@@ -992,23 +994,21 @@ CASES += [
         submissions=(None, None), routes={SEC_TICKERS_URL: {"json": {}}}, select=_sec_view,
         expect={"items": [], "warnings": [["SOURCE_UNAVAILABLE", "SEC submissions source unavailable."]],
                 "status": "SOURCE_LIMITED_NOT_FOUND", "sourcesUsed": []}),
-    # Card 237: Python rejects blank filing types; the Worker has no such check (a blank type matches nothing), and an empty
-    # list means the default three forms in Python but every form in the Worker.
+    # Card 237: blank filing types are INPUT_VALIDATION_ERROR and an empty list means the default three forms, in both runtimes (the
+    # Worker since 2.19.0, B-G8; until then a blank type matched nothing and [] accepted every form).
     _multi_scenario(
-        "news.sec.recent_events_filing_types_validation_differs", ["BR-NWS-237", "BR-NWS-216"],
+        "news.sec.recent_events_blank_filing_types_are_rejected_and_an_empty_list_uses_the_defaults", ["BR-NWS-237", "BR-NWS-216"],
         [("blank", lambda: server.get_sec_recent_events("ACME", ["  "], 90, 20), 'm.yahooFinance.getSecRecentEvents("ACME", ["  "], 90, 20)'),
          ("empty_list", lambda: server.get_sec_recent_events("ACME", [], 90, 20), 'm.yahooFinance.getSecRecentEvents("ACME", [], 90, 20)')],
         routes=_sec_routes(SEC_CIK, "ACME", "Acme Corp", _sec_recent(["8-K", "DEF 14A", "10-K", "424B5"], [1, 2, 3, 4])),
         submissions=_py_sec(SEC_CIK, "Acme Corp", _sec_recent(["8-K", "DEF 14A", "10-K", "424B5"], [1, 2, 3, 4])),
         select=lambda v: ({"error": v["error"]["code"], "message": v["error"]["message"]} if "error" in v and "items" not in v
                           else {"forms": [i["filingType"] for i in v["items"]], "status": v.get("status")}),
-        mode="pinned",
-        decision="FINDING: filing_types=['  '] is INPUT_VALIDATION_ERROR in Python but an empty NOT_FOUND result in the Worker; filing_types=[] uses 8-K/10-Q/10-K in Python and accepts every form in the Worker",
-        expect_py={"blank": {"error": "INPUT_VALIDATION_ERROR", "message": "filing_types must not be empty"},
-                   "empty_list": {"forms": ["8-K", "10-K"], "status": None}},
-        expect_ts={"blank": {"forms": [], "status": "NOT_FOUND"},
-                   "empty_list": {"forms": ["8-K", "DEF 14A", "10-K", "424B5"], "status": None}}),
+        expect={"blank": {"error": "INPUT_VALIDATION_ERROR", "message": "filing_types must not be empty"},
+                "empty_list": {"forms": ["8-K", "10-K"], "status": None}}),
     # The SEC-only event payload: the Worker adds sourceCoverage / coverage / sourceStatus, Python does not.
+    # TODO(python-mirror): R-news Batch B (B-G8 / call #15) adds the three fields to Python; flip to equal with expect=<the expect_ts
+    # below> and rename to news.sec.recent_events_payload_has_coverage_fields.
     _sec_scenario(
         "news.sec.recent_events_payload_has_coverage_fields_in_worker_only", ["BR-NWS-195", "BR-NWS-261"],
         lambda: server.get_sec_recent_events("ACME", ["8-K"], 90, 20),
@@ -1337,21 +1337,24 @@ CASES += [
                    "sourceStatus": {"finnhub": "PROVIDER_CHANGED"},
                    "warnings": [["SOURCE_UNAVAILABLE", "Finnhub provider changed: FINNHUB_PROVIDER_CHANGED: expected array, got object"], _VERIFY_LIMITED],
                    "next": "CHECK_OFFICIAL_RELEASES", "best": 0}),
-    # Card 197 edge: a company_ir verification with no website. The Worker reports NOT_REGISTERED (2.10.0: approved IR registry only;
-    # until then WEBSITE_NOT_AVAILABLE) and the result stays NOT_FOUND (that status is not a failure mode); Python serves company_ir from
-    # the Yahoo feed, whose profile lookup failed, so it is IDENTITY_UNAVAILABLE and the result is source limited.
+    # Card 197 edge: a company_ir verification with no approved registry entry. The Worker reports NOT_REGISTERED (2.10.0: approved
+    # IR registry only), which maps to the existing failureMode SOURCE_UNCONFIGURED since 2.19.0 (call #14), so the result is
+    # SOURCE_LIMITED_NOT_FOUND (it stayed NOT_FOUND before). Python serves company_ir from the Yahoo feed, whose profile lookup failed,
+    # so it is IDENTITY_UNAVAILABLE and the result is source limited for another reason.
+    # TODO(python-mirror): flip to equal with expect=<the expect_ts below> once Python's company_ir is registry-only and maps
+    # NOT_REGISTERED to SOURCE_UNCONFIGURED (rename to news.verify.unregistered_company_ir_is_source_unconfigured).
     _verify_case(
         "news.verify.company_ir_without_a_website_stays_not_found_in_the_worker", ["BR-NWS-197"], ["company_ir"], news=[], info=RuntimeError("profile unavailable"),
         identity_fails=True, mode="pinned",
-        decision="FINDING: company_ir verification: the Worker (approved IR registry only since 2.10.0) stays NOT_FOUND on NOT_REGISTERED; "
-                 "Python (Yahoo passthrough) is SOURCE_LIMITED_NOT_FOUND / YAHOO_IDENTITY_UNAVAILABLE",
+        decision="FINDING: company_ir verification: the Worker (approved IR registry only since 2.10.0) is SOURCE_LIMITED_NOT_FOUND / SOURCE_UNCONFIGURED "
+                 "on NOT_REGISTERED (2.19.0); Python (Yahoo passthrough) is SOURCE_LIMITED_NOT_FOUND / YAHOO_IDENTITY_UNAVAILABLE",
         expect_py={"status": "SOURCE_LIMITED_NOT_FOUND", "failureMode": "YAHOO_IDENTITY_UNAVAILABLE", "retryable": False, "action": _VERIFY_ACTION,
                    "sourceStatus": {"yahoo_finance_identity": "IDENTITY_UNAVAILABLE", "company_ir": "EMPTY_RESULT"},
                    "warnings": [["SOURCE_IDENTITY_UNAVAILABLE", "Yahoo company identity lookup was unavailable; only exact ticker-token matches were retained."],
                                 _VERIFY_LIMITED],
                    "next": "CHECK_OFFICIAL_RELEASES", "best": 0},
-        expect_ts={"status": "NOT_FOUND", "failureMode": None, "retryable": False, "action": None,
-                   "sourceStatus": {"company_ir": "NOT_REGISTERED"}, "warnings": [],
+        expect_ts={"status": "SOURCE_LIMITED_NOT_FOUND", "failureMode": "SOURCE_UNCONFIGURED", "retryable": False, "action": _VERIFY_ACTION,
+                   "sourceStatus": {"company_ir": "NOT_REGISTERED"}, "warnings": [_VERIFY_LIMITED],
                    "next": "CHECK_OFFICIAL_RELEASES", "best": 0}),
     # Card 242: until 2.17.0 every collected item carried tickers=[ticker], so the relevance score was HIGH at its first test and
     # the low-relevance downgrade could never fire. Since 2.17.0 (B-G12c) relevance reads the evidence text and issuer only; this
@@ -1755,6 +1758,8 @@ CASES += [
     # Card 226 / 200: longName 'Rocket Lab USA, Inc.', shortName 'Rocket Lab'. The Worker builds aliases from long, short and company
     # names, so 'Rocket Lab target raised ... by Cantor' is accepted (CLAUSE); Python uses longName only, so the same headline is
     # rejected as another company's target.
+    # TODO(python-mirror): R-news Batch B (B-G11 / call #16) gives Python the Worker's alias set; flip to equal with expect=<the
+    # expect_ts below> and rename to news.valuation_tool.long_short_and_company_name_aliases.
     _valuation_tool_case(
         "news.valuation_tool.short_name_alias_exists_in_the_worker_only", ["BR-NWS-226", "BR-NWS-200", "BR-NWS-201"], 30,
         news=_RKLB_NEWS, info=_RKLB_INFO, select=_valuation_tool_view, mode="pinned",
@@ -1767,13 +1772,30 @@ CASES += [
                                    "subjectAliases": ["rklb", "rocket lab", "rocket lab usa", "rocket lab usa inc"]},
                    "finnhub": [], "evidence": [["Cantor Fitzgerald", "CLAUSE", 30, "Rocket Lab price target raised to $30 by Cantor Fitzgerald"]]}),
     # Card 201 / 226: an invalid ticker makes Python's get_company_news return an error payload (NEWS_UNAVAILABLE); the Worker's news
-    # call does not validate the ticker, so there is no news error.
+    # call does not validate the ticker, so there is no news error. Since 2.19.0 (B-G11) the Worker raises NEWS_UNAVAILABLE for a news
+    # error payload or a failed news call, as Python does; this scenario still differs only because the Worker's internal news call
+    # does not validate ticker format (R-news Batch C, A-G12).
     _valuation_tool_case(
         "news.valuation_tool.news_error_payload_raises_news_unavailable_in_python_only", ["BR-NWS-201", "BR-NWS-226", "BR-NWS-240"], 30,
         ticker="BAD TKR!", news=[], info={}, select=lambda d: {"warnings": [w["code"] for w in d["warnings"]], "status": d["status"], "windowDays": d["windowDays"]},
         mode="pinned", decision="FINDING: a news error payload (invalid ticker) raises NEWS_UNAVAILABLE in Python; the Worker does not validate the ticker so it raises nothing",
         expect_py={"warnings": ["ATTRIBUTION_UNCHECKED", "NEWS_UNAVAILABLE"], "status": "NOT_FOUND", "windowDays": 30},
         expect_ts={"warnings": ["ATTRIBUTION_UNCHECKED"], "status": "NOT_FOUND", "windowDays": 30}),
+]
+
+
+# Card 226 / call #16 (2.19.0): a name equal to the ticker is not issuer identity. With Yahoo shortName 'RKLB' (and no longName) the
+# Worker has no attribution name, so targets are unchecked; Python takes 'RKLB' as the issuer name.
+CASES += [
+    # TODO(python-mirror): flip to equal with expect=<the expect_ts below> once Python drops a ticker-equal alias
+    # (rename to news.valuation_tool.ticker_equal_name_is_not_an_attribution_alias).
+    _valuation_tool_case(
+        "news.valuation_tool.ticker_equal_short_name_is_an_alias_only_in_python", ["BR-NWS-226", "BR-NWS-200"], 30,
+        news=[], info={"shortName": "RKLB"},
+        select=lambda d: {"warnings": [w["code"] for w in d["warnings"]], "attribution": d["attribution"]},
+        mode="pinned", decision="FINDING: 2.19.0 Worker side landed: a shortName equal to the ticker is not an attribution alias in the Worker (ATTRIBUTION_UNCHECKED); Python still uses it (port pending)",
+        expect_py={"warnings": [], "attribution": {"checked": True, "rejectedForOtherCompany": 0, "subjectAliases": ["rklb"]}},
+        expect_ts={"warnings": ["ATTRIBUTION_UNCHECKED"], "attribution": _NO_CHECK}),
 ]
 
 
@@ -1898,6 +1920,51 @@ CASES += [
                             "headers": {"content-type": "application/rss+xml"}}},
         select=lambda v: {"status": v["status"], "warnings": _warning_codes(v), "relevance": [e["relevance"] for e in v["bestEvidence"]]},
         expect={"status": "PARTIAL", "warnings": ["LOW_RELEVANCE_EVIDENCE"], "relevance": ["LOW"]}),
+]
+
+# Planner decision 6 (R-news Batch B, 2.19.0): verify relevance reads one issuer name set in both runtimes: Yahoo longName and
+# shortName plus the SEC submissions name, without any name equal to the ticker. The Worker read only Yahoo shortName (else
+# longName) before; Python reads only the SEC submissions name until its port.
+_ZETA_RELEASE = [_yn("Zeta announces acquisition of Beta Corp", publisher="Business Wire", when=_days_ago(2))]
+
+
+def _relevance_case(name, *, info, sec_name, news=None, wire_title=None, **kw) -> Case:
+    """Yahoo press releases (titles must name the Yahoo issuer), or with wire_title a GlobeNewswire release tagged Nasdaq:ZZTP."""
+    source = "newswire" if wire_title else "yahoo_finance_press_releases"
+    routes = _sec_routes(SEC_CIK, "ZZTP", sec_name, {})
+    if wire_title:
+        routes[GNW_FEEDS] = {"body": _rss([_gitem(1, wire_title, ["Nasdaq:ZZTP"], desc="Beta Corp holders approve.")]),
+                             "headers": {"content-type": "application/rss+xml"}}
+    return _scenario(
+        name, ["BR-NWS-242"],
+        lambda: server.verify_company_event("ZZTP", "acquisition", "", "", [source]),
+        f'm.yahooFinance.verifyCompanyEvent("ZZTP", "acquisition", "", "", {json.dumps([source])})',
+        news=news or [], info=info, submissions=_py_sec(SEC_CIK, sec_name, {}), routes=routes,
+        select=lambda v: {"status": v["status"], "warnings": _warning_codes(v), "relevance": [e["relevance"] for e in v["bestEvidence"]]}, **kw)
+
+
+CASES += [
+    # The SEC submissions name alone makes the release relevant in both runtimes (the Worker reads it since 2.19.0).
+    _relevance_case("news.verify.relevance_reads_the_sec_submissions_name", wire_title="Zeta announces acquisition of Beta Corp",
+                    info={"exchange": "NMS"}, sec_name="Zeta Inc",
+                    expect={"status": "CONFIRMED", "warnings": [], "relevance": ["HIGH"]}),
+    # A Yahoo shortName ('Zeta') names the issuer while the SEC name does not: HIGH in the Worker, LOW (downgraded) in Python.
+    # TODO(python-mirror): flip to equal with expect=<the expect_ts below> once Python reads Yahoo longName and shortName
+    # (rename to news.verify.relevance_reads_the_yahoo_short_name).
+    _relevance_case("news.verify.relevance_reads_the_yahoo_short_name_only_in_the_worker", news=_ZETA_RELEASE,
+                    info={"shortName": "Zeta", "longName": "Zeta Platforms, Inc."}, sec_name="ZT Holdings Corp", mode="pinned",
+                    decision="FINDING: 2.19.0 Worker side landed: verify relevance reads Yahoo longName/shortName and the SEC name in the Worker; Python reads the SEC name only (port pending)",
+                    expect_py={"status": "PARTIAL", "warnings": ["LOW_RELEVANCE_EVIDENCE"], "relevance": ["LOW"]},
+                    expect_ts={"status": "CONFIRMED", "warnings": [], "relevance": ["HIGH"]}),
+    # A name equal to the ticker is not issuer identity: 'ZZTP' inside 'ZZTPX' is not a relevance match in the Worker; Python's SEC
+    # name 'ZZTP' still matches it as a substring.
+    # TODO(python-mirror): flip to equal with expect=<the expect_ts below> once Python drops ticker-equal names
+    # (rename to news.verify.relevance_ignores_a_ticker_equal_name).
+    _relevance_case("news.verify.relevance_uses_a_ticker_equal_name_only_in_python", wire_title="ZZTPX Group announces acquisition of Beta Corp",
+                    info={"shortName": "ZZTP", "exchange": "NMS"}, sec_name="ZZTP", mode="pinned",
+                    decision="FINDING: 2.19.0 Worker side landed: a ticker-equal issuer name is dropped from verify relevance in the Worker; Python still matches it (port pending)",
+                    expect_py={"status": "CONFIRMED", "warnings": [], "relevance": ["HIGH"]},
+                    expect_ts={"status": "PARTIAL", "warnings": ["LOW_RELEVANCE_EVIDENCE"], "relevance": ["LOW"]}),
 ]
 
 
@@ -2034,8 +2101,14 @@ def _worker_ir_registry(worker_entry: dict) -> dict:
     return registry
 
 
-def _ir_page_case(name, ids, body, *, entry=None, content_type="text/html; charset=utf-8", max_results=100, lookback=365, select, **kw) -> Case:
+def _ir_page_case(name, ids, body, *, entry=None, content_type="text/html; charset=utf-8", max_results=100, lookback=365, select,
+                  verify_query=None, **kw) -> Case:
+    """get_company_news (or, with verify_query, verify_company_event) for IQE.L with one approved IR-page entry."""
     entry = entry or IR_ENTRY
+    py_tool = (lambda: server.verify_company_event("IQE.L", verify_query, "", "", ["company_ir_page"])) if verify_query else \
+        (lambda: server.get_company_news("IQE.L", max_results, lookback, ["company_ir_page"]))
+    ts_tool = (f'mod.yahooFinance.verifyCompanyEvent("IQE.L", {json.dumps(verify_query)}, "", "", ["company_ir_page"])' if verify_query
+               else f'mod.yahooFinance.getCompanyNews("IQE.L", {max_results}, {lookback}, ["company_ir_page"])')
 
     def py():
         with tempfile.TemporaryDirectory(prefix="ir-registry-") as tmp:
@@ -2043,7 +2116,7 @@ def _ir_page_case(name, ids, body, *, entry=None, content_type="text/html; chars
             path.write_text(json.dumps({"schemaVersion": "2026-07-10", "registryVersion": "2026-09-25.1200", "sources": [entry]}), encoding="utf-8")
             with _py_news_env(news=[], info={}), patch.object(ir_page_provider, "_COMPANY_IR_PAGE_REGISTRY_PATH", path), \
                     url_policy.registry_override(news_tools._load_company_ir_page_registry()):
-                return json.loads(asyncio.run(server.get_company_news("IQE.L", max_results, lookback, ["company_ir_page"])))
+                return json.loads(asyncio.run(py_tool()))
 
     worker_entry = {k: entry.get(k) for k in _IR_WORKER_FIELDS}
     fx = {"registry": _worker_ir_registry(worker_entry), "src": str(WORKER / "src"),
@@ -2051,7 +2124,7 @@ def _ir_page_case(name, ids, body, *, entry=None, content_type="text/html; chars
     js = _REGISTRY_BUNDLE_JS + _worker_js(f"""
 const mod = await registryBundle(fx.registry, fx.src, fx.esbuild);
 mod.response.setWorkerEnv({{}});
-return JSON.parse(await mod.yahooFinance.getCompanyNews("IQE.L", {max_results}, {lookback}, ["company_ir_page"]));""")
+return JSON.parse(await {ts_tool});""")
     headers = {"content-type": content_type} if content_type else {}
     return Case(name=name, ids=ids, py=py, ts={"js": js, "isolate": True, "args": [worker_entry], "fx": fx},
                 routes={**_yahoo_routes([], {}), IR_URL: {"body": body, "headers": headers}}, select=select, **kw)
@@ -2111,12 +2184,16 @@ CASES += [
                           for i in v["items"]],
         expect=[["earnings", "HIGH", "HIGH", "approved", "IQE plc", 240, 180]]),
     # Card 249: with no issuerName in the entry the issuer is the upper-cased ticker in Python and the (missing) name in the Worker.
+    # TODO(python-mirror): R-news Batch B (B-G17) makes Python's issuer null without a registry name; flip to equal with
+    # expect=<the expect_ts below> and rename to news.ir_page.issuer_without_a_registry_name_is_null.
     _ir_page_case(
         "news.ir_page.issuer_without_a_registry_name", ["BR-NWS-249"],
         "<html>" + _ir_article(1, "Acme announces Q3 earnings", date=_ir_day(1)) + "</html>", entry={k: v for k, v in IR_ENTRY.items() if k != "issuerName"},
         select=lambda v: [[i.get("issuer"), i.get("originalSource")] for i in v["items"]], mode="pinned",
         decision="FINDING: an IR-page entry without issuerName gives issuer / originalSource 'IQE.L' (upper-cased ticker) in Python and null in the Worker",
         expect_py=[["IQE.L", "IQE.L"]], expect_ts=[[None, None]]),
+    # TODO(python-mirror): R-news Batch B (B-G17) has Python read content_text; flip to equal with expect=<the expect_ts below> and
+    # rename to news.ir_page.structured_json_summary_reads_content_text.
     _ir_page_case(
         "news.ir_page.structured_json_summary_reads_content_text_in_the_worker_only", ["BR-NWS-202"],
         json.dumps({"items": [{"title": "Json headline one", "content_text": "summary via content_text", "url": "/investors/regulatory-news/j1", "date": _ir_day(2)}]}),
@@ -2124,14 +2201,23 @@ CASES += [
         select=lambda v: [[i["title"], i["summary"]] for i in v["items"]], mode="pinned",
         decision="FINDING: the Worker reads content_text as the summary of a structured JSON item; Python does not (summary falls back to the title)",
         expect_py=[["Json headline one", "Json headline one"]], expect_ts=[["Json headline one", "summary via content_text"]]),
-    # Card 202 edge: a feed-shaped body is parsed as RSS/Atom by the Worker whatever the adapter; Python parses it as HTML and finds nothing.
+    # Card 202 edge, call #17 (2.19.0): a feed-shaped body served to an html_article entry fails validation in the Worker (until then
+    # it was parsed as RSS whatever the adapter); Python parses it as HTML and finds nothing.
+    # TODO(python-mirror): flip to equal with expect=<the expect_ts below> once Python fails it too
+    # (rename to news.ir_page.feed_shaped_body_on_an_html_article_entry_fails_validation).
     _ir_page_case(
         "news.ir_page.feed_shaped_body_is_parsed_as_rss_in_the_worker_only", ["BR-NWS-202"], _IR_RSS,
-        select=lambda v: {"titles": [i["title"] for i in v["items"]], "status": v["sourceStatus"]["company_ir_page"]["status"]}, mode="pinned",
-        decision="FINDING: an RSS body served to an html_article IR page yields items in the Worker (feed parser) and none in Python (HTML parser)",
-        expect_py={"titles": [], "status": "EMPTY_RESULT"}, expect_ts={"titles": ["RSS headline one here"], "status": "APPROVED_SOURCE_OK"}),
+        select=lambda v: {"titles": [i["title"] for i in v["items"]], "status": v["sourceStatus"]["company_ir_page"]["status"],
+                          "warnings": _warning_rows(v), "collection": v.get("status")}, mode="pinned",
+        decision="FINDING: 2.19.0 Worker side landed: an RSS body served to an html_article IR page is SOURCE_VALIDATION_FAILED in the Worker; Python parses it as HTML and finds nothing (port pending)",
+        expect_py={"titles": [], "status": "EMPTY_RESULT", "warnings": [], "collection": "NOT_FOUND"},
+        expect_ts={"titles": [], "status": "SOURCE_VALIDATION_FAILED",
+                   "warnings": [["COMPANY_IR_PAGE_VALIDATION_FAILED", "Approved company IR page validation failed: unexpected feed body for html_article adapter"]],
+                   "collection": "SOURCE_LIMITED_NOT_FOUND"}),
     # Card 203: an html_article entry answered with application/json: the Worker rejects the content type (SOURCE_VALIDATION_FAILED);
     # Python parses the body as JSON, finds no records and reports an empty (approved) source.
+    # TODO(python-mirror): R-news Batch B (B-G17) has Python reject it with the same message; flip to equal with expect=<the expect_ts
+    # below> and rename to news.ir_page.html_adapter_with_json_content_type_fails_validation.
     _ir_page_case(
         "news.ir_page.html_adapter_with_json_content_type_fails_validation_in_the_worker_only", ["BR-NWS-203"], "<html>" + _ir_article(1, "Article headline one", date=_ir_day(1)) + "</html>",
         content_type="application/json", select=_ir_view, mode="pinned",
@@ -2140,6 +2226,19 @@ CASES += [
         expect_ts={"count": 0, "status": "SOURCE_VALIDATION_FAILED",
                    "warnings": [["COMPANY_IR_PAGE_VALIDATION_FAILED", "Approved company IR page validation failed: unexpected HTML content type: application/json"]],
                    "collection": "SOURCE_LIMITED_NOT_FOUND", "sourcesUsed": []}),
+    # Planner decision 6 (R-news Batch B, 2.19.0): an approved company_ir_page item counts as an official, HIGH-relevance source in
+    # verify, as sec_filing / company_ir do (Worker behaviour). Here the item names neither the ticker nor an issuer name, so Python
+    # (no company_ir_page in its HIGH list) scores it LOW and downgrades CONFIRMED to PARTIAL.
+    # TODO(python-mirror): flip to equal with expect=<the expect_ts below> once Python counts company_ir_page as HIGH
+    # (rename to news.ir_page.verify_counts_an_approved_ir_page_item_as_high_relevance).
+    _ir_page_case(
+        "news.ir_page.verify_counts_an_approved_ir_page_item_as_high_relevance_in_the_worker_only", ["BR-NWS-242", "BR-NWS-249"],
+        "<html>" + _ir_article(1, "Board approves acquisition of Beta Corp", date=_ir_day(1)) + "</html>", verify_query="acquisition",
+        select=lambda v: {"status": v["status"], "warnings": _warning_codes(v),
+                          "best": [[e["sourceType"], e["confidence"], e["relevance"]] for e in v["bestEvidence"]]},
+        mode="pinned", decision="FINDING: verify relevance counts company_ir_page as HIGH in the Worker only (planner decision 6: Python adopts it)",
+        expect_py={"status": "PARTIAL", "warnings": ["LOW_RELEVANCE_EVIDENCE"], "best": [["company_ir_page", "HIGH", "LOW"]]},
+        expect_ts={"status": "CONFIRMED", "warnings": [], "best": [["company_ir_page", "HIGH", "HIGH"]]}),
     # Card 208: exactly 768,000 bytes (750 KiB) is accepted; 768,001 is rejected with COMPANY_IR_PAGE_VALIDATION_FAILED and the source is
     # SOURCE_VALIDATION_FAILED. (A redirect to an off-list host cannot be driven here: both stubs answer with the requested URL.)
     _ir_page_case(
@@ -2156,11 +2255,10 @@ CASES += [
 
 
 # ═══════════════════════════════════════════════════════════════════════════════════════════════
-# Official-site RSS discovery for `company_ir` (Worker only): website normalisation, identity grade, feed acceptance
-# BR-NWS-207 / 209 / 210 / 211 / 228 / 258
-# Python serves `company_ir` from the Yahoo feed (no website, no discovery), so each case pins the Worker value and the (constant)
-# Python value for the same scenario. Since 2.10.0 the Worker's company_ir reads only approved company IR registry entries (the
-# discovery these cards describe was removed with the fetch allow-list), so every scenario is NOT_REGISTERED and probes no host.
+# `company_ir` is the approved company IR registry only (BR-NWS-207 / 209 / 210 / 211 / 228 / 258)
+# Python serves `company_ir` from the Yahoo feed (no website, no discovery). Since 2.10.0 the Worker's company_ir reads only approved
+# company IR registry entries (the official-site discovery these cards described was removed with the fetch allow-list), so the
+# scenario is NOT_REGISTERED and probes no host. R-news Batch B (2.19.0) ports the registry-only source to Python.
 # ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 def _company_ir_case(name, ids, website, info, *, ticker="ACME", routes=None, hosts=False, decision, expect_ts, expect_py=None, **kw) -> Case:
@@ -2196,47 +2294,10 @@ try {{
                 select=view, mode="pinned", decision=decision, expect_py=expect_py if expect_py is not None else py_default, expect_ts=expect_ts, **kw)
 
 
-_ACME = {"shortName": "Acme", "longName": "Acme Inc.", "exchange": "NMS"}
-_NO_SITE_TS = {"status": "WEBSITE_NOT_AVAILABLE", "website": None, "identityConfidence": "MEDIUM", "collection": "SOURCE_LIMITED_NOT_FOUND", "items": []}
-_BUDGET = ["COMPANY_IR_DISCOVERY_BUDGET_EXHAUSTED", "RSS/Atom discovery reached its 24-page Worker probe budget before all bounded company/IR paths were checked."]
-_NO_FEED = ["COMPANY_IR_FEED_NOT_FOUND", "No RSS/Atom feed was discovered from the verified company website or common IR/news paths."]
 _WORKER_ONLY = ("FINDING: company_ir is a Yahoo-feed passthrough in Python; in the Worker it is the approved company IR registry only "
                 "(2.10.0: official-site RSS/Atom discovery removed with the fetch allow-list), so with no approved entry it is NOT_REGISTERED")
 _TS_NOT_REGISTERED = {"status": "NOT_REGISTERED", "website": None, "identityConfidence": None, "warnings": [], "collection": "PROVIDER_ERROR",
                       "items": []}
-
-CASES += [
-    # Cards 209 / 210 / 258: an aggregator host (linkedin.com, including subdomains) is not an official domain: the website is null,
-    # COMPANY_WEBSITE_NOT_AVAILABLE names the host, company_ir is WEBSITE_NOT_AVAILABLE; a blocked host counts as no website, so with a name the
-    # identity grade is MEDIUM.
-    _company_ir_case(
-        "news.company_ir.aggregator_website_is_not_an_official_domain", ["BR-NWS-209", "BR-NWS-210", "BR-NWS-258"], "linkedin.com/company/acme", _ACME,
-        decision=_WORKER_ONLY, expect_ts=_TS_NOT_REGISTERED),
-    _company_ir_case(
-        "news.company_ir.empty_website_is_not_available", ["BR-NWS-209", "BR-NWS-210"], None, _ACME,
-        decision=_WORKER_ONLY, expect_ts=_TS_NOT_REGISTERED),
-    # Cards 209 / 210 (Finding Q7): 'ftp://acme.com' is not rejected as an unsupported scheme: 'https://' is prepended, so it becomes
-    # 'https://ftp://acme.com', whose host is 'ftp'; discovery then runs against https://ftp/.
-    _company_ir_case(
-        "news.company_ir.ftp_scheme_is_prefixed_with_https_not_rejected", ["BR-NWS-209", "BR-NWS-210"], "ftp://acme.com", _ACME,
-        decision=_WORKER_ONLY,
-        expect_ts=_TS_NOT_REGISTERED),
-    # Cards 209 / 210: a bare domain gets https:// and is reduced to its root URL; discovery probes that host, then investor., investors.
-    # and ir. of its root domain.
-    _company_ir_case(
-        "news.company_ir.bare_domain_gets_https_and_is_reduced_to_its_root", ["BR-NWS-209", "BR-NWS-210"], "acme.com", _ACME, hosts=True,
-        decision=_WORKER_ONLY,
-        expect_ts={**_TS_NOT_REGISTERED, "probedHosts": []},
-        expect_py={"status": "EMPTY_RESULT", "website": None, "identityConfidence": None, "warnings": [], "collection": "NOT_FOUND", "items": [], "probedHosts": []}),
-    # Card 209: path, query and fragment are dropped; the root domain strips a leading investors. so investor. / ir. variants are
-    # probed after the site's own host.
-    _company_ir_case(
-        "news.company_ir.path_and_query_are_dropped_and_investors_prefix_is_stripped_for_the_root", ["BR-NWS-209"], "investors.acme.com/x?y", _ACME, hosts=True,
-        decision=_WORKER_ONLY,
-        expect_ts={**_TS_NOT_REGISTERED, "probedHosts": []},
-        expect_py={"status": "EMPTY_RESULT", "website": None, "identityConfidence": None, "warnings": [], "collection": "NOT_FOUND", "items": [], "probedHosts": []}),
-]
-
 
 def _rss_feed(title, items):
     body = "".join(f"<item><title>{t}</title>" + (f"<link>{link}</link>" if link else "")
@@ -2254,48 +2315,19 @@ _FEED_ROUTES = {
     "https://feeds.example-wire.com/acme.xml": {"body": _rss_feed("Acmeinc Newsroom wire", [("Acmeinc signs contract", "https://feeds.example-wire.com/a1"),
                                                                                           ("Acmeinc quiet item without link", None)])},
 }
-_NV_INFO = {"shortName": "NVIDIA", "longName": "NVIDIA Corporation", "exchange": "NMS"}
-_TOKEN_ROUTES = {
-    "https://www.nvidia.com/": {"body": '<html><body><a href="https://f.example-wire.com/a.xml">RSS a</a> <a href="https://f.example-wire.com/b.xml">RSS b</a> '
-                                        '<a href="https://f.example-wire.com/c.xml">RSS c</a> <a href="https://f.example-wire.com/d.xml">RSS d</a></body></html>'},
-    "https://f.example-wire.com/a.xml": {"body": _rss_feed("Weekly", [("Nvidia unveils new GPU", "https://f.example-wire.com/a1")])},
-    "https://f.example-wire.com/b.xml": {"body": _rss_feed("Corporation digest", [("Corporation news", "https://f.example-wire.com/b1")])},
-    "https://f.example-wire.com/c.xml": {"body": _rss_feed("Technologies weekly", [("Technologies news", "https://f.example-wire.com/c1")])},
-    "https://f.example-wire.com/d.xml": {"body": _rss_feed("Market wrap", [("NVDA moves", "https://f.example-wire.com/d1")])},
-}
-_FEED_REJECTED = ["COMPANY_IR_RSS_HOST_REJECTED", "Linked external RSS/Atom feed did not match the company identity."]
 
+# 2.19.0 (R-news Batch B, A-G10 / B-G2): the official-site RSS discovery cases (cards 207 / 209 / 210 / 211 / 228 / 258: website
+# normalisation, identity grade, same-domain and name-token feed acceptance, the entity-declaration parse error) described behaviour
+# neither runtime keeps once Python's company_ir is registry-only, so they were merged into this one case: a company with a website
+# that links same-domain and external feeds is NOT_REGISTERED and no company host is probed.
 CASES += [
-    # Cards 207 / 228: a feed on the company's own domain (news.acmeinc.com) is accepted; its items are HIGH with a URL, LOW without,
-    # tickerRelevance HIGH. An external feed titled 'Industry Digest' that names neither the ticker nor a name token is rejected
-    # (COMPANY_IR_RSS_HOST_REJECTED); an external feed whose title carries the name token 'acmeinc' is accepted with MEDIUM (URL) / LOW (no URL).
+    # TODO(python-mirror): flip to equal with expect=<the expect_ts below> once Python's company_ir is registry-only
+    # (rename to news.company_ir.registry_only_source_probes_no_company_host).
     _company_ir_case(
-        "news.company_ir.same_domain_feed_accepted_unrelated_external_feed_rejected", ["BR-NWS-207", "BR-NWS-228"], "https://www.acmeinc.com", _ACMEINC, routes=_FEED_ROUTES,
-        decision=_WORKER_ONLY,
-        expect_ts=_TS_NOT_REGISTERED),
-    # Card 211: name tokens (4+ letters, not corp/inc/group/technology ...): 'Nvidia' matches; text with only 'Corporation' or
-    # 'Technologies' does not; the ticker in the first 2,000 characters of the feed also matches.
-    _company_ir_case(
-        "news.company_ir.external_feed_matches_on_name_token_or_ticker_but_not_stopwords", ["BR-NWS-211", "BR-NWS-207", "BR-NWS-228"], "https://www.nvidia.com", _NV_INFO,
-        ticker="NVDA", routes={**_TOKEN_ROUTES, SEC_TICKERS_URL: {"json": {"0": {"cik_str": 1045810, "ticker": "NVDA", "title": "NVIDIA CORP"}}}},
-        decision=_WORKER_ONLY,
-        expect_ts=_TS_NOT_REGISTERED),
-    # Card 258: identity grade. A name or a CIK without a usable website is MEDIUM; neither is LOW.
-    _company_ir_case(
-        "news.company_ir.identity_confidence_low_without_name_cik_or_website", ["BR-NWS-258"], None, {}, routes={SEC_TICKERS_URL: {"json": {}}},
-        decision=_WORKER_ONLY,
-        expect_py={"status": "EMPTY_RESULT", "website": None, "identityConfidence": None,
-                   "warnings": [["SOURCE_IDENTITY_UNAVAILABLE", "Yahoo company identity lookup was unavailable; only exact ticker-token matches were retained."]],
-                   "collection": "SOURCE_LIMITED_NOT_FOUND", "items": []},
-        expect_ts=_TS_NOT_REGISTERED),
-    _company_ir_case(
-        "news.company_ir.identity_confidence_medium_with_cik_only", ["BR-NWS-258"], None, {},
-        routes={SEC_TICKERS_URL: {"json": {"0": {"cik_str": 123, "ticker": "ACME", "title": "Acme"}}}},
-        decision=_WORKER_ONLY,
-        expect_py={"status": "EMPTY_RESULT", "website": None, "identityConfidence": None,
-                   "warnings": [["SOURCE_IDENTITY_UNAVAILABLE", "Yahoo company identity lookup was unavailable; only exact ticker-token matches were retained."]],
-                   "collection": "SOURCE_LIMITED_NOT_FOUND", "items": []},
-        expect_ts=_TS_NOT_REGISTERED),
+        "news.company_ir.registry_only_source_probes_no_company_host_in_the_worker",
+        ["BR-NWS-207", "BR-NWS-209", "BR-NWS-210", "BR-NWS-211", "BR-NWS-228", "BR-NWS-258"], "https://www.acmeinc.com", _ACMEINC,
+        routes=_FEED_ROUTES, hosts=True, decision=_WORKER_ONLY,
+        expect_ts={**_TS_NOT_REGISTERED, "probedHosts": []}),
 ]
 
 
@@ -2339,8 +2371,11 @@ CASES += [
                 "failureMode": "NO_OFFICIAL_RELEASE_SOURCE", "sourceStatus": {"yahoo_finance_news": "OK"}, "sourcesUsed": ["yahoo_finance_news"],
                 "warnings": [["NO_OFFICIAL_RELEASE_SOURCE", "No company-originated or official release source found in requested window."]],
                 "next": "USE_RETURNED_CONTEXT"}),
-    # Card 267: the payload fields that differ: the Worker adds doctrineUse 'ALLOWED' and the SEC evidence cikInt, and words
-    # decisionGradeBasis differently ('SEC EX-99 press-release exhibit' vs 'SEC EX-99 or approved IR-page evidence').
+    # Card 267: the payload fields that differ: the Worker adds doctrineUse 'ALLOWED' and the SEC evidence cikInt. decisionGradeBasis
+    # uses Python's wording in both runtimes since 2.19.0 (B-G18 / call #18; the Worker said 'SEC EX-99 press-release exhibit').
+    # TODO(python-mirror): R-news Batch B (call #18) adds secEvidence[].cikInt to Python; then expect_py secEvidenceKeys gains 'cikInt'
+    # and the case stays pinned on doctrineUse only (Worker-only, documented, P3); rename to
+    # news.press_releases.payload_has_doctrine_use_in_the_worker_only.
     _sec_scenario(
         "news.press_releases.payload_has_doctrine_use_and_different_basis_text_in_the_worker", ["BR-NWS-267"],
         lambda: server.get_company_press_releases("ACME", 90, 20, ["sec"]),
@@ -2349,11 +2384,11 @@ CASES += [
         select=lambda d: {"doctrineUse": d.get("doctrineUse"), "basis": d["decisionGradeBasis"], "capabilityStatus": d["capabilityStatus"],
                           "secEvidenceKeys": sorted(d["secEvidence"][0].keys()), "failureMode": d["failureMode"]},
         mode="pinned",
-        decision="FINDING: get_company_press_releases adds doctrineUse='ALLOWED' and secEvidence[].cikInt in the Worker only and words decisionGradeBasis differently",
+        decision="FINDING: get_company_press_releases adds doctrineUse='ALLOWED' and secEvidence[].cikInt in the Worker only (decisionGradeBasis agrees since 2.19.0)",
         expect_py={"doctrineUse": None, "basis": "No resolved SEC EX-99 or approved IR-page evidence in this call; use for verification/context only.",
                    "capabilityStatus": "ACTIVE", "secEvidenceKeys": ["acceptedAt", "accessionNumber", "documentUrl", "filingDate", "filingType"],
                    "failureMode": "SEC_8K_FOUND_EX99_NOT_FOUND"},
-        expect_ts={"doctrineUse": "ALLOWED", "basis": "No resolved SEC EX-99 press-release exhibit in this call; use for verification/context only.",
+        expect_ts={"doctrineUse": "ALLOWED", "basis": "No resolved SEC EX-99 or approved IR-page evidence in this call; use for verification/context only.",
                    "capabilityStatus": "ACTIVE", "secEvidenceKeys": ["acceptedAt", "accessionNumber", "cikInt", "documentUrl", "filingDate", "filingType"],
                    "failureMode": "SEC_8K_FOUND_EX99_NOT_FOUND"}),
 ]
@@ -2632,10 +2667,8 @@ CASES += [
     _scenario(
         "news.ir_page.shipped_registry_entries_are_candidates_only", ["BR-NWS-263"],
         lambda: server.get_company_news("IQE.L", 10, 14, ["company_ir_page"]), 'm.yahooFinance.getCompanyNews("IQE.L", 10, 14, ["company_ir_page"])',
-        news=[], info={}, select=_CANDIDATE_VIEW, mode="pinned",
-        decision="FINDING: a candidate-only IR page emits warning COMPANY_IR_PAGE_CANDIDATE_AVAILABLE and collection status SOURCE_LIMITED_NOT_FOUND in Python; the Worker emits no warning and PROVIDER_ERROR",
-        expect_py={**_CANDIDATE_COMMON, "warnings": ["COMPANY_IR_PAGE_CANDIDATE_AVAILABLE"], "collection": "SOURCE_LIMITED_NOT_FOUND"},
-        expect_ts={**_CANDIDATE_COMMON, "warnings": [], "collection": "PROVIDER_ERROR"}),
+        news=[], info={}, select=_CANDIDATE_VIEW,
+        expect={**_CANDIDATE_COMMON, "warnings": ["COMPANY_IR_PAGE_CANDIDATE_AVAILABLE"], "collection": "SOURCE_LIMITED_NOT_FOUND"}),
 ]
 
 
@@ -2685,17 +2718,6 @@ CASES += [
 ]
 
 
-_ENTITY_FEED_ROUTES = {
-    "https://www.acmeinc.com/": {"body": '<html><head><link rel="alternate" type="application/rss+xml" href="https://news.acmeinc.com/feed.xml"></head></html>'},
-    "https://news.acmeinc.com/feed.xml": {"body": '<?xml version="1.0"?><!DOCTYPE rss [<!ENTITY x "y">]><rss version="2.0"><channel><title>Acmeinc News</title></channel></rss>'},
-}
-CASES += [
-    # Cards 207 / 228: a feed containing <!ENTITY is a parse error (COMPANY_IR_RSS_PARSE_ERROR), not an accepted or host-rejected feed.
-    _company_ir_case(
-        "news.company_ir.feed_with_an_entity_declaration_is_a_parse_error", ["BR-NWS-207", "BR-NWS-228"], "https://www.acmeinc.com", _ACMEINC,
-        routes=_ENTITY_FEED_ROUTES, decision=_WORKER_ONLY,
-        expect_ts=_TS_NOT_REGISTERED),
-]
 
 
 # ═══════════════════════════════════════════════════════════════════════════════════════════════
