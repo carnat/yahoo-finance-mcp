@@ -2792,6 +2792,38 @@ F-024, F-026, F-029). Both runtimes change alike.
 - **Note:** `latencyMs` can read 0 for a request with no I/O.
 - **Rollback:** revert the release.
 
+### Excluding synthetic traffic (Phase 4 comparison)
+
+- **Rule (F6):** rows with `credentialTransport` (blob7) = `header` are synthetic. Every CI canary, preview canary
+  and deploy audit authenticates with an `Authorization: Bearer` header (`scripts/live_smoke_utils.py`). The
+  owner's connector uses the path transport (`/mcp/<token>`). Blob7 is recorded on every row since 2.11.1, so
+  the rule applies to the 2026-10-17 baseline too. Tooling only: no runtime change.
+- **Daily export:** `excludingHeaderTransport` carries the same `totals` and per-action aggregates as
+  `analyticsEngine`, from the same three queries with `blob7 != 'header'` added. Every other key is unchanged.
+- **D10 bounds:** the exit comparison groups by action group (blob1 `domain`), weighted by `_sample_interval`.
+  It judges only groups with 30 or more requests in both windows. A judged group passes when:
+  - its p95 `latencyMs` is at most 1.2 × the baseline p95;
+  - its p50 `latencyMs` is at most 1.2 × the baseline p50;
+  - its error-plus-exception rate (`tool_error` + `rpc_error` + `exception` over all requests) is at most the
+    baseline rate + 1 percentage point. `rejected` is reported but does not count as an error.
+- **Run:** `python scripts/compare_telemetry_windows.py --compare-start <ISO> --compare-end <ISO> [--out report.json]`.
+  It needs `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_TELEMETRY_TOKEN`. The baseline defaults to
+  2026-10-17T00:00Z to 2026-10-24T00:00Z. The comparison window defaults to the 7 days before the current UTC hour.
+- **Exit codes:**
+  - 0: pass;
+  - 1: a judged group failed;
+  - 2: missing secrets or bad arguments;
+  - 3: no group has enough volume to judge;
+  - 4: a query failed.
+- **Report:** the JSON lists the judged, skipped (low-volume) and failed groups, each group's metrics and checks,
+  and the overall result. A failed group blocks the phase exit until it is explained or fixed.
+- **Caveat:** once Phase 1b personal keys exist, a real user could use header transport. Revisit the rule then.
+- **Logged invocations < Analytics Engine requests (OPS-TEL-4):** expected. Explained 2026-10-19 by two sources:
+  - preview canaries (F6), which add Analytics Engine requests (about 15 per deploy) without matching logged
+    invocations;
+  - rejected-auth requests, which are written to Analytics Engine (one data point per `/mcp` request,
+    rejections included) but are refused before dispatch, so they never log the dispatch-start line.
+
 ## Central Validation and Ticker Caps (2.12.0)
 
 - **Why:** R4 Q3b (central ticker and accession validation) and Q3c/Q12 (per-tool ticker caps). Release type:
