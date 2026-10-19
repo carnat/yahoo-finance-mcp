@@ -449,6 +449,40 @@ grep -rnE 'from "\.\.?/(\.\./)?yahoo-finance(\.js)?"' worker/src/news.ts worker/
 - **D10. Telemetry regression bounds** for the exit comparison, for example a p95 latency delta and an error-rate delta per action group.
 - **D11. Ownership of `resolveSecFiling` / `_resolve_sec_filing`.** Also the filing-not-found and `ACCESSION_NOT_FOUND` envelope helpers that sit in the EDGAR block. They produce MCP error payloads; they are filing-selection policy, not transport. The topology puts them in `#shared`, so this spec places them in the EDGAR client. Alternative: they stay for Phase 5 SEC retrieval, which leaves them in `#shared` until then (see D1).
 
+## 11a. Planner decisions (2026-10-19)
+
+Where an option would rewrite an approved brief gate, the decision keeps the gate's wording and is recorded here for the owner to see.
+
+- **D1: (a) plus (c).**
+  - **(a)** A fifth unit, "shared utilities", runs after unit 4. It moves the generic helpers to neutral modules: `worker/src/util.ts`, `worker/src/batch.ts`, `worker/src/news/identity.ts` and `yfmcp/util.py`. That covers `_str`, `clampInt`, `runPartialBatch`, `toBatchError`, `normalizeBatchSymbolResult`, `parseObjectJson`, `compactExcerpt`, `normalizeStatus`, the company-website helpers, `resolveNewsCompanyIdentity`, and the Python `_clamp_int`, `_now_iso`, `_plain`, `_as_status`, `_unwrap_payload` and similar.
+  - **(c)** A topology-rule change: a *tool handler or tool-only helper* that the topology put in `#shared` only because two or more domains call it is assigned to its catalog domain. Examples: `_get_filing_data_unchecked`, `search_filing_text` and `resolveSecFiling` go to `#sec`; `get_earnings_momentum` and the consensus helpers go to `#earnings` / `#analyst`.
+    - Those functions are domain code, not hub code. They move in their Phase 5 unit.
+    - The rule change is made in `extract_topology.py` as an explicit override table, reviewed in the unit-5 PR, so the reclassification is visible rather than silent.
+  - **Result:** "No `#shared` region remains" keeps its wording. `#shared` means hub code only.
+  - `news.ts` then imports the 7 remaining names from the client and util modules.
+- **D2a.** The unit-1 move ships first, byte-identical. The Python EDGAR routing change follows as its own behaviour release, with docs, a version bump and parity cases, before unit 2.
+- **D2b and D2c** are decided in that routing release's own spec, with these planner rules fixed now:
+  - CIK resolution matches the Worker (full resolution).
+  - The submissions TTL matches the Worker (15 min).
+  - Existing error message text is kept where the status is unchanged.
+  - The document read keeps the HTTP status and has no size cap for those tools (today's behaviour). Timeout and decoding are as today in each runtime, unless a parity case shows a divergence.
+- **D3.** `worker/src/clients/*.ts`, to mirror `yfmcp/clients/`. The §9 glob fixes land as a tooling commit before unit 1, and they include `news/**` in `extract_topology.py` (it already misses it today).
+- **D4.** For unit 1, `clients/edgar.ts` imports `yGet`, `enc`, `countersSince`, `fetchProviderWithTimeout`, `edgeCache` and `stripHtmlTags` back from `yahoo-finance.ts`. This is allowed by playbook §3 if the TDZ scan passes and each module evaluates as the sole entry. The provider transport moves in unit 2, and the HTML helpers in unit 3. Unit 1 stays a single client.
+- **D5.** Yes: `parseHtmlTable` moves from `news.ts` to `clients/html.ts` in unit 3.
+- **D6.** Yes: `_resolve_ex991_url` moves to `yfmcp/clients/edgar.py` in unit 1, mirroring the Worker's `resolveEx991Url`.
+- **D7.** No façade over `yf.Ticker` in unit 2: it would not be a pure move, and it would retarget 12 patch sites. Python unit 2 moves only `_valuation_market_inputs`. Q3g `MarketInputs` is where a Python market-input façade belongs.
+- **D8.** Accepted. The proof is per-builder exact-literal tests (each builder returns the exact URL string the call site had, for fixture inputs), plus a harness diff of 0 and the acceptance suite.
+- **D9.** Route SEC-host URLs in `parse_public_transcript` through the EDGAR client fetch, in both runtimes, inside the Python routing release (D2a) and a matching Worker change.
+  - It is a User-Agent change only, documented and covered by parity cases.
+  - No exemption from the exit check.
+- **D10.** The exit comparison uses each action group with 30 or more requests in both windows, with preview-canary requests excluded (F6). A group passes when:
+  - p95 latency is within +20% of the baseline;
+  - p50 latency is within +20%;
+  - the error-plus-exception rate is within +1 percentage point.
+
+  A group outside these bounds blocks the phase exit until it is explained or fixed.
+- **D11.** `resolveSecFiling` / `_resolve_sec_filing` and their envelope helpers are filing-selection policy, so they stay out of the client. Under D1 (c) they are reclassified to `#sec` and move with Phase 5 SEC retrieval. Unit 1's scope list drops them; update `phase4_edgar_region.json` accordingly before unit 1 starts.
+
 ## 12. Noticed, not fixed (report-only)
 
 - `server.py:75` imports `_SEC_REQUIRED_UA` and never uses it.
