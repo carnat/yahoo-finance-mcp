@@ -234,7 +234,10 @@ def stub_urlopen(routes: dict | None):
 # ----------------------------------------------------------------- Worker side
 
 def _module_key(path: Path) -> str:
-    head, *rest = path.stem.split("-")
+    """camelCase key: `yahoo-finance.ts` -> yahooFinance; a subdirectory module keeps its
+    path, `clients/edgar.ts` -> clientsEdgar, `news/providers/sec.ts` -> newsProvidersSec."""
+    rel = path.relative_to(WORKER / "src") if path.is_absolute() else path
+    head, *rest = "-".join([*rel.parent.parts, rel.stem]).split("-")
     return head + "".join(p[:1].upper() + p[1:] for p in rest)
 
 
@@ -249,7 +252,7 @@ def _bundle() -> Path:
     out_dir = Path(tempfile.mkdtemp(prefix="parity-bundle-"))
     entry = out_dir / "entry.ts"
     lines = []
-    for ts in sorted((WORKER / "src").glob("*.ts")):
+    for ts in sorted((WORKER / "src").rglob("*.ts")):
         if ts.name.endswith(".d.ts"):
             continue
         lines.append(f'export * as {_module_key(ts)} from "{ts.as_posix()}";')
