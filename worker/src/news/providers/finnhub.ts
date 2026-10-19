@@ -60,14 +60,14 @@ export async function collectFinnhubEvents(
       if (resp.status === 401 || resp.status === 403) {
         throw new Error(`FINNHUB_AUTH_ERROR:${resp.status}`);
       } else if (resp.status === 429) {
-        throw new Error("FINNHUB_RATE_LIMITED");
+        throw new Error("FINNHUB_RATE_LIMITED:429");
       } else {
         throw new Error(`HTTP ${resp.status}`);
       }
     }
     const rawJson = await resp.json();
     if (!Array.isArray(rawJson)) {
-      throw new Error(`FINNHUB_PROVIDER_CHANGED: expected array, got ${typeof rawJson}`);
+      throw new Error("FINNHUB_PROVIDER_CHANGED");
     }
     const news = rawJson as unknown[];
     diagnostics.rawCount = news.length;
@@ -119,13 +119,15 @@ export async function collectFinnhubEvents(
       if (items.length < maxResults) items.push(item);
     }
   } catch (e) {
+    // R-news Batch C (decision 11): one message template per status, Python's `HTTP <n>` wording. The internal FINNHUB_* tags
+    // never reach the message; sourceStatus infers AUTH_ERROR / RATE_LIMITED / PROVIDER_CHANGED from these message prefixes.
     const msg = e instanceof Error ? e.message : String(e);
-    if (msg.startsWith("FINNHUB_AUTH_ERROR")) {
-      warnings.push({ code: "SOURCE_UNAVAILABLE", message: `Finnhub auth error: ${msg}`, severity: "warning" });
+    if (msg.startsWith("FINNHUB_AUTH_ERROR:")) {
+      warnings.push({ code: "SOURCE_UNAVAILABLE", message: `Finnhub auth error: HTTP ${msg.slice("FINNHUB_AUTH_ERROR:".length)}`, severity: "warning" });
     } else if (msg.startsWith("FINNHUB_RATE_LIMITED")) {
       warnings.push({ code: "SOURCE_UNAVAILABLE", message: "Finnhub rate limited: HTTP 429", severity: "warning" });
     } else if (msg.startsWith("FINNHUB_PROVIDER_CHANGED")) {
-      warnings.push({ code: "SOURCE_UNAVAILABLE", message: `Finnhub provider changed: ${msg}`, severity: "warning" });
+      warnings.push({ code: "SOURCE_UNAVAILABLE", message: "Finnhub provider changed: unexpected response format", severity: "warning" });
     } else {
       warnings.push({ code: "SOURCE_UNAVAILABLE", message: `Finnhub source unavailable: ${msg}`, severity: "warning" });
     }
