@@ -1390,7 +1390,9 @@ async def search_company_news(
     returned = _rank_news_items_by_relevance(filtered)[:safe_max]
     status = _build_collection_status(returned, sources_used, warnings)
     source_status = _compute_source_status(sources_used, warnings, returned, effective_sources, source_diagnostics)
-    source_coverage = _compute_source_coverage(source_status)
+    coverage = _build_coverage(source_status, None, safe_max, len(returned))
+    # F15: the top-level field follows coverage.state, which includes the truncation rule (decisions 10 and 18).
+    source_coverage = coverage["state"]
     payload = {
         "ticker": ticker.upper(),
         "query": query,
@@ -1403,7 +1405,7 @@ async def search_company_news(
         },
         "warnings": warnings,
         "sourceCoverage": source_coverage,
-        "coverage": _build_coverage(source_status, None, safe_max, len(returned)),
+        "coverage": coverage,
         "sourceStatus": source_status,
         **_source_request_fields(sources, source_status),
     }
@@ -1775,7 +1777,9 @@ async def get_public_event_timeline(
     timeline = timeline[:safe_max]
     status = _build_collection_status(items, sources_used, warnings)
     source_status = _compute_source_status(sources_used, warnings, items, effective_sources, source_diagnostics)
-    source_coverage = _compute_source_coverage(source_status)
+    coverage = _build_coverage(source_status, None, safe_max, len(timeline))
+    # F15: the top-level field follows coverage.state, which includes the truncation rule (decisions 10 and 18).
+    source_coverage = coverage["state"]
     payload = {
         "ticker": ticker.upper(),
         "timeline": timeline,
@@ -1786,7 +1790,7 @@ async def get_public_event_timeline(
         },
         "warnings": warnings,
         "sourceCoverage": source_coverage,
-        "coverage": _build_coverage(source_status, None, safe_max, len(timeline)),
+        "coverage": coverage,
         "sourceStatus": source_status,
         **_source_request_fields(sources, source_status),
     }
@@ -2175,8 +2179,9 @@ async def get_company_news(
     items = _rank_news_items_by_relevance(items)[:safe_max]
     status = _build_collection_status(items, sources_used, warnings)
     source_status = _compute_source_status(sources_used, warnings, items, effective_sources, source_diagnostics)
-    source_coverage = _compute_source_coverage(source_status)
     coverage = _build_coverage(source_status, None, safe_max, len(items))
+    # F15: the top-level field follows coverage.state, which includes the truncation rule (decisions 10 and 18).
+    source_coverage = coverage["state"]
     payload = {
         "ticker": ticker.upper(),
         "items": items,

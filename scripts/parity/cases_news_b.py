@@ -685,7 +685,9 @@ def _fin_counts(v):
 
 def _fin_truncation_view(v):
     return {"returned": len(v["items"]), "finnhub": _fin_counts(v), "truncatedSources": v["coverage"]["truncatedSources"],
-            "action": v["coverage"]["recommendedNextAction"], "state": v["coverage"]["state"], "status": v.get("status")}
+            "action": v["coverage"]["recommendedNextAction"], "state": v["coverage"]["state"], "status": v.get("status"),
+            # F15: the top-level sourceCoverage follows coverage.state.
+            "sourceCoverage": v["sourceCoverage"]}
 
 
 _ROWS_10_DAYS = [_frow(i, days=1 + (i % 10), text=f"Story number {i}") for i in range(120)]
@@ -703,7 +705,7 @@ CASES += [
                 "finnhub": {"status": "OK", "acceptedCount": 40, "collectedCount": 30, "returnedCount": 10, "truncatedCount": 30,
                             "hasMoreAccepted": True},
                 "truncatedSources": [{"source": "finnhub", "acceptedCount": 40, "returnedCount": 10, "truncatedCount": 30}],
-                "action": "RETRY_TRUNCATED_SOURCE", "state": "FULL", "status": None}),
+                "action": "RETRY_TRUNCATED_SOURCE", "state": "FULL", "status": None, "sourceCoverage": "FULL"}),
     _scenario(
         "news.finnhub.25_accepted_rows_10_returned_truncated_15", ["BR-NWS-192", "BR-NWS-220"],
         lambda: server.get_company_news("AAPL", 10, 14, ["finnhub"]),
@@ -713,7 +715,7 @@ CASES += [
                 "finnhub": {"status": "OK", "acceptedCount": 25, "collectedCount": 25, "returnedCount": 10, "truncatedCount": 15,
                             "hasMoreAccepted": True},
                 "truncatedSources": [{"source": "finnhub", "acceptedCount": 25, "returnedCount": 10, "truncatedCount": 15}],
-                "action": "RETRY_TRUNCATED_SOURCE", "state": "FULL", "status": None}),
+                "action": "RETRY_TRUNCATED_SOURCE", "state": "FULL", "status": None, "sourceCoverage": "FULL"}),
     # #19 (R-news Batch C, decisions 10 and 18): when truncatedSources is non-empty and the tool returns fewer items than the
     # caller's effective max_results, the evidence was cut by the pool cap or dedupe, not by the caller, so coverage.state is
     # PARTIAL. The two cases above return a full output (10 of 10), so the caller's limit cut them and they stay FULL. Here 40
@@ -727,7 +729,7 @@ CASES += [
                    "finnhub": {"status": "OK", "acceptedCount": 40, "collectedCount": 30, "returnedCount": 4, "truncatedCount": 36,
                                "hasMoreAccepted": True},
                    "truncatedSources": [{"source": "finnhub", "acceptedCount": 40, "returnedCount": 4, "truncatedCount": 36}],
-                   "action": "RETRY_TRUNCATED_SOURCE", "state": "PARTIAL", "status": None}),
+                   "action": "RETRY_TRUNCATED_SOURCE", "state": "PARTIAL", "status": None, "sourceCoverage": "PARTIAL"}),
     # #19 / decisions 10 and 18, the pool cap: search_company_news filters a pool of 100. Of 120 accepted rows only the first 100
     # are searched, so 'number 11' finds row 11 but not rows 110-119: 1 of max 10 returned, coverage PARTIAL.
     _scenario(
@@ -739,7 +741,7 @@ CASES += [
                    "finnhub": {"status": "OK", "acceptedCount": 120, "collectedCount": 100, "returnedCount": 1, "truncatedCount": 119,
                                "hasMoreAccepted": True},
                    "truncatedSources": [{"source": "finnhub", "acceptedCount": 120, "returnedCount": 1, "truncatedCount": 119}],
-                   "action": "RETRY_TRUNCATED_SOURCE", "state": "PARTIAL", "status": None}),
+                   "action": "RETRY_TRUNCATED_SOURCE", "state": "PARTIAL", "status": None, "sourceCoverage": "PARTIAL"}),
     # Decision 18: a mixed output that fills max_results stays FULL although Finnhub is in truncatedSources. 6 Yahoo items (today,
     # the newest) and 4 of Finnhub's 40 accepted rows fill the 10 slots (all HIGH relevance), so the caller's limit cut Finnhub.
     # A full output never turns PARTIAL, in either runtime.
@@ -753,10 +755,10 @@ CASES += [
         env=FINNHUB_ENV, routes=_finnhub([_frow(i, days=1 + (i % 10), text=f"AAPL finnhub story {i}") for i in range(40)]),
         select=lambda v: {"returned": len(v["items"]), "sources": sorted({i["source"] for i in v["items"]}),
                           "truncatedSources": v["coverage"]["truncatedSources"], "state": v["coverage"]["state"],
-                          "action": v["coverage"]["recommendedNextAction"]},
+                          "action": v["coverage"]["recommendedNextAction"], "sourceCoverage": v["sourceCoverage"]},
         expect={"returned": 10, "sources": ["finnhub", "yahoo_finance_news"],
                 "truncatedSources": [{"source": "finnhub", "acceptedCount": 40, "returnedCount": 4, "truncatedCount": 36}],
-                "state": "FULL", "action": "RETRY_TRUNCATED_SOURCE"}),
+                "state": "FULL", "action": "RETRY_TRUNCATED_SOURCE", "sourceCoverage": "FULL"}),
     # Card 192: a retryable failure (RATE_LIMITED / TIMEOUT) sets the next action to RETRY_RETRYABLE_SOURCES, ahead of CHECK_OFFICIAL_RELEASES and
     # RETRY_TRUNCATED_SOURCE.
     _scenario(
