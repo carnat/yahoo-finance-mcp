@@ -1,6 +1,6 @@
 # Triage of the post-approval findings (F1–F20) and the open ops items
 
-**Status:** draft for one owner approval (2026-10-19). The planner calls in §3 carry recommendations; the owner approves the table as a whole, as with Q3i.
+**Status:** APPROVED 2026-10-19 (owner; §4). The planner calls in §3 carry recommendations; the owner approves the table as a whole, as with Q3i.
 **Source:** `Q3I_TRIAGE.md` §5 (F1–F20) and `q3i/defects_and_inputs.md` (OPS-TEL-2…4).
 **Rules:** the Q3i planner rules P1–P5 apply unchanged.
 - P1: never overstate.
@@ -70,4 +70,12 @@ Everything else follows the existing rules and needs no separate decision.
 
 ## 4. Approval
 
-Owner approval, recorded here verbatim when given.
+Approved by the owner on 2026-10-19, after "continue with the next triage while waiting". The four planner calls were answered as follows:
+- F12: "Add filler words (Recommended)"
+- F10: "Port to Python (Recommended)"
+- F17: "Align in Phase 6 (Recommended)"
+- F5: "Retire in Phase 6 (Recommended)"
+
+**Progress:**
+- **F6:** done as a Phase 4 prep tooling commit (`scripts/compare_telemetry_windows.py` and the export's `excludingHeaderTransport` view). No runtime change.
+- **Next:** R-news D (2.22.0), covering F10, F11 rest, F12, F13 and F14.
