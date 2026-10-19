@@ -149,8 +149,9 @@ class TestCoerceMaxResults(unittest.TestCase):
     def test_normal_value(self):
         self.assertEqual(srv._coerce_max_results(10, 20), 10)
 
-    def test_zero_uses_default(self):
-        self.assertEqual(srv._coerce_max_results(0, 25), 25)
+    def test_zero_clamps_to_one_and_none_uses_default(self):
+        self.assertEqual(srv._coerce_max_results(0, 25), 1)
+        self.assertEqual(srv._coerce_max_results(None, 25), 25)
 
     def test_clamps_to_minimum_one(self):
         self.assertEqual(srv._coerce_max_results(-5, 10), 1)
@@ -166,8 +167,9 @@ class TestCoerceLookbackDays(unittest.TestCase):
     def test_normal_value(self):
         self.assertEqual(srv._coerce_lookback_days(30, 90), 30)
 
-    def test_zero_uses_default(self):
-        self.assertEqual(srv._coerce_lookback_days(0, 60), 60)
+    def test_zero_clamps_to_one_and_none_uses_default(self):
+        self.assertEqual(srv._coerce_lookback_days(0, 60), 1)
+        self.assertEqual(srv._coerce_lookback_days(None, 60), 60)
 
     def test_clamps_to_minimum_one(self):
         self.assertEqual(srv._coerce_lookback_days(-1, 30), 1)
