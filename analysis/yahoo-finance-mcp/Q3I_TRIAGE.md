@@ -152,4 +152,16 @@ These came up while implementing R4b. None is a regression.
   - Both runtimes behave the same, so parity holds.
   - Proposed repair for the next release: in `get_company_news`, `search_company_news` and `get_public_event_timeline`, set `sourceCoverage` from `coverage.state`. This uses an existing value, in both runtimes, with parity cases.
 
+- **F16. Yahoo estimate confidence across tools** (found in the R5-shared audit, 2.21.0). After 2.21.0, `get_earnings_analysis` rates Yahoo consensus estimate rows LOW. `compare_earnings_actual_vs_estimate` still gives the same Yahoo `estimate.*` rows the comparison result's HIGH/MEDIUM (`tools/earnings.py` ~849-856, `yahoo-finance.ts` ~14561-14565).
+- **F17. `get_ownership_holders` row shape** (R5-shared audit). Worker rows carry Yahoo's lowercase `value` and are enriched as facts (LOW from 2.21.0). Python rows come from yfinance records with a `Value` column, are not fact-shaped, and have no confidence. Pinned: `confidence.ownership_holders.finding_f17_...`.
+- **F18. Producer-level HIGH fallbacks** (R5-shared audit). The envelope default (now LOW) does not reach these.
+  - Python: `server.py` ~6500, 6630, 6672, 8615, 8647, 8751.
+  - Worker: `yahoo-finance.ts` ~11420, 11792, 11829, 13392, 13416, 13496, 13514.
+  - Python `.get("confidence", default)` keeps an explicit `None`; TS `??` replaces it.
+- **F19. `get_analyst_consensus` provenance** (confirmed by a pinned parity case in 2.21.0).
+  - Python sets `source:"yahoo_finance"`, `evidenceClass:"CONTEXTUAL_MARKET_DATA"`, `decisionGrade:false`, `recommendedNextAction:"NONE"`, and `priceTargets.sourceType` is `yahoo_finance`.
+  - The Worker sets none of the four top-level keys, and `priceTargets.sourceType` is `unknown`.
+  - Pinned: `confidence.analyst_consensus.finding_f19_...`. The likely repair aligns the Worker to Python: these values already exist, so this is not a new field (rule P2).
+- **F20. Status strings in `confidence`** (R5-shared audit). Producers store `EXTRACTION_FAILED` or `FILING_NOT_FOUND_TRY_OTHER_TYPE` in `confidence`, and the envelope normalises them to LOW. This is a data-model question for Phase 6.
+
 F8, F9 and F11 were fixed in R-news Batch C (2.20.0), and F10 was deferred. F12 waits for the next triage.
