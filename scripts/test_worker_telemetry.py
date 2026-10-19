@@ -258,6 +258,7 @@ def _catalog_groups() -> set[str]:
 ACTION_ALLOW = _catalog_actions() | {
     "initialize", "ping", "tools/list", "tools/call:unknown", "rpc:other",
     "rejected:auth", "rejected:method", "rejected:body_size", "rejected:batch", "rejected:invalid",
+    "rejected:key_limit",
 }
 DOMAIN_ALLOW = _catalog_groups() | {"-"}
 OUTCOMES = {"ok", "tool_error", "rpc_error", "rejected", "exception"}
@@ -315,6 +316,7 @@ def _fields(point: dict) -> dict:
         "domain": blobs[0], "serverVersion": blobs[1], "buildShaShort": blobs[2], "outcome": blobs[3],
         "errorCode": blobs[4], "sizeBucket": blobs[5], "credentialTransport": blobs[6],
         "budgetExhausted": blobs[7], "cacheSource": blobs[8], "toolMode": blobs[9], "timeoutClass": blobs[10],
+        "keyId": blobs[11],
         "latencyMs": doubles[0], "responseBytes": doubles[1], "httpStatus": doubles[2],
         "upstreamRequests": doubles[3], "subrequestsUsed": doubles[4], "budgetRefusals": doubles[5],
         "providerTimeouts": doubles[6], "edgeCacheHits": doubles[7], "edgeCacheMisses": doubles[8],
@@ -342,12 +344,12 @@ class TestWorkerTelemetry(unittest.TestCase):
             self.assertEqual(len(r[name]["points"]), 1, name)
         self.assertEqual(r["health"]["points"], [], "non-/mcp routes write nothing")
 
-    def test_layout_is_one_index_eleven_blobs_ten_doubles(self):
+    def test_layout_is_one_index_twelve_blobs_ten_doubles(self):
         for name in DISPATCHED + REJECTED:
             point = _point(name)
             self.assertEqual(sorted(point), ["blobs", "doubles", "indexes"], name)
             self.assertEqual(len(point["indexes"]), 1, name)
-            self.assertEqual(len(point["blobs"]), 11, name)
+            self.assertEqual(len(point["blobs"]), 12, name)
             self.assertEqual(len(point["doubles"]), 10, name)
             for value in point["blobs"] + point["indexes"]:
                 self.assertIsInstance(value, str, name)
@@ -379,6 +381,12 @@ class TestWorkerTelemetry(unittest.TestCase):
             self.assertIn(f["cacheSource"], CACHE_SOURCES, name)
             self.assertIn(f["timeoutClass"], {"none", "some", "all"}, name)
             self.assertIn(f["budgetExhausted"], {"0", "1"}, name)
+
+    def test_key_id_is_owner_once_identified_else_dash(self):
+        """2.18.0: blob 12 keyId. The owner key records `owner` on every outcome; no identified key records `-`."""
+        unidentified = {"auth401", "auth401WrongPath", "auth401WrongHeader"}
+        for name in DISPATCHED + REJECTED:
+            self.assertEqual(_fields(_point(name))["keyId"], "-" if name in unidentified else "owner", name)
 
     def test_rejections_carry_no_counters(self):
         for name in REJECTED:

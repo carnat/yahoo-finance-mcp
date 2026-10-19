@@ -14,7 +14,31 @@ export function setWorkerEnv(env: Record<string, unknown>): void {
   );
 }
 
+/**
+ * The key-gated provider credentials (Finnhub, Marketaux, Alpha Vantage). For a
+ * personal access key without `paidProviders` (2.18.0) they read as unset, so
+ * every existing "unconfigured provider" path applies unchanged.
+ */
+const KEY_GATED_PROVIDER_VARS: ReadonlySet<string> = new Set([
+  "FINNHUB_API_KEY",
+  "FINNHUB_TOKEN",
+  "MARKETAUX_API_TOKEN",
+  "MARKETAUX_API_KEY",
+  "ALPHA_VANTAGE_API_KEY",
+  "ALPHAVANTAGE_API_KEY",
+]);
+
+// Whether the current request may read the key-gated provider credentials.
+// index.ts registers request-context's paidProvidersAllowed (this module stays
+// import-free); until then, and outside a request, the answer is yes.
+let paidProvidersAllowed: () => boolean = () => true;
+
+export function setPaidProvidersProvider(provider: () => boolean): void {
+  paidProvidersAllowed = provider;
+}
+
 export function getWorkerVar(name: string): string | undefined {
+  if (KEY_GATED_PROVIDER_VARS.has(name) && !paidProvidersAllowed()) return undefined;
   return _workerEnv[name];
 }
 

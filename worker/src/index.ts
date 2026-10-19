@@ -2,7 +2,8 @@
  * Cloudflare Worker entry point for Yahoo Finance MCP server.
  *
  * Exposes a single MCP endpoint using the Streamable HTTP transport
- * (stateless — no Durable Objects required):
+ * (stateless; the only Durable Object is the per-person key usage counter,
+ * `KeyUsage`, 2.18.0):
  *
  *   POST /mcp          →  MCP JSON-RPC request / batch
  *   POST /mcp/<token>  →  the same, with the credential in the path
@@ -21,14 +22,17 @@
  *   Add the URL https://<your-worker>.workers.dev/mcp in Settings → Integrations.
  */
 
-import { resolveCredential, timingSafeEqual, type CredentialStatus } from "./auth.js";
+import { identifyCaller, resolveCredential, timingSafeEqual, type CallerIdentity } from "./auth.js";
 import { handleMcp } from "./mcp.js";
 import { setEvidenceBucket } from "./evidence-store.js";
-import { getBuildVersion, getServerVersion, setCacheSummaryProvider, setWorkerEnv, getWorkerVar } from "./response.js";
+import { getBuildVersion, getServerVersion, setCacheSummaryProvider, setPaidProvidersProvider, setWorkerEnv, getWorkerVar } from "./response.js";
 import { TOOLS, callTool } from "./tools.js";
-import { currentCacheSummary, currentRootScope, formatCacheUsage, withCacheScope, withRequestFacts } from "./request-context.js";
+import { currentCacheSummary, currentRootScope, formatCacheUsage, paidProvidersAllowed, withCacheScope, withRequestFacts } from "./request-context.js";
 import { classifyBody, classifyResult, logDispatchStart, newRequestRecord, writeRequestDataPoint, type RequestRecord, type TelemetryDataset } from "./telemetry.js";
 import { markYahooCacheActivity, secDocumentCacheStats, yahooCacheStats } from "./yahoo-finance.js";
+
+/** Durable Object class for per-person key usage (2.18.0); bound as `USAGE` from the activation release on. */
+export { KeyUsage } from "./access-keys.js";
 
 export interface Env {
   MCP_ENVELOPE_V2?: string;
@@ -44,10 +48,16 @@ export interface Env {
   CF_VERSION_METADATA?: WorkerVersionMetadata;
   /** Workers Analytics Engine dataset (2.11.1); absent in tests and local dev, where telemetry is a no-op. */
   TELEMETRY?: TelemetryDataset;
+  /** Per-person access keys (2.18.0): KV `yfmcp_access_keys`. Personal keys need it and USAGE. */
+  ACCESS_KEYS?: unknown;
+  /** Per-person key usage counter (2.18.0): Durable Object namespace of class KeyUsage. */
+  USAGE?: unknown;
   [key: string]: unknown;
 }
 
 setCacheSummaryProvider(currentCacheSummary);
+// Per-person keys without paidProviders read the key-gated provider credentials as unset (2.18.0).
+setPaidProvidersProvider(paidProvidersAllowed);
 
 /** The one browser origin allowed to read /mcp responses. */
 const MCP_ALLOWED_ORIGIN = "https://claude.ai";
@@ -104,6 +114,19 @@ const AUTH_REQUIRED_BODY = {
     data: { code: "AUTH_REQUIRED" },
   },
 };
+
+/** HTTP 429 body for a personal key over its per-minute or daily limit (2.18.0); the AUTH_REQUIRED shape plus retryAfterSeconds. */
+function keyRateLimitedBody(retryAfterSeconds: number) {
+  return {
+    jsonrpc: "2.0",
+    id: null,
+    error: {
+      code: -32029,
+      message: "Key rate limit reached.",
+      data: { code: "KEY_RATE_LIMITED", retryAfterSeconds },
+    },
+  };
+}
 
 function rpcError(record: RequestRecord, status: number, code: number, message: string, dataCode: string, cors: Record<string, string>): Response {
   return recordedJson(record, { jsonrpc: "2.0", id: null, error: { code, message, data: { code: dataCode } } }, status, {}, cors);
@@ -185,7 +208,9 @@ export default {
       const record = newRequestRecord(credential.transport);
       let response: Response;
       try {
-        response = await serveMcp(request, env, credential.status, record);
+        // A failing key store or usage counter throws here: fail closed (500, outcome exception).
+        const caller = await identifyCaller(request, pathname, env, credential.status);
+        response = await serveMcp(request, env, caller, record);
       } catch (error) {
         record.outcome = "exception";
         record.httpStatus = 500;
@@ -224,12 +249,18 @@ function reject(record: RequestRecord, action: string, errorCode: string): Reque
   return record;
 }
 
-async function serveMcp(request: Request, env: Env, status: CredentialStatus, record: RequestRecord): Promise<Response> {
+async function serveMcp(request: Request, env: Env, caller: CallerIdentity, record: RequestRecord): Promise<Response> {
   const { method } = request;
   const cors = corsHeadersFor(request, "mcp");
+  // Telemetry key id: `owner`, a personal key's id, or `-` when no key is identified.
+  record.keyId = caller.keyId;
   // Auth first, so an unauthenticated client learns nothing about limits or methods.
-  if (status === "invalid" || (status === "absent" && authEnforced(env))) {
+  if (caller.kind === "rejected" || (caller.kind === "anonymous" && authEnforced(env))) {
     return recordedJson(reject(record, "rejected:auth", "AUTH_REQUIRED"), AUTH_REQUIRED_BODY, 401, { "WWW-Authenticate": 'Bearer realm="yahoo-finance-mcp"' }, cors);
+  }
+  if (caller.kind === "limited") {
+    const retryAfter = caller.retryAfterSeconds;
+    return recordedJson(reject(record, "rejected:key_limit", "KEY_RATE_LIMITED"), keyRateLimitedBody(retryAfter), 429, { "Retry-After": String(retryAfter) }, cors);
   }
 
   if (method !== "POST") {
@@ -284,7 +315,7 @@ async function serveMcp(request: Request, env: Env, status: CredentialStatus, re
   try {
     const authorizationHeaderPresent = (request.headers.get("Authorization") ?? "").trim() !== "";
     const { result, scope } = await withRequestFacts(
-      { authorizationHeaderPresent, credentialTransport: record.credentialTransport },
+      { authorizationHeaderPresent, credentialTransport: record.credentialTransport, paidProvidersAllowed: caller.paidProviders },
       () => withCacheScope(() => {
         record.scope = currentRootScope();
         return handleMcp(body);

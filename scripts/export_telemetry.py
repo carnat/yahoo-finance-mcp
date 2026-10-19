@@ -10,8 +10,10 @@ telemetry/<end date>.json:
    request count, outcome counts, weighted p50/p95/p99 latencyMs, mean
    upstreamRequests and subrequestsUsed, and the sums of budgetRefusals,
    providerTimeouts and providerRetries; per action for the day the latency
-   percentiles, the sizeBucket histogram and the error-code counts. Every
-   count and sum is weighted by `_sample_interval`.
+   percentiles, the sizeBucket histogram and the error-code counts; per key id
+   (blob12 `keyId`, 2.18.0: `owner`, a personal key's 8-character id, or `-`)
+   the request and outcome counts. Every count and sum is weighted by
+   `_sample_interval`. Rows written before 2.18.0 have no keyId and count as `-`.
 2. Workers Observability telemetry query API (`events` view, paged): invocation
    outcome counts (ok, exceededCpu, exceededResources, exception, ...). Each
    count is joined to the action through the Worker's dispatch-start log line
@@ -194,6 +196,18 @@ ORDER BY action
 FORMAT JSON"""
 
 
+def keys_sql(dataset: str, start: datetime, end: datetime) -> str:
+    return f"""SELECT
+  blob12 AS key_id,
+  blob4 AS outcome,
+  SUM(_sample_interval) AS requests
+FROM {dataset}
+WHERE {_where(start, end)}
+GROUP BY key_id, outcome
+ORDER BY key_id
+FORMAT JSON"""
+
+
 def run_sql(transport: Transport, account_id: str, token: str, sql: str) -> list[dict[str, Any]]:
     url = f"{API_BASE}/accounts/{account_id}/analytics_engine/sql"
     raw = transport(url, {"Authorization": f"Bearer {token}", "Content-Type": "text/plain"}, sql.encode("utf-8"))
@@ -296,6 +310,25 @@ def aggregate_analytics(hourly: list[dict], daily: list[dict], breakdown: list[d
         entry["hourly"].sort(key=lambda h: h["hour"])
 
     return {"totals": _round_tree(totals), "actions": _round_tree(dict(sorted(actions.items())))}
+
+
+KEY_ID = re.compile(r"^(owner|-|[0-9a-f]{8})$")
+
+
+def aggregate_keys(rows: list[dict]) -> dict[str, Any]:
+    """Requests and outcome counts per keyId (2.18.0). An empty keyId (pre-2.18.0 rows) counts as `-`;
+    any other value that is not `owner`, `-` or an 8-hex id counts as "invalid"."""
+    keys: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        raw = row.get("key_id")
+        text = "" if raw is None else str(raw)
+        key_id = "-" if text == "" else text if KEY_ID.match(text) else "invalid"
+        entry = keys.setdefault(key_id, {"requests": 0.0, "outcomes": {o: 0.0 for o in OUTCOMES}})
+        requests = _num(row.get("requests"))
+        entry["requests"] += requests
+        outcome = _safe(row.get("outcome"))
+        entry["outcomes"][outcome] = entry["outcomes"].get(outcome, 0.0) + requests
+    return _round_tree(dict(sorted(keys.items())))
 
 
 def _round_tree(value: Any) -> Any:
@@ -528,6 +561,7 @@ def build_export(
     hourly = run_sql(transport, account_id, token, hourly_sql(dataset, start, stop))
     daily = run_sql(transport, account_id, token, daily_latency_sql(dataset, start, stop))
     breakdown = run_sql(transport, account_id, token, breakdown_sql(dataset, start, stop))
+    key_rows = run_sql(transport, account_id, token, keys_sql(dataset, start, stop))
     problems: list[str] = []
     try:
         logs: dict[str, Any] = {"available": True, **aggregate_invocations(
@@ -536,6 +570,7 @@ def build_export(
         problems.append(f"workersLogs: {error}")
         logs = {"available": False, "error": str(error)}
     analytics = aggregate_analytics(hourly, daily, breakdown)
+    analytics["keys"] = aggregate_keys(key_rows)
     document = {
         "schemaVersion": SCHEMA_VERSION,
         "date": stop.date().isoformat(),
