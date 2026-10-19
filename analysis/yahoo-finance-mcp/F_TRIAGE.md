@@ -17,6 +17,7 @@
 | F15 | 2.20.1 |
 | R4-TICKER-AMP | Q3i classified it document-only; it is not reopened here |
 | OPS-TEL-1 | 2.14.0 |
+| OPS-TEL-2 | 2.14.0 |
 
 ## 1. Classification
 
@@ -27,7 +28,7 @@
 | F3 | `query_sec_filing_index` with an older pinned accession: the evidence names the latest 10-K, because the revenue read is not pinned | REPAIR | The revenue read uses the pinned accession. Naming the wrong filing overstates provenance (P1). Both runtimes. | R5-extractors |
 | F4 | A pinned geographic read with no XBRL revenue fact of the requested form returns `NO_FACT_FOR_ACCESSION` without reading that filing's table | REPAIR | Fall through to the existing table read for the pinned accession. This uses an existing path, so it is not a new capability (P5). Both runtimes. | R5-extractors |
 | F5 | `extract_sec_filing_fact`: `meta.decisionGrade` (a static capability flag) contradicts the payload's per-call `decisionGrade` | PLANNER CALL | Recommended: retire the meta flag in the Phase 6 major release, with a deprecation notice from R5-extractors on | Phase 6 |
-| F6 | Telemetry: about 15 preview-canary requests per deploy appear in Analytics Engine | REPAIR (export script only) | `scripts/export_telemetry.py` excludes requests from candidate (preview) worker versions, by version id or by the canary's deploy-window actions, in both the baseline and the comparison windows. No runtime change, so the baseline stays comparable. | Phase 4 prep (before 2026-10-24) |
+| F6 | Telemetry: preview-canary requests (about 15 per deploy) plus production canaries and deploy audits appear in Analytics Engine | REPAIR (scripts only) | Every CI canary and audit authenticates with an `Authorization: Bearer` header (`scripts/live_smoke_utils.py`). The owner's connector uses the path transport. Blob 7 (`credentialTransport`) is recorded on every row, including the baseline window, so `credentialTransport = 'header'` identifies synthetic traffic. Add a window-comparison script that queries Analytics Engine for the baseline and comparison windows with header-transport rows excluded, and applies the Phase 4 D10 bounds. The daily export gains the same filtered view. No runtime change. Caveat: once Phase 1b personal keys exist, a real user could use header transport; revisit then. | Phase 4 prep (before 2026-10-24) |
 | F7 | Python EDGAR ticker index: a failed load caches `{}` and is not retried for up to 24 h | REPAIR | An empty map counts as not cached, so the next call retries. Check the Worker's `getEdgarTickerCikMap` and align it. | Phase 4 Python routing release (it matters for D2b) |
 | F10 | The Worker parses RSS/Atom bodies for structured IR-page entries; Python does not | PLANNER CALL | Recommended: port it to Python (4 functions plus fixtures shared with the Worker), so a registry entry behaves the same locally. Alternative: document it as Worker-only while no registry entry uses a structured feed. | R-news D |
 | F11 rest | Unregistered IR-page row keys: the Worker has `registrySchemaVersion` and no `canonicalUrl`; Python has the opposite | REPAIR (align-free) | Both rows carry both keys. Python adds `registrySchemaVersion`; the Worker adds `canonicalUrl: null`. Both keys exist already (P2). | R-news D |
@@ -39,7 +40,7 @@
 | F18 | Producer-level `?? "HIGH"` / `.get("confidence", "HIGH")` fallbacks (Python 6, Worker 7) | REPAIR (with audit) | Each site either gets an explicit HIGH (a direct tagged read) or falls to LOW, following the R5-shared rules. Also align Python's explicit-`None` handling with TS `??`. | R5-extractors (the sites sit in extractor and exposure code) |
 | F19 | `get_analyst_consensus` provenance: Python sets `source`, `evidenceClass`, `decisionGrade`, `recommendedNextAction` and `priceTargets.sourceType: yahoo_finance`; the Worker sets none of them (`sourceType: unknown`) | REPAIR → Python | The Worker sets the same four fields and the source type. The values exist (P2). The pinned case flips to equal. | R5-fundamentals |
 | F20 | Status strings (`EXTRACTION_FAILED`, `FILING_NOT_FOUND_TRY_OTHER_TYPE`) stored in `confidence` | DEFER | A data-model change: move them to a status field. This needs new or renamed fields, so it is Phase 6. | Phase 6 |
-| OPS-TEL-2 | The export has no coverage guard for Analytics Engine counting requests while Workers Logs counts 0 | REPAIR (export script only) | The export flags the mismatch. | Phase 4 prep, with F6 |
+| OPS-TEL-2 | The export has no coverage guard for Analytics Engine counting requests while Workers Logs counts 0 | CLOSED | Already done in 2.14.0 (`coverage.warnings` `LOGS_ZERO_WITH_REQUESTS`) | — |
 | OPS-TEL-3 | `[observability] enabled = false` sits beside `[observability.logs] enabled = true` | REPAIR (config) | Set the flags consistently, or add a comment saying why. It changes runtime logging, so it waits until after the Phase 4 exit comparison, to keep the telemetry windows comparable. | After the Phase 4 exit |
 | OPS-TEL-4 | Logged invocations are fewer than Analytics Engine requests | DOCUMENT | Explained (2026-10-19): preview canaries (F6) plus rejected-auth requests, which never log. Recorded in the telemetry docs. | Phase 4 prep docs |
 
@@ -47,7 +48,7 @@
 
 | Release | Contents | Timing |
 |---|---|---|
-| **Phase 4 prep (scripts only)** | F6, OPS-TEL-2, OPS-TEL-4 docs | Before 2026-10-24. No runtime change, no version bump; a tooling PR. |
+| **Phase 4 prep (scripts only)** | F6, OPS-TEL-4 docs | Before 2026-10-24. No runtime change, no version bump; a tooling PR. |
 | **R-news D (2.22.0)** | F11 rest, F13, F12*, F10*, F14 | Now; gates nothing |
 | **Phase 4 Python routing release** | F7 | Phase 4, after unit 1 (D2a) |
 | **R5-sec** | F1, F2 | Before Phase 5 unit 1 |
