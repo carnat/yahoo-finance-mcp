@@ -2990,6 +2990,43 @@ F-024, F-026, F-029). Both runtimes change alike.
   - `[]` means the defaults: 8-K, 10-Q and 10-K.
 - **Rollback:** revert the release.
 
+## News Repairs, Batch C (2.20.0)
+
+- **Why:** R-news part 3, Batch C of the approved Q3i triage (`RNEWS3_SPEC.md`, planner decisions 10 to 23). Release type: minor. Outputs change identically in both runtimes unless a divergence is listed below.
+- **Coverage when truncated:** `coverage.state` is `PARTIAL` when `truncatedSources` is non-empty and the tool returns fewer items than the caller's effective `max_results` (`get_company_news`, `search_company_news`, `get_public_event_timeline`).
+  - A full output keeps its state, because the caller's limit cut it.
+  - The Marketaux 3-row limit and the `get_company_news` pool cap have no effect: Marketaux never reports `hasMoreAccepted`, and `max_results` clamps to the pool size.
+  - `status`, `failureMode`, `failedSources` and `recommendedNextAction` are unchanged.
+- **Finnhub messages (both runtimes):**
+  - `Finnhub auth error: HTTP <n>` for 401 and 403.
+  - `Finnhub rate limited: HTTP 429`.
+  - `Finnhub source unavailable: HTTP <n>` for any other HTTP status.
+  - `Finnhub provider changed: unexpected response format`.
+  - `Finnhub source unavailable: <error>` for non-HTTP failures.
+  - Statuses are unchanged.
+- **Marketaux:**
+  - Wire fallback messages are `Marketaux wire fallback returned HTTP <n> (<STATUS>).` and `Marketaux wire fallback unavailable (<STATUS>).`
+  - The Worker reads every row past the 3-row limit, so `acceptedCount` and the rejection counts cover all rows.
+- **Zero inputs:** `max_results` and `lookback_days` of 0 clamp to 1 in both runtimes. Omitted means the default.
+- **Entitlement:** a provider body containing "current plan" is `ENTITLEMENT_REQUIRED` with `USE_ALPHA_VANTAGE_EXPLICITLY` in Python, as in the Worker.
+  - Documented divergence: the Worker's denial memory (6 hours for entitlement, the Alpha Vantage daily limit until 00:00Z) stays Worker-only.
+- **Fail closed:** an unreadable Finnhub eligibility policy makes Finnhub `NOT_ELIGIBLE` with reasonCode `MARKET_NOT_ENABLED_BY_DEPLOYED_ENTITLEMENT` in Python, on both the `provider_gaps` and news paths.
+- **Batches:**
+  - The Worker validates each batch symbol with Python's ticker rule. A malformed symbol is an `INPUT_VALIDATION_ERROR` entry.
+  - `__batchMeta` (`partialSuccess`, `successCount`, `errorCount`) is a Worker-internal key that the envelope lifts into `meta`. Python returns per-ticker results only. Documented divergence.
+- **`duplicateGroupId`:** an opaque grouping id for dedupe. Callers must not parse it or compare it across runtimes.
+  - It hashes the normalised title stem, the first 10 characters of the publication time and the issuer (else the ticker), upper-cased.
+  - The Worker returns 8 hex characters (a 32-bit string hash). Python returns 16 hex characters (a truncated SHA-256). The formats differ by runtime; this release does not change them.
+- **`extract_analyst_valuation_methods`:** the Worker now raises `RATING_CHANGES_UNAVAILABLE` when the rating-changes call fails, as Python does (finding F8).
+- **IR pages (Python, aligned to the Worker):**
+  - A structured entry whose content type is not json, xml, rss, atom, text or plain is `SOURCE_VALIDATION_FAILED` (F9).
+  - The unregistered row carries `registryVersion` and `approvalStatus: "not_registered"` (F11).
+- **Removed:** the dead Python `get_yahoo_finance_news` helper and the Worker's leftover schema key. Neither was a registered tool; both runtimes answer "Unknown tool name.".
+- **Tool catalog:** `tool_catalog.json` Params lines now list `sources` (`get_company_press_releases`, `verify_company_event`) and `filing_types`, `max_results` (`get_sec_recent_events`).
+  - `test_grouped_contract_parity` now fails on an accepted optional param missing from a Params line. 25 existing omissions in other groups are frozen in `_KNOWN_UNADVERTISED_PARAMS` (finding F14).
+- **Not in this release:** F10 (structured IR-page RSS/Atom parsing in Python), F12 (verify stop words), F13 (Marketaux 404 and non-object status divergences) and F14.
+- **Rollback:** revert the release.
+
 ## Per-Person Access Keys (2.18.0)
 
 - **Why:** Phase 1b, approved by the owner on 2026-10-18, for sharing the hosted MCP with a few trusted people, non-commercially. Release type: minor. Worker only: the local Python server is single-user stdio.
