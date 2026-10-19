@@ -68,3 +68,13 @@
 - `get_earnings_analysis` AAPL: estimate rows are LOW.
 - `get_ownership_holders` AAPL institutional: rows are LOW.
 - An unrelated tagged tool, `extract_sec_filing_fact`, is unchanged.
+
+## 5. Status (2026-10-19)
+
+Released as 2.21.0 (#299). Deploy run #278 was delayed about 10 minutes in the GitHub runner queue, then went green. Live checks at 15:40Z on build 2.21.0+git.f42b93d:
+- `get_analyst_consensus` AAPL: `priceTargets.confidence` is LOW. `sourceType` is `unknown` (F19, as pinned).
+- `get_earnings_analysis` AAPL: all 8 estimate rows are LOW.
+- `get_ownership_holders` AAPL institutional: all 10 rows are LOW (Worker).
+- `manifestHash` and `schemaHash` are unchanged from 2.20.1.
+
+R5-shared is complete.

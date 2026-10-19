@@ -366,6 +366,10 @@ Each R-release is a set of **separately released** behaviour changes that must b
       - Releases: R4b before Phase 4; R-news (provider adapters, then the source registry and the `NEWS_SOURCES_DISABLED` off switch, then the news repairs); R5-shared (the BR-ENV-001 confidence default); and R5-‹unit›.
     - **R4b-1 (2.14.0, #289) and R4b-2 (2.15.0, #290):** merged, deployed (runs #268 and the 2.15.0 deploy, canaries green) and live-verified on 2026-10-18.
     - **R4 is complete as of 2026-10-18.**
+    - **2026-10-19:**
+      - R-news part 3 is complete: Batch C in 2.20.0 (#297), plus the F15 patch 2.20.1 (#298).
+      - **R5-shared (BR-ENV-001) is released as 2.21.0 (#299) and live-verified.**
+      - Phase 4 unit 1 (EDGAR client move, both runtimes) is on the branch, unmerged until the telemetry baseline gate (2026-10-24).
   - Q3a: the Worker honours exact `accession_number` with fail-closed semantics.
   - Q3b: central ticker and accession validation in both runtimes, on every relevant action, including the Python paths that skip it.
   - Q3c + Q12: the per-tool ticker caps from the §7 Q12 table, advertised as schema `maxItems` and rejected with `BATCH_LIMIT_EXCEEDED` in both runtimes. Measure `get_market_snapshot` first and set its cap. Correct the stale comment at `yahoo-finance.ts:58–64`.
