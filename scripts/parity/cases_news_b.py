@@ -714,14 +714,16 @@ CASES += [
                             "hasMoreAccepted": True},
                 "truncatedSources": [{"source": "finnhub", "acceptedCount": 25, "returnedCount": 10, "truncatedCount": 15}],
                 "action": "RETRY_TRUNCATED_SOURCE", "state": "FULL", "status": None}),
-    # #19 (R-news Batch C, decision 10): a source listed in truncatedSources whose returnedCount is below the caller's effective
-    # max_results was cut by the pool cap, a provider limit or dedupe, not by the caller, so coverage.state is PARTIAL. The two
-    # cases above were cut only to the caller's max_results (10 of 10 returned) and stay FULL. Here 40 accepted rows carry 4 distinct
-    # stories on one day: the pool of 30 dedupes to 4 items, so 4 < 10 are returned and 36 accepted rows are cut.
-    # TODO(python-mirror): decision 10 — Python's _build_coverage takes the caller's effective max_results (get_company_news:
-    # safe_max; search_company_news: the clamped max_results; get_public_event_timeline: the clamped max_results, 1-100, default 50)
-    # and returns state PARTIAL when any truncatedSources entry has returnedCount below it (no new field; status, failureMode,
-    # failedSources and recommendedNextAction unchanged); then flip to equal with expect=<the expect_ts below>.
+    # #19 (R-news Batch C, decisions 10 and 18): when truncatedSources is non-empty and the tool returns fewer items than the
+    # caller's effective max_results, the evidence was cut by the pool cap or dedupe, not by the caller, so coverage.state is
+    # PARTIAL. The two cases above return a full output (10 of 10), so the caller's limit cut them and they stay FULL. Here 40
+    # accepted rows carry 4 distinct stories on one day: the pool of 30 dedupes to 4 items, so 4 < 10 are returned.
+    # TODO(python-mirror): decisions 10/18 — Python's _build_coverage takes the caller's effective max_results and the number of
+    # items the tool returns (get_company_news: safe_max and len(items) after the cut; search_company_news: the clamped
+    # max_results and the matched items returned; get_public_event_timeline: max_results clamped 1-100, default 50, and the
+    # timeline length), and returns state PARTIAL when truncatedSources is non-empty and that count is below the limit; otherwise
+    # the state stays as _compute_source_coverage gives (no new field; status, failureMode, failedSources and
+    # recommendedNextAction unchanged). Then flip to equal with expect=<the expect_ts below>.
     _scenario(
         "news.coverage.truncation_by_dedupe_below_max_results_is_partial", ["BR-NWS-192", "BR-NWS-220", "BR-NWS-260"],
         lambda: server.get_company_news("AAPL", 10, 14, ["finnhub"]),
@@ -738,9 +740,9 @@ CASES += [
                                "hasMoreAccepted": True},
                    "truncatedSources": [{"source": "finnhub", "acceptedCount": 40, "returnedCount": 4, "truncatedCount": 36}],
                    "action": "RETRY_TRUNCATED_SOURCE", "state": "PARTIAL", "status": None}),
-    # #19 / decision 10, the pool cap: search_company_news filters a pool of 100. Of 120 accepted rows only the first 100 are
-    # searched, so 'number 11' finds row 11 but not rows 110-119: 1 of max 10 returned, coverage PARTIAL.
-    # TODO(python-mirror): decision 10, as above; then flip to equal with expect=<the expect_ts below>.
+    # #19 / decisions 10 and 18, the pool cap: search_company_news filters a pool of 100. Of 120 accepted rows only the first 100
+    # are searched, so 'number 11' finds row 11 but not rows 110-119: 1 of max 10 returned, coverage PARTIAL.
+    # TODO(python-mirror): decisions 10/18, as above; then flip to equal with expect=<the expect_ts below>.
     _scenario(
         "news.coverage.search_pool_cap_truncation_below_max_results_is_partial", ["BR-NWS-192", "BR-NWS-260"],
         lambda: server.search_company_news("AAPL", "number 11", "", "", ["finnhub"], 10),
@@ -757,6 +759,24 @@ CASES += [
                                "hasMoreAccepted": True},
                    "truncatedSources": [{"source": "finnhub", "acceptedCount": 120, "returnedCount": 1, "truncatedCount": 119}],
                    "action": "RETRY_TRUNCATED_SOURCE", "state": "PARTIAL", "status": None}),
+    # Decision 18: a mixed output that fills max_results stays FULL although Finnhub is in truncatedSources. 6 Yahoo items (today,
+    # the newest) and 4 of Finnhub's 40 accepted rows fill the 10 slots (all HIGH relevance), so the caller's limit cut Finnhub.
+    # Python reports FULL today as well (it has no truncation rule yet), so the case is equal now.
+    # TODO(python-mirror): keep this case equal when porting decisions 10/18 (a full output never turns PARTIAL).
+    _scenario(
+        "news.coverage.mixed_output_filling_max_results_stays_full_with_a_truncated_source", ["BR-NWS-192", "BR-NWS-260"],
+        lambda: server.get_company_news("AAPL", 10, 14, ["yahoo_finance_news", "finnhub"]),
+        'm.yahooFinance.getCompanyNews("AAPL", 10, 14, ["yahoo_finance_news", "finnhub"])',
+        news=[_yn(f"AAPL unveils {w} product line", when=_days_ago(0, hour=1 + i), link=f"https://example.com/y{i}")
+              for i, w in enumerate(("alpha", "bravo", "charlie", "delta", "echo", "foxtrot"))],
+        info={"shortName": "Apple Inc.", "longName": "Apple Inc.", "exchange": "NMS"},
+        env=FINNHUB_ENV, routes=_finnhub([_frow(i, days=1 + (i % 10), text=f"AAPL finnhub story {i}") for i in range(40)]),
+        select=lambda v: {"returned": len(v["items"]), "sources": sorted({i["source"] for i in v["items"]}),
+                          "truncatedSources": v["coverage"]["truncatedSources"], "state": v["coverage"]["state"],
+                          "action": v["coverage"]["recommendedNextAction"]},
+        expect={"returned": 10, "sources": ["finnhub", "yahoo_finance_news"],
+                "truncatedSources": [{"source": "finnhub", "acceptedCount": 40, "returnedCount": 4, "truncatedCount": 36}],
+                "state": "FULL", "action": "RETRY_TRUNCATED_SOURCE"}),
     # Card 192: a retryable failure (RATE_LIMITED / TIMEOUT) sets the next action to RETRY_RETRYABLE_SOURCES, ahead of CHECK_OFFICIAL_RELEASES and
     # RETRY_TRUNCATED_SOURCE.
     _scenario(

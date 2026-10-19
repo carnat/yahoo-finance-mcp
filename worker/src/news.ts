@@ -220,15 +220,16 @@ function enrichNewsItemForLlm(item: Record<string, unknown>): Record<string, unk
   };
 }
 /**
- * `callerLimit` is the caller's effective max_results (after clamping), for the tools that take one. R-news Batch C
- * (decision 10, #19): a source already listed in truncatedSources whose returnedCount is below that limit was cut by the
- * pool cap, a provider limit or dedupe, not by the caller, so coverage.state becomes PARTIAL. A source cut only to the
- * caller's own max_results leaves the state as it is. The limit is a parameter, never an emitted field.
+ * `cut` is the caller's effective max_results (after clamping) and the number of items the tool returns, for the tools
+ * that take a limit. R-news Batch C (decisions 10 and 18, #19): when truncatedSources is non-empty and the output is below
+ * that limit, the accepted evidence was cut by the pool cap or dedupe, not by the caller, so coverage.state becomes
+ * PARTIAL. A full output was cut by the caller's own limit and keeps the state computeSourceCoverage gives. Both values
+ * are parameters, never emitted fields.
  */
 export function buildCoverage(
   sourceStatus: Record<string, unknown>,
   resolvedAction: string | null = null,
-  callerLimit: number | null = null,
+  cut: { callerLimit: number; returnedCount: number } | null = null,
 ): Record<string, unknown> {
   const failedStatuses = new Set(["UNCONFIGURED", "PROVIDER_ERROR", "AUTH_ERROR", "RATE_LIMITED", "TIMEOUT", "PROVIDER_BUDGET_EXHAUSTED", "PROVIDER_CHANGED", "IDENTITY_UNAVAILABLE", "WEBSITE_NOT_AVAILABLE", "DISCOVERY_NOT_FOUND", "DISCOVERY_BUDGET_EXHAUSTED", "FEED_NOT_FOUND", "PARSE_ERROR", "CANDIDATE_AVAILABLE", "NOT_REGISTERED", "DISABLED", "REVALIDATION_DUE", "SOURCE_VALIDATION_FAILED"]);
   const failedSources: Record<string, unknown>[] = [];
@@ -258,8 +259,7 @@ export function buildCoverage(
         ? "CHECK_OFFICIAL_RELEASES"
         : (truncatedSources.length ? "RETRY_TRUNCATED_SOURCE" : "USE_RETURNED_CONTEXT"))
   );
-  const cutBelowCallerLimit = callerLimit !== null
-    && truncatedSources.some(entry => Number(entry.returnedCount ?? 0) < callerLimit);
+  const cutBelowCallerLimit = cut !== null && truncatedSources.length > 0 && cut.returnedCount < cut.callerLimit;
   const state = cutBelowCallerLimit ? "PARTIAL" : computeSourceCoverage(sourceStatus);
   return { state, failedSources, skippedSources, truncatedSources, recommendedNextAction };
 }
@@ -981,7 +981,7 @@ export async function getCompanyNews(
   const status = collectionStatus(out.items, out.sourcesUsed, out.warnings);
   const sourceStatus = computeSourceStatus(out.sourcesUsed, out.warnings, out.items, sources, out.sourceDiagnostics, out.budgetStarvedSources, out.disabledSources);
   const sourceCoverage = computeSourceCoverage(sourceStatus);
-  const coverage = buildCoverage(sourceStatus, null, safeMax);
+  const coverage = buildCoverage(sourceStatus, null, { callerLimit: safeMax, returnedCount: out.items.length });
   const payload: Record<string, unknown> = {
     ticker: ticker.toUpperCase(),
     items: out.items,
@@ -1023,7 +1023,7 @@ export async function searchCompanyNews(
   const status = collectionStatus(matched, out.sourcesUsed, out.warnings);
   const sourceStatus = computeSourceStatus(out.sourcesUsed, out.warnings, matched, sources, out.sourceDiagnostics, out.budgetStarvedSources, out.disabledSources);
   const sourceCoverage = computeSourceCoverage(sourceStatus);
-  const coverage = buildCoverage(sourceStatus, null, safeMax);
+  const coverage = buildCoverage(sourceStatus, null, { callerLimit: safeMax, returnedCount: matched.length });
   const payload: Record<string, unknown> = {
     ticker: ticker.toUpperCase(),
     query,
@@ -1311,7 +1311,7 @@ export async function getPublicEventTimeline(
   const status = collectionStatus(out.items, out.sourcesUsed, out.warnings);
   const sourceStatus = computeSourceStatus(out.sourcesUsed, out.warnings, out.items, sources, out.sourceDiagnostics, out.budgetStarvedSources, out.disabledSources);
   const sourceCoverage = computeSourceCoverage(sourceStatus);
-  const coverage = buildCoverage(sourceStatus, null, clampInt(maxResults, 50, 1, 100));
+  const coverage = buildCoverage(sourceStatus, null, { callerLimit: clampInt(maxResults, 50, 1, 100), returnedCount: timeline.length });
   const payload: Record<string, unknown> = {
     ticker: ticker.toUpperCase(),
     timeline,
