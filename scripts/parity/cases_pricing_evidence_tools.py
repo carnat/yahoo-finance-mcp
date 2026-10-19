@@ -1830,13 +1830,11 @@ CASES += [
     _ownership_case("prv.eligibility.eligible_ticker_is_attempted", ["BR-PRV-002", "BR-PRV-003"], "AAPL",
                     expect={"status": "SOURCE_UNCONFIGURED", "action": "CONFIGURE_PROVIDER",
                             "attempts": [["finnhub", "SOURCE_UNCONFIGURED", False, None]]}),
-    # Q3i: Python reads the policy file at call time and fails open on any read error, so every ticker, including
-    # the ineligible VOD.L, is sent to Finnhub. The Worker's policy is compiled in and cannot be unreadable.
-    _ownership_case("prv.eligibility.q3i_unreadable_policy_fails_open_in_python", ["BR-PRV-002", "BR-PRV-003"], "VOD.L",
-                    policy_missing=True, mode="pinned", decision="Q3i",
-                    expect_py={"status": "SOURCE_UNCONFIGURED", "action": "CONFIGURE_PROVIDER",
-                               "attempts": [["finnhub", "SOURCE_UNCONFIGURED", False, None]]},
-                    expect_ts=NOT_ELIGIBLE),
+    # Q3i / R-news Batch C decision 14: Python reads the policy file at call time and fails closed on any read error, so every
+    # ticker, including VOD.L, is NOT_ELIGIBLE. The Worker's policy is compiled in and cannot be unreadable.
+    _ownership_case("prv.eligibility.q3i_unreadable_policy_fails_closed", ["BR-PRV-002", "BR-PRV-003"], "VOD.L",
+                    policy_missing=True,
+                    expect=NOT_ELIGIBLE),
 ]
 
 

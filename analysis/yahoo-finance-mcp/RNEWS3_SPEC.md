@@ -89,3 +89,46 @@
    - An undated match counts as in range.
    - B-G11's invalid-ticker case completes in Batch C, with A-G12 ticker validation.
 9. **New finding, for the next triage:** F8. Python raises `RATING_CHANGES_UNAVAILABLE` when the analyst radar call throws, and the Worker does not.
+
+### Batch C decisions (2026-10-19)
+10. **#19 truncation coverage.**
+    - The rule only reads sources already listed in `coverage.truncatedSources`. No new entries are added, and no new emitted field.
+    - `coverage.state` becomes PARTIAL when a listed source was cut below the caller's effective `max_results`: its `returnedCount` is lower than that limit, as with the pool cap of 100 or the Marketaux 3-row limit. A source cut only by the caller's own `max_results` leaves the state as it is.
+    - Any internal marker the pipeline needs to tell the two apart is stripped before output.
+    - `status`, `failureMode`, `failedSources` and the `recommendedNextAction` logic are unchanged.
+11. **Finnhub message templates (both runtimes).**
+    - 401/403: `Finnhub auth error: HTTP <n>`
+    - 429: `Finnhub rate limited: HTTP 429`
+    - any other HTTP status: `Finnhub source unavailable: HTTP <n>`
+    - non-array payload: `Finnhub provider changed: unexpected response format`
+    - non-HTTP exceptions keep `Finnhub source unavailable: <error message>` (network error text cannot be aligned).
+    - Internal `FINNHUB_*` tags never reach a message. Message-based status inference must keep giving the same statuses; check every reader of these messages.
+12. **Marketaux message templates (both runtimes).**
+    - HTTP failure: `Marketaux wire fallback returned HTTP <n> (<STATUS>).`
+    - non-HTTP failure: `Marketaux wire fallback unavailable (<STATUS>).`
+    - The Worker reads every row after the 3-row limit, so `acceptedCount` and the rejection counts cover all rows (Python behaviour).
+13. **Zero inputs.** In every news tool, `max_results` / `lookback_days` of 0 clamp to 1 in Python. A missing value still means the default.
+14. **Fail closed (A-G13).** If the policy file cannot be read or parsed, `provider_gaps._finnhub_eligible` and `news._finnhub_eligibility` return not eligible with the bundled policy's existing `reasonCode` (`FINNHUB_MARKET_NOT_ELIGIBLE` when absent). There is no new reason code.
+15. **Batch ticker validation (A-G12).** The Worker applies Python's `_validate_ticker` rule (same regex, same message) to each batch symbol. A malformed symbol gets an `INPUT_VALIDATION_ERROR` entry and is counted as an error in `__batchMeta`. Single-symbol Worker tools that already validate keep their behaviour; if a single-symbol news tool does not validate, align it in the same way.
+16. **F8 to F11 are included** (align-to-Worker fixes with existing values, except F8):
+    - **F8:** the Worker adds Python's `RATING_CHANGES_UNAVAILABLE` warning when the analyst radar call throws. It uses the same shape and message. The code already exists in Python output (P2).
+    - **F9:** Python rejects a structured IR-page entry whose content type is not json/xml/rss/atom/text/plain, as the Worker does, with the same status and warning.
+    - **F10:** Python parses RSS/Atom bodies for structured IR-page entries, as the Worker does. If the port needs more than one parser function, STOP and report.
+    - **F11:** Python fills `registryVersion` and `approvalStatus: "not_registered"` on the unregistered IR-page row.
+17. **F12 (stop words) is not in this batch.** It is logged in `Q3I_TRIAGE.md` §5. Changing the meaningful-term rule changes the verify matching threshold, so it goes to the next triage.
+
+### Batch C decisions after the Worker step (2026-10-19)
+18. **Decision 10 narrowed.**
+    - Read per source, decision 10 marks a normal mixed output PARTIAL. For example, Finnhub gets 4 of 10 slots, so its `returnedCount` 4 is below 10 even though only the caller's limit cut it.
+    - **Rule:** `coverage.state` is PARTIAL when `truncatedSources` is non-empty **and** the total number of items returned by the tool is below the caller's effective `max_results`. When the output is full, the caller's limit is what cut it, and the state stays as `computeSourceCoverage` gives.
+    - The Marketaux 3-row limit and the `get_company_news` pool cap have no effect, because Marketaux never sets `hasMoreAccepted` and `max_results` clamps to the pool size. The release docs say so.
+19. **Recorded, not changed in this batch:**
+    - The Marketaux HTTP 404 status (Worker `NOT_FOUND`, Python `PROVIDER_ERROR`) and the non-object body status (Worker `PROVIDER_ERROR`, Python `PROVIDER_CHANGED`) become finding F13.
+    - Under the legacy envelope (`MCP_ENVELOPE_V2=false`), a Worker batch error entry reads `PROVIDER_ERROR`. This is part of finding F13.
+    - The 25 unadvertised params in other groups, frozen in `_KNOWN_UNADVERTISED_PARAMS`, become finding F14.
+
+### Batch C decisions after the Python step (2026-10-19)
+20. **Fail-closed reason code.** An unreadable policy uses `MARKET_NOT_ENABLED_BY_DEPLOYED_ENTITLEMENT`, the bundled policy's existing `reasonCode`, which is the first choice in decision 14. Python hard-codes it because the file cannot be read in that branch. A readable policy with no `reasonCode` keeps `FINNHUB_MARKET_NOT_ELIGIBLE`.
+21. **F10 deferred.** Porting the Worker's RSS/Atom handling for structured IR-page entries needs four new Python functions, a different dispatch order and a changed `Accept` header. That is past decision 16's one-function limit. F10 stays open for the next triage.
+22. **F11 remainder.** The Worker's NOT_REGISTERED row has no `canonicalUrl` key but has `registrySchemaVersion`; Python's row has the opposite. F11 is extended with this, and it is not changed now.
+23. **B-G19, Worker side.** The dead `get_yahoo_finance_news` key in the `worker/src/tools.ts` output-schema map is removed too. The Worker already answered "Unknown tool name.".

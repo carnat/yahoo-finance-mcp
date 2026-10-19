@@ -217,7 +217,8 @@ def _finnhub_eligible(ticker: str) -> tuple[bool, str | None]:
     try:
         policy = json.loads(_SOURCE_POLICY_PATH.read_text(encoding="utf-8"))["providers"]["finnhub"]
     except (OSError, KeyError, TypeError, ValueError):
-        return True, None
+        # Fail closed (R-news Batch C, decision 14) with the bundled policy's reasonCode, as the Worker's compiled-in policy gives.
+        return False, "MARKET_NOT_ENABLED_BY_DEPLOYED_ENTITLEMENT"
     ticker_u = ticker.upper()
     ineligible = ticker_u in {str(value).upper() for value in policy.get("ineligibleTickers") or []} or any(
         ticker_u.endswith(str(suffix).upper()) for suffix in policy.get("ineligibleTickerSuffixes") or []

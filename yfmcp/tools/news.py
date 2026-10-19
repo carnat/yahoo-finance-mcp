@@ -171,8 +171,16 @@ def _finnhub_policy() -> dict:
     return json.loads(_NEWS_SOURCE_CAPABILITIES_PATH.read_text(encoding="utf-8"))["providers"]["finnhub"]
 
 
+# The bundled policy's reasonCode, used when the policy file cannot be read: the Worker compiles the policy in, so an unreadable
+# file there cannot happen and Python fails closed with the same code (R-news Batch C, decision 14).
+_FINNHUB_UNREADABLE_POLICY_REASON_CODE = "MARKET_NOT_ENABLED_BY_DEPLOYED_ENTITLEMENT"
+
+
 def _finnhub_eligibility(ticker: str) -> tuple[bool, str | None]:
-    policy = _finnhub_policy()
+    try:
+        policy = _finnhub_policy()
+    except (OSError, KeyError, TypeError, ValueError):
+        return False, _FINNHUB_UNREADABLE_POLICY_REASON_CODE
     ticker_u = ticker.upper()
     ineligible = ticker_u in set(policy.get("ineligibleTickers") or []) or any(
         ticker_u.endswith(str(suffix).upper()) for suffix in policy.get("ineligibleTickerSuffixes") or []
@@ -245,7 +253,16 @@ def _enrich_news_item_for_llm(item: dict) -> dict:
     return enriched
 
 
-def _build_coverage(source_status: dict, resolved_action: str | None = None) -> dict:
+def _build_coverage(
+    source_status: dict,
+    resolved_action: str | None = None,
+    caller_limit: int | None = None,
+    returned_count: int | None = None,
+) -> dict:
+    """``caller_limit`` is the caller's effective max_results (after clamping) and ``returned_count`` the number of items
+    the tool returns. When truncatedSources is non-empty and the output is below that limit, the accepted evidence was cut
+    by the pool cap or dedupe, not by the caller, so coverage.state becomes PARTIAL (R-news Batch C, decisions 10 and 18).
+    A full output keeps the state _compute_source_coverage gives. Both are parameters, never emitted fields."""
     failed_states = {
         "UNCONFIGURED", "PROVIDER_ERROR", "AUTH_ERROR", "RATE_LIMITED", "TIMEOUT", "PROVIDER_BUDGET_EXHAUSTED", "PROVIDER_CHANGED",
         "IDENTITY_UNAVAILABLE",
@@ -278,8 +295,11 @@ def _build_coverage(source_status: dict, resolved_action: str | None = None) -> 
             )
         )
     )
+    cut_below_caller_limit = (
+        caller_limit is not None and returned_count is not None and bool(truncated_sources) and returned_count < caller_limit
+    )
     return {
-        "state": _compute_source_coverage(source_status),
+        "state": "PARTIAL" if cut_below_caller_limit else _compute_source_coverage(source_status),
         "failedSources": failed_sources,
         "skippedSources": skipped_sources,
         "truncatedSources": truncated_sources,
@@ -322,11 +342,11 @@ _NEWS_SOURCE_REGISTRY_PATH = Path(__file__).resolve().parents[2] / "worker" / "s
 
 
 def _coerce_max_results(value: int, default_value: int) -> int:
-    return min(max(1, int(value or default_value)), 100)
+    return min(max(1, int(default_value if value is None else value)), 100)
 
 
 def _coerce_lookback_days(value: int, default_value: int) -> int:
-    return min(max(1, int(value or default_value)), 3650)
+    return min(max(1, int(default_value if value is None else value)), 3650)
 
 
 def _normalize_event_sources(sources: list[str] | None, default_sources: list[str]) -> tuple[list[str], list[dict]]:
@@ -879,7 +899,7 @@ def _compute_source_status(
             status = "NOT_REGISTERED"
         # The registry metadata comes from the entry itself, so a clean approved fetch carries it too (2.19.0, row g).
         page_diagnostic = diagnostics.get("company_ir_page") if isinstance(diagnostics.get("company_ir_page"), dict) else {}
-        registry_fields = page_diagnostic if page_diagnostic.get("approvalStatus") not in (None, "not_registered") else page_warning
+        registry_fields = page_diagnostic if page_diagnostic.get("approvalStatus") is not None else page_warning
         # A fetched page answers fetch_configured_source whether or not it had items in the window (2.19.0, row f).
         fetched = status == "APPROVED_SOURCE_OK" or (status == "EMPTY_RESULT" and "company_ir_page" in sources_used)
         result["company_ir_page"] = {
@@ -1366,7 +1386,8 @@ async def search_company_news(
         ]).lower()
         if q in text:
             filtered.append(item)
-    returned = _rank_news_items_by_relevance(filtered)[:_coerce_max_results(max_results, 10)]
+    safe_max = _coerce_max_results(max_results, 10)
+    returned = _rank_news_items_by_relevance(filtered)[:safe_max]
     status = _build_collection_status(returned, sources_used, warnings)
     source_status = _compute_source_status(sources_used, warnings, returned, effective_sources, source_diagnostics)
     source_coverage = _compute_source_coverage(source_status)
@@ -1382,7 +1403,7 @@ async def search_company_news(
         },
         "warnings": warnings,
         "sourceCoverage": source_coverage,
-        "coverage": _build_coverage(source_status),
+        "coverage": _build_coverage(source_status, None, safe_max, len(returned)),
         "sourceStatus": source_status,
         **_source_request_fields(sources, source_status),
     }
@@ -1750,7 +1771,8 @@ async def get_public_event_timeline(
         "sourceRefs": it.get("sourceRefs") or [],
     } for it in items if it.get("publishedAt")]
     timeline.sort(key=lambda ev: str(ev.get("timestamp") or ""), reverse=bool(newest_first))
-    timeline = timeline[:_coerce_max_results(max_results, 50)]
+    safe_max = _coerce_max_results(max_results, 50)
+    timeline = timeline[:safe_max]
     status = _build_collection_status(items, sources_used, warnings)
     source_status = _compute_source_status(sources_used, warnings, items, effective_sources, source_diagnostics)
     source_coverage = _compute_source_coverage(source_status)
@@ -1764,7 +1786,7 @@ async def get_public_event_timeline(
         },
         "warnings": warnings,
         "sourceCoverage": source_coverage,
-        "coverage": _build_coverage(source_status),
+        "coverage": _build_coverage(source_status, None, safe_max, len(timeline)),
         "sourceStatus": source_status,
         **_source_request_fields(sources, source_status),
     }
@@ -2154,7 +2176,7 @@ async def get_company_news(
     status = _build_collection_status(items, sources_used, warnings)
     source_status = _compute_source_status(sources_used, warnings, items, effective_sources, source_diagnostics)
     source_coverage = _compute_source_coverage(source_status)
-    coverage = _build_coverage(source_status)
+    coverage = _build_coverage(source_status, None, safe_max, len(items))
     payload = {
         "ticker": ticker.upper(),
         "items": items,

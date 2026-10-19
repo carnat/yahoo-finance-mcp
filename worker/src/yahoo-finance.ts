@@ -12562,9 +12562,10 @@ export async function reconcileMetricSources(ticker: string, metric: string, per
 export async function extractAnalystValuationMethods(ticker: string, daysBack = 30): Promise<string> {
   const days = clampInt(daysBack, 30, 1, 365);
   let newsFailed = false;
+  let radarFailed = false;
   const [news, radar, identity] = await Promise.all([
     getCompanyNews(ticker, 100, days).then(parseObjectJson).catch(() => { newsFailed = true; return {} as Record<string, unknown>; }),
-    getAnalystUpgradeRadar(ticker, days).then(parseObjectJson).catch(() => ({} as Record<string, unknown>)),
+    getAnalystUpgradeRadar(ticker, days).then(parseObjectJson).catch(() => { radarFailed = true; return {} as Record<string, unknown>; }),
     resolveNewsCompanyIdentity(ticker).catch(() => null),
   ]);
   const items = Array.isArray(news.items) ? news.items as Record<string, unknown>[] : [];
@@ -12578,7 +12579,8 @@ export async function extractAnalystValuationMethods(ticker: string, daysBack = 
   if (names.length === 0) warnings.push({ code: "ATTRIBUTION_UNCHECKED", message: "The company name could not be resolved, so targets were not checked against the subject.", severity: "warning" });
   // A news error payload or a failed news call is disclosed (2.19.0, B-G11; Python behaviour).
   if (newsFailed || news.error || news.code === "INPUT_VALIDATION_ERROR") warnings.push({ code: "NEWS_UNAVAILABLE", message: String(news.message ?? "News could not be read."), severity: "warning" });
-  if (radar.error) warnings.push({ code: "RATING_CHANGES_UNAVAILABLE", message: String(radar.message ?? "Rating changes could not be read."), severity: "warning" });
+  // A failed radar call is disclosed like a radar error payload (2.20.0, F8; Python behaviour).
+  if (radarFailed || radar.error) warnings.push({ code: "RATING_CHANGES_UNAVAILABLE", message: String(radar.message ?? "Rating changes could not be read."), severity: "warning" });
   out.windowDays = days;
   out.newsSourcesUsed = (news.meta as Record<string, unknown> | undefined)?.sourcesUsed ?? [];
   out.warnings = warnings;

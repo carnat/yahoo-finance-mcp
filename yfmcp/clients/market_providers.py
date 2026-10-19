@@ -93,7 +93,7 @@ def _message_status(message: str) -> str:
     normalized = message.lower()
     if re.search(r"rate limit|frequency|call volume|standard api rate|too many requests", normalized):
         return "RATE_LIMIT"
-    if re.search(r"premium|subscription|subscribe|entitlement|not available under your current plan|access to this resource", normalized):
+    if re.search(r"premium|subscription|subscribe|entitlement|current plan|access to this resource", normalized):
         return "ENTITLEMENT_REQUIRED"
     if re.search(r"api key|apikey|authentication|unauthorized|invalid token|forbidden", normalized):
         return "AUTH_ERROR"

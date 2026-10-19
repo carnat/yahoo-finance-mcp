@@ -142,9 +142,13 @@ export async function collectMarketauxEvents(
         ? "RATE_LIMITED"
         : provider.status;
     diagnostics.status = status;
+    // R-news Batch C (decision 12): Python's templates, `returned HTTP <n> (<STATUS>).` when the provider answered with an HTTP
+    // status, `unavailable (<STATUS>).` otherwise.
     const message = status === "UNCONFIGURED"
       ? "Marketaux wire fallback is not configured; set MARKETAUX_API_TOKEN to enable it."
-      : `Marketaux wire fallback unavailable (${status}).`;
+      : typeof provider.httpStatus === "number"
+        ? `Marketaux wire fallback returned HTTP ${provider.httpStatus} (${status}).`
+        : `Marketaux wire fallback unavailable (${status}).`;
     warnings.push({ code: "SOURCE_UNAVAILABLE", message, severity: "warning", source: "marketaux" });
     return { items, warnings, used: false, diagnostics };
   }
@@ -204,6 +208,10 @@ export async function collectMarketauxEvents(
       continue;
     }
     const summary = _str(row.snippet) || _str(row.description) || title;
+    if (items.length >= limit) {
+      diagnostics.acceptedCount = Number(diagnostics.acceptedCount ?? 0) + 1;
+      continue;
+    }
     const duplicateGroupId = makeDupGroupId(tickerU, title, publishedAt, null);
     items.push({
       title,
@@ -228,8 +236,9 @@ export async function collectMarketauxEvents(
       providerArticleId: _str(row.uuid) || null,
       providerRelevanceScore: matchedEntity.match_score ?? null,
     });
+    // R-news Batch C (decision 12): keep reading after the 3-row limit, so acceptedCount and the rejection counts cover every
+    // row (Python behaviour); only the first `limit` accepted rows are returned.
     diagnostics.acceptedCount = Number(diagnostics.acceptedCount ?? 0) + 1;
-    if (items.length >= limit) break;
   }
   diagnostics.status = Number(diagnostics.acceptedCount ?? 0) > 0 ? "OK" : "EMPTY_RESULT";
   diagnostics.collectedCount = items.length;

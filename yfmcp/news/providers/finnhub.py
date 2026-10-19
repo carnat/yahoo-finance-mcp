@@ -103,7 +103,7 @@ async def _collect_finnhub_events(
         else:
             warnings.append({
                 "code": "SOURCE_UNAVAILABLE",
-                "message": f"Finnhub source unavailable: {exc}",
+                "message": f"Finnhub source unavailable: HTTP {exc.code}",
                 "severity": "warning",
             })
         return items, warnings, False, diagnostics
