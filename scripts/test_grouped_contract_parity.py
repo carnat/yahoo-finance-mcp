@@ -264,9 +264,18 @@ class TestEnvelopeParity(unittest.TestCase):
                 name: json.loads(_envelope_tool_result("sample_tool", json.dumps(raw)))
                 for name, raw in _ENVELOPE_SAMPLES.items()
             }
+        # TODO(python-mirror): R5-shared (2.21.0) decision 1 — once yfmcp/envelope.py defaults an untagged fact with a value to
+        # LOW, delete _PENDING_LOW_DEFAULT and this block. Until then the pending difference is asserted exactly, then aligned.
+        for name, key in _PENDING_LOW_DEFAULT.items():
+            self.assertEqual((local[name]["data"][key]["confidence"], worker[name]["data"][key]["confidence"]), ("HIGH", "LOW"), name)
+            local[name]["data"][key]["confidence"] = "LOW"
         for name in _ENVELOPE_SAMPLES:
             with self.subTest(sample=name):
                 self.assertEqual(_comparable(local[name]), _comparable(worker[name]))
+
+
+# Samples whose untagged fact defaults to LOW in the Worker (2.21.0) and still to HIGH in Python (port pending).
+_PENDING_LOW_DEFAULT = {"fact": "revenue", "range": "targetPrice"}
 
 
 if __name__ == "__main__":
