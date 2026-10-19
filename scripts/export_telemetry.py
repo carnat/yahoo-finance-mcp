@@ -20,7 +20,14 @@ telemetry/<end date>.json:
    {"t":"yfmcp","v":1,"action":...,"domain":...,"build":...}, which is parsed
    client-side, and the outcome comes from the invocation log with the same
    request id. Only action, domain, build and the outcome are read.
-3. coverage.warnings (2.14.0): LOGS_ZERO_WITH_REQUESTS when Analytics Engine
+3. excludingHeaderTransport (Phase 4 prep, F6): the Analytics Engine `totals`
+   and `actions` aggregates of (1) again, from the same three SQL queries with
+   `blob7 != 'header'` added (blob7 is `credentialTransport`). Every CI canary,
+   preview canary and deploy audit authenticates with an `Authorization: Bearer`
+   header, while the owner's connector uses the path transport, so this view
+   excludes synthetic traffic. Every other key is unchanged. The Phase 4 exit
+   comparison is scripts/compare_telemetry_windows.py.
+4. coverage.warnings (2.14.0): LOGS_ZERO_WITH_REQUESTS when Analytics Engine
    counted requests and Workers Logs, read successfully, counted 0 invocations.
    An ops signal: it is printed and the run still exits 0.
 
@@ -141,11 +148,16 @@ def export_window(end: datetime | None = None) -> tuple[datetime, datetime]:
 
 # ── Analytics Engine SQL ─────────────────────────────────────────────────────
 
-def _where(start: datetime, end: datetime) -> str:
-    return f"timestamp >= toDateTime({int(start.timestamp())}) AND timestamp < toDateTime({int(end.timestamp())})"
+EXCLUDED_TRANSPORT = "header"
+HEADER_FILTER = f"blob7 != '{EXCLUDED_TRANSPORT}'"
 
 
-def hourly_sql(dataset: str, start: datetime, end: datetime) -> str:
+def _where(start: datetime, end: datetime, exclude_header: bool = False) -> str:
+    where = f"timestamp >= toDateTime({int(start.timestamp())}) AND timestamp < toDateTime({int(end.timestamp())})"
+    return f"{where} AND {HEADER_FILTER}" if exclude_header else where
+
+
+def hourly_sql(dataset: str, start: datetime, end: datetime, exclude_header: bool = False) -> str:
     outcome_cols = ",\n  ".join(f"sumIf(_sample_interval, blob4 = '{o}') AS outcome_{o}" for o in OUTCOMES)
     return f"""SELECT
   toStartOfInterval(timestamp, INTERVAL '1' HOUR) AS hour,
@@ -162,13 +174,13 @@ def hourly_sql(dataset: str, start: datetime, end: datetime) -> str:
   SUM(_sample_interval * double7) AS provider_timeouts,
   SUM(_sample_interval * double10) AS provider_retries
 FROM {dataset}
-WHERE {_where(start, end)}
+WHERE {_where(start, end, exclude_header)}
 GROUP BY hour, action, domain
 ORDER BY hour, action
 FORMAT JSON"""
 
 
-def daily_latency_sql(dataset: str, start: datetime, end: datetime) -> str:
+def daily_latency_sql(dataset: str, start: datetime, end: datetime, exclude_header: bool = False) -> str:
     return f"""SELECT
   index1 AS action,
   SUM(_sample_interval) AS requests,
@@ -176,13 +188,13 @@ def daily_latency_sql(dataset: str, start: datetime, end: datetime) -> str:
   quantileExactWeighted(0.95)(double1, _sample_interval) AS latency_p95,
   quantileExactWeighted(0.99)(double1, _sample_interval) AS latency_p99
 FROM {dataset}
-WHERE {_where(start, end)}
+WHERE {_where(start, end, exclude_header)}
 GROUP BY action
 ORDER BY action
 FORMAT JSON"""
 
 
-def breakdown_sql(dataset: str, start: datetime, end: datetime) -> str:
+def breakdown_sql(dataset: str, start: datetime, end: datetime, exclude_header: bool = False) -> str:
     return f"""SELECT
   index1 AS action,
   blob4 AS outcome,
@@ -190,7 +202,7 @@ def breakdown_sql(dataset: str, start: datetime, end: datetime) -> str:
   blob6 AS size_bucket,
   SUM(_sample_interval) AS requests
 FROM {dataset}
-WHERE {_where(start, end)}
+WHERE {_where(start, end, exclude_header)}
 GROUP BY action, outcome, error_code, size_bucket
 ORDER BY action
 FORMAT JSON"""
@@ -569,6 +581,11 @@ def build_export(
     except ExportError as error:
         problems.append(f"workersLogs: {error}")
         logs = {"available": False, "error": str(error)}
+    excluding_header = aggregate_analytics(
+        run_sql(transport, account_id, token, hourly_sql(dataset, start, stop, exclude_header=True)),
+        run_sql(transport, account_id, token, daily_latency_sql(dataset, start, stop, exclude_header=True)),
+        run_sql(transport, account_id, token, breakdown_sql(dataset, start, stop, exclude_header=True)),
+    )
     analytics = aggregate_analytics(hourly, daily, breakdown)
     analytics["keys"] = aggregate_keys(key_rows)
     document = {
@@ -580,6 +597,7 @@ def build_export(
         "analyticsEngine": analytics,
         "workersLogs": logs,
         "coverage": {"warnings": coverage_warnings(analytics, logs)},
+        "excludingHeaderTransport": {"excluded": {"credentialTransport": EXCLUDED_TRANSPORT}, **excluding_header},
     }
     return document, problems
 
