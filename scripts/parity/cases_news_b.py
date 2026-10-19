@@ -714,6 +714,49 @@ CASES += [
                             "hasMoreAccepted": True},
                 "truncatedSources": [{"source": "finnhub", "acceptedCount": 25, "returnedCount": 10, "truncatedCount": 15}],
                 "action": "RETRY_TRUNCATED_SOURCE", "state": "FULL", "status": None}),
+    # #19 (R-news Batch C, decision 10): a source listed in truncatedSources whose returnedCount is below the caller's effective
+    # max_results was cut by the pool cap, a provider limit or dedupe, not by the caller, so coverage.state is PARTIAL. The two
+    # cases above were cut only to the caller's max_results (10 of 10 returned) and stay FULL. Here 40 accepted rows carry 4 distinct
+    # stories on one day: the pool of 30 dedupes to 4 items, so 4 < 10 are returned and 36 accepted rows are cut.
+    # TODO(python-mirror): decision 10 — Python's _build_coverage takes the caller's effective max_results (get_company_news:
+    # safe_max; search_company_news: the clamped max_results; get_public_event_timeline: the clamped max_results, 1-100, default 50)
+    # and returns state PARTIAL when any truncatedSources entry has returnedCount below it (no new field; status, failureMode,
+    # failedSources and recommendedNextAction unchanged); then flip to equal with expect=<the expect_ts below>.
+    _scenario(
+        "news.coverage.truncation_by_dedupe_below_max_results_is_partial", ["BR-NWS-192", "BR-NWS-220", "BR-NWS-260"],
+        lambda: server.get_company_news("AAPL", 10, 14, ["finnhub"]),
+        'm.yahooFinance.getCompanyNews("AAPL", 10, 14, ["finnhub"])',
+        env=FINNHUB_ENV, routes=_finnhub([_frow(i, days=1, text=f"Same story {i % 4}") for i in range(40)]), select=_fin_truncation_view,
+        mode="pinned", decision="FINDING: 2.20.0 Worker side landed (decision 10): truncation below the caller's max_results makes coverage PARTIAL in the Worker; Python still reports FULL (port pending)",
+        expect_py={"returned": 4,
+                   "finnhub": {"status": "OK", "acceptedCount": 40, "collectedCount": 30, "returnedCount": 4, "truncatedCount": 36,
+                               "hasMoreAccepted": True},
+                   "truncatedSources": [{"source": "finnhub", "acceptedCount": 40, "returnedCount": 4, "truncatedCount": 36}],
+                   "action": "RETRY_TRUNCATED_SOURCE", "state": "FULL", "status": None},
+        expect_ts={"returned": 4,
+                   "finnhub": {"status": "OK", "acceptedCount": 40, "collectedCount": 30, "returnedCount": 4, "truncatedCount": 36,
+                               "hasMoreAccepted": True},
+                   "truncatedSources": [{"source": "finnhub", "acceptedCount": 40, "returnedCount": 4, "truncatedCount": 36}],
+                   "action": "RETRY_TRUNCATED_SOURCE", "state": "PARTIAL", "status": None}),
+    # #19 / decision 10, the pool cap: search_company_news filters a pool of 100. Of 120 accepted rows only the first 100 are
+    # searched, so 'number 11' finds row 11 but not rows 110-119: 1 of max 10 returned, coverage PARTIAL.
+    # TODO(python-mirror): decision 10, as above; then flip to equal with expect=<the expect_ts below>.
+    _scenario(
+        "news.coverage.search_pool_cap_truncation_below_max_results_is_partial", ["BR-NWS-192", "BR-NWS-260"],
+        lambda: server.search_company_news("AAPL", "number 11", "", "", ["finnhub"], 10),
+        'm.yahooFinance.searchCompanyNews("AAPL", "number 11", "", "", ["finnhub"], 10)',
+        env=FINNHUB_ENV, routes=_finnhub(_ROWS_10_DAYS), select=_fin_truncation_view,
+        mode="pinned", decision="FINDING: 2.20.0 Worker side landed (decision 10): pool-cap truncation below the caller's max_results makes coverage PARTIAL in the Worker; Python still reports FULL (port pending)",
+        expect_py={"returned": 1,
+                   "finnhub": {"status": "OK", "acceptedCount": 120, "collectedCount": 100, "returnedCount": 1, "truncatedCount": 119,
+                               "hasMoreAccepted": True},
+                   "truncatedSources": [{"source": "finnhub", "acceptedCount": 120, "returnedCount": 1, "truncatedCount": 119}],
+                   "action": "RETRY_TRUNCATED_SOURCE", "state": "FULL", "status": None},
+        expect_ts={"returned": 1,
+                   "finnhub": {"status": "OK", "acceptedCount": 120, "collectedCount": 100, "returnedCount": 1, "truncatedCount": 119,
+                               "hasMoreAccepted": True},
+                   "truncatedSources": [{"source": "finnhub", "acceptedCount": 120, "returnedCount": 1, "truncatedCount": 119}],
+                   "action": "RETRY_TRUNCATED_SOURCE", "state": "PARTIAL", "status": None}),
     # Card 192: a retryable failure (RATE_LIMITED / TIMEOUT) sets the next action to RETRY_RETRYABLE_SOURCES, ahead of CHECK_OFFICIAL_RELEASES and
     # RETRY_TRUNCATED_SOURCE.
     _scenario(
@@ -738,18 +781,20 @@ CASES += [
         expect={"finnhub": {"status": "UNCONFIGURED"},
                 "warnings": [["SOURCE_UNAVAILABLE", "Finnhub company-news source is not configured; skipped."]],
                 "status": "SOURCE_LIMITED_NOT_FOUND", "sourceCoverage": "PARTIAL", "attempted": []}),
-    # HTTP outcomes. The statuses agree; the warning TEXT differs for auth errors, other HTTP errors and a changed payload.
+    # HTTP outcomes. One message template per status in both runtimes (R-news Batch C, decision 11): Python's `HTTP <n>` wording,
+    # and no internal FINNHUB_* tags (the Worker said 'FINNHUB_AUTH_ERROR:401' and 'FINNHUB_PROVIDER_CHANGED: expected array, got
+    # object' until 2.20.0). The statuses, inferred from the message prefixes, are unchanged.
     _scenario(
-        "news.finnhub.http_401_is_auth_error_with_runtime_specific_message", ["BR-NWS-219"],
+        "news.finnhub.http_401_is_auth_error_with_the_http_status_message", ["BR-NWS-219"],
         lambda: server.get_company_news("AAPL", 10, 14, ["finnhub"]),
         'm.yahooFinance.getCompanyNews("AAPL", 10, 14, ["finnhub"])',
         env=FINNHUB_ENV, routes=_finnhub(None, 401, "invalid token"),
         select=lambda v: {"finnhub": v["sourceStatus"]["finnhub"], "warnings": _warning_rows(v), "status": v.get("status")},
-        mode="pinned", decision="FINDING: Finnhub auth-error warning text differs (Python 'HTTP 401', Worker 'FINNHUB_AUTH_ERROR:401')",
-        expect_py={"finnhub": {"status": "AUTH_ERROR", "rawCount": 0, "filteredCount": 0},
-                   "warnings": [["SOURCE_UNAVAILABLE", "Finnhub auth error: HTTP 401"]], "status": "SOURCE_LIMITED_NOT_FOUND"},
-        expect_ts={"finnhub": {"status": "AUTH_ERROR", "rawCount": 0, "filteredCount": 0},
-                   "warnings": [["SOURCE_UNAVAILABLE", "Finnhub auth error: FINNHUB_AUTH_ERROR:401"]], "status": "SOURCE_LIMITED_NOT_FOUND"}),
+        expect={"finnhub": {"status": "AUTH_ERROR", "rawCount": 0, "filteredCount": 0},
+                "warnings": [["SOURCE_UNAVAILABLE", "Finnhub auth error: HTTP 401"]], "status": "SOURCE_LIMITED_NOT_FOUND"}),
+    # TODO(python-mirror): decision 11 — Python's HTTPError branch for a status other than 401/403/429 must say
+    # f"Finnhub source unavailable: HTTP {exc.code}" (not str(exc), urllib's 'HTTP Error 500: <reason>'); then flip to equal with
+    # expect=<the expect_ts below>, drop the re.sub in select, and rename to news.finnhub.http_500_is_provider_error_with_the_http_status_message.
     _scenario(
         "news.finnhub.http_500_is_provider_error_with_runtime_specific_message", ["BR-NWS-219"],
         lambda: server.get_company_news("AAPL", 10, 14, ["finnhub"]),
@@ -758,23 +803,19 @@ CASES += [
         # The reason phrase after 'HTTP Error 500:' comes from the harness stub, so it is cut from the compared text.
         select=lambda v: {"finnhub": v["sourceStatus"]["finnhub"], "status": v.get("status"),
                           "warnings": [[c, re.sub(r"(HTTP Error 500):.*", r"\1", m)] for c, m in _warning_rows(v)]},
-        mode="pinned", decision="FINDING: Finnhub HTTP-error warning text differs (Python 'HTTP Error 500' from urllib, Worker 'HTTP 500')",
+        mode="pinned", decision="FINDING: 2.20.0 Worker side landed (decision 11, 'Finnhub source unavailable: HTTP 500'); Python still says 'HTTP Error 500' from urllib (port pending)",
         expect_py={"finnhub": {"status": "PROVIDER_ERROR", "rawCount": 0, "filteredCount": 0},
                    "warnings": [["SOURCE_UNAVAILABLE", "Finnhub source unavailable: HTTP Error 500"]], "status": "SOURCE_LIMITED_NOT_FOUND"},
         expect_ts={"finnhub": {"status": "PROVIDER_ERROR", "rawCount": 0, "filteredCount": 0},
                    "warnings": [["SOURCE_UNAVAILABLE", "Finnhub source unavailable: HTTP 500"]], "status": "SOURCE_LIMITED_NOT_FOUND"}),
     _scenario(
-        "news.finnhub.non_array_payload_is_provider_changed_with_runtime_specific_message", ["BR-NWS-219"],
+        "news.finnhub.non_array_payload_is_provider_changed_with_the_unexpected_format_message", ["BR-NWS-219"],
         lambda: server.get_company_news("AAPL", 10, 14, ["finnhub"]),
         'm.yahooFinance.getCompanyNews("AAPL", 10, 14, ["finnhub"])',
         env=FINNHUB_ENV, routes=_finnhub({"error": "changed"}),
         select=lambda v: {"finnhub": v["sourceStatus"]["finnhub"], "warnings": _warning_rows(v), "status": v.get("status")},
-        mode="pinned", decision="FINDING: Finnhub provider-changed warning text differs (Python 'unexpected response format', Worker 'FINNHUB_PROVIDER_CHANGED: expected array, got object')",
-        expect_py={"finnhub": {"status": "PROVIDER_CHANGED", "rawCount": 0, "filteredCount": 0},
-                   "warnings": [["SOURCE_UNAVAILABLE", "Finnhub provider changed: unexpected response format"]], "status": "SOURCE_LIMITED_NOT_FOUND"},
-        expect_ts={"finnhub": {"status": "PROVIDER_CHANGED", "rawCount": 0, "filteredCount": 0},
-                   "warnings": [["SOURCE_UNAVAILABLE", "Finnhub provider changed: FINNHUB_PROVIDER_CHANGED: expected array, got object"]],
-                   "status": "SOURCE_LIMITED_NOT_FOUND"}),
+        expect={"finnhub": {"status": "PROVIDER_CHANGED", "rawCount": 0, "filteredCount": 0},
+                "warnings": [["SOURCE_UNAVAILABLE", "Finnhub provider changed: unexpected response format"]], "status": "SOURCE_LIMITED_NOT_FOUND"}),
     # Row acceptance (card 220): a non-object row is INVALID_ROW, an empty headline MISSING_HEADLINE, rows older than the
     # lookback or without a timestamp DATE_OUTSIDE_WINDOW. Confidence is MEDIUM with a URL, LOW without; tickerRelevance is
     # HIGH only when the ticker is a substring of headline + summary (LOW rows stay, ranked after the HIGH ones).
@@ -831,7 +872,9 @@ CASES += [
                 "-2": {"returned": 0, "status": "EMPTY_RESULT", "acceptedCount": 0, "collectedCount": 0, "truncatedCount": 0},
                 "7": {"returned": 3, "status": "OK", "acceptedCount": 3, "collectedCount": 3, "truncatedCount": 0}}),
     # Card 194 / 277 (Q7 for triage): 0 counts as 'missing' in Python (tool defaults 10 results / 14 days) but is clamped to 1 by
-    # the Worker (1 result / 1 day).
+    # the Worker (1 result / 1 day). R-news Batch C (B-G7, decision 13) keeps the Worker behaviour: 0 clamps to 1 in every news tool.
+    # TODO(python-mirror): decision 13 — Python clamps max_results / lookback_days of 0 to 1 in every news tool (a missing value
+    # still means the default); then flip to equal with expect=<the expect_ts below> and rename to news.limits.zero_clamps_to_one.
     _multi_scenario(
         "news.limits.zero_means_default_in_python_and_one_in_worker", ["BR-NWS-194", "BR-NWS-277"],
         [("max_results_0", *_limit_call(0, 14)), ("lookback_0", *_limit_call(5, 0))],
@@ -1117,44 +1160,33 @@ CASES += [
                             "status": "NOT_FOUND", "warnings": []}),
     _marketaux_case("news.marketaux.entity_with_blank_exchange_skips_the_exchange_check", ["BR-NWS-229", "BR-NWS-230"],
                     {"data": [_mrow(1, exchange="")]}, expect=_MX_OK),
-    # Card 230: every rejection reason once; one request returns at most 3 rows. Python keeps counting accepted rows after the
-    # third (acceptedCount 4); the Worker stops reading at the limit (acceptedCount 3). Rejections are the same here because
-    # they all precede the third accepted row.
+    # Card 230: every rejection reason once; one request returns at most 3 rows. Both runtimes keep reading after the third
+    # accepted row (the Worker since 2.20.0, R-news Batch C decision 12; it stopped at the limit before), so acceptedCount is 4
+    # and the MSFT row after the limit is still counted as ENTITY_SYMBOL_MISMATCH.
     _marketaux_case(
-        "news.marketaux.row_rejection_reasons_and_accepted_count_at_the_3_row_limit", ["BR-NWS-229", "BR-NWS-230"],
+        "news.marketaux.row_rejection_reasons_and_accepted_count_cover_rows_past_the_3_row_limit", ["BR-NWS-229", "BR-NWS-230"],
         {"data": ["junk", _mrow(2, title=""), _mrow(3, url="http://www.prnewswire.com/x"), _mrow(4, url="https://evil.example.com/x"),
-                  _mrow(5, symbol="MSFT"), _mrow(6, exchange="NYSE"), _mrow(7, days=40), _mrow(8), _mrow(9), _mrow(10), _mrow(11)]},
-        mode="pinned", decision="FINDING: Marketaux acceptedCount counts every acceptable row in Python (4) but stops at the 3-row limit in the Worker (3)",
-        expect_py={"items": [[f"AAPL wire headline {i}", "PROVIDER_ENTITY_SYMBOL", "LOW", "HIGH", "Apple Inc."] for i in (8, 9, 10)],
-                   "marketaux": {"status": "OK", "acceptedCount": 4, "returnedCount": 3, "rejectedCount": 7,
-                                 "rejectionCounts": {"INVALID_ROW": 1, "MISSING_HEADLINE": 1, "INVALID_URL": 1, "DOMAIN_NOT_ALLOWED": 1,
-                                                     "ENTITY_SYMBOL_MISMATCH": 1, "ENTITY_EXCHANGE_MISMATCH": 1, "DATE_OUTSIDE_WINDOW": 1},
-                                 "fallbackReason": "HIGHER_PRIORITY_EMPTY", "attempted": True, "allowedAction": "check_official_releases"},
-                   "status": None, "warnings": []},
-        expect_ts={"items": [[f"AAPL wire headline {i}", "PROVIDER_ENTITY_SYMBOL", "LOW", "HIGH", "Apple Inc."] for i in (8, 9, 10)],
-                   "marketaux": {"status": "OK", "acceptedCount": 3, "returnedCount": 3, "rejectedCount": 7,
-                                 "rejectionCounts": {"INVALID_ROW": 1, "MISSING_HEADLINE": 1, "INVALID_URL": 1, "DOMAIN_NOT_ALLOWED": 1,
-                                                     "ENTITY_SYMBOL_MISMATCH": 1, "ENTITY_EXCHANGE_MISMATCH": 1, "DATE_OUTSIDE_WINDOW": 1},
-                                 "fallbackReason": "HIGHER_PRIORITY_EMPTY", "attempted": True, "allowedAction": "check_official_releases"},
-                   "status": None, "warnings": []}),
+                  _mrow(5, symbol="MSFT"), _mrow(6, exchange="NYSE"), _mrow(7, days=40), _mrow(8), _mrow(9), _mrow(10), _mrow(11),
+                  _mrow(12, symbol="MSFT")]},
+        expect={"items": [[f"AAPL wire headline {i}", "PROVIDER_ENTITY_SYMBOL", "LOW", "HIGH", "Apple Inc."] for i in (8, 9, 10)],
+                "marketaux": {"status": "OK", "acceptedCount": 4, "returnedCount": 3, "rejectedCount": 8,
+                              "rejectionCounts": {"INVALID_ROW": 1, "MISSING_HEADLINE": 1, "INVALID_URL": 1, "DOMAIN_NOT_ALLOWED": 1,
+                                                  "ENTITY_SYMBOL_MISMATCH": 2, "ENTITY_EXCHANGE_MISMATCH": 1, "DATE_OUTSIDE_WINDOW": 1},
+                              "fallbackReason": "HIGHER_PRIORITY_EMPTY", "attempted": True, "allowedAction": "check_official_releases"},
+                "status": None, "warnings": []}),
     _marketaux_case("news.marketaux.missing_token_is_unconfigured_and_not_attempted", ["BR-NWS-230"], {"data": [_mrow(1)]}, env={},
                     expect=_mx_failed("UNCONFIGURED", "configure_marketaux_api_token",
                                       "Marketaux wire fallback is not configured; set MARKETAUX_API_TOKEN to enable it.", attempted=False)),
     _marketaux_case("news.marketaux.non_list_data_is_provider_changed", ["BR-NWS-230"], {"x": 1},
                     expect=_mx_failed("PROVIDER_CHANGED", "inspect_provider_contract", "Marketaux provider changed: expected a data array.")),
-    # Card 230: 401/403 -> AUTH_ERROR, 402/429 -> RATE_LIMITED, others PROVIDER_ERROR. The status agrees; the warning text differs.
-    _marketaux_case("news.marketaux.http_401_is_auth_error_with_runtime_specific_message", ["BR-NWS-230"], None, status=401, body="nope",
-                    mode="pinned", decision="FINDING: Marketaux HTTP-error warning text differs (Python 'returned HTTP 401 (AUTH_ERROR)', Worker 'unavailable (AUTH_ERROR)')",
-                    expect_py=_mx_failed("AUTH_ERROR", "verify_marketaux_api_token", "Marketaux wire fallback returned HTTP 401 (AUTH_ERROR)."),
-                    expect_ts=_mx_failed("AUTH_ERROR", "verify_marketaux_api_token", "Marketaux wire fallback unavailable (AUTH_ERROR).")),
-    _marketaux_case("news.marketaux.http_402_is_rate_limited_with_runtime_specific_message", ["BR-NWS-230"], None, status=402, body="quota",
-                    mode="pinned", decision="FINDING: Marketaux HTTP-error warning text differs (Python 'returned HTTP 402 (RATE_LIMITED)', Worker 'unavailable (RATE_LIMITED)')",
-                    expect_py=_mx_failed("RATE_LIMITED", "retry_after_quota_reset", "Marketaux wire fallback returned HTTP 402 (RATE_LIMITED)."),
-                    expect_ts=_mx_failed("RATE_LIMITED", "retry_after_quota_reset", "Marketaux wire fallback unavailable (RATE_LIMITED).")),
-    _marketaux_case("news.marketaux.http_500_is_provider_error_with_runtime_specific_message", ["BR-NWS-230"], None, status=500, body="boom",
-                    mode="pinned", decision="FINDING: Marketaux HTTP-error warning text differs (Python 'returned HTTP 500 (PROVIDER_ERROR)', Worker 'unavailable (PROVIDER_ERROR)')",
-                    expect_py=_mx_failed("PROVIDER_ERROR", "retry_or_use_official_sources", "Marketaux wire fallback returned HTTP 500 (PROVIDER_ERROR)."),
-                    expect_ts=_mx_failed("PROVIDER_ERROR", "retry_or_use_official_sources", "Marketaux wire fallback unavailable (PROVIDER_ERROR).")),
+    # Card 230: 401/403 -> AUTH_ERROR, 402/429 -> RATE_LIMITED, others PROVIDER_ERROR. The warning text is one template in both
+    # runtimes since 2.20.0 (decision 12): 'returned HTTP <n> (<STATUS>).' (the Worker said 'unavailable (<STATUS>).').
+    _marketaux_case("news.marketaux.http_401_is_auth_error_with_the_http_status_message", ["BR-NWS-230"], None, status=401, body="nope",
+                    expect=_mx_failed("AUTH_ERROR", "verify_marketaux_api_token", "Marketaux wire fallback returned HTTP 401 (AUTH_ERROR).")),
+    _marketaux_case("news.marketaux.http_402_is_rate_limited_with_the_http_status_message", ["BR-NWS-230"], None, status=402, body="quota",
+                    expect=_mx_failed("RATE_LIMITED", "retry_after_quota_reset", "Marketaux wire fallback returned HTTP 402 (RATE_LIMITED).")),
+    _marketaux_case("news.marketaux.http_500_is_provider_error_with_the_http_status_message", ["BR-NWS-230"], None, status=500, body="boom",
+                    expect=_mx_failed("PROVIDER_ERROR", "retry_or_use_official_sources", "Marketaux wire fallback returned HTTP 500 (PROVIDER_ERROR).")),
 ]
 
 
@@ -1278,20 +1310,15 @@ CASES += [
                              ["SOURCE_UNAVAILABLE", "Marketaux wire fallback is not configured; set MARKETAUX_API_TOKEN to enable it."], _VERIFY_LIMITED],
                 "next": "RETRY_RETRYABLE_SOURCES", "best": 0}),
     # Card 197 precedence: AUTH_ERROR maps to SOURCE_UNCONFIGURED since 2.19.0 (call #10), as the unconfigured Marketaux does, so the mode
-    # is SOURCE_UNCONFIGURED either way. The warning text for the Finnhub auth error differs between runtimes.
+    # is SOURCE_UNCONFIGURED either way. The Finnhub auth-error text is one template in both runtimes since 2.20.0 (decision 11).
     _verify_case(
-        "news.verify.auth_error_alone_is_not_a_failure_mode", ["BR-NWS-197"], ["finnhub", "marketaux"], env=FINNHUB_ENV, routes=_finnhub(None, 401, "bad token"),
-        mode="pinned", decision="FINDING: Finnhub auth-error warning text differs (Python 'HTTP 401', Worker 'FINNHUB_AUTH_ERROR:401')",
-        expect_py={"status": "SOURCE_LIMITED_NOT_FOUND", "failureMode": "SOURCE_UNCONFIGURED", "retryable": False, "action": _VERIFY_ACTION,
-                   "sourceStatus": {"finnhub": "AUTH_ERROR", "marketaux": "UNCONFIGURED"},
-                   "warnings": [["SOURCE_UNAVAILABLE", "Finnhub auth error: HTTP 401"],
-                                ["SOURCE_UNAVAILABLE", "Marketaux wire fallback is not configured; set MARKETAUX_API_TOKEN to enable it."], _VERIFY_LIMITED],
-                   "next": "CHECK_OFFICIAL_RELEASES", "best": 0},
-        expect_ts={"status": "SOURCE_LIMITED_NOT_FOUND", "failureMode": "SOURCE_UNCONFIGURED", "retryable": False, "action": _VERIFY_ACTION,
-                   "sourceStatus": {"finnhub": "AUTH_ERROR", "marketaux": "UNCONFIGURED"},
-                   "warnings": [["SOURCE_UNAVAILABLE", "Finnhub auth error: FINNHUB_AUTH_ERROR:401"],
-                                ["SOURCE_UNAVAILABLE", "Marketaux wire fallback is not configured; set MARKETAUX_API_TOKEN to enable it."], _VERIFY_LIMITED],
-                   "next": "CHECK_OFFICIAL_RELEASES", "best": 0}),
+        "news.verify.auth_error_with_unconfigured_marketaux_is_source_unconfigured", ["BR-NWS-197"], ["finnhub", "marketaux"], env=FINNHUB_ENV,
+        routes=_finnhub(None, 401, "bad token"),
+        expect={"status": "SOURCE_LIMITED_NOT_FOUND", "failureMode": "SOURCE_UNCONFIGURED", "retryable": False, "action": _VERIFY_ACTION,
+                "sourceStatus": {"finnhub": "AUTH_ERROR", "marketaux": "UNCONFIGURED"},
+                "warnings": [["SOURCE_UNAVAILABLE", "Finnhub auth error: HTTP 401"],
+                             ["SOURCE_UNAVAILABLE", "Marketaux wire fallback is not configured; set MARKETAUX_API_TOKEN to enable it."], _VERIFY_LIMITED],
+                "next": "CHECK_OFFICIAL_RELEASES", "best": 0}),
     _verify_case(
         "news.verify.unconfigured_finnhub_is_source_unconfigured", ["BR-NWS-197"], ["finnhub"],
         expect={"status": "SOURCE_LIMITED_NOT_FOUND", "failureMode": "SOURCE_UNCONFIGURED", "retryable": False, "action": _VERIFY_ACTION,
@@ -1307,15 +1334,10 @@ CASES += [
                 "next": "CHECK_OFFICIAL_RELEASES", "best": 0}),
     _verify_case(
         "news.verify.changed_payload_is_provider_changed", ["BR-NWS-197"], ["finnhub"], env=FINNHUB_ENV, routes=_finnhub({"x": 1}),
-        mode="pinned", decision="FINDING: Finnhub provider-changed warning text differs (Python 'unexpected response format', Worker 'FINNHUB_PROVIDER_CHANGED: expected array, got object')",
-        expect_py={"status": "SOURCE_LIMITED_NOT_FOUND", "failureMode": "PROVIDER_CHANGED", "retryable": False, "action": _VERIFY_ACTION,
-                   "sourceStatus": {"finnhub": "PROVIDER_CHANGED"},
-                   "warnings": [["SOURCE_UNAVAILABLE", "Finnhub provider changed: unexpected response format"], _VERIFY_LIMITED],
-                   "next": "CHECK_OFFICIAL_RELEASES", "best": 0},
-        expect_ts={"status": "SOURCE_LIMITED_NOT_FOUND", "failureMode": "PROVIDER_CHANGED", "retryable": False, "action": _VERIFY_ACTION,
-                   "sourceStatus": {"finnhub": "PROVIDER_CHANGED"},
-                   "warnings": [["SOURCE_UNAVAILABLE", "Finnhub provider changed: FINNHUB_PROVIDER_CHANGED: expected array, got object"], _VERIFY_LIMITED],
-                   "next": "CHECK_OFFICIAL_RELEASES", "best": 0}),
+        expect={"status": "SOURCE_LIMITED_NOT_FOUND", "failureMode": "PROVIDER_CHANGED", "retryable": False, "action": _VERIFY_ACTION,
+                "sourceStatus": {"finnhub": "PROVIDER_CHANGED"},
+                "warnings": [["SOURCE_UNAVAILABLE", "Finnhub provider changed: unexpected response format"], _VERIFY_LIMITED],
+                "next": "CHECK_OFFICIAL_RELEASES", "best": 0}),
     # Card 197 edge: a company_ir verification with no approved registry entry. company_ir is the approved IR registry only in both
     # runtimes (the Worker since 2.10.0, Python since 2.19.0), so it reads NOT_REGISTERED, which maps to the existing failureMode
     # SOURCE_UNCONFIGURED when company_ir is requested explicitly, as here (call #14, planner decision 7), and the result is
@@ -1547,7 +1569,10 @@ CASES += [
         expect=[{"status": "SOURCE_UNCONFIGURED", "action": "CONFIGURE_PROVIDER", "alphaFallbackAllowed": False,
                  "attempts": [["finnhub", "SOURCE_UNCONFIGURED", False, "MISS", None, None]]}]),
     # Card 233: the entitlement pattern differs. A body that only says 'current plan' is ENTITLEMENT_REQUIRED in the Worker but
-    # AUTH_ERROR in Python (whose pattern is 'not available under your current plan').
+    # AUTH_ERROR in Python (whose pattern is 'not available under your current plan'). R-news Batch C (B-G10) takes the Worker pattern.
+    # TODO(python-mirror): B-G10 — Python's provider client classifies a body containing 'current plan' (e.g. 'Your current plan
+    # does not include this.') as ENTITLEMENT_REQUIRED, as the Worker's providerMessageStatus does; then flip to equal with
+    # expect=<the expect_ts below> and rename to news.provider.current_plan_body_is_entitlement_required.
     _ownership_calls_case(
         "news.provider.current_plan_body_is_entitlement_in_the_worker_only", ["BR-NWS-233", "BR-NWS-191"], ["AAA1"],
         {FINNHUB_OWNERSHIP + "*": {"status": 403, "body": json.dumps({"error": "Your current plan does not include this."})}}, FINNHUB_ENV,
@@ -1756,16 +1781,49 @@ CASES += [
                 "attribution": {"checked": True, "rejectedForOtherCompany": 1,
                                 "subjectAliases": ["rklb", "rocket lab", "rocket lab usa", "rocket lab usa inc"]},
                 "finnhub": [], "evidence": [["Cantor Fitzgerald", "CLAUSE", 30, "Rocket Lab price target raised to $30 by Cantor Fitzgerald"]]}),
-    # Card 201 / 226: an invalid ticker makes Python's get_company_news return an error payload (NEWS_UNAVAILABLE); the Worker's news
-    # call does not validate the ticker, so there is no news error. Since 2.19.0 (B-G11) both runtimes raise NEWS_UNAVAILABLE for a news
-    # error payload or a failed news call; this scenario stays pinned only because the Worker's internal news call does not validate
-    # ticker format. It completes in R-news Batch C (A-G12, ticker validation in batch/internal calls), then flips to equal.
+    # Card 201 / 226: an invalid ticker makes get_company_news return an error payload, which raises NEWS_UNAVAILABLE in both runtimes
+    # (B-G11, 2.19.0). The Worker's internal news call validates the ticker format since 2.20.0 (A-G12, decision 15); until then it
+    # ran the collection and raised nothing.
     _valuation_tool_case(
-        "news.valuation_tool.news_error_payload_raises_news_unavailable_in_python_only", ["BR-NWS-201", "BR-NWS-226", "BR-NWS-240"], 30,
-        ticker="BAD TKR!", news=[], info={}, select=lambda d: {"warnings": [w["code"] for w in d["warnings"]], "status": d["status"], "windowDays": d["windowDays"]},
-        mode="pinned", decision="FINDING: a news error payload (invalid ticker) raises NEWS_UNAVAILABLE in Python; the Worker does not validate the ticker so it raises nothing",
-        expect_py={"warnings": ["ATTRIBUTION_UNCHECKED", "NEWS_UNAVAILABLE"], "status": "NOT_FOUND", "windowDays": 30},
-        expect_ts={"warnings": ["ATTRIBUTION_UNCHECKED"], "status": "NOT_FOUND", "windowDays": 30}),
+        "news.valuation_tool.news_error_payload_raises_news_unavailable", ["BR-NWS-201", "BR-NWS-226", "BR-NWS-240"], 30,
+        ticker="BAD TKR!", news=[], info={},
+        select=lambda d: {"warnings": [[w["code"], w["message"], w["severity"]] for w in d["warnings"]], "status": d["status"], "windowDays": d["windowDays"]},
+        expect={"warnings": [["ATTRIBUTION_UNCHECKED", "The company name could not be resolved, so targets were not checked against the subject.", "warning"],
+                             ["NEWS_UNAVAILABLE", "News could not be read.", "warning"]],
+                "status": "NOT_FOUND", "windowDays": 30}),
+]
+
+
+# F8 (R-news Batch C, decision 16): a rating-changes (analyst radar) call that throws is disclosed with RATING_CHANGES_UNAVAILABLE in
+# both runtimes, same shape and message (Python behaviour; the Worker added it in 2.20.0). The Worker's radar catches its own
+# errors, so the Worker side forces the rejection by making JSON.stringify throw for the radar's result object and for its error
+# payload (restored before returning); Python's radar call is patched to raise.
+def _radar_failure_case(name, ids, **kw) -> Case:
+    def py():
+        with _py_news_env(news=_RKLB_NEWS, info=_RKLB_INFO), \
+                patch.object(server, "get_analyst_upgrade_radar", AsyncMock(side_effect=RuntimeError("radar boom"))):
+            return json.loads(asyncio.run(server.extract_analyst_valuation_methods("RKLB", 30)))
+
+    js = _worker_js("""
+const realStringify = JSON.stringify;
+JSON.stringify = function (value, ...rest) {
+  if (value && typeof value === "object" && ("upgrades30d" in value || value.message === "radar boom")) throw new Error("radar boom");
+  return realStringify.call(JSON, value, ...rest);
+};
+let raw;
+try { raw = await m.yahooFinance.extractAnalystValuationMethods("RKLB", 30); } finally { JSON.stringify = realStringify; }
+return JSON.parse(raw);""")
+    return Case(name=name, ids=ids, py=py, ts={"js": js, "isolate": True},
+                routes={**_yahoo_routes(_RKLB_NEWS, _RKLB_INFO, None, False), **_UPGRADE_HISTORY_ROUTE}, **kw)
+
+
+CASES += [
+    _radar_failure_case(
+        "news.valuation_tool.failed_rating_changes_call_raises_rating_changes_unavailable", ["BR-NWS-200", "BR-NWS-201"],
+        select=lambda d: {"warnings": [[w["code"], w["message"], w["severity"]] for w in d["warnings"]], "status": d["status"],
+                          "ratingChangesScanned": d["ratingChangesScanned"]},
+        expect={"warnings": [["RATING_CHANGES_UNAVAILABLE", "Rating changes could not be read.", "warning"]],
+                "status": "METHOD_NOT_DISCLOSED", "ratingChangesScanned": 0}),
 ]
 
 

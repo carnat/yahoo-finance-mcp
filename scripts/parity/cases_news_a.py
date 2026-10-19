@@ -1783,8 +1783,18 @@ CASES += [
     for tool, args in _BLOOMBERG_ARGS.items()
 ]
 
-# Card 143: a batch. The Worker adds __batchMeta; Python returns only the per-ticker results. A symbol that fails Python's ticker
-# format check is an error entry there, while the Worker (which only rejects blanks) runs it like any other.
+# Card 143: a batch. The Worker adds __batchMeta; Python returns only the per-ticker results (a documented divergence: the Worker
+# envelope lifts __batchMeta into meta). A symbol that fails the ticker format check is an INPUT_VALIDATION_ERROR entry in both
+# runtimes, with Python's _validate_ticker message (the Worker since 2.20.0, R-news Batch C decision 15; it only rejected blanks
+# and ran the collection for it before), and the Worker counts it as an error in __batchMeta.
+def _batch_entry_error(x):
+    """(code, message) of a batch error entry: Python keeps the inner failure envelope, the Worker a flat error object."""
+    if not isinstance(x, dict) or not x.get("error"):
+        return None
+    err = x["error"] if isinstance(x["error"], dict) else x
+    return [err.get("code"), err.get("message")]
+
+
 CASES += [
     tool_case("batch.per_ticker_results_and_batch_meta_differ", ["BR-NWS-143"], "news",
               [["AAPL", "MSFT"], 5, 14, []], {"info": {}},
@@ -1793,13 +1803,19 @@ CASES += [
               mode="pinned", decision="FINDING: batch get_company_news adds __batchMeta (partialSuccess/successCount/errorCount) in the Worker only",
               expect_py={"keys": ["AAPL", "MSFT"], "errors": [], "meta": None},
               expect_ts={"keys": ["AAPL", "MSFT", "__batchMeta"], "errors": [], "meta": {"partialSuccess": False, "successCount": 2, "errorCount": 0}}),
-    tool_case("batch.symbol_failing_python_ticker_validation_is_an_error_entry_only_in_python", ["BR-NWS-143"], "news",
+    tool_case("batch.symbol_failing_ticker_validation_is_an_input_validation_error_entry", ["BR-NWS-143"], "news",
               [["AAPL", "BAD TICKER!"], 5, 14, []], {"info": {}},
-              select=lambda v: {"keys": sorted(v), "errors": sorted(k for k, x in v.items() if isinstance(x, dict) and x.get("error")),
-                                "meta": v.get("__batchMeta")},
-              mode="pinned", decision="FINDING: batch news validates each ticker's format in Python (error entry) but not in the Worker",
-              expect_py={"keys": ["AAPL", "BAD TICKER!"], "errors": ["BAD TICKER!"], "meta": None},
-              expect_ts={"keys": ["AAPL", "BAD TICKER!", "__batchMeta"], "errors": [], "meta": {"partialSuccess": False, "successCount": 2, "errorCount": 0}}),
+              select=lambda v: {"keys": sorted(k for k in v if k != "__batchMeta"),
+                                "errors": {k: _batch_entry_error(x) for k, x in v.items() if _batch_entry_error(x)}},
+              expect={"keys": ["AAPL", "BAD TICKER!"],
+                      "errors": {"BAD TICKER!": ["INPUT_VALIDATION_ERROR",
+                                                 "Invalid ticker symbol: 'BAD TICKER!'. Must be 1-20 characters: uppercase letters, digits, or . - ^ ="]}}),
+    # __batchMeta itself stays Worker-only (documented): the malformed symbol is counted as an error there.
+    tool_case("batch.batch_meta_counts_a_malformed_symbol_as_an_error_in_the_worker", ["BR-NWS-143"], "news",
+              [["AAPL", "BAD TICKER!"], 5, 14, []], {"info": {}},
+              select=lambda v: v.get("__batchMeta"),
+              mode="pinned", decision="FINDING: __batchMeta (here counting the malformed symbol as an error) exists in the Worker only; documented, not aligned",
+              expect_py=None, expect_ts={"partialSuccess": True, "successCount": 1, "errorCount": 1}),
 ]
 
 
