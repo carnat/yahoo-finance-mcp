@@ -3027,6 +3027,14 @@ F-024, F-026, F-029). Both runtimes change alike.
 - **Not in this release:** F10 (structured IR-page RSS/Atom parsing in Python), F12 (verify stop words), F13 (Marketaux 404 and non-object status divergences) and F14.
 - **Rollback:** revert the release.
 
+## Coverage Field Consistency (2.20.1)
+
+- **Why:** in 2.20.0 the truncation rule (`coverage.state` is `PARTIAL` when `truncatedSources` is non-empty and the tool returns fewer items than the caller's effective `max_results`) changed only `coverage.state`. The top-level `sourceCoverage` still came from the per-source computation, so a search could show `coverage.state` `PARTIAL` with `sourceCoverage` `FULL` (finding F15, seen live on `search_company_news` AAPL "iPhone" with `max_results` 50). Release type: patch.
+- **Change:** in `get_company_news`, `search_company_news` and `get_public_event_timeline`, `sourceCoverage` takes the value of `coverage.state`, in both runtimes.
+  - No new field or value.
+  - The other news tools are unchanged: they have no caller limit, so the two fields already agree.
+- **Rollback:** redeploy 2.20.0.
+
 ## Per-Person Access Keys (2.18.0)
 
 - **Why:** Phase 1b, approved by the owner on 2026-10-18, for sharing the hosted MCP with a few trusted people, non-commercially. Release type: minor. Worker only: the local Python server is single-user stdio.

@@ -980,8 +980,9 @@ export async function getCompanyNews(
   out.items = rankNewsItemsByRelevance(out.items).slice(0, safeMax);
   const status = collectionStatus(out.items, out.sourcesUsed, out.warnings);
   const sourceStatus = computeSourceStatus(out.sourcesUsed, out.warnings, out.items, sources, out.sourceDiagnostics, out.budgetStarvedSources, out.disabledSources);
-  const sourceCoverage = computeSourceCoverage(sourceStatus);
   const coverage = buildCoverage(sourceStatus, null, { callerLimit: safeMax, returnedCount: out.items.length });
+  // F15: the top-level field follows coverage.state, which includes the truncation rule (decisions 10 and 18).
+  const sourceCoverage = _str(coverage.state);
   const payload: Record<string, unknown> = {
     ticker: ticker.toUpperCase(),
     items: out.items,
@@ -1022,8 +1023,9 @@ export async function searchCompanyNews(
   const matched = rankNewsItemsByRelevance(matchedAll).slice(0, safeMax);
   const status = collectionStatus(matched, out.sourcesUsed, out.warnings);
   const sourceStatus = computeSourceStatus(out.sourcesUsed, out.warnings, matched, sources, out.sourceDiagnostics, out.budgetStarvedSources, out.disabledSources);
-  const sourceCoverage = computeSourceCoverage(sourceStatus);
   const coverage = buildCoverage(sourceStatus, null, { callerLimit: safeMax, returnedCount: matched.length });
+  // F15: the top-level field follows coverage.state, which includes the truncation rule (decisions 10 and 18).
+  const sourceCoverage = _str(coverage.state);
   const payload: Record<string, unknown> = {
     ticker: ticker.toUpperCase(),
     query,
@@ -1310,8 +1312,9 @@ export async function getPublicEventTimeline(
     .slice(0, clampInt(maxResults, 50, 1, 100));
   const status = collectionStatus(out.items, out.sourcesUsed, out.warnings);
   const sourceStatus = computeSourceStatus(out.sourcesUsed, out.warnings, out.items, sources, out.sourceDiagnostics, out.budgetStarvedSources, out.disabledSources);
-  const sourceCoverage = computeSourceCoverage(sourceStatus);
   const coverage = buildCoverage(sourceStatus, null, { callerLimit: clampInt(maxResults, 50, 1, 100), returnedCount: timeline.length });
+  // F15: the top-level field follows coverage.state, which includes the truncation rule (decisions 10 and 18).
+  const sourceCoverage = _str(coverage.state);
   const payload: Record<string, unknown> = {
     ticker: ticker.toUpperCase(),
     timeline,

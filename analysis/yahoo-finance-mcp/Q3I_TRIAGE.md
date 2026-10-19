@@ -147,4 +147,9 @@ These came up while implementing R4b. None is a regression.
   - Also, under `MCP_ENVELOPE_V2=false` a Worker batch error entry reads `PROVIDER_ERROR`, because `normalizeBatchSymbolResult` ignores `code` on legacy errors.
 - **F14. Unadvertised optional params** (found in 2.20.0). 25 actions in 8 groups accept params that their `tool_catalog.json` Params line omits. They are frozen in `_KNOWN_UNADVERTISED_PARAMS` in `scripts/test_grouped_contract_parity.py`. `get_analyst_recommendations` and `get_ownership_holders` have no Params line at all.
 
+- **F15. `sourceCoverage` vs `coverage.state` after 2.20.0** (found in 2.20.0 live checks). The 2.20.0 truncation rule (RNEWS3 decisions 10 and 18) changed only `coverage.state`. The top-level `sourceCoverage` still comes from `computeSourceCoverage` / `_compute_source_coverage`.
+  - Live example: `search_company_news` AAPL "iPhone", max_results 50, returns 31 items with Finnhub truncated by the pool cap. The output carries `coverage.state` PARTIAL and `sourceCoverage` FULL.
+  - Both runtimes behave the same, so parity holds.
+  - Proposed repair for the next release: in `get_company_news`, `search_company_news` and `get_public_event_timeline`, set `sourceCoverage` from `coverage.state`. This uses an existing value, in both runtimes, with parity cases.
+
 F8, F9 and F11 were fixed in R-news Batch C (2.20.0), and F10 was deferred. F12 waits for the next triage.

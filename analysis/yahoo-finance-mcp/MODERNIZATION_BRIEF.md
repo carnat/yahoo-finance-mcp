@@ -262,7 +262,13 @@ Every PR follows `CLAUDE.md`: the TS change first, then the `python-mirror` port
   - Risk 1: auth locks out a client that can't send headers. *Mitigation:* V1 gate, plus a token-issued grace release before enforcement.
   - Risk 2: the allow-list blocks legitimate URLs (the IR registry is empty). *Mitigation:* `raw_text` escape hatch, plus approving registry entries through the existing bot and review flow.
 
-### Phase 1b — Multi-user access for trusted, non-commercial sharing (APPROVED 2026-10-18)
+### Phase 1b — Multi-user access for trusted, non-commercial sharing (APPROVED 2026-10-18; PARKED 2026-10-19)
+- **Parked (owner, 2026-10-19):** "Park phase 1b and proceed to later phase".
+  - **State:** all 1b code shipped inactive in 2.18.0 (#295). Only the owner key works.
+  - **To resume:**
+    1. The owner creates the KV namespace `yfmcp_access_keys` and gives its ID.
+    2. The activation PR adds the KV binding, the `USAGE` Durable Object binding and the `new_sqlite_classes` migration, plus the dispatch-only `apply-do-migration.yml` (`PHASE1B_SPEC.md` §9).
+  - Parking gates nothing, because 1b never gated another phase.
 - **Approval (owner, 2026-10-18):** "1b approved". The names were accepted as proposed:
   - **KV namespace:** `yfmcp_access_keys`, binding `ACCESS_KEYS`.
   - **Key record:** stored under the key's SHA-256 hash, with the fields `id` (an 8-character hash prefix), `label`, `createdAt`, `status` (active or revoked), `dailyLimit`, `perMinuteLimit` and `paidProviders`.
