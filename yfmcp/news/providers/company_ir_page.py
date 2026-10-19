@@ -230,6 +230,9 @@ async def _fetch_company_ir_page(entry: dict) -> tuple[str, str, str]:
             if not _company_ir_page_url_allowed(entry, final_url):
                 raise ValueError("redirect target is outside registry allow-list")
             content_type = str(resp.headers.get("content-type") or "").lower()
+            # A structured entry is approved for json / xml / rss / atom / text only (2.20.0, F9).
+            if entry.get("adapter") == "structured" and content_type and not _re.search(r"(json|xml|rss|atom|text/plain)", content_type, flags=_re.I):
+                raise ValueError(f"unexpected structured content type: {content_type}")
             # An html_article entry is approved for HTML only (2.19.0, B-G17): any other declared content type fails validation.
             if entry.get("adapter") == "html_article" and content_type and not _re.search(r"(html|text/plain)", content_type, flags=_re.I):
                 raise ValueError(f"unexpected HTML content type: {content_type}")

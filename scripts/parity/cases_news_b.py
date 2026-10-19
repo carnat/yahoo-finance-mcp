@@ -2230,6 +2230,25 @@ CASES += [
         entry={**IR_ENTRY, "adapter": "structured"}, content_type="application/json",
         select=lambda v: [[i["title"], i["summary"]] for i in v["items"]],
         expect=[["Json headline one", "summary via content_text"]]),
+    # F9 (R-news Batch C): a structured entry answered with a content type outside json / xml / rss / atom / text/plain fails
+    # validation in both runtimes, with the same message.
+    _ir_page_case(
+        "news.ir_page.structured_adapter_with_html_content_type_fails_validation", ["BR-NWS-203"],
+        json.dumps({"items": [{"title": "Json headline one", "url": "/investors/regulatory-news/j1", "date": _ir_day(2)}]}),
+        entry={**IR_ENTRY, "adapter": "structured"}, content_type="text/html; charset=utf-8", select=_ir_view,
+        expect={"count": 0, "status": "SOURCE_VALIDATION_FAILED",
+                "warnings": [["COMPANY_IR_PAGE_VALIDATION_FAILED", "Approved company IR page validation failed: unexpected structured content type: text/html; charset=utf-8"]],
+                "collection": "SOURCE_LIMITED_NOT_FOUND", "sourcesUsed": []}),
+    # F11 (R-news Batch C): the IR-page row for a ticker with no registry entry carries registryVersion and approvalStatus
+    # "not_registered" in both runtimes.
+    _scenario(
+        "news.ir_page.unregistered_ticker_row_carries_registry_version_and_not_registered", ["BR-NWS-249"],
+        lambda: server.get_company_news("AAPL", 10, 14, ["company_ir_page"]),
+        'm.yahooFinance.getCompanyNews("AAPL", 10, 14, ["company_ir_page"])',
+        select=lambda v: {k: v["sourceStatus"]["company_ir_page"].get(k) for k in ("status", "approvalStatus", "allowedAction")}
+        | {"hasRegistryVersion": bool(v["sourceStatus"]["company_ir_page"].get("registryVersion"))},
+        expect={"status": "NOT_REGISTERED", "approvalStatus": "not_registered", "allowedAction": "registry_review_required",
+                "hasRegistryVersion": True}),
     # Card 202 edge, call #17 (2.19.0): a feed-shaped body served to an html_article entry fails validation in both runtimes (the Worker
     # parsed it as RSS whatever the adapter, and Python as HTML, finding nothing, until then).
     _ir_page_case(

@@ -899,7 +899,7 @@ def _compute_source_status(
             status = "NOT_REGISTERED"
         # The registry metadata comes from the entry itself, so a clean approved fetch carries it too (2.19.0, row g).
         page_diagnostic = diagnostics.get("company_ir_page") if isinstance(diagnostics.get("company_ir_page"), dict) else {}
-        registry_fields = page_diagnostic if page_diagnostic.get("approvalStatus") not in (None, "not_registered") else page_warning
+        registry_fields = page_diagnostic if page_diagnostic.get("approvalStatus") is not None else page_warning
         # A fetched page answers fetch_configured_source whether or not it had items in the window (2.19.0, row f).
         fetched = status == "APPROVED_SOURCE_OK" or (status == "EMPTY_RESULT" and "company_ir_page" in sources_used)
         result["company_ir_page"] = {
