@@ -80,6 +80,7 @@ from yfmcp.clients.edgar import (
     _edgar_get_company_facts, _edgar_get_submissions,
     _edgar_build_filing_urls, _edgar_cik_from_accession,
     _edgar_list_exhibits_from_index, _edgar_get_html,
+    _edgar_read_json, _warm_sec_submissions,
 )
 from yfmcp.parsing.html import (
     _strip_html_tags, _strip_html_blocks, _parse_html_table, _parse_numeric_cell, _detect_unit_multiplier, _UNIT_SCALE_ASSUMED_WARNING,
@@ -2064,22 +2065,6 @@ def _fy_number(value: Any) -> float:
         return float(value)
     except (TypeError, ValueError):
         return 0.0
-
-
-async def _edgar_read_json(url: str) -> dict:
-    """The Worker's edgarReadJson (2.5.17): an EDGAR JSON read that tells absence from failure.
-
-    A 404 is SEC saying the resource does not exist ({"ok": True, "json": None}); any other non-OK status is
-    {"ok": False, "httpStatus": <code>}; a network error or an unreadable body is {"ok": False, "httpStatus": None}.
-    """
-    try:
-        return {"ok": True, "json": await _edgar_get(url)}
-    except EdgarError as e:
-        if e.status_code == 404:
-            return {"ok": True, "json": None}
-        return {"ok": False, "httpStatus": e.status_code}
-    except Exception:
-        return {"ok": False, "httpStatus": None}
 
 
 def _js_json_numbers(value: Any) -> Any:
@@ -7992,20 +7977,6 @@ async def compare_peer_valuations(tickers: list[str], subject: str | None = None
     if not markets:
         return json.dumps({"error": True, "message": "Yahoo quote summary failed for every ticker: " + "; ".join(e["message"] for e in errors)})
     return json.dumps(_vl.peer_valuations(subject, markets, errors))
-
-
-async def _warm_sec_submissions(ticker: str) -> None:
-    """Load the cached SEC submissions once before concurrent filing reads.
-
-    Composite extractors fan out to several tools that each look up the
-    same submissions document; warming it first keeps a cold call from
-    sending one duplicate SEC request per branch. Failures are left to the
-    individual tools, which report them in their own responses.
-    """
-    try:
-        await _get_submissions_for_ticker(ticker)
-    except Exception:
-        pass
 
 
 def _china_filing_not_found(ticker: str, filing_type: str, source: dict) -> str:
