@@ -482,6 +482,8 @@ Where an option would rewrite an approved brief gate, the decision keeps the gat
 
   A group outside these bounds blocks the phase exit until it is explained or fixed.
 - **D11.** `resolveSecFiling` / `_resolve_sec_filing` and their envelope helpers are filing-selection policy, so they stay out of the client. Under D1 (c) they are reclassified to `#sec` and move with Phase 5 SEC retrieval. Unit 1's scope list drops them; update `phase4_edgar_region.json` accordingly before unit 1 starts.
+  - **Accepted from the unit-1 Worker step (2026-10-19):** `uniqueRecentForms` (called only by the deferred functions) and `isLikelyXbrlDocumentUrl` (called by `resolveSecFiling` and two `#sec` tools) are deferred with them.
+  - **Unit-1 Worker result:** 29 functions (480 NLOC) moved to `worker/src/clients/edgar.ts`. The tool manifest is identical. The bundle grew by 25 bytes, and the TDZ scan is clean. The Worker SEC-fetch grep went from 10 to 0.
 
 ## 12. Noticed, not fixed (report-only)
 
