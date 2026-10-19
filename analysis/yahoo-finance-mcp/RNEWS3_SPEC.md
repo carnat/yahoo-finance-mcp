@@ -77,3 +77,15 @@
 6. **Verify relevance issuer names.**
    - Both runtimes use one name set: Yahoo `longName`, `shortName` and the SEC submissions `name`, excluding any alias equal to the ticker. This is the same rule as call #16.
    - A `company_ir_page` source counts as an official, HIGH source type in both runtimes (Worker behaviour). It is the official tier in the registry.
+
+### Batch B decisions (2026-10-19)
+7. **Call #14 applies only when `company_ir` is requested explicitly.**
+   - `company_ir` is a default verify source, and almost no ticker has an approved entry. Mapping a defaults-applied `company_ir` NOT_REGISTERED row to SOURCE_LIMITED_NOT_FOUND would make a default verify call nearly never return NOT_FOUND, which drowns the signal.
+   - **Rule:** the upgrade applies when the caller's `sources` names `company_ir`. With default sources, the NOT_REGISTERED row stays in `coverage.failedSources` / `sourceStatus` as today, and it does not change `status` or `failureMode`.
+   - AUTH_ERROR (call #10) upgrades in both cases, because it is a real provider failure.
+8. **Accepted judgement calls:**
+   - AUTH_ERROR and NOT_REGISTERED take the UNCONFIGURED precedence slot.
+   - "Failed SEC row" means PROVIDER_ERROR or PROVIDER_BUDGET_EXHAUSTED. NOT_ELIGIBLE and an operator-disabled SEC keep the old `failureMode`.
+   - An undated match counts as in range.
+   - B-G11's invalid-ticker case completes in Batch C, with A-G12 ticker validation.
+9. **New finding, for the next triage:** F8. Python raises `RATING_CHANGES_UNAVAILABLE` when the analyst radar call throws, and the Worker does not.
