@@ -376,7 +376,7 @@ class TestExposureFanOut(unittest.TestCase):
         import time
         from unittest.mock import AsyncMock, patch
 
-        with patch("server._get_submissions_for_ticker", new_callable=AsyncMock) as warm, \
+        with patch("yfmcp.clients.edgar._get_submissions_for_ticker", new_callable=AsyncMock) as warm, \
              patch("server.get_sec_filing_index", side_effect=self._slow({"filingDate": "2026-02-01"})), \
              patch("server.extract_geographic_revenue", side_effect=self._slow(error=RuntimeError("geo parser failed"))), \
              patch("server.search_sec_filing_text", side_effect=self._slow({"matches": []})) as search, \
@@ -396,7 +396,7 @@ class TestExposureFanOut(unittest.TestCase):
     def test_extract_exposure_index_failure_still_raises(self):
         from unittest.mock import AsyncMock, patch
 
-        with patch("server._get_submissions_for_ticker", new_callable=AsyncMock), \
+        with patch("yfmcp.clients.edgar._get_submissions_for_ticker", new_callable=AsyncMock), \
              patch("server.get_sec_filing_index", side_effect=self._slow(error=RuntimeError("index down"))), \
              patch("server.extract_geographic_revenue", side_effect=self._slow()), \
              patch("server.search_sec_filing_text", side_effect=self._slow()), \
@@ -408,7 +408,7 @@ class TestExposureFanOut(unittest.TestCase):
         import time
         from unittest.mock import AsyncMock, patch
 
-        with patch("server._get_submissions_for_ticker", new_callable=AsyncMock), \
+        with patch("yfmcp.clients.edgar._get_submissions_for_ticker", new_callable=AsyncMock), \
              patch("server.get_sec_filing_index", side_effect=self._slow({"index": {}})), \
              patch("server.extract_revenue_exposure", side_effect=self._slow({"status": "NOT_DISCLOSED"})), \
              patch("server.search_sec_filing_text", side_effect=self._slow({"matches": []})), \
