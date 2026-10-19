@@ -1,0 +1,265 @@
+{
+ "server.py": [
+  {
+   "name": "_valuation_market_inputs",
+   "line": 7914,
+   "nloc": 8,
+   "region": "shared",
+   "dest": "yfmcp/clients/yahoo.py"
+  }
+ ],
+ "worker/src/yahoo-finance.ts": [
+  {
+   "name": "providerCacheKey",
+   "line": 136,
+   "nloc": 9,
+   "region": "shared",
+   "dest": "worker/src/clients/provider-http.ts"
+  },
+  {
+   "name": "providerCacheName",
+   "line": 146,
+   "nloc": 3,
+   "region": "providers",
+   "dest": "worker/src/clients/provider-http.ts"
+  },
+  {
+   "name": "providerEdgeRequest",
+   "line": 150,
+   "nloc": 3,
+   "region": "earnings",
+   "dest": "worker/src/clients/provider-http.ts"
+  },
+  {
+   "name": "edgeCache",
+   "line": 154,
+   "nloc": 4,
+   "region": "earnings",
+   "dest": "worker/src/clients/provider-http.ts"
+  },
+  {
+   "name": "getProviderCache",
+   "line": 159,
+   "nloc": 36,
+   "region": "shared",
+   "dest": "worker/src/clients/provider-http.ts"
+  },
+  {
+   "name": "setProviderCache",
+   "line": 196,
+   "nloc": 25,
+   "region": "shared",
+   "dest": "worker/src/clients/provider-http.ts"
+  },
+  {
+   "name": "deleteProviderCache",
+   "line": 222,
+   "nloc": 10,
+   "region": "earnings",
+   "dest": "worker/src/clients/provider-http.ts"
+  },
+  {
+   "name": "providerMessageStatus",
+   "line": 233,
+   "nloc": 7,
+   "region": "shared",
+   "dest": "worker/src/clients/provider-http.ts"
+  },
+  {
+   "name": "providerHttpStatus",
+   "line": 241,
+   "nloc": 7,
+   "region": "shared",
+   "dest": "worker/src/clients/provider-http.ts"
+  },
+  {
+   "name": "fetchProviderWithTimeout",
+   "line": 249,
+   "nloc": 22,
+   "region": "shared",
+   "dest": "worker/src/clients/provider-http.ts"
+  },
+  {
+   "name": "alternateYahooHost",
+   "line": 667,
+   "nloc": 6,
+   "region": "shared",
+   "dest": "worker/src/clients/yahoo.ts"
+  },
+  {
+   "name": "pause",
+   "line": 674,
+   "nloc": 3,
+   "region": "pricing",
+   "dest": "worker/src/clients/yahoo.ts"
+  },
+  {
+   "name": "refreshCrumb",
+   "line": 678,
+   "nloc": 36,
+   "region": "shared",
+   "dest": "worker/src/clients/yahoo.ts"
+  },
+  {
+   "name": "getCrumbIfAvailable",
+   "line": 718,
+   "nloc": 12,
+   "region": "shared",
+   "dest": "worker/src/clients/yahoo.ts"
+  },
+  {
+   "name": "getCrumb",
+   "line": 731,
+   "nloc": 13,
+   "region": "shared",
+   "dest": "worker/src/clients/yahoo.ts"
+  },
+  {
+   "name": "invalidateCrumb",
+   "line": 745,
+   "nloc": 25,
+   "region": "shared",
+   "dest": "worker/src/clients/yahoo.ts"
+  },
+  {
+   "name": "markYahooCacheActivity",
+   "line": 774,
+   "nloc": 3,
+   "region": "pricing",
+   "dest": "worker/src/clients/yahoo.ts"
+  },
+  {
+   "name": "countYahooCache",
+   "line": 778,
+   "nloc": 4,
+   "region": "shared",
+   "dest": "worker/src/clients/yahoo.ts"
+  },
+  {
+   "name": "yahooCacheStats",
+   "line": 783,
+   "nloc": 9,
+   "region": "pricing",
+   "dest": "worker/src/clients/yahoo.ts"
+  },
+  {
+   "name": "yGetText",
+   "line": 793,
+   "nloc": 69,
+   "region": "shared",
+   "dest": "worker/src/clients/yahoo.ts"
+  },
+  {
+   "name": "yahooCacheUrl",
+   "line": 868,
+   "nloc": 5,
+   "region": "pricing",
+   "dest": "worker/src/clients/yahoo.ts"
+  },
+  {
+   "name": "yahooEdgeTtlMs",
+   "line": 874,
+   "nloc": 20,
+   "region": "shared",
+   "dest": "worker/src/clients/yahoo.ts"
+  },
+  {
+   "name": "isEdgeCacheableYahooBody",
+   "line": 895,
+   "nloc": 18,
+   "region": "shared",
+   "dest": "worker/src/clients/yahoo.ts"
+  },
+  {
+   "name": "yahooEdgeRequest",
+   "line": 914,
+   "nloc": 3,
+   "region": "shared",
+   "dest": "worker/src/clients/yahoo.ts"
+  },
+  {
+   "name": "readYahooEdge",
+   "line": 918,
+   "nloc": 16,
+   "region": "shared",
+   "dest": "worker/src/clients/yahoo.ts"
+  },
+  {
+   "name": "writeYahooEdge",
+   "line": 935,
+   "nloc": 18,
+   "region": "shared",
+   "dest": "worker/src/clients/yahoo.ts"
+  },
+  {
+   "name": "fetchYahooBody",
+   "line": 954,
+   "nloc": 18,
+   "region": "shared",
+   "dest": "worker/src/clients/yahoo.ts"
+  },
+  {
+   "name": "yahooGetKey",
+   "line": 973,
+   "nloc": 4,
+   "region": "pricing",
+   "dest": "worker/src/clients/yahoo.ts"
+  },
+  {
+   "name": "evictYahooGet",
+   "line": 978,
+   "nloc": 3,
+   "region": "pricing",
+   "dest": "worker/src/clients/yahoo.ts"
+  },
+  {
+   "name": "yGet",
+   "line": 982,
+   "nloc": 29,
+   "region": "shared",
+   "dest": "worker/src/clients/yahoo.ts"
+  },
+  {
+   "name": "yPost",
+   "line": 1012,
+   "nloc": 30,
+   "region": "fundamentals",
+   "dest": "worker/src/clients/yahoo.ts"
+  },
+  {
+   "name": "raw",
+   "line": 1043,
+   "nloc": 11,
+   "region": "shared",
+   "dest": "worker/src/clients/yahoo.ts"
+  },
+  {
+   "name": "iso",
+   "line": 1055,
+   "nloc": 1,
+   "region": "shared",
+   "dest": "worker/src/clients/yahoo.ts"
+  },
+  {
+   "name": "noData",
+   "line": 1056,
+   "nloc": 10,
+   "region": "shared",
+   "dest": "worker/src/clients/yahoo.ts"
+  },
+  {
+   "name": "fetchTimeseriesByDate",
+   "line": 1712,
+   "nloc": 45,
+   "region": "shared",
+   "dest": "worker/src/clients/yahoo.ts"
+  },
+  {
+   "name": "valuationMarketInputs",
+   "line": 12738,
+   "nloc": 9,
+   "region": "shared",
+   "dest": "worker/src/clients/yahoo.ts"
+  }
+ ]
+}

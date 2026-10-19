@@ -1,0 +1,20 @@
+{
+ "server.py": [
+  {
+   "name": "_manual_lookup_payload",
+   "line": 2045,
+   "nloc": 15,
+   "region": "shared",
+   "dest": "yfmcp/clients/endpoints.py"
+  }
+ ],
+ "worker/src/yahoo-finance.ts": [
+  {
+   "name": "filingManualLookup",
+   "line": 6134,
+   "nloc": 17,
+   "region": "sec",
+   "dest": "worker/src/clients/endpoints.ts"
+  }
+ ]
+}
