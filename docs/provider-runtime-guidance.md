@@ -3051,7 +3051,7 @@ F-024, F-026, F-029). Both runtimes change alike.
   - F16: `compare_earnings_actual_vs_estimate` still rates Yahoo estimate rows by the comparison's confidence.
   - F18: producer-level `HIGH` fallbacks.
   - F19: `get_analyst_consensus` provenance fields are present in Python only, so the Worker's `priceTargets.sourceType` reads "unknown".
-  - F20.
+  - F20: status-like strings such as `EXTRACTION_FAILED` stored in `confidence` normalise to LOW.
 - **Rollback:** redeploy 2.20.1.
 
 ## Per-Person Access Keys (2.18.0)
