@@ -219,11 +219,6 @@ async def get_stock_info(
     return json.dumps(info)
 
 
-async def get_yahoo_finance_news(ticker: str) -> str:
-    """Alias for get_company_news. Routes to the canonical news tool with Yahoo Finance + Finnhub sources."""
-    return await get_company_news(ticker, sources=["yahoo_finance_news", "yahoo_finance_press_releases", "finnhub"])
-
-
 # ---------------------------------------------------------------------------
 # News & public-event domain tools - imported for registration and re-exported
 # ---------------------------------------------------------------------------

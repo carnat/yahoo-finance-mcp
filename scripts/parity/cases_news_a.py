@@ -1967,13 +1967,11 @@ CASES += [
     # Cards 177/180: the news Finnhub market policy gates this tool too; IQE.L (.L suffix) never reaches Finnhub.
     ownership_case("ownership.ineligible_suffix_never_reaches_finnhub", ["BR-NWS-177", "BR-NWS-180"], "IQE.L",
                    select=lambda v: {k: ownership_view(v)[k] for k in ("status", "source", "action", "attempts")}, expect={k: _NOT_ELIGIBLE_OWN[k] for k in ("status", "source", "action", "attempts")}),
-    # Card 180: Python reads the policy file at call time and fails open on any read error (IQE.L is then sent to Finnhub, which has
-    # no key here); the Worker's copy is compiled in.
-    ownership_case("ownership.unreadable_policy_fails_open_in_python", ["BR-NWS-180", "BR-NWS-177"], "IQE.L", policy_missing=True,
+    # Card 180: Python reads the policy file at call time and fails closed on any read error (R-news Batch C, decision 14): IQE.L is
+    # not sent to Finnhub, with the bundled policy's reasonCode; the Worker's copy is compiled in.
+    ownership_case("ownership.unreadable_policy_fails_closed", ["BR-NWS-180", "BR-NWS-177"], "IQE.L", policy_missing=True,
                    select=lambda v: {k: ownership_view(v)[k] for k in ("status", "action", "attempts")},
-                   mode="pinned", decision="FINDING: Python fails open (calls Finnhub) when the news-source policy file is unreadable; the Worker's bundled policy cannot fail",
-                   expect_py={"status": "SOURCE_UNCONFIGURED", "action": "CONFIGURE_PROVIDER", "attempts": [["finnhub", "SOURCE_UNCONFIGURED", False, None, None]]},
-                   expect_ts={"status": "NOT_ELIGIBLE", "action": "USE_YAHOO_OR_OFFICIAL_FILINGS",
+                   expect={"status": "NOT_ELIGIBLE", "action": "USE_YAHOO_OR_OFFICIAL_FILINGS",
                               "attempts": [["finnhub", "NOT_ELIGIBLE", False, "MARKET_NOT_ENABLED_BY_DEPLOYED_ENTITLEMENT", None]]}),
 ]
 

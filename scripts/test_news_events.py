@@ -274,7 +274,7 @@ class TestPhase6BCompanyNews(unittest.TestCase):
         }]
         with patch("yfmcp.tools.news._collect_company_events", new_callable=AsyncMock) as mocked:
             mocked.return_value = (yf_items, ["yahoo_finance_news"], finnhub_unconfigured_warning, "2026-05-16T08:01:00Z")
-            data = _parse(_run(srv.get_yahoo_finance_news("AAPL")))
+            data = _parse(_run(srv.get_company_news("AAPL", sources=["yahoo_finance_news", "yahoo_finance_press_releases", "finnhub"])))
             # Must return 2 Yahoo items even with no Finnhub key
             self.assertEqual(len(data.get("items", [])), 2)
             source_status = data.get("sourceStatus", {})
@@ -513,7 +513,7 @@ class TestPhase6BCompanyNews(unittest.TestCase):
                 [{"code": "SOURCE_UNAVAILABLE", "message": "Finnhub company-news source is not configured; skipped.", "severity": "warning"}],
                 "2026-05-16T10:00:00Z",
             )
-            data = _parse(_run(srv.get_yahoo_finance_news("NVDA")))
+            data = _parse(_run(srv.get_company_news("NVDA", sources=["yahoo_finance_news", "yahoo_finance_press_releases", "finnhub"])))
             source_status = data.get("sourceStatus", {})
             # sec must not appear in source status
             self.assertNotIn("sec", source_status)

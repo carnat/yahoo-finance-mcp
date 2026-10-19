@@ -268,7 +268,6 @@ _TOOL_OUTPUT_SCHEMAS: dict[str, dict] = {
     },
     "get_historical_stock_prices": _SIMPLE_OUTPUT_SCHEMA,
     "get_stock_info": _SIMPLE_OUTPUT_SCHEMA,
-    "get_yahoo_finance_news": _NEWS_EVENT_OUTPUT_SCHEMA,
     "get_stock_actions": _SIMPLE_OUTPUT_SCHEMA,
     "get_financial_statement": _SIMPLE_OUTPUT_SCHEMA,
     "get_holder_info": _SIMPLE_OUTPUT_SCHEMA,

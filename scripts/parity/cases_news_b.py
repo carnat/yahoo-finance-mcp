@@ -718,51 +718,31 @@ CASES += [
     # caller's effective max_results, the evidence was cut by the pool cap or dedupe, not by the caller, so coverage.state is
     # PARTIAL. The two cases above return a full output (10 of 10), so the caller's limit cut them and they stay FULL. Here 40
     # accepted rows carry 4 distinct stories on one day: the pool of 30 dedupes to 4 items, so 4 < 10 are returned.
-    # TODO(python-mirror): decisions 10/18 — Python's _build_coverage takes the caller's effective max_results and the number of
-    # items the tool returns (get_company_news: safe_max and len(items) after the cut; search_company_news: the clamped
-    # max_results and the matched items returned; get_public_event_timeline: max_results clamped 1-100, default 50, and the
-    # timeline length), and returns state PARTIAL when truncatedSources is non-empty and that count is below the limit; otherwise
-    # the state stays as _compute_source_coverage gives (no new field; status, failureMode, failedSources and
-    # recommendedNextAction unchanged). Then flip to equal with expect=<the expect_ts below>.
     _scenario(
         "news.coverage.truncation_by_dedupe_below_max_results_is_partial", ["BR-NWS-192", "BR-NWS-220", "BR-NWS-260"],
         lambda: server.get_company_news("AAPL", 10, 14, ["finnhub"]),
         'm.yahooFinance.getCompanyNews("AAPL", 10, 14, ["finnhub"])',
         env=FINNHUB_ENV, routes=_finnhub([_frow(i, days=1, text=f"Same story {i % 4}") for i in range(40)]), select=_fin_truncation_view,
-        mode="pinned", decision="FINDING: 2.20.0 Worker side landed (decision 10): truncation below the caller's max_results makes coverage PARTIAL in the Worker; Python still reports FULL (port pending)",
-        expect_py={"returned": 4,
-                   "finnhub": {"status": "OK", "acceptedCount": 40, "collectedCount": 30, "returnedCount": 4, "truncatedCount": 36,
-                               "hasMoreAccepted": True},
-                   "truncatedSources": [{"source": "finnhub", "acceptedCount": 40, "returnedCount": 4, "truncatedCount": 36}],
-                   "action": "RETRY_TRUNCATED_SOURCE", "state": "FULL", "status": None},
-        expect_ts={"returned": 4,
+        expect={"returned": 4,
                    "finnhub": {"status": "OK", "acceptedCount": 40, "collectedCount": 30, "returnedCount": 4, "truncatedCount": 36,
                                "hasMoreAccepted": True},
                    "truncatedSources": [{"source": "finnhub", "acceptedCount": 40, "returnedCount": 4, "truncatedCount": 36}],
                    "action": "RETRY_TRUNCATED_SOURCE", "state": "PARTIAL", "status": None}),
     # #19 / decisions 10 and 18, the pool cap: search_company_news filters a pool of 100. Of 120 accepted rows only the first 100
     # are searched, so 'number 11' finds row 11 but not rows 110-119: 1 of max 10 returned, coverage PARTIAL.
-    # TODO(python-mirror): decisions 10/18, as above; then flip to equal with expect=<the expect_ts below>.
     _scenario(
         "news.coverage.search_pool_cap_truncation_below_max_results_is_partial", ["BR-NWS-192", "BR-NWS-260"],
         lambda: server.search_company_news("AAPL", "number 11", "", "", ["finnhub"], 10),
         'm.yahooFinance.searchCompanyNews("AAPL", "number 11", "", "", ["finnhub"], 10)',
         env=FINNHUB_ENV, routes=_finnhub(_ROWS_10_DAYS), select=_fin_truncation_view,
-        mode="pinned", decision="FINDING: 2.20.0 Worker side landed (decision 10): pool-cap truncation below the caller's max_results makes coverage PARTIAL in the Worker; Python still reports FULL (port pending)",
-        expect_py={"returned": 1,
-                   "finnhub": {"status": "OK", "acceptedCount": 120, "collectedCount": 100, "returnedCount": 1, "truncatedCount": 119,
-                               "hasMoreAccepted": True},
-                   "truncatedSources": [{"source": "finnhub", "acceptedCount": 120, "returnedCount": 1, "truncatedCount": 119}],
-                   "action": "RETRY_TRUNCATED_SOURCE", "state": "FULL", "status": None},
-        expect_ts={"returned": 1,
+        expect={"returned": 1,
                    "finnhub": {"status": "OK", "acceptedCount": 120, "collectedCount": 100, "returnedCount": 1, "truncatedCount": 119,
                                "hasMoreAccepted": True},
                    "truncatedSources": [{"source": "finnhub", "acceptedCount": 120, "returnedCount": 1, "truncatedCount": 119}],
                    "action": "RETRY_TRUNCATED_SOURCE", "state": "PARTIAL", "status": None}),
     # Decision 18: a mixed output that fills max_results stays FULL although Finnhub is in truncatedSources. 6 Yahoo items (today,
     # the newest) and 4 of Finnhub's 40 accepted rows fill the 10 slots (all HIGH relevance), so the caller's limit cut Finnhub.
-    # Python reports FULL today as well (it has no truncation rule yet), so the case is equal now.
-    # TODO(python-mirror): keep this case equal when porting decisions 10/18 (a full output never turns PARTIAL).
+    # A full output never turns PARTIAL, in either runtime.
     _scenario(
         "news.coverage.mixed_output_filling_max_results_stays_full_with_a_truncated_source", ["BR-NWS-192", "BR-NWS-260"],
         lambda: server.get_company_news("AAPL", 10, 14, ["yahoo_finance_news", "finnhub"]),
@@ -812,21 +792,13 @@ CASES += [
         select=lambda v: {"finnhub": v["sourceStatus"]["finnhub"], "warnings": _warning_rows(v), "status": v.get("status")},
         expect={"finnhub": {"status": "AUTH_ERROR", "rawCount": 0, "filteredCount": 0},
                 "warnings": [["SOURCE_UNAVAILABLE", "Finnhub auth error: HTTP 401"]], "status": "SOURCE_LIMITED_NOT_FOUND"}),
-    # TODO(python-mirror): decision 11 — Python's HTTPError branch for a status other than 401/403/429 must say
-    # f"Finnhub source unavailable: HTTP {exc.code}" (not str(exc), urllib's 'HTTP Error 500: <reason>'); then flip to equal with
-    # expect=<the expect_ts below>, drop the re.sub in select, and rename to news.finnhub.http_500_is_provider_error_with_the_http_status_message.
     _scenario(
-        "news.finnhub.http_500_is_provider_error_with_runtime_specific_message", ["BR-NWS-219"],
+        "news.finnhub.http_500_is_provider_error_with_the_http_status_message", ["BR-NWS-219"],
         lambda: server.get_company_news("AAPL", 10, 14, ["finnhub"]),
         'm.yahooFinance.getCompanyNews("AAPL", 10, 14, ["finnhub"])',
         env=FINNHUB_ENV, routes=_finnhub(None, 500, "boom"),
-        # The reason phrase after 'HTTP Error 500:' comes from the harness stub, so it is cut from the compared text.
-        select=lambda v: {"finnhub": v["sourceStatus"]["finnhub"], "status": v.get("status"),
-                          "warnings": [[c, re.sub(r"(HTTP Error 500):.*", r"\1", m)] for c, m in _warning_rows(v)]},
-        mode="pinned", decision="FINDING: 2.20.0 Worker side landed (decision 11, 'Finnhub source unavailable: HTTP 500'); Python still says 'HTTP Error 500' from urllib (port pending)",
-        expect_py={"finnhub": {"status": "PROVIDER_ERROR", "rawCount": 0, "filteredCount": 0},
-                   "warnings": [["SOURCE_UNAVAILABLE", "Finnhub source unavailable: HTTP Error 500"]], "status": "SOURCE_LIMITED_NOT_FOUND"},
-        expect_ts={"finnhub": {"status": "PROVIDER_ERROR", "rawCount": 0, "filteredCount": 0},
+        select=lambda v: {"finnhub": v["sourceStatus"]["finnhub"], "status": v.get("status"), "warnings": _warning_rows(v)},
+        expect={"finnhub": {"status": "PROVIDER_ERROR", "rawCount": 0, "filteredCount": 0},
                    "warnings": [["SOURCE_UNAVAILABLE", "Finnhub source unavailable: HTTP 500"]], "status": "SOURCE_LIMITED_NOT_FOUND"}),
     _scenario(
         "news.finnhub.non_array_payload_is_provider_changed_with_the_unexpected_format_message", ["BR-NWS-219"],
@@ -891,18 +863,12 @@ CASES += [
         expect={"1": {"returned": 0, "status": "EMPTY_RESULT", "acceptedCount": 0, "collectedCount": 0, "truncatedCount": 0},
                 "-2": {"returned": 0, "status": "EMPTY_RESULT", "acceptedCount": 0, "collectedCount": 0, "truncatedCount": 0},
                 "7": {"returned": 3, "status": "OK", "acceptedCount": 3, "collectedCount": 3, "truncatedCount": 0}}),
-    # Card 194 / 277 (Q7 for triage): 0 counts as 'missing' in Python (tool defaults 10 results / 14 days) but is clamped to 1 by
-    # the Worker (1 result / 1 day). R-news Batch C (B-G7, decision 13) keeps the Worker behaviour: 0 clamps to 1 in every news tool.
-    # TODO(python-mirror): decision 13 — Python clamps max_results / lookback_days of 0 to 1 in every news tool (a missing value
-    # still means the default); then flip to equal with expect=<the expect_ts below> and rename to news.limits.zero_clamps_to_one.
+    # Card 194 / 277: 0 clamps to 1 in both runtimes (R-news Batch C, B-G7, decision 13); only a missing value means the default.
     _multi_scenario(
-        "news.limits.zero_means_default_in_python_and_one_in_worker", ["BR-NWS-194", "BR-NWS-277"],
+        "news.limits.zero_clamps_to_one", ["BR-NWS-194", "BR-NWS-277"],
         [("max_results_0", *_limit_call(0, 14)), ("lookback_0", *_limit_call(5, 0))],
-        env=FINNHUB_ENV, routes=_finnhub(_ROWS_10_DAYS), select=_limit_view, mode="pinned",
-        decision="FINDING: max_results=0 / lookback_days=0 mean the default (10 / 14) in Python (int(value or default)) but clamp to 1 in the Worker (clampInt)",
-        expect_py={"max_results_0": {"returned": 10, "status": "OK", "acceptedCount": 120, "collectedCount": 30, "truncatedCount": 110},
-                   "lookback_0": {"returned": 5, "status": "OK", "acceptedCount": 120, "collectedCount": 15, "truncatedCount": 115}},
-        expect_ts={"max_results_0": {"returned": 1, "status": "OK", "acceptedCount": 120, "collectedCount": 3, "truncatedCount": 119},
+        env=FINNHUB_ENV, routes=_finnhub(_ROWS_10_DAYS), select=_limit_view,
+        expect={"max_results_0": {"returned": 1, "status": "OK", "acceptedCount": 120, "collectedCount": 3, "truncatedCount": 119},
                    "lookback_0": {"returned": 5, "status": "OK", "acceptedCount": 12, "collectedCount": 12, "truncatedCount": 7}}),
 ]
 
@@ -1226,7 +1192,27 @@ def _coverage_report(v):
             "failed": [[s["source"], s["status"]] for s in v["coverage"]["failedSources"]]}
 
 
+async def _with_unreadable_finnhub_policy(call):
+    """Run the Python tool coroutine with the news-source policy file unreadable (the Worker's copy is compiled in)."""
+    with patch.object(news_tools, "_NEWS_SOURCE_CAPABILITIES_PATH", Path("/nonexistent/news-source-capabilities.json")):
+        news_tools._finnhub_policy.cache_clear()
+        try:
+            return await call()
+        finally:
+            news_tools._finnhub_policy.cache_clear()
+
+
 CASES += [
+    # R-news Batch C, decision 14: an unreadable policy file fails closed on the news path too. Finnhub is NOT_ELIGIBLE with the
+    # bundled policy's reasonCode and is never called, as in the Worker (whose policy is compiled in).
+    _scenario(
+        "news.coverage.unreadable_finnhub_policy_fails_closed_as_not_eligible", ["BR-NWS-180", "BR-NWS-196"],
+        lambda: _with_unreadable_finnhub_policy(lambda: server.get_company_news("VOD.L", 10, 14, ["yahoo_finance_news", "finnhub"])),
+        'm.yahooFinance.getCompanyNews("VOD.L", 10, 14, ["yahoo_finance_news", "finnhub"])',
+        news=_VOD_FEED, info=_VOD_INFO, env=FINNHUB_ENV, select=_coverage_report,
+        expect={"sourceCoverage": "PARTIAL", "state": "PARTIAL", "action": "CHECK_OFFICIAL_RELEASES",
+                "sourceStatus": {"yahoo_finance_news": "OK", "finnhub": "NOT_ELIGIBLE"}, "status": "PARTIAL",
+                "skipped": [["finnhub", "NOT_ELIGIBLE", "MARKET_NOT_ENABLED_BY_DEPLOYED_ENTITLEMENT"]], "failed": []}),
     # Card 196: Yahoo OK + Finnhub NOT_ELIGIBLE -> PARTIAL (NOT_ELIGIBLE limits coverage); the next action is CHECK_OFFICIAL_RELEASES.
     _scenario(
         "news.coverage.not_eligible_source_makes_coverage_partial", ["BR-NWS-196", "BR-NWS-192"],
@@ -1439,8 +1425,15 @@ async def _gated_tool(name, args):
 
 
 def _alias_py():
-    with _py_news_env(news=[], info={}):
-        return json.loads(asyncio.run(server.get_yahoo_finance_news("AAPL")))
+    """get_yahoo_finance_news is not a Python tool any more (R-news Batch C, B-G19): no server function, no registration. The
+    Python SDK answers an unregistered name with its own unknown-tool error, reduced here to the Worker's dispatcher outcome."""
+    assert not hasattr(server, "get_yahoo_finance_news")
+    try:
+        registered_tool_fn("get_yahoo_finance_news")
+    except RuntimeError as exc:
+        assert "is not registered" in str(exc)
+        return {"error": "INPUT_VALIDATION_ERROR", "message": "Unknown tool name."}
+    raise AssertionError("get_yahoo_finance_news is still registered")
 
 
 CASES += [
@@ -1496,15 +1489,13 @@ CASES += [
         news=[], info={}, select=_tool_outcome,
         expect={"six": ["BATCH_LIMIT_EXCEEDED", "Too many tickers: 6. Maximum is 5 per call for get_company_news."],
                 "five": {"batch": {t: [t, _NO_NEWS_STATUS] for t in _SIX_TICKERS[:5]}}}),
-    # Card 271: get_yahoo_finance_news is a Python alias of get_company_news with a fixed source list (no Marketaux); the Worker has no such tool.
-    Case(name="news.validation.get_yahoo_finance_news_alias_exists_in_python_only", ids=["BR-NWS-271"],
+    # Card 271 / B-G19: get_yahoo_finance_news (the old Python alias) is gone; both runtimes treat it as an unknown tool.
+    Case(name="news.validation.get_yahoo_finance_news_is_an_unknown_tool_in_both_runtimes", ids=["BR-NWS-271"],
          py=lambda: _alias_py(),
          ts={"js": _worker_js(f"return JSON.parse(await {_call_tool('get_yahoo_finance_news', {'ticker': 'AAPL'})});"), "isolate": True},
-         routes=_yahoo_routes([], {}), mode="pinned",
-         decision="FINDING: get_yahoo_finance_news (fixed source list without Marketaux) exists in Python only; the Worker answers 'Unknown tool name.'",
-         select=lambda v: ({"requested": v["requestedSources"], "defaultApplied": v["defaultSourcesApplied"]} if "requestedSources" in v else _unwrap(v)),
-         expect_py={"requested": ["yahoo_finance_news", "yahoo_finance_press_releases", "finnhub"], "defaultApplied": False},
-         expect_ts={"error": "INPUT_VALIDATION_ERROR", "message": "Unknown tool name."}),
+         routes=_yahoo_routes([], {}),
+         select=_unwrap,
+         expect={"error": "INPUT_VALIDATION_ERROR", "message": "Unknown tool name."}),
 ]
 
 
@@ -1588,19 +1579,11 @@ CASES += [
         "news.provider.missing_key_is_unconfigured_and_not_attempted", ["BR-NWS-191"], ["AAA1"], {}, {},
         expect=[{"status": "SOURCE_UNCONFIGURED", "action": "CONFIGURE_PROVIDER", "alphaFallbackAllowed": False,
                  "attempts": [["finnhub", "SOURCE_UNCONFIGURED", False, "MISS", None, None]]}]),
-    # Card 233: the entitlement pattern differs. A body that only says 'current plan' is ENTITLEMENT_REQUIRED in the Worker but
-    # AUTH_ERROR in Python (whose pattern is 'not available under your current plan'). R-news Batch C (B-G10) takes the Worker pattern.
-    # TODO(python-mirror): B-G10 — Python's provider client classifies a body containing 'current plan' (e.g. 'Your current plan
-    # does not include this.') as ENTITLEMENT_REQUIRED, as the Worker's providerMessageStatus does; then flip to equal with
-    # expect=<the expect_ts below> and rename to news.provider.current_plan_body_is_entitlement_required.
+    # Card 233: a body that only says 'current plan' is ENTITLEMENT_REQUIRED in both runtimes (R-news Batch C, B-G10).
     _ownership_calls_case(
-        "news.provider.current_plan_body_is_entitlement_in_the_worker_only", ["BR-NWS-233", "BR-NWS-191"], ["AAA1"],
+        "news.provider.current_plan_body_is_entitlement_required", ["BR-NWS-233", "BR-NWS-191"], ["AAA1"],
         {FINNHUB_OWNERSHIP + "*": {"status": 403, "body": json.dumps({"error": "Your current plan does not include this."})}}, FINNHUB_ENV,
-        mode="pinned",
-        decision="FINDING: the entitlement pattern differs (Worker 'current plan', Python 'not available under your current plan'), so the same 403 is ENTITLEMENT_REQUIRED / USE_ALPHA_VANTAGE_EXPLICITLY in the Worker and AUTH_ERROR / CHECK_PROVIDER_CREDENTIALS in Python",
-        expect_py=[{"status": "AUTH_ERROR", "action": "CHECK_PROVIDER_CREDENTIALS", "alphaFallbackAllowed": False,
-                    "attempts": [["finnhub", "AUTH_ERROR", True, "MISS", 403, None]]}],
-        expect_ts=[{"status": "ENTITLEMENT_REQUIRED", "action": "USE_ALPHA_VANTAGE_EXPLICITLY", "alphaFallbackAllowed": False,
+        expect=[{"status": "ENTITLEMENT_REQUIRED", "action": "USE_ALPHA_VANTAGE_EXPLICITLY", "alphaFallbackAllowed": False,
                     "attempts": [["finnhub", "ENTITLEMENT_REQUIRED", True, "MISS", 403, None]]}]),
     # Card 193: the Worker remembers an entitlement denial per endpoint for 6 hours: the second call (a different ticker, two
     # hours later) is not sent; it reports attempted false, cacheStatus HIT_PROCESS and 'remembered until 16:00Z'. Python
@@ -2442,7 +2425,7 @@ _NEWS_TOOL_NAMES = ["get_company_news", "search_company_news", "get_public_event
 def _declared_status_py():
     out = {}
     for tool in _NEWS_TOOL_NAMES:
-        schema = server._TOOL_OUTPUT_SCHEMAS.get("get_yahoo_finance_news" if tool == "get_company_news" else tool) or {}
+        schema = server._TOOL_OUTPUT_SCHEMAS.get(tool) or {}
         out[tool] = (schema.get("properties") or {}).get("status", {}).get("enum")
     with _py_news_env(news=[], info=_VOD_INFO):
         payload = json.loads(asyncio.run(server.get_company_news("VOD.L", 10, 14, ["yahoo_finance_news"])))
