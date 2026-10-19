@@ -108,6 +108,7 @@ from yfmcp.news.providers.company_ir_page import (
     _parse_company_ir_page_html,
     _parse_company_ir_page_json,
 )
+from yfmcp.news.providers.company_ir import _collect_company_ir_events
 from yfmcp.news.providers.globenewswire import (
     _GLOBENEWSWIRE_BLOCKED_XML_MARKERS,
     _GLOBENEWSWIRE_ISIN_CATEGORY_DOMAIN,
@@ -177,6 +178,19 @@ def _finnhub_eligibility(ticker: str) -> tuple[bool, str | None]:
         ticker_u.endswith(str(suffix).upper()) for suffix in policy.get("ineligibleTickerSuffixes") or []
     )
     return (not ineligible, str(policy.get("reasonCode") or "") if ineligible else None)
+
+
+def _confidence_for_source_type(source_type: object, fallback: object = "LOW") -> str:
+    """Confidence by source type (the Worker's confidenceForSourceType): official sources HIGH, wires MEDIUM, contextual news LOW;
+    any other type keeps the item's own confidence."""
+    source = source_type if isinstance(source_type, str) else ""
+    if source in ("sec_filing", "company_ir", "company_ir_page"):
+        return "HIGH"
+    if source in ("press_release", "yahoo_finance_press_releases", "newswire"):
+        return "MEDIUM"
+    if source in ("company_news", "yahoo_finance_news", "yahoo_finance", "finnhub"):
+        return "LOW"
+    return fallback if isinstance(fallback, str) else "LOW"
 
 
 def _evidence_class_for(source_type: object) -> str:
@@ -839,12 +853,15 @@ def _compute_source_status(
             "allowedAction": allowed_action,
         }
     if "company_ir" in sources:
+        # Registry-only since 2.19.0 (Worker 2.10.0): the collector's diagnostics carry the registry state (NOT_REGISTERED
+        # without an approved entry) and override the item-count status, as the Worker's spread does.
+        company_ir_diagnostic = diagnostics.get("company_ir") if isinstance(diagnostics.get("company_ir"), dict) else {}
+        company_ir_status = "EMPTY_RESULT"
         if "company_ir" in sources_used:
-            result["company_ir"] = {"status": "OK" if company_ir_items else "EMPTY_RESULT", "rawCount": len(company_ir_items), "filteredCount": len(company_ir_items)}
+            company_ir_status = "OK" if company_ir_items else "EMPTY_RESULT"
         elif _yf_error_status(warning_msgs):
-            result["company_ir"] = {"status": "PROVIDER_ERROR", "rawCount": 0, "filteredCount": 0}
-        else:
-            result["company_ir"] = {"status": "EMPTY_RESULT", "rawCount": 0, "filteredCount": 0}
+            company_ir_status = "PROVIDER_ERROR"
+        result["company_ir"] = {"status": company_ir_status, "rawCount": len(company_ir_items), "filteredCount": len(company_ir_items), **company_ir_diagnostic}
     if "company_ir_page" in sources:
         page_warning = next((w for w in warnings if isinstance(w, dict) and str(w.get("code", "")).startswith("COMPANY_IR_PAGE_")), {})
         status = "EMPTY_RESULT"
@@ -860,14 +877,19 @@ def _compute_source_status(
             status = "SOURCE_VALIDATION_FAILED"
         else:
             status = "NOT_REGISTERED"
+        # The registry metadata comes from the entry itself, so a clean approved fetch carries it too (2.19.0, row g).
+        page_diagnostic = diagnostics.get("company_ir_page") if isinstance(diagnostics.get("company_ir_page"), dict) else {}
+        registry_fields = page_diagnostic if page_diagnostic.get("approvalStatus") not in (None, "not_registered") else page_warning
+        # A fetched page answers fetch_configured_source whether or not it had items in the window (2.19.0, row f).
+        fetched = status == "APPROVED_SOURCE_OK" or (status == "EMPTY_RESULT" and "company_ir_page" in sources_used)
         result["company_ir_page"] = {
             "status": status,
             "rawCount": len(company_ir_page_items),
             "filteredCount": len(company_ir_page_items),
-            "registryVersion": page_warning.get("registryVersion"),
-            "canonicalUrl": page_warning.get("canonicalUrl"),
-            "approvalStatus": page_warning.get("approvalStatus"),
-            "allowedAction": "fetch_configured_source" if status == "APPROVED_SOURCE_OK" else (
+            "registryVersion": registry_fields.get("registryVersion"),
+            "canonicalUrl": registry_fields.get("canonicalUrl"),
+            "approvalStatus": registry_fields.get("approvalStatus"),
+            "allowedAction": "fetch_configured_source" if fetched else (
                 "review_and_promote" if status == "CANDIDATE_AVAILABLE" else "registry_review_required"
             ),
         }
@@ -928,7 +950,7 @@ def _compute_source_coverage(source_status: dict) -> str:
     return "FULL"
 
 
-def _verify_coverage_failure_mode(source_status: dict, warnings: list[dict]) -> str | None:
+def _verify_coverage_failure_mode(source_status: dict, warnings: list[dict], company_ir_requested: bool = False) -> str | None:
     """Classify unavailable verification coverage without mistaking it for absence."""
     warning_text = " ".join(
         str(w.get("message") or "").lower()
@@ -950,7 +972,12 @@ def _verify_coverage_failure_mode(source_status: dict, warnings: list[dict]) -> 
         return "PROVIDER_CHANGED"
     if "IDENTITY_UNAVAILABLE" in source_states:
         return "YAHOO_IDENTITY_UNAVAILABLE"
-    if "UNCONFIGURED" in source_states:
+    # AUTH_ERROR and an unregistered company_ir map to the existing SOURCE_UNCONFIGURED (2.19.0, calls #10 / #14). The company_ir
+    # upgrade applies only when the caller named company_ir: a defaults-applied NOT_REGISTERED row stays in sourceStatus /
+    # coverage without changing the status (planner decision 7).
+    company_ir_row = source_status.get("company_ir")
+    company_ir_status = str(company_ir_row.get("status") or "") if company_ir_requested and isinstance(company_ir_row, dict) else ""
+    if "UNCONFIGURED" in source_states or "AUTH_ERROR" in source_states or company_ir_status == "NOT_REGISTERED":
         return "SOURCE_UNCONFIGURED"
     if "NOT_ELIGIBLE" in source_states:
         return "SOURCE_NOT_ELIGIBLE"
@@ -1003,10 +1030,8 @@ async def _collect_company_events(
     # items are labelled with their specific source (yahoo_finance_news / _press_releases).
     _need_yf_news = "yahoo_finance_news" in selected_sources or "yahoo_finance" in selected_sources
     _need_yf_pr = "yahoo_finance_press_releases" in selected_sources or "yahoo_finance" in selected_sources
-    # Also satisfy old company_ir source via the Yahoo feed when it is requested
-    # but yahoo_finance* is not.  ``newswire`` is now served by the direct
-    # GlobeNewswire RSS fetcher below and is intentionally excluded here.
-    _need_yf_news = _need_yf_news or "company_ir" in selected_sources
+    # ``company_ir`` is registry-only (2.19.0): it never reads the Yahoo feed. ``newswire`` is served by the direct
+    # GlobeNewswire RSS fetcher below and is likewise excluded here.
     finnhub_eligible, finnhub_reason_code = (
         _finnhub_eligibility(ticker) if "finnhub" in selected_sources else (False, None)
     )
@@ -1048,12 +1073,13 @@ async def _collect_company_events(
 
     # The first-tier sources are independent, so they are fetched together;
     # results are merged below in the fixed source order, as before.
-    sec_result, page_result, yahoo_result, finnhub_result = await asyncio.gather(
+    sec_result, company_ir_result, page_result, yahoo_result, finnhub_result = await asyncio.gather(
         _watched(["sec"], _collect_sec_events(
             ticker,
             filing_types=sec_filing_types or ["8-K", "10-Q", "10-K", "S-3", "DEF14A"],
             **window,
         )) if "sec" in selected_sources else _skipped(),
+        _watched(["company_ir"], _collect_company_ir_events(ticker, **window)) if "company_ir" in selected_sources else _skipped(),
         _watched(["company_ir_page"], _collect_company_ir_page_events(ticker, **window)) if "company_ir_page" in selected_sources else _skipped(),
         _yahoo_feeds(),
         _watched(["finnhub"], _collect_finnhub_events(ticker, **window)) if "finnhub" in selected_sources and finnhub_eligible else _skipped(),
@@ -1078,8 +1104,19 @@ async def _collect_company_events(
         else:
             warnings.extend(sec_warnings)
 
+    if company_ir_result is not None:
+        company_ir_items, company_ir_warnings, company_ir_used = company_ir_result
+        source_diagnostics["company_ir"] = dict(getattr(company_ir_result, "diagnostics", None) or {})
+        if company_ir_used:
+            sources_used.append("company_ir")
+        items.extend(company_ir_items)
+        warnings.extend(company_ir_warnings)
+
     if page_result is not None:
         page_items, page_warnings, page_used = page_result
+        page_diagnostics = getattr(page_result, "diagnostics", None)
+        if page_diagnostics:
+            source_diagnostics["company_ir_page"] = dict(page_diagnostics)
         if page_used:
             sources_used.append("company_ir_page")
         items.extend(page_items)
@@ -1115,16 +1152,11 @@ async def _collect_company_events(
                 sources_used.append("yahoo_finance_news")
             if "yahoo_finance" in selected_sources and "yahoo_finance" not in sources_used:
                 sources_used.append("yahoo_finance")
-            # Legacy sub-source resolved via Yahoo feed
-            if "company_ir" in selected_sources and "company_ir" not in sources_used:
-                sources_used.append("company_ir")
         for item in yf_items:
             src = str(item.get("source") or "")
             if "yahoo_finance_news" in selected_sources and src == "yahoo_finance_news":
                 items.append(item)
             elif "yahoo_finance" in selected_sources and src in ("yahoo_finance_news", "yahoo_finance_press_releases"):
-                items.append(item)
-            elif "company_ir" in selected_sources and src in ("yahoo_finance_news", "yahoo_finance_press_releases"):
                 items.append(item)
         warnings.extend(yf_warnings)
 
@@ -1445,11 +1477,14 @@ async def get_company_press_releases(
         if it.get("sourceType") == "sec_filing" and it.get("filingType") == "8-K":
             acc = it.get("accessionNumber")
             url = it.get("url") or ""
+            # The filer's CIK as the decimal string the SEC archive URLs use (the Worker's secEvidence[].cikInt, 2.19.0, call #18).
+            cik_in_url = _re.search(r"/data/(\d+)/", url)
             evidence = {
                 "filingType": "8-K",
                 "filingDate": it.get("filingDate"),
                 "acceptedAt": it.get("acceptedAt"),
                 "accessionNumber": acc,
+                "cikInt": str(it.get("cikInt") or "") or (cik_in_url.group(1) if cik_in_url else None),
                 "documentUrl": url or None,
             }
             sec_8k_evidence.append(evidence)
@@ -1500,6 +1535,11 @@ async def get_company_press_releases(
             "filingsSearched": sec_8k_without_ex99_count,
         })
 
+    candidate_sources = [
+        w.get("candidate")
+        for w in warnings
+        if isinstance(w, dict) and w.get("code") == "COMPANY_IR_PAGE_CANDIDATE_AVAILABLE" and isinstance(w.get("candidate"), dict)
+    ]
     status = None
     if has_sec_ex99_found:
         status = "SEC_EX99_FOUND"
@@ -1511,7 +1551,7 @@ async def get_company_press_releases(
         if "yahoo_finance_press_releases" in selected_sources:
             status = "NO_YAHOO_PRESS_RELEASE"
         elif "company_ir_page" in selected_sources:
-            status = "COMPANY_IR_PAGE_NOT_APPROVED"
+            status = "COMPANY_IR_PAGE_CANDIDATE_ONLY" if candidate_sources else "COMPANY_IR_PAGE_NOT_APPROVED"
         elif "company_ir" in selected_sources:
             status = "COMPANY_IR_NOT_FOUND"
         else:
@@ -1562,11 +1602,15 @@ async def get_company_press_releases(
         for it in modified_release_items
         if it.get("sourceType") == "company_ir_page" and it.get("approvalStatus") == "approved"
     ][:10]
-    candidate_sources = [
-        w.get("candidate")
-        for w in warnings
-        if isinstance(w, dict) and w.get("code") == "COMPANY_IR_PAGE_CANDIDATE_AVAILABLE" and isinstance(w.get("candidate"), dict)
-    ]
+    # An SEC outage keeps the status; the failure mode comes from the failed SEC row, so the empty result is not read as absence
+    # (2.19.0, call #9). A failed row is PROVIDER_ERROR or PROVIDER_BUDGET_EXHAUSTED; NOT_ELIGIBLE and an operator-disabled SEC
+    # keep the coverage status (planner decision 8). sourceStatus.sec already makes coverage PARTIAL.
+    sec_row = source_status.get("sec")
+    sec_outage_mode = (
+        _verify_coverage_failure_mode({"sec": sec_row}, [])
+        if isinstance(sec_row, dict) and sec_row.get("status") in ("PROVIDER_ERROR", "PROVIDER_BUDGET_EXHAUSTED")
+        else None
+    )
     payload = {
         "ticker": ticker.upper(),
         "items": modified_release_items[:safe_max],
@@ -1585,7 +1629,7 @@ async def get_company_press_releases(
         "decisionGradeBasis": decision_grade_basis,
         "capabilityStatus": "ACTIVE",
         "reliabilityClass": _TOOL_RELIABILITY_CLASS["get_company_press_releases"],
-        "failureMode": None if decision_grade else coverage_status,
+        "failureMode": None if decision_grade else (sec_outage_mode or coverage_status),
     }
     if sec_8k_evidence:
         payload["secEvidence"] = sec_8k_evidence[:10]
@@ -1630,10 +1674,15 @@ async def get_sec_recent_events(
     items = [_enrich_news_item_for_llm(item) for item in items]
     status = _build_collection_status(items, ["sec"] if used else [], warnings)
     source_status = _mark_budget_starved_sources(
-        {"sec": {"status": "OK" if items else "EMPTY_RESULT"} if used else {"status": "PROVIDER_ERROR"}},
+        {"sec": {
+            "status": ("OK" if items else "EMPTY_RESULT") if used else "PROVIDER_ERROR",
+            "rawCount": len(items),
+            "filteredCount": len(items),
+        }},
         ["sec"] if sec_watch.starved else [],
     )
     source_coverage = _compute_source_coverage(source_status)
+    # coverage, sourceCoverage and sourceStatus, as in the Worker (2.19.0, B-G8 / call #15).
     payload = {
         "ticker": ticker.upper(),
         "items": items,
@@ -1642,6 +1691,9 @@ async def get_sec_recent_events(
             "watermark": retrieved_at,
         },
         "warnings": warnings,
+        "sourceCoverage": source_coverage,
+        "coverage": _build_coverage(source_status),
+        "sourceStatus": source_status,
     }
     if status:
         payload["status"] = status
@@ -1748,19 +1800,6 @@ async def verify_company_event(
     if not str(event_query or "").strip():
         return _mcp_failure("verify_company_event", ErrorCode.INPUT_VALIDATION_ERROR, "event_query is required")
     effective_sources = _DEFAULT_EVENT_SOURCES if sources is None else sources
-    items, sources_used, warnings, retrieved_at, source_diagnostics = _unpack_company_event_result(
-        # Match against everything collected: a cap of the newest 50 let a flood
-        # of aggregator items push the official release out before matching
-        # (ASTS BlueBird launch, 2.4.5).
-        await _collect_company_events(
-            ticker,
-            max_results=50,
-            lookback_days=365,
-            sources=effective_sources,
-            include_diagnostics=True,
-            keep_all=True,
-        )
-    )
     event_query_stopwords = {
         "announce", "announced", "announcement", "announcements", "announces",
         "company", "corporate", "latest", "news", "official", "press", "release",
@@ -1795,26 +1834,47 @@ async def verify_company_event(
             return {"matched": True, "method": "TERM_THRESHOLD", "matchedTerms": matched_terms, "requiredTermMatches": required_term_matches}
         return {"matched": False, "method": "NONE", "matchedTerms": matched_terms, "requiredTermMatches": required_term_matches}
 
+    # A query with no meaningful terms can verify nothing, and NOT_FOUND would claim absence (2.19.0, call #12).
     if not meaningful_terms:
-        warnings.append({
-            "code": "EVENT_QUERY_TOO_GENERIC",
-            "message": "The event query contains no specific event terms. Add a term such as acquisition, dividend, guidance, contract, or offering.",
-            "severity": "warning",
-        })
+        return _mcp_failure(
+            "verify_company_event",
+            ErrorCode.INPUT_VALIDATION_ERROR,
+            "The event query contains no specific event terms. Add a term such as acquisition, dividend, guidance, contract, or offering.",
+        )
+
+    items, sources_used, warnings, retrieved_at, source_diagnostics = _unpack_company_event_result(
+        # Match against everything collected: a cap of the newest 50 let a flood
+        # of aggregator items push the official release out before matching
+        # (ASTS BlueBird launch, 2.4.5). The 365-day window is collected whatever the range, which applies only when
+        # classifying, so a match outside the range can still read STALE.
+        await _collect_company_events(
+            ticker,
+            max_results=50,
+            lookback_days=365,
+            sources=effective_sources,
+            include_diagnostics=True,
+            keep_all=True,
+        )
+    )
 
     matched = [it for it in items if _query_match(it)["matched"]]
-    matched_in_range = [
-        it for it in matched
-        if _within_date_window(it.get("publishedAt"), start_date=start_date, end_date=end_date)
-        or (not start_date and not end_date)
-    ]
+    stale_cutoff = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=_STALE_EVENT_DAYS)).strftime("%Y-%m-%d")
+
+    def _in_range(item: dict) -> bool:
+        if not start_date and not end_date:
+            # Without a range a match older than 90 days is not in range, so an old release reads STALE, not CONFIRMED
+            # (2.19.0, call #11). An undated match stays in range there.
+            day = str(item.get("publishedAt") or "")[:10]
+            return not day or day >= stale_cutoff
+        return _within_date_window(item.get("publishedAt"), start_date=start_date, end_date=end_date)
+
+    matched_in_range = [it for it in matched if _in_range(it)]
     official_in_range = [
         it for it in matched_in_range
         if str(it.get("sourceType") or "") in _OFFICIAL_SOURCE_TYPES
         and bool(it.get("url"))
-        and str(it.get("confidence") or "") in ("HIGH", "MEDIUM")
+        and _confidence_for_source_type(it.get("sourceType"), it.get("confidence")) in ("HIGH", "MEDIUM")
     ]
-    stale_cutoff = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=_STALE_EVENT_DAYS)).strftime("%Y-%m-%d")
     stale_only = bool(matched) and all(str(it.get("publishedAt") or "")[:10] < stale_cutoff for it in matched if it.get("publishedAt"))
     matched_group_ids = {
         str(item.get("duplicateGroupId") or "")
@@ -1846,7 +1906,10 @@ async def verify_company_event(
 
     # Stronger evidence first, then newest: a LOW-confidence aggregator item
     # never outranks a press release that matched the same query.
-    best = _er.rank_evidence(official_in_range or matched_in_range or matched, lambda ev: str(ev.get("confidence") or ""))
+    best = _er.rank_evidence(
+        official_in_range or matched_in_range or matched,
+        lambda ev: _confidence_for_source_type(ev.get("sourceType"), ev.get("confidence")),
+    )
 
     # ── Ticker/entity relevance filtering ────────────────────────────────
     # Ensure bestEvidence items actually reference the queried ticker/entity
@@ -1854,12 +1917,30 @@ async def verify_company_event(
     ticker_upper = ticker.upper()
     ticker_pattern = _re.compile(r'\b' + _re.escape(ticker_upper) + r'\b', _re.IGNORECASE)
 
-    # The company name only scores bestEvidence relevance, so no evidence means no SEC lookup
-    # (sources=[] must make no request).
-    cik_padded, submissions = await _get_submissions_for_ticker(ticker) if best else (None, None)
-    company_name = ""
-    if submissions and isinstance(submissions, dict):
-        company_name = str(submissions.get("name") or "").strip()
+    # Issuer names score relevance only, so no evidence means no lookup (sources=[] must make no request). The name set is
+    # Yahoo longName and shortName plus the SEC submissions name, without any name equal to the ticker (2.19.0, planner
+    # decision 6; the call #16 rule).
+    company_names: list[str] = []
+
+    def _add_company_name(value: object) -> None:
+        name = value.strip() if isinstance(value, str) else ""
+        if name and name.lower() != ticker.lower() and name not in company_names:
+            company_names.append(name)
+
+    if best:
+        try:
+            yahoo_info = await asyncio.to_thread(lambda: yf.Ticker(ticker).info)
+        except Exception:
+            yahoo_info = None
+        if isinstance(yahoo_info, dict):
+            _add_company_name(yahoo_info.get("longName"))
+            _add_company_name(yahoo_info.get("shortName"))
+        try:
+            _cik_padded, submissions = await _get_submissions_for_ticker(ticker)
+        except Exception:
+            submissions = None
+        if isinstance(submissions, dict):
+            _add_company_name(submissions.get("name"))
 
     def _extract_base_company_name(name: str) -> str:
         if not name:
@@ -1877,7 +1958,12 @@ async def verify_company_event(
                 name_clean = name_clean[:-len(suff)]
         return name_clean.strip()
 
-    base_company_name = _extract_base_company_name(company_name)
+    name_tests = [
+        test.lower()
+        for name in company_names
+        for test in (_extract_base_company_name(name), name)
+        if test
+    ]
 
     def _relevance_score(ev: dict) -> str:
         """Return 'HIGH', 'MEDIUM', or 'LOW' based on ticker/entity presence."""
@@ -1885,9 +1971,9 @@ async def verify_company_event(
         # injects the queried ticker there, which made LOW_RELEVANCE_EVIDENCE unreachable (2.17.0).
         # 1. Check source type
         source_type = str(ev.get("sourceType") or "")
-        if source_type in ("sec_filing", "sec", "company_ir", "sec_ex99_found"):
+        if source_type in ("sec_filing", "sec", "company_ir", "company_ir_page", "sec_ex99_found"):
             return "HIGH"
-            
+
         # 2. Check text content
         hay = " ".join([
             str(ev.get("title") or ""),
@@ -1900,10 +1986,8 @@ async def verify_company_event(
         if ticker_pattern.search(hay):
             return "HIGH"
             
-        # Check company name/base name
-        if base_company_name and base_company_name.lower() in hay.lower():
-            return "HIGH"
-        if company_name and company_name.lower() in hay.lower():
+        # Check the issuer names and their base forms
+        if any(test in hay.lower() for test in name_tests):
             return "HIGH"
             
         # Check issuer field explicitly
@@ -1922,7 +2006,7 @@ async def verify_company_event(
             "publishedAt": ev.get("publishedAt"),
             "retrievedAt": ev.get("retrievedAt"),
             "url": ev.get("url"),
-            "confidence": ev.get("confidence"),
+            "confidence": _confidence_for_source_type(ev.get("sourceType"), ev.get("confidence")),
             "relevance": relevance,
             "entityRelevance": relevance,
             "queryMatch": {
@@ -1947,7 +2031,8 @@ async def verify_company_event(
     source_status = _compute_source_status(sources_used, warnings, items, effective_sources, source_diagnostics)
     source_coverage = _compute_source_coverage(source_status)
     coverage = _build_coverage(source_status)
-    coverage_failure_mode = _verify_coverage_failure_mode(source_status, warnings)
+    company_ir_requested = sources is not None and "company_ir" in _normalize_event_sources(sources, [])[0]
+    coverage_failure_mode = _verify_coverage_failure_mode(source_status, warnings, company_ir_requested)
     if status == "NOT_FOUND" and coverage_failure_mode:
         status = "SOURCE_LIMITED_NOT_FOUND"
         warnings.append({

@@ -12561,19 +12561,23 @@ export async function reconcileMetricSources(ticker: string, metric: string, per
 
 export async function extractAnalystValuationMethods(ticker: string, daysBack = 30): Promise<string> {
   const days = clampInt(daysBack, 30, 1, 365);
+  let newsFailed = false;
   const [news, radar, identity] = await Promise.all([
-    getCompanyNews(ticker, 100, days).then(parseObjectJson).catch(() => ({} as Record<string, unknown>)),
+    getCompanyNews(ticker, 100, days).then(parseObjectJson).catch(() => { newsFailed = true; return {} as Record<string, unknown>; }),
     getAnalystUpgradeRadar(ticker, days).then(parseObjectJson).catch(() => ({} as Record<string, unknown>)),
     resolveNewsCompanyIdentity(ticker).catch(() => null),
   ]);
   const items = Array.isArray(news.items) ? news.items as Record<string, unknown>[] : [];
   const changes = Array.isArray(radar.changes) ? radar.changes as Record<string, unknown>[] : [];
-  // Targets are attributed to the subject by name; without a name nothing can be checked.
-  const names = [identity?.longName, identity?.shortName, identity?.companyName].filter((n): n is string => typeof n === "string" && n.trim() !== "");
+  // Targets are attributed to the subject by name; without a name nothing can be checked. A name equal to the ticker is
+  // not issuer identity (2.19.0, B-G11 / call #16).
+  const names = [identity?.longName, identity?.shortName, identity?.companyName]
+    .filter((n): n is string => typeof n === "string" && n.trim() !== "" && n.trim().toLowerCase() !== ticker.trim().toLowerCase());
   const out = analystValuationMethods(ticker.toUpperCase(), items, changes, names.length > 0 ? names : null);
   const warnings: Record<string, unknown>[] = [];
   if (names.length === 0) warnings.push({ code: "ATTRIBUTION_UNCHECKED", message: "The company name could not be resolved, so targets were not checked against the subject.", severity: "warning" });
-  if (news.error || news.code === "INPUT_VALIDATION_ERROR") warnings.push({ code: "NEWS_UNAVAILABLE", message: String(news.message ?? "News could not be read."), severity: "warning" });
+  // A news error payload or a failed news call is disclosed (2.19.0, B-G11; Python behaviour).
+  if (newsFailed || news.error || news.code === "INPUT_VALIDATION_ERROR") warnings.push({ code: "NEWS_UNAVAILABLE", message: String(news.message ?? "News could not be read."), severity: "warning" });
   if (radar.error) warnings.push({ code: "RATING_CHANGES_UNAVAILABLE", message: String(radar.message ?? "Rating changes could not be read."), severity: "warning" });
   out.windowDays = days;
   out.newsSourcesUsed = (news.meta as Record<string, unknown> | undefined)?.sourcesUsed ?? [];

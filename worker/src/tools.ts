@@ -1792,7 +1792,7 @@ const TOOL_DOCTRINE_STATUS: Record<string, DoctrineToolStatus> = {
     evidenceRequired: true,
     sourceType: "company_ir_page",
     successCriteria: ["coverageStatus=SEC_EX99_RESOLVED or APPROVED_IR_PAGE_RESOLVED", "decisionGrade=true", "secEvidence or irPageEvidence present"],
-    limitationStatuses: ["SEC_8K_FOUND_EX99_NOT_FOUND", "NO_OFFICIAL_RELEASE_SOURCE", "NO_YAHOO_PRESS_RELEASE", "COMPANY_IR_PAGE_NOT_APPROVED", "COMPANY_IR_NOT_FOUND", "NOT_FOUND"],
+    limitationStatuses: ["SEC_8K_FOUND_EX99_NOT_FOUND", "NO_OFFICIAL_RELEASE_SOURCE", "NO_YAHOO_PRESS_RELEASE", "COMPANY_IR_PAGE_NOT_APPROVED", "COMPANY_IR_PAGE_CANDIDATE_ONLY", "COMPANY_IR_NOT_FOUND", "NOT_FOUND"],
     note: "Tool is usable, but gate-clear is payload-level only; candidate, unresolved, RSS-only, newswire, and Yahoo payloads remain non-decision-grade.",
   },
   extract_sec_filing_fact: {

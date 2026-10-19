@@ -250,6 +250,7 @@ from yfmcp.tools.news import (  # re-export for compatibility, grouped routing a
     _company_ir_page_item,
     _parse_company_ir_page_json,
     _parse_company_ir_page_html,
+    _collect_company_ir_events,
     _collect_company_ir_page_events,
     _build_yahoo_event_item,
     _collect_sec_events,
@@ -7698,11 +7699,11 @@ async def extract_analyst_valuation_methods(ticker: str, days_back: int = 30) ->
     news_raw, radar_raw, issuer = await asyncio.gather(
         get_company_news(ticker, max_results=100, lookback_days=days),
         get_analyst_upgrade_radar(ticker, days),
-        _issuer_name(ticker),
+        _issuer_names(ticker),
         return_exceptions=True,
     )
     # Targets are attributed to the subject by name; without a name nothing can be checked.
-    names = [issuer] if isinstance(issuer, str) and issuer.strip() else []
+    names = issuer if isinstance(issuer, list) else []
     news = _unwrap_payload(news_raw) if isinstance(news_raw, str) else {}
     radar = _unwrap_payload(radar_raw) if isinstance(radar_raw, str) else {}
     items = news.get("items") if isinstance(news.get("items"), list) else []
@@ -7773,6 +7774,23 @@ def _charge_rows(payload: dict) -> list[dict]:
             "particulars": particulars["description"][:400] if isinstance(particulars.get("description"), str) else None,
         })
     return out
+
+
+async def _issuer_names(ticker: str) -> list[str]:
+    """Attribution names for a ticker (2.19.0, B-G11 / call #16; the Worker's alias set): Yahoo longName, shortName and the
+    company name (longName, else shortName), without any name equal to the ticker."""
+    try:
+        info = await asyncio.to_thread(lambda: yf.Ticker(ticker).info)
+    except Exception:
+        return []
+    info = info if isinstance(info, dict) else {}
+    long_name = info.get("longName")
+    short_name = info.get("shortName")
+    company_name = long_name or short_name
+    return [
+        name for name in (long_name, short_name, company_name)
+        if isinstance(name, str) and name.strip() and name.strip().lower() != ticker.strip().lower()
+    ]
 
 
 async def _issuer_name(ticker: str) -> str | None:

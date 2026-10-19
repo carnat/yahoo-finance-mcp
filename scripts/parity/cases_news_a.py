@@ -1275,28 +1275,32 @@ IQE_CANDIDATE = {
 _IQE_PRESS = {"coverageStatus": "NO_OFFICIAL_RELEASE_SOURCE", "decisionGrade": False, "candidateSources": [IQE_CANDIDATE],
               "company_ir_page": {"status": "CANDIDATE_AVAILABLE", "allowedAction": "review_and_promote", "candidates": [IQE_CANDIDATE]}}
 
-# Card 147: nothing found because SEC is unavailable, yet the status reads as plain absence (NO_YAHOO_PRESS_RELEASE) and the
-# coverage status is NO_OFFICIAL_RELEASE_SOURCE; the outage shows only in sourceStatus.sec.
-# Finding (Q7, for triage): a provider outage on an empty press-release result is labelled like genuine absence.
+# Card 147: nothing found because SEC is unavailable. The status stays NO_YAHOO_PRESS_RELEASE and the coverage status
+# NO_OFFICIAL_RELEASE_SOURCE; R-news Batch B (2.19.0, call #9) derives failureMode from the failed SEC row (PROVIDER_ERROR) so the
+# outage is not read as absence, and the failed row already makes coverage PARTIAL.
+_SEC_OUTAGE_PRESS = {"status": "NO_YAHOO_PRESS_RELEASE", "coverageStatus": "NO_OFFICIAL_RELEASE_SOURCE", "decisionGrade": False,
+                     "warnings": ["SOURCE_UNAVAILABLE", "NO_OFFICIAL_RELEASE_SOURCE"], "candidateSources": None, "sec": "PROVIDER_ERROR",
+                     "sourceCoverage": "PARTIAL", "coverageState": "PARTIAL"}
 CASES += [
-    tool_case("press.empty.sec_outage_with_yahoo_selected_reads_as_no_yahoo_press_release", ["BR-NWS-147"], "press",
-              ["ZZPR", 90, 20, None], {"info": ACME_INFO, "news": []}, select=_empty_press_view,
-              expect={"status": "NO_YAHOO_PRESS_RELEASE", "coverageStatus": "NO_OFFICIAL_RELEASE_SOURCE", "decisionGrade": False,
-                      "warnings": ["SOURCE_UNAVAILABLE", "NO_OFFICIAL_RELEASE_SOURCE"], "candidateSources": None, "sec": "PROVIDER_ERROR"}),
+    tool_case("press.empty.sec_outage_keeps_the_status_and_takes_the_failure_mode_from_the_sec_row", ["BR-NWS-147"], "press",
+              ["ZZPR", 90, 20, None], {"info": ACME_INFO, "news": []},
+              select=lambda v: {**_empty_press_view(v), "failureMode": v.get("failureMode"), "sourceCoverage": v.get("sourceCoverage"),
+                                "coverageState": v["coverage"]["state"]},
+              expect={**_SEC_OUTAGE_PRESS, "failureMode": "PROVIDER_ERROR"}),
     # Precedence of the empty-result status: Yahoo press releases > IR page > company_ir RSS > NOT_FOUND.
     tool_case("press.empty.status_for_unregistered_ir_page_only", ["BR-NWS-147", "BR-NWS-148"], "press",
               ["ZZPR", 90, 20, ["company_ir_page"]], {"info": {}}, select=_empty_press_view,
               expect={"status": "COMPANY_IR_PAGE_NOT_APPROVED", "coverageStatus": "NO_OFFICIAL_RELEASE_SOURCE", "decisionGrade": False,
                       "warnings": ["NO_OFFICIAL_RELEASE_SOURCE"], "candidateSources": None, "sec": None}),
-    # Card 148: only an unapproved candidate exists (IQE.L is a shipped candidate). Python says NOT_APPROVED, the Worker CANDIDATE_ONLY;
-    # both list the candidate in candidateSources, built from different inputs.
-    tool_case("press.empty.candidate_only_ir_page_status_differs", ["BR-NWS-148", "BR-NWS-146", "BR-NWS-101"], "press",
+    # Card 148: only an unapproved candidate exists (IQE.L is a shipped candidate). Both runtimes say CANDIDATE_ONLY (call #8, 2.19.0:
+    # Python adopted it, and the Worker lists it in limitationStatuses); both list the candidate in candidateSources, built from
+    # different inputs (Python from the COMPANY_IR_PAGE_CANDIDATE_AVAILABLE warning, the Worker from the source diagnostics).
+    tool_case("press.empty.candidate_only_ir_page_status_is_candidate_only", ["BR-NWS-148", "BR-NWS-146", "BR-NWS-101"], "press",
               ["IQE.L", 90, 20, ["company_ir_page"]], {"info": {}},
               select=lambda v: {"status": v.get("status"), "coverageStatus": v.get("coverageStatus"), "decisionGrade": v.get("decisionGrade"),
                                 "candidateSources": v.get("candidateSources"),
                                 "company_ir_page": status_row(v["sourceStatus"].get("company_ir_page"), "status", "allowedAction", "candidates")},
-              mode="pinned", decision="FINDING: with only an unapproved IR-page candidate the empty press-release status is COMPANY_IR_PAGE_NOT_APPROVED in Python and COMPANY_IR_PAGE_CANDIDATE_ONLY in the Worker",
-              expect_py={**_IQE_PRESS, "status": "COMPANY_IR_PAGE_NOT_APPROVED"}, expect_ts={**_IQE_PRESS, "status": "COMPANY_IR_PAGE_CANDIDATE_ONLY"}),
+              expect={**_IQE_PRESS, "status": "COMPANY_IR_PAGE_CANDIDATE_ONLY"}),
     tool_case("press.empty.yahoo_press_release_selection_outranks_the_ir_page_status", ["BR-NWS-148"], "press",
               ["IQE.L", 90, 20, ["company_ir_page", "yahoo_finance_press_releases"]], {"info": {}, "news": []},
               select=lambda v: v.get("status"), expect="NO_YAHOO_PRESS_RELEASE"),
@@ -1310,6 +1314,16 @@ CASES += [
 
 VERIFY_ACTION = ("Inspect sourceStatus and retry with a narrower sources list that excludes failed providers; "
                  "do not treat this result as confirmed absence.")
+
+
+_GENERIC_QUERY_ERROR = {"error": "INPUT_VALIDATION_ERROR",
+                        "message": "The event query contains no specific event terms. Add a term such as acquisition, dividend, guidance, contract, or offering."}
+
+
+def _generic_query_view(v: dict) -> dict:
+    if v.get("ok") is False:
+        return {"error": v["error"]["code"], "message": v["error"]["message"]}
+    return {"policy": v["queryPolicy"], "warnings": codes(v)}
 
 
 def verify_view(v: dict) -> dict:
@@ -1329,9 +1343,12 @@ def _limited(mode: str | None, retryable: bool, **over) -> dict:
 
 
 def _verify_case(name: str, ids: list[str], sources: list[str], env: dict, routes: dict, expect: dict, ticker: str = "ACME", **scn) -> Case:
+    pin = {k: scn.pop(k) for k in ("mode", "decision", "expect_py", "expect_ts") if k in scn}
+    if not pin:
+        pin["expect"] = expect
     return tool_case(name, ids, "verify", [ticker, "buyback announcement", "", "", sources],
                      {"env": env, "info": scn.pop("info", ACME_INFO), "news": scn.pop("news", []), "routes": routes, **scn},
-                     select=verify_view, expect=expect)
+                     select=verify_view, **pin)
 
 
 CASES += [
@@ -1351,11 +1368,10 @@ CASES += [
                  {FINNHUB_NEWS: {"json": {"oops": 1}}}, _limited("PROVIDER_CHANGED", False)),
     _verify_case("verify.identity_unavailable_gives_yahoo_identity_failure_mode", ["BR-NWS-163"], ["yahoo_finance_news"], {}, {},
                  _limited("YAHOO_IDENTITY_UNAVAILABLE", False, warnings=["SOURCE_IDENTITY_UNAVAILABLE", "SOURCE_LIMITED_NOT_FOUND"]), info={}),
-    # Finding (Q7, for triage): AUTH_ERROR is a real outage but yields no failure mode, so NOT_FOUND is not upgraded.
-    _verify_case("verify.auth_error_does_not_upgrade_not_found", ["BR-NWS-163", "BR-NWS-106"], ["finnhub"], FAKE_FINNHUB,
-                 {FINNHUB_NEWS: {"status": 401, "body": "{}"}},
-                 {"status": "NOT_FOUND", "failureMode": None, "retryable": False, "recommendedAction": None, "warnings": ["SOURCE_UNAVAILABLE"],
-                  "sourceCoverage": "PARTIAL", "bestEvidence": [], "matched": 0}),
+    # AUTH_ERROR is a real outage: R-news Batch B (2.19.0, call #10) maps it to the existing SOURCE_UNCONFIGURED in both runtimes, so
+    # NOT_FOUND is upgraded to SOURCE_LIMITED_NOT_FOUND (not retryable). Until then it yielded no failure mode.
+    _verify_case("verify.auth_error_upgrades_not_found_with_source_unconfigured", ["BR-NWS-163", "BR-NWS-106"], ["finnhub"], FAKE_FINNHUB,
+                 {FINNHUB_NEWS: {"status": 401, "body": "{}"}}, _limited("SOURCE_UNCONFIGURED", False)),
     # Card 138: the term threshold. 'announced' is a stop word; 4 meaningful terms need ceil(4 * 0.67) = 3 of them.
     tool_case("verify.query_policy.four_meaningful_terms_require_three_matches", ["BR-NWS-138"], "verify",
               ["ACME", "BlueBird satellite launch contract announced", "", "", []],
@@ -1364,10 +1380,10 @@ CASES += [
     tool_case("verify.query_policy.up_to_two_terms_must_all_match", ["BR-NWS-138"], "verify", ["ACME", "dividend cut", "", "", []],
               {"info": ACME_INFO}, select=lambda v: v["queryPolicy"],
               expect={"meaningfulTerms": ["dividend", "cut"], "requiredTermMatches": 2, "matchedEvidenceCount": 0}),
-    tool_case("verify.query_policy.generic_query_has_no_terms_and_warns", ["BR-NWS-138"], "verify", ["ACME", "announced results", "", "", []],
-              {"info": ACME_INFO}, select=lambda v: {"policy": v["queryPolicy"], "warnings": codes(v)},
-              expect={"policy": {"meaningfulTerms": [], "requiredTermMatches": 0, "matchedEvidenceCount": 0},
-                      "warnings": ["EVENT_QUERY_TOO_GENERIC"]}),
+    # Call #12 (2.19.0): a query with no meaningful terms can verify nothing, so it is INPUT_VALIDATION_ERROR before any collection in
+    # both runtimes (until then it ran with an EVENT_QUERY_TOO_GENERIC warning).
+    tool_case("verify.query_policy.generic_query_is_input_validation_error", ["BR-NWS-138"], "verify", ["ACME", "announced results", "", "", []],
+              {"info": ACME_INFO}, select=_generic_query_view, expect=_GENERIC_QUERY_ERROR),
 ]
 
 # Card 164: status precedence CONFLICTING > CONFIRMED (official, in range) > PARTIAL (matched in range) > STALE > NOT_FOUND.
@@ -1389,40 +1405,39 @@ CASES += [
                  "2026-10-01", "", {"status": "CONFIRMED", "matched": 1, "best": [("yahoo_finance_press_releases", "PHRASE")]}),
     _status_case("verify.status.contextual_news_only_is_partial", ["BR-NWS-164"], [_NEWS_ROW], ["yahoo_finance_news"], "2026-10-01", "",
                  {"status": "PARTIAL", "matched": 1, "best": [("yahoo_finance_news", "PHRASE")]}),
-    # Card 164: STALE needs a match outside the requested range that is also older than 90 days. The Worker passes the range into
-    # the collection window, so such an item is never collected and its status stays NOT_FOUND (STALE is unreachable there).
-    _status_case("verify.status.match_outside_the_date_range_and_older_than_90_days_is_stale_only_in_python", ["BR-NWS-164"],
+    # Card 164: STALE needs a match outside the requested range that is also older than 90 days. Both runtimes collect the 365-day
+    # window and apply the range only when classifying (the Worker since 2.19.0, A-G8; until then it passed the range into the
+    # collection window, so such an item was never collected and the status stayed NOT_FOUND).
+    _status_case("verify.status.match_outside_the_date_range_and_older_than_90_days_is_stale", ["BR-NWS-164"],
                  [yahoo_row("Acme supply contract talks", "2026-03-01T09:00:00Z")], ["yahoo_finance_news"], "2026-10-01", "",
-                 {}, mode="pinned", decision="FINDING: verify_company_event can return STALE in Python but not in the Worker, which applies start_date/end_date while collecting",
-                 expect_py={"status": "STALE", "matched": 1, "best": [("yahoo_finance_news", "PHRASE")]},
-                 expect_ts={"status": "NOT_FOUND", "matched": 0, "best": []}),
+                 {"status": "STALE", "matched": 1, "best": [("yahoo_finance_news", "PHRASE")]}),
     _status_case("verify.status.no_match_is_not_found", ["BR-NWS-164"], [yahoo_row("Acme opens a plant", "2026-10-05T09:00:00Z")],
                  ["yahoo_finance_news"], "2026-10-01", "", {"status": "NOT_FOUND", "matched": 0, "best": []}),
-    # Finding (Q7, for triage): without a date range every match counts as in range, so a 200-day-old official release is
-    # CONFIRMED and STALE cannot occur.
-    _status_case("verify.status.old_official_release_without_dates_is_still_confirmed", ["BR-NWS-164"],
+    # Call #11 (2.19.0): without a date range the 90-day cutoff still applies in both runtimes, so a 200-day-old official release is
+    # STALE, not CONFIRMED (until then every match counted as in range and STALE could not occur without dates).
+    _status_case("verify.status.old_official_release_without_dates_is_stale", ["BR-NWS-164"],
                  [yahoo_row("Acme announces supply contract", "2026-03-28T09:00:00Z", publisher="Business Wire")], ["yahoo_finance_press_releases"], "", "",
-                 {"status": "CONFIRMED", "matched": 1, "best": [("yahoo_finance_press_releases", "PHRASE")]}),
-    # Card 164: bestEvidence.confidence. The Worker derives it from the source type (contextual Yahoo news is always LOW); Python
-    # reports the item's own confidence (MEDIUM when it has a URL).
-    tool_case("verify.best_evidence_confidence_for_contextual_news_differs", ["BR-NWS-164"], "verify",
+                 {"status": "STALE", "matched": 1, "best": [("yahoo_finance_press_releases", "PHRASE")]}),
+    # Card 164: bestEvidence.confidence is source-type based in both runtimes (R-news Batch B, A-G8): contextual Yahoo news is always
+    # LOW; Python used to report the item's own confidence (MEDIUM when it has a URL).
+    tool_case("verify.best_evidence_confidence_for_contextual_news_is_low", ["BR-NWS-164"], "verify",
               ["ACME", "supply contract", "2026-10-01", "", ["yahoo_finance_news"]], {"info": ACME_INFO, "news": [_NEWS_ROW]},
               select=lambda v: [(e["sourceType"], e["confidence"]) for e in v["bestEvidence"]],
-              mode="pinned", decision="FINDING: verify bestEvidence confidence is the item's own in Python and source-type based in the Worker",
-              expect_py=[("yahoo_finance_news", "MEDIUM")], expect_ts=[("yahoo_finance_news", "LOW")]),
+              expect=[("yahoo_finance_news", "LOW")]),
     tool_case("verify.best_evidence_confidence_for_official_press_release_agrees", ["BR-NWS-164"], "verify",
               ["ACME", "supply contract", "2026-10-01", "", ["yahoo_finance_press_releases"]], {"info": ACME_INFO, "news": [_PR_ROW]},
               select=lambda v: [(e["sourceType"], e["confidence"]) for e in v["bestEvidence"]],
               expect=[("yahoo_finance_press_releases", "MEDIUM")]),
-    # Finding (Q7, for triage, card 138): an exact PHRASE match is accepted even when the query is all stop words, so a too-generic
-    # query can still produce a match beside the EVENT_QUERY_TOO_GENERIC warning.
-    tool_case("verify.query_policy.generic_phrase_still_matches_despite_the_warning", ["BR-NWS-138"], "verify",
+    # Card 138: until 2.19.0 an exact PHRASE match was accepted even when the query was all stop words, so a too-generic query still
+    # produced a match beside the EVENT_QUERY_TOO_GENERIC warning. Call #12: the query is rejected before matching in both runtimes,
+    # even when an item carries the phrase.
+    tool_case("verify.query_policy.generic_phrase_query_is_rejected_before_matching", ["BR-NWS-138"], "verify",
               ["ACME", "announced results", "", "", ["yahoo_finance_news"]],
               {"info": ACME_INFO, "news": [yahoo_row("Acme announced results", "2026-10-05T09:00:00Z")]},
-              select=lambda v: {"status": v["status"], "warnings": codes(v), "policy": v["queryPolicy"],
-                                "methods": [e["queryMatch"]["method"] for e in v["bestEvidence"]]},
-              expect={"status": "PARTIAL", "warnings": ["EVENT_QUERY_TOO_GENERIC"],
-                      "policy": {"meaningfulTerms": [], "requiredTermMatches": 0, "matchedEvidenceCount": 1}, "methods": ["PHRASE"]}),
+              select=lambda v: _generic_query_view(v) if v.get("ok") is False else {
+                  "status": v["status"], "warnings": codes(v), "policy": v["queryPolicy"],
+                  "methods": [e["queryMatch"]["method"] for e in v["bestEvidence"]]},
+              expect=_GENERIC_QUERY_ERROR),
 ]
 
 
@@ -1603,53 +1618,55 @@ CASES += [
                       "items": [],
                       "coverage": {"sourceCoverage": "PARTIAL", "state": "PARTIAL", "failed": [["company_ir_page", "CANDIDATE_AVAILABLE"]],
                                    "skipped": [], "truncated": [], "action": "CHECK_OFFICIAL_RELEASES"}}),
-    # Card 149: Python raises an info warning COMPANY_IR_PAGE_CANDIDATE_AVAILABLE, which makes the empty result source-limited;
-    # the Worker raises no warning for a candidate, so nothing marks the source as used or limited (PROVIDER_ERROR).
-    tool_case("ir_page.candidate_empty_result_status_differs", ["BR-NWS-149", "BR-NWS-144"], "news",
+    # Card 149: an unreviewed candidate raises the info warning COMPANY_IR_PAGE_CANDIDATE_AVAILABLE, which makes the empty result
+    # source-limited in both runtimes (the Worker since 2.19.0, A-G9 / B-G3; until then it raised no warning, so a candidate-only
+    # collection read PROVIDER_ERROR).
+    tool_case("ir_page.candidate_empty_result_status_is_source_limited", ["BR-NWS-149", "BR-NWS-144"], "news",
               ["IQE.L", 10, 14, ["sec", "company_ir_page"]], {"info": {}},
               select=lambda v: {"status": v.get("status"), "warnings": codes(v)},
-              mode="pinned", decision="FINDING: an unreviewed IR-page candidate makes the empty collection status SOURCE_LIMITED_NOT_FOUND in Python (info warning) and not in the Worker",
-              expect_py={"status": "SOURCE_LIMITED_NOT_FOUND", "warnings": ["SOURCE_UNAVAILABLE", "COMPANY_IR_PAGE_CANDIDATE_AVAILABLE"]},
-              expect_ts={"status": "SOURCE_LIMITED_NOT_FOUND", "warnings": ["SOURCE_UNAVAILABLE"]}),
-    tool_case("ir_page.candidate_alone_empty_result_status_differs", ["BR-NWS-149"], "news",
+              expect={"status": "SOURCE_LIMITED_NOT_FOUND", "warnings": ["SOURCE_UNAVAILABLE", "COMPANY_IR_PAGE_CANDIDATE_AVAILABLE"]}),
+    tool_case("ir_page.candidate_alone_empty_result_status_is_source_limited", ["BR-NWS-149"], "news",
               ["IQE.L", 10, 14, ["company_ir_page"]], {"info": {}},
               select=lambda v: {"status": v.get("status"), "warnings": codes(v)},
-              mode="pinned", decision="FINDING: an unreviewed IR-page candidate makes the empty collection status SOURCE_LIMITED_NOT_FOUND in Python (info warning) and PROVIDER_ERROR in the Worker",
-              expect_py={"status": "SOURCE_LIMITED_NOT_FOUND", "warnings": ["COMPANY_IR_PAGE_CANDIDATE_AVAILABLE"]},
-              expect_ts={"status": "PROVIDER_ERROR", "warnings": []}),
-    # Card 142 / 149: a disabled entry. Python warns (info) and says registry_review_required; the Worker is silent and says 'none'.
-    ir_news_case("ir_page.disabled_entry_status_and_allowed_action_differ", ["BR-NWS-142", "BR-NWS-149", "BR-NWS-102", "BR-NWS-101"], "IRDIS", {},
+              expect={"status": "SOURCE_LIMITED_NOT_FOUND", "warnings": ["COMPANY_IR_PAGE_CANDIDATE_AVAILABLE"]}),
+    # Card 142 / 149: a disabled entry raises the info warning COMPANY_IR_PAGE_DISABLED (source-limited) and says registry_review_required
+    # in both runtimes (the Worker since 2.19.0; until then it was silent, said 'none' and read PROVIDER_ERROR).
+    ir_news_case("ir_page.disabled_entry_is_source_limited_with_registry_review", ["BR-NWS-142", "BR-NWS-149", "BR-NWS-102", "BR-NWS-101"], "IRDIS", {},
                  lambda v: {"row": ir_row(v, "status", "allowedAction"), "status": v.get("status"), "warnings": codes(v), "items": len(v["items"])},
-                 mode="pinned", decision="FINDING: DISABLED IR page entry: allowedAction registry_review_required + info warning + SOURCE_LIMITED_NOT_FOUND in Python; none + no warning + PROVIDER_ERROR in the Worker",
-                 expect_py={"row": {"status": "DISABLED", "allowedAction": "registry_review_required"}, "status": "SOURCE_LIMITED_NOT_FOUND",
-                            "warnings": ["COMPANY_IR_PAGE_DISABLED"], "items": 0},
-                 expect_ts={"row": {"status": "DISABLED", "allowedAction": "none"}, "status": "PROVIDER_ERROR", "warnings": [], "items": 0}),
-    ir_news_case("ir_page.stale_entry_allowed_action_differs", ["BR-NWS-142", "BR-NWS-171"], "IRSTALE", {},
+                 expect={"row": {"status": "DISABLED", "allowedAction": "registry_review_required"}, "status": "SOURCE_LIMITED_NOT_FOUND",
+                         "warnings": ["COMPANY_IR_PAGE_DISABLED"], "items": 0}),
+    # 2.19.0: the registry-state info warnings carry the same fields in both runtimes (the candidate warning also carries the candidate).
+    *[ir_news_case(f"ir_page.{label}_info_warning_fields_agree", ["BR-NWS-149", "BR-NWS-146"], ticker, {},
+                   lambda v: [{k: w.get(k) for k in sorted(w)} for w in v["warnings"]], expect=expect)
+      for label, ticker, expect in (
+          ("disabled", "IRDIS", [{"approvalStatus": "disabled", "canonicalUrl": ir_page_url("IRDIS"), "code": "COMPANY_IR_PAGE_DISABLED",
+                                  "message": "Company IR page registry entry is disabled.", "registryVersion": "2026-10-15.0900", "severity": "info"}]),
+          ("candidate", "IRCAND", [{"approvalStatus": "candidate", "canonicalUrl": ir_page_url("IRCAND"), "code": "COMPANY_IR_PAGE_CANDIDATE_AVAILABLE",
+                                    "message": "Company IR page candidate is available for review but was not fetched.", "registryVersion": "2026-10-15.0900",
+                                    "severity": "info",
+                                    "candidate": {"ticker": "IRCAND", "issuerName": "IRCAND Corp", "canonicalUrl": ir_page_url("IRCAND"),
+                                                  "adapter": "html_article", "candidateReason": "test registry entry",
+                                                  "discoveredAt": "2026-09-01T00:00:00Z", "decisionGrade": False}}]))],
+    # Card 142 (rows d / e): REVALIDATION_DUE and SOURCE_VALIDATION_FAILED say registry_review_required in both runtimes (Python's value;
+    # the Worker said 'revalidate' and 'review_registry_entry' until 2.19.0).
+    ir_news_case("ir_page.stale_entry_allowed_action_is_registry_review", ["BR-NWS-142", "BR-NWS-171"], "IRSTALE", {},
                  lambda v: {"row": ir_row(v, "status", "allowedAction"), "status": v.get("status"), "warnings": codes(v)},
-                 mode="pinned", decision="FINDING: REVALIDATION_DUE allowedAction is registry_review_required in Python and revalidate in the Worker",
-                 expect_py={"row": {"status": "REVALIDATION_DUE", "allowedAction": "registry_review_required"}, "status": "SOURCE_LIMITED_NOT_FOUND",
-                            "warnings": ["COMPANY_IR_PAGE_REVALIDATION_DUE"]},
-                 expect_ts={"row": {"status": "REVALIDATION_DUE", "allowedAction": "revalidate"}, "status": "SOURCE_LIMITED_NOT_FOUND",
-                            "warnings": ["COMPANY_IR_PAGE_REVALIDATION_DUE"]}),
-    ir_news_case("ir_page.validation_failure_allowed_action_differs", ["BR-NWS-142", "BR-NWS-101"], "IRBADC", {},
+                 expect={"row": {"status": "REVALIDATION_DUE", "allowedAction": "registry_review_required"}, "status": "SOURCE_LIMITED_NOT_FOUND",
+                         "warnings": ["COMPANY_IR_PAGE_REVALIDATION_DUE"]}),
+    ir_news_case("ir_page.validation_failure_allowed_action_is_registry_review", ["BR-NWS-142", "BR-NWS-101"], "IRBADC", {},
                  lambda v: {"row": ir_row(v, "status", "allowedAction")},
-                 mode="pinned", decision="FINDING: SOURCE_VALIDATION_FAILED allowedAction is registry_review_required in Python and review_registry_entry in the Worker",
-                 expect_py={"row": {"status": "SOURCE_VALIDATION_FAILED", "allowedAction": "registry_review_required"}},
-                 expect_ts={"row": {"status": "SOURCE_VALIDATION_FAILED", "allowedAction": "review_registry_entry"}}),
-    # Card 142: an approved source that returned nothing in the window is EMPTY_RESULT with registry_review_required in Python; the
-    # Worker's diagnostic keeps fetch_configured_source (its status flips to EMPTY_RESULT but not the action).
-    ir_news_case("ir_page.approved_page_with_nothing_in_window_allowed_action_differs", ["BR-NWS-142", "BR-NWS-146"], "IRPR",
+                 expect={"row": {"status": "SOURCE_VALIDATION_FAILED", "allowedAction": "registry_review_required"}}),
+    # Card 142 (row f): an approved source that returned nothing in the window is EMPTY_RESULT with fetch_configured_source in both
+    # runtimes (the Worker's value; Python said registry_review_required until 2.19.0).
+    ir_news_case("ir_page.approved_page_with_nothing_in_window_allowed_action_is_fetch_configured_source", ["BR-NWS-142", "BR-NWS-146"], "IRPR",
                  ir_routes("IRPR", _article("IRPR old release from August", "/investors/news/old", "2026-08-01")),
                  lambda v: {"row": ir_row(v, "status", "allowedAction", "rawCount"), "status": v.get("status")},
-                 mode="pinned", decision="FINDING: an approved IR page with an empty window has allowedAction registry_review_required in Python and fetch_configured_source in the Worker",
-                 expect_py={"row": {"status": "EMPTY_RESULT", "allowedAction": "registry_review_required", "rawCount": 0}, "status": "NOT_FOUND"},
-                 expect_ts={"row": {"status": "EMPTY_RESULT", "allowedAction": "fetch_configured_source", "rawCount": 0}, "status": "NOT_FOUND"}),
-    # Registry metadata on the status row: Python copies it from IR-page warnings only (so a clean approved fetch has none).
-    ir_news_case("ir_page.approved_fetch_status_row_registry_metadata_differs", ["BR-NWS-101"], "IROKH", ir_routes("IROKH", _OKH_PAGE),
+                 expect={"row": {"status": "EMPTY_RESULT", "allowedAction": "fetch_configured_source", "rawCount": 0}, "status": "NOT_FOUND"}),
+    # Card 101 (row g): the status row carries the registry metadata in both runtimes, filled from the registry entry (Python copied it
+    # from IR-page warnings only, so a clean approved fetch had none until 2.19.0).
+    ir_news_case("ir_page.approved_fetch_status_row_carries_registry_metadata", ["BR-NWS-101"], "IROKH", ir_routes("IROKH", _OKH_PAGE),
                  lambda v: ir_row(v, "registryVersion", "canonicalUrl", "approvalStatus"),
-                 mode="pinned", decision="FINDING: the Worker status row always carries registryVersion/canonicalUrl/approvalStatus; Python only when an IR-page warning exists",
-                 expect_py={"registryVersion": None, "canonicalUrl": None, "approvalStatus": None},
-                 expect_ts={"registryVersion": "2026-10-15.0900", "canonicalUrl": "https://ir.irokh.example/investors/news/", "approvalStatus": "approved"}),
+                 expect={"registryVersion": "2026-10-15.0900", "canonicalUrl": "https://ir.irokh.example/investors/news/", "approvalStatus": "approved"}),
     # get_company_press_releases with an approved, fresh IR page: decision grade without any SEC exhibit (cards 101, 105).
     ir_news_case("ir_page.press_release_from_approved_page_is_decision_grade", ["BR-NWS-101", "BR-NWS-105"], "IRPR",
                  ir_routes("IRPR", _article("IRPR reports quarterly earnings", "/investors/news/q3", "2026-10-12")),
@@ -1665,87 +1682,32 @@ CASES += [
 
 
 # ═══════════════════════════════════════════════════════════════════════════════════════════════
-# company_ir source: BR-NWS-103, 107 (P0: what "company_ir" means), 145, 165, 167 (status precedence), 170, 183 (discovery)
-# Python serves company_ir from the Yahoo news feed (items keep their yahoo_finance_news type; the source is marked used and,
-# having no company_ir/press_release items, reads EMPTY_RESULT). Until 2.10.0 the Worker discovered the company website's RSS/Atom
-# feed; since 2.10.0 (fetch allow-list) it reads only approved company IR registry entries, so with none for ACME every scenario
-# below is NOT_REGISTERED and fetches nothing from the company site (the routes stay to show they are no longer used).
-# Every case is pinned: the Python values are what the same request returns there today.
+# company_ir source: BR-NWS-103, 107 (P0: what "company_ir" means)
+# company_ir is the approved company IR registry only in both runtimes: since 2.10.0 (fetch allow-list) in the Worker, and since
+# 2.19.0 (R-news Batch B, A-G10 / B-G2) in Python, which until then served it from the Yahoo news feed. With no approved entry for
+# ACME it is NOT_REGISTERED and fetches nothing from the company site. The website RSS/Atom discovery cases (cards 145, 165, 167, 170,
+# 183) described behaviour neither runtime keeps, so they were merged into the one registry-only case below (2.19.0).
 # ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 ACME_SITE = "https://www.acme.example"
 ACME_WEB_INFO = {**ACME_INFO, "website": ACME_SITE}
-RSS_DECISION = ("FINDING: company_ir means Yahoo-feed passthrough in Python; in the Worker it is the approved company IR registry only "
-                "(2.10.0: website RSS/Atom autodiscovery removed with the fetch allow-list), so with no approved entry it is NOT_REGISTERED")
 _ROOT_WITH_FEED = '<html><head><link rel="alternate" type="application/rss+xml" href="/rss/news.xml"></head><body>Acme</body></html>'
 _ACME_FEED = rss([{"title": "Acme official RSS release", "link": f"{ACME_SITE}/news/1", "pubDate": "Tue, 13 Oct 2026 10:00:00 GMT",
                    "description": "Acme announces results"}], title="Acme News")
-_PY_EMPTY = {"row": "EMPTY_RESULT", "collection": "NOT_FOUND", "warnings": []}
-_TS_NOT_REGISTERED = {"row": "NOT_REGISTERED", "collection": "PROVIDER_ERROR", "warnings": []}
-
-
-def ir_rss_view(v: dict) -> dict:
-    row = (v.get("sourceStatus") or {}).get("company_ir") or {}
-    return {"row": row.get("status"), "collection": v.get("status"), "warnings": codes(v)}
-
-
-def _ir_rss_case(name: str, ids: list[str], routes: dict, expect_py: dict, expect_ts: dict, info: dict | None = None, news: list | None = None,
-                 select=ir_rss_view) -> Case:
-    return tool_case(name, ids, "news", ["ACME", 10, 14, ["company_ir"]], {"info": info if info is not None else ACME_WEB_INFO,
-                                                                         "news": news or [], "routes": routes},
-                     select=select, mode="pinned", decision=RSS_DECISION, expect_py=expect_py, expect_ts=expect_ts)
-
 
 CASES += [
-    # Cards 103/107: with Yahoo news available, Python returns it under the company_ir source; the Worker returns the feed's own item.
-    tool_case("company_ir.passthrough_in_python_vs_rss_discovery_in_worker", ["BR-NWS-103", "BR-NWS-107"], "news",
+    # Cards 103/107: with Yahoo news available and a company website that links an RSS feed, company_ir reads only the approved registry
+    # in both runtimes (Python since 2.19.0): not used, NOT_REGISTERED, no items, no Yahoo pass-through and no company-site fetch.
+    tool_case("company_ir.registry_only_without_an_approved_entry_is_not_registered", ["BR-NWS-103", "BR-NWS-107", "BR-NWS-145", "BR-NWS-165",
+                                                                              "BR-NWS-167", "BR-NWS-170", "BR-NWS-183"], "news",
               ["ACME", 10, 14, ["company_ir"]],
               {"info": ACME_WEB_INFO, "news": [yahoo_row("Acme wins big order", "2026-10-14T09:00:00Z")],
-               "routes": {f"{ACME_SITE}/": {"body": _ROOT_WITH_FEED}, f"{ACME_SITE}/rss/news.xml": {"body": _ACME_FEED}}},
+               "routes": {f"{ACME_SITE}/": {"body": _ROOT_WITH_FEED}, f"{ACME_SITE}/rss/news.xml": {"body": _ACME_FEED},
+                          f"{ACME_SITE}/rss.cfm": {"body": _ACME_FEED}}},
               select=lambda v: {"sourcesUsed": v["meta"]["sourcesUsed"], "row": (v["sourceStatus"].get("company_ir") or {}).get("status"),
+                                "collection": v.get("status"), "warnings": codes(v),
                                 "items": [(it["title"], it["sourceType"], it["evidenceClass"], it["decisionUse"]) for it in v["items"]]},
-              mode="pinned", decision=RSS_DECISION,
-              expect_py={"sourcesUsed": ["company_ir"], "row": "EMPTY_RESULT",
-                         "items": [("Acme wins big order", "yahoo_finance_news", "CONTEXTUAL_NEWS", "CONTEXT_ONLY")]},
-              expect_ts={"sourcesUsed": [], "row": "NOT_REGISTERED", "items": []}),
-    # Card 170: probe order, rel=alternate link discovery, same-domain acceptance (HIGH confidence). Diagnostics exist only in the Worker.
-    tool_case("company_ir.discovery_finds_alternate_link_feed_on_the_company_domain", ["BR-NWS-170", "BR-NWS-145"], "news",
-              ["ACME", 10, 14, ["company_ir"]],
-              {"info": ACME_WEB_INFO, "news": [],
-               "routes": {f"{ACME_SITE}/": {"body": _ROOT_WITH_FEED}, f"{ACME_SITE}/rss/news.xml": {"body": _ACME_FEED}}},
-              select=lambda v: {k: (v["sourceStatus"].get("company_ir") or {}).get(k)
-                                for k in ("status", "rssDiscovery", "discoveredFeedCount", "discoveryPageProbeCount", "discoveryProbeBudget",
-                                          "acceptedFeedCount", "acceptedFeeds", "discoveryProbeBudgetExhausted")}
-              | {"item": [(it["discoveryMethod"], it["feedUrl"], it["confidence"], it["tickerRelevance"], it["publishedAt"][:10])
-                          for it in v["items"]] if v["items"] and "discoveryMethod" in v["items"][0] else []},
-              mode="pinned", decision=RSS_DECISION,
-              expect_py={"status": "EMPTY_RESULT", "rssDiscovery": None, "discoveredFeedCount": None, "discoveryPageProbeCount": None,
-                         "discoveryProbeBudget": None, "acceptedFeedCount": None, "acceptedFeeds": None, "discoveryProbeBudgetExhausted": None, "item": []},
-              expect_ts={"status": "NOT_REGISTERED", "rssDiscovery": None, "discoveredFeedCount": None, "discoveryPageProbeCount": None,
-                         "discoveryProbeBudget": None, "acceptedFeedCount": None, "acceptedFeeds": None,
-                         "discoveryProbeBudgetExhausted": None, "item": []}),
-    # Cards 183/165: no feed on any candidate host -> the 24-page probe budget runs out before all paths are tried;
-    # FEED_NOT_FOUND is also raised and the status takes the earlier-checked DISCOVERY_BUDGET_EXHAUSTED.
-    _ir_rss_case("company_ir.no_feed_anywhere_exhausts_the_probe_budget", ["BR-NWS-183", "BR-NWS-165", "BR-NWS-170"], {},
-                 _PY_EMPTY,
-                 _TS_NOT_REGISTERED),
-    _ir_rss_case("company_ir.no_company_website_gives_website_not_available", ["BR-NWS-145", "BR-NWS-165"], {},
-                 _PY_EMPTY, _TS_NOT_REGISTERED,
-                 info=ACME_INFO),
-    # Card 145: two linked external feeds that do not mention the company are rejected -> feed_not_accepted, source not used.
-    _ir_rss_case("company_ir.external_feeds_not_matching_the_company_are_rejected", ["BR-NWS-145", "BR-NWS-228", "BR-NWS-165"],
-                 {f"{ACME_SITE}/": {"body": '<html><body><a href="https://feeds.example-wire.com/a.xml">RSS</a>'
-                                             '<a href="https://feeds.example-wire.com/b.xml">More</a></body></html>'},
-                  "https://feeds.example-wire.com/a.xml": {"body": rss([{"title": "Other firm", "link": "https://x.example/1", "pubDate": "Tue, 13 Oct 2026 10:00:00 GMT"}], "Business Wire Top Stories")},
-                  "https://feeds.example-wire.com/b.xml": {"body": rss([{"title": "Another firm", "link": "https://x.example/2", "pubDate": "Tue, 13 Oct 2026 10:00:00 GMT"}], "Business Wire Top Stories")}},
-                 _PY_EMPTY, _TS_NOT_REGISTERED),
-    # Card 167: discovery found a feed link but the feed itself could not be downloaded -> PROVIDER_ERROR (RSS unavailable).
-    _ir_rss_case("company_ir.feed_that_fails_to_download_is_provider_error", ["BR-NWS-167", "BR-NWS-165"],
-                 {f"{ACME_SITE}/": {"body": _ROOT_WITH_FEED}, f"{ACME_SITE}/rss/news.xml": {"status": 503, "body": "down"}},
-                 _PY_EMPTY, _TS_NOT_REGISTERED),
-    _ir_rss_case("company_ir.feed_that_is_not_xml_is_parse_error", ["BR-NWS-165", "BR-NWS-167"],
-                 {f"{ACME_SITE}/": {"body": _ROOT_WITH_FEED}, f"{ACME_SITE}/rss/news.xml": {"body": "<html>not a feed</html>"}},
-                 _PY_EMPTY, _TS_NOT_REGISTERED),
+              expect={"sourcesUsed": [], "row": "NOT_REGISTERED", "collection": "PROVIDER_ERROR", "warnings": [], "items": []}),
 ]
 
 
@@ -2016,15 +1978,6 @@ CASES += [
                       "coverage": {"sourceCoverage": "PARTIAL", "state": "PARTIAL", "failed": [["finnhub", "RATE_LIMITED"]], "skipped": [],
                                    "truncated": [], "action": "RETRY_RETRYABLE_SOURCES"},
                       "titles": ["Acme wins supply contract"], "rows": {"yahoo_finance_news": "OK", "finnhub": "RATE_LIMITED"}}),
-    # Card 170: a probed page that is itself an RSS document on the company domain is a direct feed (discoveryMethod direct_feed_path).
-    tool_case("company_ir.discovery_accepts_a_probed_path_that_is_itself_a_feed", ["BR-NWS-170"], "news",
-              ["ACME", 10, 14, ["company_ir"]],
-              {"info": ACME_WEB_INFO, "news": [], "routes": {f"{ACME_SITE}/rss.cfm": {"body": _ACME_FEED}}},
-              select=lambda v: {"row": (v["sourceStatus"].get("company_ir") or {}).get("status"),
-                                "items": [(it.get("discoveryMethod"), it.get("feedUrl"), it.get("confidence"), it.get("sourceType")) for it in v["items"]]},
-              mode="pinned", decision=RSS_DECISION,
-              expect_py={"row": "EMPTY_RESULT", "items": []},
-              expect_ts={"row": "NOT_REGISTERED", "items": []}),
     # Card 182: both runtimes refuse any feed containing a DOCTYPE (the Worker since 2.17.0; before, it refused only <!ENTITY).
     tool_case("newswire.doctype_in_a_feed_is_refused_in_both", ["BR-NWS-182", "BR-NWS-154"], "news",
               ["ACME", 10, 14, ["newswire"]],

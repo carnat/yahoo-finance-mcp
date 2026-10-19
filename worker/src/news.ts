@@ -23,6 +23,7 @@ import {
   finnhubEligibility,
   resolveNewsCompanyIdentity,
   resolveEx991Url,
+  getSubmissionsForTicker,
 } from "./yahoo-finance.js";
 import { collectCompanyIrPageEvents } from "./news/providers/company-ir-page.js";
 import { collectCompanyIrEvents } from "./news/providers/company-ir.js";
@@ -33,7 +34,7 @@ import { collectSecEvents } from "./news/providers/sec.js";
 import { yahooNewsIdentityFor, yahooDecisionUse, collectYahooEvents } from "./news/providers/yahoo.js";
 import { sourceDecisionUse, shortText, withinDateWindow, isoUtc, tickerInText } from "./news/shared.js";
 import newsSourceRegistry from "./news-source-registry.json";
-import { getWorkerVar } from "./response.js";
+import { ErrorCode, getWorkerVar, mcpFailure } from "./response.js";
 // Names other modules and tests import from news.ts (2.15.1 provider move).
 export { parseHtmlTable } from "./news/shared.js";
 export { getNews, yahooItemIssuer, collectYahooEvents } from "./news/providers/yahoo.js";
@@ -314,6 +315,8 @@ function collectionStatus(items: Record<string, unknown>[], sourcesUsed: string[
       "COMPANY_IR_DISCOVERY_BUDGET_EXHAUSTED",
       "COMPANY_IR_PAGE_VALIDATION_FAILED",
       "COMPANY_IR_PAGE_REVALIDATION_DUE",
+      "COMPANY_IR_PAGE_CANDIDATE_AVAILABLE",
+      "COMPANY_IR_PAGE_DISABLED",
     ].includes(_str(w.code)))) return "SOURCE_LIMITED_NOT_FOUND";
     if (sourcesUsed.length > 0) return "NOT_FOUND";
     return "PROVIDER_ERROR";
@@ -606,7 +609,8 @@ function computeSourceCoverage(sourceStatus: Record<string, unknown>): string {
 }
 function verifyCoverageFailureMode(
   sourceStatus: Record<string, unknown>,
-  warnings: Record<string, unknown>[]
+  warnings: Record<string, unknown>[],
+  companyIrRequested = false,
 ): string | null {
   const sourceStatuses = Object.values(sourceStatus)
     .filter((info): info is Record<string, unknown> => !!info && typeof info === "object")
@@ -620,7 +624,13 @@ function verifyCoverageFailureMode(
   if (sourceStatuses.includes("TIMEOUT")) return "PROVIDER_TIMEOUT";
   if (sourceStatuses.includes("PROVIDER_CHANGED")) return "PROVIDER_CHANGED";
   if (sourceStatuses.includes("IDENTITY_UNAVAILABLE")) return "YAHOO_IDENTITY_UNAVAILABLE";
-  if (sourceStatuses.includes("UNCONFIGURED")) return "SOURCE_UNCONFIGURED";
+  // AUTH_ERROR and an unregistered company_ir map to the existing SOURCE_UNCONFIGURED (2.19.0, calls #10 / #14). The
+  // company_ir upgrade applies only when the caller named company_ir: a defaults-applied NOT_REGISTERED row stays in
+  // sourceStatus / coverage without changing the status (2.19.0, planner decision 7).
+  const companyIrStatus = companyIrRequested && sourceStatus.company_ir && typeof sourceStatus.company_ir === "object"
+    ? _str((sourceStatus.company_ir as Record<string, unknown>).status)
+    : "";
+  if (sourceStatuses.includes("UNCONFIGURED") || sourceStatuses.includes("AUTH_ERROR") || companyIrStatus === "NOT_REGISTERED") return "SOURCE_UNCONFIGURED";
   if (sourceStatuses.includes("NOT_ELIGIBLE")) return "SOURCE_NOT_ELIGIBLE";
   if (sourceStatuses.includes("PROVIDER_ERROR")) return "PROVIDER_ERROR";
   return null;
@@ -1179,11 +1189,15 @@ export async function getCompanyPressReleases(
     ? hasSecEx99Found
       ? "Resolved SEC 8-K EX-99 press-release exhibit for this call."
       : "Resolved an approved, registry-reviewed company IR page source for this call."
-    : "No resolved SEC EX-99 press-release exhibit in this call; use for verification/context only.";
+    : "No resolved SEC EX-99 or approved IR-page evidence in this call; use for verification/context only.";
   const budgetStarvedSources = [...new Set([...(primary.budgetStarvedSources ?? []), ...(supplemental.budgetStarvedSources ?? [])])];
   const sourceStatus = computeSourceStatus(sourcesUsed, uniqueWarnings, processedItems, requestedSelection, sourceDiagnostics, budgetStarvedSources, disabledSources);
   const sourceCoverage = computeSourceCoverage(sourceStatus);
   const coverage = buildCoverage(sourceStatus, payloadDecisionGrade ? "USE_OFFICIAL_EVIDENCE" : null);
+  // An SEC outage keeps the status; the failure mode comes from the failed SEC row, so the empty result is not read as
+  // absence (2.19.0, call #9). sourceStatus.sec already makes coverage PARTIAL.
+  const secRow = sourceStatus.sec && typeof sourceStatus.sec === "object" ? sourceStatus.sec as Record<string, unknown> : null;
+  const secOutageMode = secRow && SEC_OUTAGE_STATUSES.has(_str(secRow.status)) ? verifyCoverageFailureMode({ sec: secRow }, []) : null;
 
   const payload: Record<string, unknown> = {
     ticker: ticker.toUpperCase(),
@@ -1200,7 +1214,7 @@ export async function getCompanyPressReleases(
     capabilityStatus: "ACTIVE",
     doctrineUse: "ALLOWED",
     reliabilityClass: reliabilityClassFor("ALLOWED"),
-    failureMode: payloadDecisionGrade ? null : coverageStatus,
+    failureMode: payloadDecisionGrade ? null : (secOutageMode ?? coverageStatus),
   };
   if (sec8kEvidence.length > 0) payload.secEvidence = sec8kEvidence.slice(0, 10);
   if (irPageEvidence.length > 0) payload.irPageEvidence = irPageEvidence;
@@ -1208,14 +1222,21 @@ export async function getCompanyPressReleases(
   if (status) payload.status = status;
   return JSON.stringify(markNoSourceSelected(payload, requestedSources));
 }
+/** SEC row statuses that are an outage (not absence, not ineligibility, not an operator switch-off). */
+const SEC_OUTAGE_STATUSES = new Set(["PROVIDER_ERROR", "PROVIDER_BUDGET_EXHAUSTED", "RATE_LIMITED", "TIMEOUT", "AUTH_ERROR", "PROVIDER_CHANGED"]);
 export async function getSecRecentEvents(
   ticker: string,
   filingTypes: string[] = ["8-K", "10-Q", "10-K"],
   lookbackDays = 90,
   maxResults = 20
 ): Promise<string> {
+  // [] means the default forms and a list of only blank types is rejected (2.19.0, B-G8; Python behaviour).
+  const selectedTypes = (filingTypes.length > 0 ? filingTypes : ["8-K", "10-Q", "10-K"]).filter(ft => String(ft).trim() !== "");
+  if (selectedTypes.length === 0) {
+    return mcpFailure("get_sec_recent_events", ErrorCode.INPUT_VALIDATION_ERROR, "filing_types must not be empty");
+  }
   const watermark = isoUtc(new Date());
-  const { result: sec, starved } = await withBudgetWatch(() => collectSecEvents(ticker, filingTypes, clampInt(maxResults, 20, 1, 100), watermark, "", "", clampInt(lookbackDays, 90, 1, 3650)));
+  const { result: sec, starved } = await withBudgetWatch(() => collectSecEvents(ticker, selectedTypes, clampInt(maxResults, 20, 1, 100), watermark, "", "", clampInt(lookbackDays, 90, 1, 3650)));
   const status = collectionStatus(sec.items, sec.used ? ["sec"] : [], sec.warnings);
   const sourceStatus = markBudgetStarvedSources(
     { sec: { status: sec.used ? (sec.items.length ? "OK" : "EMPTY_RESULT") : "PROVIDER_ERROR", rawCount: sec.items.length, filteredCount: sec.items.length } },
@@ -1292,10 +1313,6 @@ export async function verifyCompanyEvent(
   requestedSources: string[] | null = null
 ): Promise<string> {
   const sources = requestedSources ?? DEFAULT_EVENT_SOURCES;
-  // Match against everything collected: a cap of the newest 50 let a flood of
-  // aggregator items push the official release out before matching (ASTS
-  // BlueBird launch, 2.4.5).
-  const out = await collectCompanyEvents(ticker, { maxResults: 50, lookbackDays: 365, startDate, endDate, sources, keepAll: true });
   const normalizeEventText = (value: unknown): string =>
     _str(value).toLowerCase().replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ").trim();
   const eventQueryStopwords = new Set([
@@ -1329,16 +1346,28 @@ export async function verifyCompanyEvent(
     }
     return { matched: false, method: "NONE", matchedTerms, requiredTermMatches };
   };
+  // A query with no meaningful terms can verify nothing, and NOT_FOUND would claim absence (2.19.0, call #12).
   if (meaningfulTerms.length === 0) {
-    out.warnings.push({
-      code: "EVENT_QUERY_TOO_GENERIC",
-      message: "The event query contains no specific event terms. Add a term such as acquisition, dividend, guidance, contract, or offering.",
-      severity: "warning",
-    });
+    return mcpFailure(
+      "verify_company_event",
+      ErrorCode.INPUT_VALIDATION_ERROR,
+      "The event query contains no specific event terms. Add a term such as acquisition, dividend, guidance, contract, or offering.",
+    );
   }
+  // Match against everything collected: a cap of the newest 50 let a flood of
+  // aggregator items push the official release out before matching (ASTS
+  // BlueBird launch, 2.4.5). The 365-day window is collected whatever the range, which applies only when classifying,
+  // so a match outside the range can still read STALE (2.19.0, A-G8; Python behaviour).
+  const out = await collectCompanyEvents(ticker, { maxResults: 50, lookbackDays: 365, sources, keepAll: true });
   const matched = out.items.filter(item => queryMatch(item).matched);
+  const staleCutoff = new Date(Date.now() - 90 * 86400000).toISOString().slice(0, 10);
+  // Without a range a match older than 90 days is not in range, so an old release reads STALE, not CONFIRMED (2.19.0, call #11).
+  // An undated match stays in range there, as before.
   const inRange = matched.filter(item => {
-    if (!startDate && !endDate) return true;
+    if (!startDate && !endDate) {
+      const day = _str(item.publishedAt).slice(0, 10);
+      return !day || day >= staleCutoff;
+    }
     return withinDateWindow(_str(item.publishedAt) || null, startDate, endDate);
   });
   const official = inRange.filter(item =>
@@ -1346,7 +1375,6 @@ export async function verifyCompanyEvent(
     !!_str(item.url) &&
     ["HIGH", "MEDIUM"].includes(confidenceForSourceType(item.sourceType, item.confidence))
   );
-  const staleCutoff = new Date(Date.now() - 90 * 86400000).toISOString().slice(0, 10);
   const staleOnly = matched.length > 0 && matched.every(item => _str(item.publishedAt).slice(0, 10) < staleCutoff);
   const matchedGroupIds = new Set(matched.map(item => _str(item.duplicateGroupId)).filter(Boolean));
   const conflicts: Record<string, unknown>[] = out.warnings
@@ -1362,15 +1390,32 @@ export async function verifyCompanyEvent(
   else if (inRange.length > 0) status = "PARTIAL";
   else if (staleOnly) status = "STALE";
 
-  let companyName = "";
-  try {
-    const priceD = await yGet(
-      `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${enc(ticker)}?modules=price`
-    ) as Record<string, unknown>;
-    const priceResult = ((priceD?.quoteSummary as Record<string, unknown> | undefined)
-      ?.result as Record<string, unknown>[] | undefined)?.[0]?.price as Record<string, unknown> | undefined;
-    companyName = _str(priceResult?.shortName || priceResult?.longName);
-  } catch { /* non-fatal */ }
+  // Stronger evidence first, then newest: a LOW-confidence aggregator item
+  // never outranks a press release that matched the same query.
+  const pool = official.length > 0 ? official : (inRange.length > 0 ? inRange : matched);
+  const tickerUpper = ticker.toUpperCase();
+  // Issuer names score relevance only, so no evidence means no lookup. The name set is Yahoo longName and shortName plus the
+  // SEC submissions name, without any name equal to the ticker (2.19.0, planner decision 6; the call #16 rule).
+  const companyNames: string[] = [];
+  if (pool.length > 0) {
+    const addName = (value: unknown): void => {
+      const name = _str(value).trim();
+      if (name && name.toLowerCase() !== ticker.toLowerCase() && !companyNames.includes(name)) companyNames.push(name);
+    };
+    try {
+      const priceD = await yGet(
+        `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${enc(ticker)}?modules=price`
+      ) as Record<string, unknown>;
+      const priceResult = ((priceD?.quoteSummary as Record<string, unknown> | undefined)
+        ?.result as Record<string, unknown>[] | undefined)?.[0]?.price as Record<string, unknown> | undefined;
+      addName(priceResult?.longName);
+      addName(priceResult?.shortName);
+    } catch { /* non-fatal */ }
+    try {
+      const { submissions } = await getSubmissionsForTicker(ticker);
+      addName(submissions?.name);
+    } catch { /* non-fatal */ }
+  }
 
   const extractBaseCompanyName = (name: string): string => {
     if (!name) return "";
@@ -1391,8 +1436,9 @@ export async function verifyCompanyEvent(
     return nameClean.trim();
   };
 
-  const baseCompanyName = extractBaseCompanyName(companyName);
-  const tickerUpper = ticker.toUpperCase();
+  const nameTests = companyNames.flatMap(name => [extractBaseCompanyName(name), name])
+    .map(name => name.toLowerCase())
+    .filter(Boolean);
   const tickerPattern = new RegExp(`\\b${tickerUpper}\\b`, "i");
 
   // Relevance is scored from the evidence text and issuer, never from the item's tickers list: every collector
@@ -1410,10 +1456,7 @@ export async function verifyCompanyEvent(
       return "HIGH";
     }
 
-    if (baseCompanyName && hay.includes(baseCompanyName.toLowerCase())) {
-      return "HIGH";
-    }
-    if (companyName && hay.includes(companyName.toLowerCase())) {
+    if (nameTests.some(name => hay.includes(name))) {
       return "HIGH";
     }
 
@@ -1425,9 +1468,6 @@ export async function verifyCompanyEvent(
     return "LOW";
   };
 
-  // Stronger evidence first, then newest: a LOW-confidence aggregator item
-  // never outranks a press release that matched the same query.
-  const pool = official.length > 0 ? official : (inRange.length > 0 ? inRange : matched);
   const best = rankEvidence(pool, (ev) => confidenceForSourceType(ev.sourceType, ev.confidence)).slice(0, 5).map(ev => {
     const relevance = relevanceScore(ev);
     const match = queryMatch(ev);
@@ -1463,7 +1503,8 @@ export async function verifyCompanyEvent(
   const sourceStatus = computeSourceStatus(out.sourcesUsed, out.warnings, out.items, sources, out.sourceDiagnostics, out.budgetStarvedSources, out.disabledSources);
   const sourceCoverage = computeSourceCoverage(sourceStatus);
   const coverage = buildCoverage(sourceStatus);
-  const coverageFailureMode = verifyCoverageFailureMode(sourceStatus, out.warnings);
+  const companyIrRequested = requestedSources !== null && normalizeSources(requestedSources, []).selected.includes("company_ir");
+  const coverageFailureMode = verifyCoverageFailureMode(sourceStatus, out.warnings, companyIrRequested);
   if (status === "NOT_FOUND" && coverageFailureMode) {
     status = "SOURCE_LIMITED_NOT_FOUND";
     out.warnings.push({
