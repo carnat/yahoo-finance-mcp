@@ -1,0 +1,96 @@
+{
+ "server.py": [],
+ "worker/src/yahoo-finance.ts": [
+  {
+   "name": "stripHtmlTags",
+   "line": 5597,
+   "nloc": 20,
+   "region": "shared",
+   "dest": "worker/src/clients/html.ts"
+  },
+  {
+   "name": "decodeHtmlEntities",
+   "line": 5619,
+   "nloc": 15,
+   "region": "earnings",
+   "dest": "worker/src/clients/html.ts"
+  },
+  {
+   "name": "sanitizeFilingHtml",
+   "line": 5635,
+   "nloc": 7,
+   "region": "earnings",
+   "dest": "worker/src/clients/html.ts"
+  },
+  {
+   "name": "htmlToReadableText",
+   "line": 5643,
+   "nloc": 27,
+   "region": "shared",
+   "dest": "worker/src/clients/html.ts"
+  },
+  {
+   "name": "filterParagraphsByTopics",
+   "line": 5671,
+   "nloc": 30,
+   "region": "shared",
+   "dest": "worker/src/clients/html.ts"
+  },
+  {
+   "name": "mergeFinancialCells",
+   "line": 5702,
+   "nloc": 28,
+   "region": "sec",
+   "dest": "worker/src/clients/html.ts"
+  },
+  {
+   "name": "parseFinancialTableRows",
+   "line": 5731,
+   "nloc": 4,
+   "region": "shared",
+   "dest": "worker/src/clients/html.ts"
+  },
+  {
+   "name": "parseNumericCell",
+   "line": 5736,
+   "nloc": 17,
+   "region": "shared",
+   "dest": "worker/src/clients/html.ts"
+  },
+  {
+   "name": "statedUnitScales",
+   "line": 5814,
+   "nloc": 15,
+   "region": "shared",
+   "dest": "worker/src/clients/html.ts"
+  },
+  {
+   "name": "documentUnitScale",
+   "line": 5832,
+   "nloc": 8,
+   "region": "shared",
+   "dest": "worker/src/clients/html.ts"
+  },
+  {
+   "name": "detectUnitScale",
+   "line": 5841,
+   "nloc": 9,
+   "region": "shared",
+   "dest": "worker/src/clients/html.ts"
+  },
+  {
+   "name": "lazyDocumentScale",
+   "line": 5851,
+   "nloc": 16,
+   "region": "shared",
+   "dest": "worker/src/clients/html.ts"
+  },
+  {
+   "name": "tableUnitScale",
+   "line": 9206,
+   "nloc": 11,
+   "region": "shared",
+   "dest": "worker/src/clients/html.ts"
+  }
+ ]
+}

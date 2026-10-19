@@ -246,7 +246,7 @@ def _enrich_facts(val, parent_source_type=None, parent_confidence=None, is_metri
             conf = val.get("confidence") or parent_confidence
             if not conf:
                 if val.get("value") is not None or val.get("low") is not None or val.get("valueRatio") is not None:
-                    conf = "HIGH"
+                    conf = "LOW"
                 else:
                     conf = "NOT_DECISION_GRADE"
             

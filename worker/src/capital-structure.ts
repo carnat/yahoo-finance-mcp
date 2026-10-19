@@ -777,6 +777,8 @@ export function warrantCountEvents(sources: IxSource[]): Record<string, unknown>
         ...(exercise ? { exercise: { concept: exercise.name, value: exercise.value, date: exercise.periodEnd } } : {}),
         filingType: source.filingType,
         accessionNumber: source.accessionNumber,
+        // A tagged inline-XBRL count read straight from the filing (2.21.0: explicit, as the envelope default is LOW).
+        confidence: "HIGH",
       });
     }
   }

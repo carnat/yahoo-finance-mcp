@@ -448,7 +448,7 @@ Each R-release is a set of **separately released** behaviour changes that must b
   - [x] Phase 3 exit criteria are met; `PLAYBOOK.md` is written. *(The regenerated brief is approved with §8.)*
   - [x] Phase 1 is released and live-verified.
   - [x] **Source-text test cleanup is merged** (pilot lesson 2): no test reads `server.py` or `yahoo-finance.ts` text directly; they read through one helper that covers all domain modules, or check behaviour.
-  - [ ] Each hub unit's spec lists its scope from the topology (`#shared` plus the client functions), as in `phase3_news_region.json`.
+  - [x] Each hub unit's spec lists its scope from the topology (`#shared` plus the client functions), as in `phase3_news_region.json`. *(`PHASE4_SPEC.md` and `phase4_*_region.json`, 2026-10-19. Planner decisions in §11a. They add a fifth "shared utilities" unit, and a topology override that assigns cross-called tool handlers to their catalog domain, so `#shared` means hub code only.)*
   - [x] R4 is released (2.11.1–2.15.0, complete 2026-10-18).
   - [ ] **The telemetry baseline window is captured** (Q10). It runs from 2026-10-17, and the first eligible day is 2026-10-24. Exclude the preview-canary requests (Q3i finding F6).
 - **Exit criteria:**

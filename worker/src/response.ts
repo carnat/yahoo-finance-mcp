@@ -205,8 +205,9 @@ function enrichFacts(val: any, parentSourceType: string | null = null, parentCon
       const hasExplicitDecisionGrade = Object.prototype.hasOwnProperty.call(val, "decisionGrade");
       let conf = val.confidence || parentConfidence;
       if (!conf) {
+        // An untagged fact with a value is LOW (2.21.0): a producer tags what is genuinely HIGH.
         if ((val.value !== undefined && val.value !== null) || (val.low !== undefined && val.low !== null) || (val.valueRatio !== undefined && val.valueRatio !== null)) {
-          conf = "HIGH";
+          conf = "LOW";
         } else {
           conf = "NOT_DECISION_GRADE";
         }
