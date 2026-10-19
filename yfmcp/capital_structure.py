@@ -828,6 +828,7 @@ def warrant_count_events(sources: list[IxSource]) -> list[dict]:
                 **({"exercise": {"concept": exercise.name, "value": exercise.value, "date": exercise.period_end}} if exercise else {}),
                 "filingType": source.filing_type,
                 "accessionNumber": source.accession_number,
+                "confidence": "HIGH",
             }
     return list(out.values())
 

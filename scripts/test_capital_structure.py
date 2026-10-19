@@ -1034,21 +1034,7 @@ class TestCapitalStructureParity(unittest.TestCase):
 
     def test_outputs_match(self) -> None:
         for key in ("bridge", "bridgeLow", "bridgeAwards", "bridgeAaoi", "bridgeTable", "bridgeBe", "bridgeVrtWarrants", "bridgeCohr", "bridgeCohrUnread", "bridgeCohrClean", "bridgePrefOpen", "bridgeMrvl", "bridgeMrvlHigh", "bridgeLife", "bridgeAehr", "bridgeLite", "bridgeCensus", "bridgePrefLiq", "bridgeStale", "bridgeStaleUnread", "bridgeSettled", "bridgeLiteSettled", "bridgeCensus2", "preferredWordings", "bridgeCapped", "bridgeCappedHigh", "bridgeLiteCapped", "cappedTerms", "bridgeNest", "bridgeNestUnread", "capital", "capitalAaoi", "capitalAaoiDebt", "capitalAaoiDebtNoText", "capitalAstsDebt", "capitalAstsDebtNoText", "capitalMuDebt", "capitalVrtDebt", "capital_lease_total_q", "capital_lease_parts_q", "capital_lease_unsplit_q", "capital_agg_q", "capital_agg_ambiguous_q", "capital_fdx_q", "spelledYears", "wantsText", "labelsDated", "capitalAsts", "capitalDebtFree", "capitalOverlap", "capitalAggregate", "capitalVrt", "capitalParts", "labels", "analyst", "analystAsts", "ch", "chPick"):
-            self.assertEqual(_without_pending_count_confidence(self.worker[key]), self.local[key], key)
-
-
-def _without_pending_count_confidence(out):
-    """TODO(python-mirror): R5-shared (2.21.0) decision 4 — the Worker tags each WARRANT_EXERCISE_NOT_OUTSTANDING count
-    confidence "HIGH"; once yfmcp/capital_structure.py warrant_count_events does too, delete this helper and compare directly."""
-    if not isinstance(out, dict) or not isinstance(out.get("warnings"), list):
-        return out
-    warnings = []
-    for w in out["warnings"]:
-        if isinstance(w, dict) and w.get("code") == "WARRANT_EXERCISE_NOT_OUTSTANDING":
-            assert all(c.get("confidence") == "HIGH" for c in w["counts"]), w
-            w = {**w, "counts": [{k: v for k, v in c.items() if k != "confidence"} for c in w["counts"]]}
-        warnings.append(w)
-    return {**out, "warnings": warnings}
+            self.assertEqual(self.worker[key], self.local[key], key)
 
 
 class TestCapitalStructureValues(unittest.TestCase):

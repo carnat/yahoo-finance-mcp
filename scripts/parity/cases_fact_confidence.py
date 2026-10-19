@@ -34,7 +34,6 @@ from yfmcp.envelope import _envelope_tool_result  # noqa: E402
 
 CASES: list[Case] = []
 
-_PORT = "FINDING: 2.21.0 Worker side landed (R5-shared decision 1): an untagged fact with a value defaults to LOW in the Worker; Python still defaults to HIGH (port pending)"
 
 
 def _worker(body: str) -> str:
@@ -72,17 +71,12 @@ _DEFAULT_TS = {"untaggedValue": "LOW", "untaggedLow": "LOW", "untaggedRatio": "L
                "inheritedFromParent": "MEDIUM", "inheritedFromFact": "HIGH"}
 
 CASES += [
-    # TODO(python-mirror): R5-shared decision 1 — in yfmcp/envelope.py _enrich_facts (~249) the default for a fact with value /
-    # low / valueRatio non-null and no own or inherited confidence becomes "LOW" (was "HIGH"); the NOT_DECISION_GRADE branch
-    # and the normalisation stay. Then flip to equal with expect=<the expect_ts below>.
     Case(name="confidence.default.untagged_fact_with_a_value_is_low_only_high_is_not_decision_grade_inherited_wins",
          ids=["BR-ENV-001"],
          py=lambda: _envelope_tool_result("extract_sec_filing_fact", json.dumps(_DEFAULT_PAYLOAD)),
          ts={"js": _worker("return JSON.parse(m.response.mcpSuccess(args[0], args[1]));"),
              "args": ["extract_sec_filing_fact", json.dumps(_DEFAULT_PAYLOAD)]},
-         select=_default_view, mode="pinned", decision=_PORT,
-         expect_py={**_DEFAULT_TS, "untaggedValue": "HIGH", "untaggedLow": "HIGH", "untaggedRatio": "HIGH"},
-         expect_ts=_DEFAULT_TS),
+         select=_default_view, expect=_DEFAULT_TS),
 ]
 
 
@@ -130,14 +124,10 @@ def _f19_view(v: dict) -> dict:
 
 
 CASES += [
-    # TODO(python-mirror): R5-shared decision 2 — follows from the envelope.py default change above (no producer change in
-    # server.py get_analyst_consensus); then flip to equal with expect=<the expect_ts below>.
     _consensus_case("confidence.analyst_consensus.price_targets_are_low",
                     lambda v: {"priceTargets": v["data"]["priceTargets"]["confidence"],
                                "priceTargetsDecisionGrade": v["data"]["priceTargets"]["decisionGrade"]},
-                    mode="pinned", decision=_PORT,
-                    expect_py={"priceTargets": "HIGH", "priceTargetsDecisionGrade": False},
-                    expect_ts={"priceTargets": "LOW", "priceTargetsDecisionGrade": False}),
+                    expect={"priceTargets": "LOW", "priceTargetsDecisionGrade": False}),
     # F19 (R5-shared spec 2.5): Python's tool sets the top-level provenance fields and the Worker's sets none, so the
     # envelope gives priceTargets the parent source "yahoo_finance" in Python and "unknown" in the Worker. Recorded, not fixed.
     _consensus_case("confidence.analyst_consensus.finding_f19_top_level_provenance_and_price_targets_source_type_differ",
@@ -183,15 +173,12 @@ def _estimate_view(v: dict) -> dict:
 
 
 CASES += [
-    # TODO(python-mirror): R5-shared decision 2 — follows from the envelope.py default change (no producer change in server.py
-    # get_earnings_analysis); then flip to equal with expect=<the expect_ts below>.
     Case(name="confidence.earnings_analysis.estimate_rows_are_low", ids=["BR-ENV-001"], py=_py_earnings_envelope,
          ts={"js": _ts_with_clock(GATE_NOW, _worker(
              f'const r = await m.tools.callToolResult("get_earnings_analysis", {{ticker: "{_TICKER_B}"}}); return r.value;')),
              "isolate": True},
-         routes=_EARNINGS_ROUTES, select=_estimate_view, mode="pinned", decision=_PORT,
-         expect_py={"earningsEstimate": ["HIGH", "HIGH"], "revenueEstimate": ["HIGH", "HIGH"]},
-         expect_ts={"earningsEstimate": ["LOW", "LOW"], "revenueEstimate": ["LOW", "LOW"]}),
+         routes=_EARNINGS_ROUTES, select=_estimate_view,
+         expect={"earningsEstimate": ["LOW", "LOW"], "revenueEstimate": ["LOW", "LOW"]}),
 ]
 
 
@@ -276,9 +263,6 @@ def _bridge_case(name: str, html: str, filing: str, price: float, expect: list) 
 CASES += [
     # R5-shared decision 4: each count is tagged confidence HIGH at the producer (Worker capital-structure.ts warrantCountEvents),
     # so the counts and the `exercise` child (which inherits it) stay HIGH after the default flips to LOW.
-    # TODO(python-mirror): R5-shared decision 4 — tag each entry of yfmcp/capital_structure.py warrant_count_events (~808) with
-    # "confidence": "HIGH" (last key, after accessionNumber, as in the Worker); this case is equal today only because Python's
-    # envelope still defaults to HIGH, and must stay equal after the envelope.py change.
     _bridge_case("confidence.dilution_bridge.warrant_exercised_after_count_and_its_exercise_stay_high", T.BE_Q, "10-Q", 30,
                  [[3_531_073, "EXERCISED_AFTER_COUNT", "HIGH", "HIGH"]]),
     _bridge_case("confidence.dilution_bridge.warrant_exercise_and_equity_movement_counts_stay_high", T.VRT_WARRANT_K, "10-K", 150,
