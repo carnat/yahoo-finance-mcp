@@ -1338,7 +1338,8 @@ CASES += [
                    "warnings": [["SOURCE_UNAVAILABLE", "Finnhub provider changed: FINNHUB_PROVIDER_CHANGED: expected array, got object"], _VERIFY_LIMITED],
                    "next": "CHECK_OFFICIAL_RELEASES", "best": 0}),
     # Card 197 edge: a company_ir verification with no approved registry entry. The Worker reports NOT_REGISTERED (2.10.0: approved
-    # IR registry only), which maps to the existing failureMode SOURCE_UNCONFIGURED since 2.19.0 (call #14), so the result is
+    # IR registry only), which maps to the existing failureMode SOURCE_UNCONFIGURED since 2.19.0 when company_ir is requested
+    # explicitly, as here (call #14, planner decision 7), so the result is
     # SOURCE_LIMITED_NOT_FOUND (it stayed NOT_FOUND before). Python serves company_ir from the Yahoo feed, whose profile lookup failed,
     # so it is IDENTITY_UNAVAILABLE and the result is source limited for another reason.
     # TODO(python-mirror): flip to equal with expect=<the expect_ts below> once Python's company_ir is registry-only and maps
@@ -1356,6 +1357,36 @@ CASES += [
         expect_ts={"status": "SOURCE_LIMITED_NOT_FOUND", "failureMode": "SOURCE_UNCONFIGURED", "retryable": False, "action": _VERIFY_ACTION,
                    "sourceStatus": {"company_ir": "NOT_REGISTERED"}, "warnings": [_VERIFY_LIMITED],
                    "next": "CHECK_OFFICIAL_RELEASES", "best": 0}),
+    # Planner decision 7 (2.19.0): the call #14 upgrade needs company_ir in the caller's own sources. With default sources the
+    # NOT_REGISTERED company_ir row stays in sourceStatus / coverage and a clean miss is still NOT_FOUND (every other default source
+    # answers: SEC empty, Yahoo no match, Finnhub empty, Marketaux empty).
+    _scenario(
+        "news.verify.default_sources_with_unregistered_company_ir_can_still_be_not_found", ["BR-NWS-197", "BR-NWS-106"],
+        lambda: server.verify_company_event("ACME", "acquisition", "", "", None),
+        'm.yahooFinance.verifyCompanyEvent("ACME", "acquisition", "", "", null)',
+        news=[_yn("Acme opens a plant", when=_days_ago(2))], info={"shortName": "Acme", "longName": "Acme Corp", "exchange": "NMS"},
+        env={**FINNHUB_ENV, **MARKETAUX_ENV}, submissions=_py_sec(SEC_CIK, "Acme Corp", _sec_recent([], [])),
+        routes={**_sec_routes(SEC_CIK, "ACME", "Acme Corp", _sec_recent([], [])), **_finnhub([]), MARKETAUX_PREFIX: {"json": {"data": []}}},
+        select=lambda v: {"status": v["status"], "failureMode": v["failureMode"], "companyIr": v["sourceStatus"].get("company_ir", {}).get("status"),
+                          "failed": sorted(f["source"] for f in v["coverage"]["failedSources"])},
+        # TODO(python-mirror): flip to equal with expect=<the expect_ts below> once Python's company_ir is registry-only (status and
+        # failureMode already agree; only the company_ir row differs).
+        mode="pinned", decision="FINDING: default-sources verify stays NOT_FOUND in both runtimes; the company_ir row is NOT_REGISTERED (and failed) in the Worker, EMPTY_RESULT in Python (registry-only port pending)",
+        expect_py={"status": "NOT_FOUND", "failureMode": None, "companyIr": "EMPTY_RESULT", "failed": ["company_ir_page"]},
+        expect_ts={"status": "NOT_FOUND", "failureMode": None, "companyIr": "NOT_REGISTERED", "failed": ["company_ir", "company_ir_page"]}),
+    # Decision 7, explicit side: sources=['company_ir'] with no approved entry upgrades NOT_FOUND to SOURCE_LIMITED_NOT_FOUND /
+    # SOURCE_UNCONFIGURED in the Worker. Python (Yahoo passthrough) reads company_ir as EMPTY_RESULT and stays NOT_FOUND.
+    # TODO(python-mirror): flip to equal with expect=<the expect_ts below> once Python's company_ir is registry-only and an explicitly
+    # requested NOT_REGISTERED company_ir maps to SOURCE_UNCONFIGURED (rename to news.verify.explicit_unregistered_company_ir_is_source_limited).
+    _scenario(
+        "news.verify.explicit_unregistered_company_ir_is_source_limited_in_the_worker", ["BR-NWS-197", "BR-NWS-106"],
+        lambda: server.verify_company_event("ACME", "acquisition", "", "", ["company_ir"]),
+        'm.yahooFinance.verifyCompanyEvent("ACME", "acquisition", "", "", ["company_ir"])',
+        news=[_yn("Acme opens a plant", when=_days_ago(2))], info={"shortName": "Acme", "longName": "Acme Corp", "exchange": "NMS"},
+        select=lambda v: {"status": v["status"], "failureMode": v["failureMode"], "companyIr": v["sourceStatus"].get("company_ir", {}).get("status")},
+        mode="pinned", decision="FINDING: 2.19.0 Worker side landed: an explicitly requested, unregistered company_ir gives SOURCE_LIMITED_NOT_FOUND / SOURCE_UNCONFIGURED in the Worker; Python (Yahoo passthrough) stays NOT_FOUND",
+        expect_py={"status": "NOT_FOUND", "failureMode": None, "companyIr": "EMPTY_RESULT"},
+        expect_ts={"status": "SOURCE_LIMITED_NOT_FOUND", "failureMode": "SOURCE_UNCONFIGURED", "companyIr": "NOT_REGISTERED"}),
     # Card 242: until 2.17.0 every collected item carried tickers=[ticker], so the relevance score was HIGH at its first test and
     # the low-relevance downgrade could never fire. Since 2.17.0 (B-G12c) relevance reads the evidence text and issuer only; this
     # release headline names the company ('Zeta Platforms', from Yahoo in the Worker and from SEC submissions in Python), so it is

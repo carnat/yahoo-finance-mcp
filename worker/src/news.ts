@@ -609,7 +609,8 @@ function computeSourceCoverage(sourceStatus: Record<string, unknown>): string {
 }
 function verifyCoverageFailureMode(
   sourceStatus: Record<string, unknown>,
-  warnings: Record<string, unknown>[]
+  warnings: Record<string, unknown>[],
+  companyIrRequested = false,
 ): string | null {
   const sourceStatuses = Object.values(sourceStatus)
     .filter((info): info is Record<string, unknown> => !!info && typeof info === "object")
@@ -623,8 +624,10 @@ function verifyCoverageFailureMode(
   if (sourceStatuses.includes("TIMEOUT")) return "PROVIDER_TIMEOUT";
   if (sourceStatuses.includes("PROVIDER_CHANGED")) return "PROVIDER_CHANGED";
   if (sourceStatuses.includes("IDENTITY_UNAVAILABLE")) return "YAHOO_IDENTITY_UNAVAILABLE";
-  // AUTH_ERROR and an unregistered company_ir map to the existing SOURCE_UNCONFIGURED (2.19.0, calls #10 / #14).
-  const companyIrStatus = sourceStatus.company_ir && typeof sourceStatus.company_ir === "object"
+  // AUTH_ERROR and an unregistered company_ir map to the existing SOURCE_UNCONFIGURED (2.19.0, calls #10 / #14). The
+  // company_ir upgrade applies only when the caller named company_ir: a defaults-applied NOT_REGISTERED row stays in
+  // sourceStatus / coverage without changing the status (2.19.0, planner decision 7).
+  const companyIrStatus = companyIrRequested && sourceStatus.company_ir && typeof sourceStatus.company_ir === "object"
     ? _str((sourceStatus.company_ir as Record<string, unknown>).status)
     : "";
   if (sourceStatuses.includes("UNCONFIGURED") || sourceStatuses.includes("AUTH_ERROR") || companyIrStatus === "NOT_REGISTERED") return "SOURCE_UNCONFIGURED";
@@ -1500,7 +1503,8 @@ export async function verifyCompanyEvent(
   const sourceStatus = computeSourceStatus(out.sourcesUsed, out.warnings, out.items, sources, out.sourceDiagnostics, out.budgetStarvedSources, out.disabledSources);
   const sourceCoverage = computeSourceCoverage(sourceStatus);
   const coverage = buildCoverage(sourceStatus);
-  const coverageFailureMode = verifyCoverageFailureMode(sourceStatus, out.warnings);
+  const companyIrRequested = requestedSources !== null && normalizeSources(requestedSources, []).selected.includes("company_ir");
+  const coverageFailureMode = verifyCoverageFailureMode(sourceStatus, out.warnings, companyIrRequested);
   if (status === "NOT_FOUND" && coverageFailureMode) {
     status = "SOURCE_LIMITED_NOT_FOUND";
     out.warnings.push({
