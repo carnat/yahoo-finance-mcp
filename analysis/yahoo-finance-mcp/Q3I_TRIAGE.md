@@ -141,4 +141,10 @@ These came up while implementing R4b. None is a regression.
 
 - **F12. Verify stop words** (found in 2.19.0 live checks). `verify_company_event` drops only event-noise words (announce, news, results ...) and terms shorter than 3 letters. English function words such as "the" and "and" count as meaningful, so the query "the and of" gives meaningfulTerms ["the","and"] and skips the `INPUT_VALIDATION_ERROR` guard. The list is shared, so this is not a parity issue. Widening it changes the matching threshold, which makes it a planner call.
 
+- **F13. Marketaux status divergences** (found in 2.20.0).
+  - HTTP 404: the Worker reports `NOT_FOUND`, Python `PROVIDER_ERROR`.
+  - A non-object JSON body: the Worker reports `PROVIDER_ERROR`, Python `PROVIDER_CHANGED`.
+  - Also, under `MCP_ENVELOPE_V2=false` a Worker batch error entry reads `PROVIDER_ERROR`, because `normalizeBatchSymbolResult` ignores `code` on legacy errors.
+- **F14. Unadvertised optional params** (found in 2.20.0). 25 actions in 8 groups accept params that their `tool_catalog.json` Params line omits. They are frozen in `_KNOWN_UNADVERTISED_PARAMS` in `scripts/test_grouped_contract_parity.py`. `get_analyst_recommendations` and `get_ownership_holders` have no Params line at all.
+
 F8 to F11 are included in R-news Batch C (RNEWS3_SPEC decision 16). F12 waits for the next triage.

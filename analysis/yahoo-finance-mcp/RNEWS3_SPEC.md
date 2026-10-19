@@ -116,3 +116,13 @@
     - **F10:** Python parses RSS/Atom bodies for structured IR-page entries, as the Worker does. If the port needs more than one parser function, STOP and report.
     - **F11:** Python fills `registryVersion` and `approvalStatus: "not_registered"` on the unregistered IR-page row.
 17. **F12 (stop words) is not in this batch.** It is logged in `Q3I_TRIAGE.md` §5. Changing the meaningful-term rule changes the verify matching threshold, so it goes to the next triage.
+
+### Batch C decisions after the Worker step (2026-10-19)
+18. **Decision 10 narrowed.**
+    - Read per source, decision 10 marks a normal mixed output PARTIAL. For example, Finnhub gets 4 of 10 slots, so its `returnedCount` 4 is below 10 even though only the caller's limit cut it.
+    - **Rule:** `coverage.state` is PARTIAL when `truncatedSources` is non-empty **and** the total number of items returned by the tool is below the caller's effective `max_results`. When the output is full, the caller's limit is what cut it, and the state stays as `computeSourceCoverage` gives.
+    - The Marketaux 3-row limit and the `get_company_news` pool cap have no effect, because Marketaux never sets `hasMoreAccepted` and `max_results` clamps to the pool size. The release docs say so.
+19. **Recorded, not changed in this batch:**
+    - The Marketaux HTTP 404 status (Worker `NOT_FOUND`, Python `PROVIDER_ERROR`) and the non-object body status (Worker `PROVIDER_ERROR`, Python `PROVIDER_CHANGED`) become finding F13.
+    - Under the legacy envelope (`MCP_ENVELOPE_V2=false`), a Worker batch error entry reads `PROVIDER_ERROR`. This is part of finding F13.
+    - The 25 unadvertised params in other groups, frozen in `_KNOWN_UNADVERTISED_PARAMS`, become finding F14.
