@@ -80,7 +80,7 @@ from yfmcp.clients.edgar import (
     _edgar_get_company_facts, _edgar_get_submissions,
     _edgar_build_filing_urls, _edgar_cik_from_accession,
     _edgar_list_exhibits_from_index, _edgar_get_html,
-    _is_likely_xbrl_document_url, _edgar_read_json, _warm_sec_submissions,
+    _edgar_read_json, _warm_sec_submissions,
 )
 from yfmcp.parsing.html import (
     _strip_html_tags, _strip_html_blocks, _parse_html_table, _parse_numeric_cell, _detect_unit_multiplier, _UNIT_SCALE_ASSUMED_WARNING,
@@ -273,6 +273,12 @@ from yfmcp.tools.news import (  # re-export for compatibility, grouped routing a
 
 
 _PRE_REVENUE_EPS_EPSILON = 1e-9
+
+
+def _is_likely_xbrl_document_url(url: str) -> bool:
+    """Same test as the Worker's isLikelyXbrlDocumentUrl."""
+    lower = url.split("?", 1)[0].lower()
+    return lower.endswith(".xml") or "/xbrl/" in lower
 
 
 async def get_stock_actions(ticker: str, start_date: str = "", limit: int = 40) -> str:

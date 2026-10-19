@@ -408,12 +408,6 @@ async def _get_submissions_for_ticker(ticker: str) -> tuple[str | None, dict | N
     return cik_padded, await _edgar_get_submissions(cik_padded)
 
 
-def _is_likely_xbrl_document_url(url: str) -> bool:
-    """Same test as the Worker's isLikelyXbrlDocumentUrl."""
-    lower = url.split("?", 1)[0].lower()
-    return lower.endswith(".xml") or "/xbrl/" in lower
-
-
 async def _edgar_read_json(url: str) -> dict:
     """The Worker's edgarReadJson (2.5.17): an EDGAR JSON read that tells absence from failure.
 
