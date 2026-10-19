@@ -16,15 +16,13 @@ import {
   yGet,
   enc,
   runPartialBatch,
-  edgarCikFromAccession,
   _str,
   clampInt,
   type NewsCompanyIdentity,
   finnhubEligibility,
   resolveNewsCompanyIdentity,
-  resolveEx991Url,
-  getSubmissionsForTicker,
 } from "./yahoo-finance.js";
+import { edgarCikFromAccession, getSubmissionsForTicker, resolveEx991Url } from "./clients/edgar.js";
 import { collectCompanyIrPageEvents } from "./news/providers/company-ir-page.js";
 import { collectCompanyIrEvents } from "./news/providers/company-ir.js";
 import { collectFinnhubEvents } from "./news/providers/finnhub.js";
