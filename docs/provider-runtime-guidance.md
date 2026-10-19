@@ -2959,6 +2959,37 @@ F-024, F-026, F-029). Both runtimes change alike.
   beyond the cap. No new field.
 - **Rollback:** revert the release.
 
+## News Repairs, Batch B (2.19.0)
+
+- **Why:** R-news part 3, Batch B of the approved Q3i triage (`RNEWS3_SPEC.md`, with planner decisions 6 to 9). Release type: minor. Outputs change identically in both runtimes.
+- **`company_ir` is registry-only in both runtimes.** Python now uses the Worker's registry-only collector: no Yahoo pass-through, and a company IR source counts as used only with an approved registry entry. Without one, the row is `NOT_REGISTERED`.
+- **IR-page registry states:**
+  - **Candidate and disabled entries** raise the info warnings `COMPANY_IR_PAGE_CANDIDATE_AVAILABLE` and `COMPANY_IR_PAGE_DISABLED`. The collection status reads `SOURCE_LIMITED_NOT_FOUND`, not `PROVIDER_ERROR`.
+  - **`allowedAction`:** a stale or validation-failed entry gets `registry_review_required`; an approved page with nothing in the window gets `fetch_configured_source`.
+  - **Registry metadata:** approved rows carry the registry metadata in both runtimes.
+- **IR-page parsing:**
+  - The issuer is null when the registry has no `issuerName`.
+  - A structured JSON item's summary reads `content_text`.
+  - An `html_article` entry served a JSON content type, or an RSS/Atom body, fails with `SOURCE_VALIDATION_FAILED`.
+- **`get_company_press_releases`:**
+  - **Candidate-only status:** `COMPANY_IR_PAGE_CANDIDATE_ONLY` is used in both runtimes and listed in `limitationStatuses`.
+  - **SEC outage:** the status is kept, `failureMode` comes from the failed SEC row, and coverage reads PARTIAL.
+  - **Python now carries `secEvidence[].cikInt`.** `doctrineUse` stays Worker-only until Phase 6.
+- **`verify_company_event`:**
+  - **Date range:** it collects 365 days and applies the date range only when classifying.
+  - **STALE:** a match older than 90 days is `STALE`, also when no range is given; an undated match counts as in range.
+  - **Best-evidence confidence** depends on the source type: contextual news is LOW.
+  - **Provider auth failure** (`AUTH_ERROR`): the result is `SOURCE_LIMITED_NOT_FOUND` with `failureMode: SOURCE_UNCONFIGURED`.
+  - **Unregistered `company_ir`:** the same upgrade happens only when the caller names `company_ir` in `sources`. With default sources, the `NOT_REGISTERED` row stays in coverage but does not change the status, so a default verify can still return `NOT_FOUND`.
+  - **Generic query:** a query made only of stop words returns `INPUT_VALIDATION_ERROR`.
+  - **Relevance names:** relevance reads Yahoo `longName` and `shortName` plus the SEC submissions name, excluding any name equal to the ticker. An approved IR page counts as a HIGH source.
+- **`extract_analyst_valuation_methods`:** attribution aliases are `longName`, `shortName` and `companyName`, excluding any equal to the ticker. `NEWS_UNAVAILABLE` is raised when the news call fails. An invalid ticker is handled in Batch C.
+- **`get_sec_recent_events`:**
+  - Python adds `coverage`, `sourceCoverage` and `sourceStatus`.
+  - Blank `filing_types` gives `INPUT_VALIDATION_ERROR`.
+  - `[]` means the defaults: 8-K, 10-Q and 10-K.
+- **Rollback:** revert the release.
+
 ## Per-Person Access Keys (2.18.0)
 
 - **Why:** Phase 1b, approved by the owner on 2026-10-18, for sharing the hosted MCP with a few trusted people, non-commercially. Release type: minor. Worker only: the local Python server is single-user stdio.
