@@ -38,6 +38,12 @@ def _run(coro):  # type: ignore[no-untyped-def]
     return asyncio.run(coro)
 
 
+def _recent_iso(days: int = 2) -> str:
+    """A UTC timestamp a few days ago: verify treats a match older than 90 days as STALE even without a date range (2.19.0)."""
+    import datetime
+    return (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def _parse(raw: str) -> dict:
     return json.loads(raw)
 
@@ -575,7 +581,7 @@ class TestPhase6BVerifyEvent(unittest.TestCase):
             "title": "8-K filed",
             "source": "SEC",
             "sourceType": "sec_filing",
-            "publishedAt": "2026-05-10T10:00:00Z",
+            "publishedAt": _recent_iso(),
             "retrievedAt": "2026-05-10T10:01:00Z",
             "url": "https://www.sec.gov/Archives/test",
             "confidence": "HIGH",
@@ -663,7 +669,7 @@ class TestPhase6BVerifyEvent(unittest.TestCase):
             "summary": "The company agreed to acquire Target AB.",
             "source": "company_ir",
             "sourceType": "company_ir",
-            "publishedAt": "2026-07-10T08:00:00Z",
+            "publishedAt": _recent_iso(),
             "retrievedAt": "2026-07-17T08:00:00Z",
             "url": "https://example.com/acquisition",
             "confidence": "HIGH",
@@ -699,9 +705,15 @@ class TestPhase6BVerifyEvent(unittest.TestCase):
             submissions.return_value = (None, None)
             data = _parse(_run(srv.verify_company_event("SIVE.ST", "---")))
 
-        self.assertEqual(data.get("status"), "NOT_FOUND")
-        self.assertEqual(data.get("queryPolicy", {}).get("matchedEvidenceCount"), 0)
-        self.assertIn("EVENT_QUERY_TOO_GENERIC", [w.get("code") for w in data.get("warnings", [])])
+        # A query with no meaningful terms can verify nothing, so it is rejected before any collection (2.19.0, call #12):
+        # NOT_FOUND would claim absence.
+        self.assertIs(data.get("ok"), False)
+        self.assertEqual(data["error"]["code"], "INPUT_VALIDATION_ERROR")
+        self.assertEqual(
+            data["error"]["message"],
+            "The event query contains no specific event terms. Add a term such as acquisition, dividend, guidance, contract, or offering.",
+        )
+        mocked.assert_not_called()
 
     def test_verify_stale_timestamp_variance_and_evidence_conflict(self):
         stale_item = [{
@@ -722,12 +734,19 @@ class TestPhase6BVerifyEvent(unittest.TestCase):
             self.assertEqual(data.get("status"), "STALE")
 
         with patch("yfmcp.tools.news._collect_company_events", new_callable=AsyncMock) as mocked:
-            mocked.return_value = (stale_item, ["sec"], [{"code": "TIMESTAMP_VARIANCE", "message": "x", "duplicateGroupId": "other", "statusImpact": False}], "2026-05-10T10:01:00Z")
+            # Without a range the 90-day cutoff applies (2.19.0, call #11): the 2020 item reads STALE, not CONFIRMED.
+            mocked.return_value = (stale_item, ["sec"], [], "2026-05-10T10:01:00Z")
+            data = _parse(_run(srv.verify_company_event("AAPL", "guidance")))
+            self.assertEqual(data.get("status"), "STALE")
+
+        recent_item = [dict(stale_item[0], publishedAt=_recent_iso())]
+        with patch("yfmcp.tools.news._collect_company_events", new_callable=AsyncMock) as mocked:
+            mocked.return_value = (recent_item, ["sec"], [{"code": "TIMESTAMP_VARIANCE", "message": "x", "duplicateGroupId": "other", "statusImpact": False}], "2026-05-10T10:01:00Z")
             data = _parse(_run(srv.verify_company_event("AAPL", "guidance")))
             self.assertEqual(data.get("status"), "CONFIRMED")
             self.assertEqual(data.get("conflicts"), [])
 
-        matched_item = [dict(stale_item[0], duplicateGroupId="guidance-group", publishedAt="2026-05-10T10:00:00Z")]
+        matched_item = [dict(stale_item[0], duplicateGroupId="guidance-group", publishedAt=_recent_iso())]
         with patch("yfmcp.tools.news._collect_company_events", new_callable=AsyncMock) as mocked:
             mocked.return_value = (matched_item, ["sec"], [{"code": "EVIDENCE_CONFLICT", "message": "Amounts differ.", "duplicateGroupId": "guidance-group"}], "2026-05-10T10:01:00Z")
             data = _parse(_run(srv.verify_company_event("AAPL", "guidance")))

@@ -93,7 +93,8 @@ def _company_ir_page_item(
     if not _company_ir_page_url_allowed(entry, url):
         return None
     ticker_u = ticker.upper()
-    issuer = str(entry.get("issuerName") or ticker_u)
+    # The issuer is the registry issuerName and nothing else: an entry without one gives null, as in the Worker (2.19.0, B-G17).
+    issuer = entry.get("issuerName")
     duplicate_group_id = _make_duplicate_group_id(ticker_u, title, published_at, issuer, url)
     return {
         "title": title,
@@ -154,7 +155,7 @@ def _parse_company_ir_page_json(ticker: str, entry: dict, text: str, retrieved_a
         title = str(raw.get("title") or raw.get("headline") or raw.get("name") or "").strip()
         if not title:
             continue
-        summary = str(raw.get("summary") or raw.get("description") or raw.get("excerpt") or raw.get("content") or "").strip()
+        summary = str(raw.get("summary") or raw.get("description") or raw.get("excerpt") or raw.get("content_text") or raw.get("content") or "").strip()
         raw_url = str(raw.get("url") or raw.get("link") or raw.get("external_url") or raw.get("permalink") or "").strip() or None
         published_at = _to_iso_utc(raw.get("publishedAt") or raw.get("published_at") or raw.get("datePublished") or raw.get("date_published") or raw.get("date") or raw.get("pubDate"))
         item = _company_ir_page_item(ticker, entry, title, summary, raw_url, published_at, retrieved_at, final_url)
@@ -166,6 +167,10 @@ def _parse_company_ir_page_json(ticker: str, entry: dict, text: str, retrieved_a
 def _html_attr(attrs: str, name: str) -> str:
     match = _re.search(rf'\b{_re.escape(name)}\s*=\s*["\']([^"\']+)["\']', attrs or "", flags=_re.I)
     return _html_module.unescape(match.group(1)) if match else ""
+
+
+def _looks_like_feed(text: str) -> bool:
+    return bool(_re.search(r"<rss\b", text or "", flags=_re.I) or _re.search(r"<feed\b", text or "", flags=_re.I))
 
 
 def _parse_company_ir_page_html(ticker: str, entry: dict, html_text: str, retrieved_at: str, final_url: str) -> list[dict]:
@@ -225,12 +230,26 @@ async def _fetch_company_ir_page(entry: dict) -> tuple[str, str, str]:
             if not _company_ir_page_url_allowed(entry, final_url):
                 raise ValueError("redirect target is outside registry allow-list")
             content_type = str(resp.headers.get("content-type") or "").lower()
+            # An html_article entry is approved for HTML only (2.19.0, B-G17): any other declared content type fails validation.
+            if entry.get("adapter") == "html_article" and content_type and not _re.search(r"(html|text/plain)", content_type, flags=_re.I):
+                raise ValueError(f"unexpected HTML content type: {content_type}")
             data = resp.read(_COMPANY_IR_PAGE_MAX_BYTES + 1)
             if len(data) > _COMPANY_IR_PAGE_MAX_BYTES:
                 raise ValueError("response exceeded size limit")
             return data.decode("utf-8", errors="replace"), final_url, content_type
 
     return await asyncio.to_thread(_fetch)
+
+
+class _CompanyIrPageResult(tuple):
+    """``(items, warnings, used)`` that also carries the source diagnostics (never serialized)."""
+
+    diagnostics: dict
+
+    def __new__(cls, triple: tuple, diagnostics: dict) -> "_CompanyIrPageResult":
+        result = super().__new__(cls, triple)
+        result.diagnostics = diagnostics
+        return result
 
 
 async def _collect_company_ir_page_events(
@@ -241,18 +260,39 @@ async def _collect_company_ir_page_events(
     start_date: str = "",
     end_date: str = "",
     lookback_days: int | None = None,
-) -> tuple[list[dict], list[dict], bool]:
+) -> "_CompanyIrPageResult":
+    """The ``(items, warnings, used)`` triple plus ``.diagnostics`` (2.19.0): the Worker's per-source diagnostics, i.e. the
+    registry fields the status row carries and the state of the entry."""
     entry = _company_ir_page_entry(ticker)
     if not entry:
-        return [], [], False
+        registry = _load_company_ir_page_registry()
+        return _CompanyIrPageResult(([], [], False), {
+            "registryVersion": registry.get("registryVersion"),
+            "registrySchemaVersion": registry.get("schemaVersion"),
+            "status": "NOT_REGISTERED",
+            "approvalStatus": "not_registered",
+            "allowedAction": "registry_review_required",
+        })
     status = str(entry.get("status") or "")
     warning_base = {
         "canonicalUrl": entry.get("canonicalUrl"),
         "registryVersion": entry.get("registryVersion"),
         "approvalStatus": status,
     }
+    diagnostics: dict = {
+        "registryVersion": entry.get("registryVersion"),
+        "registrySchemaVersion": entry.get("registrySchemaVersion"),
+        "status": "EMPTY_RESULT",
+        "approvalStatus": status,
+        "adapter": entry.get("adapter"),
+        "canonicalUrl": entry.get("canonicalUrl"),
+        "allowedHosts": entry.get("allowedHosts"),
+        "allowedPathPrefixes": entry.get("allowedPathPrefixes"),
+        "revalidateAfter": entry.get("revalidateAfter"),
+    }
     if status == "disabled":
-        return [], [{**warning_base, "code": "COMPANY_IR_PAGE_DISABLED", "message": "Company IR page registry entry is disabled.", "severity": "info"}], False
+        warning = {**warning_base, "code": "COMPANY_IR_PAGE_DISABLED", "message": "Company IR page registry entry is disabled.", "severity": "info"}
+        return _CompanyIrPageResult(([], [warning], False), {**diagnostics, "status": "DISABLED", "allowedAction": "registry_review_required"})
     if status == "candidate":
         candidate = {
             "ticker": entry.get("ticker"),
@@ -263,12 +303,17 @@ async def _collect_company_ir_page_events(
             "discoveredAt": entry.get("discoveredAt"),
             "decisionGrade": False,
         }
-        return [], [{**warning_base, "code": "COMPANY_IR_PAGE_CANDIDATE_AVAILABLE", "message": "Company IR page candidate is available for review but was not fetched.", "severity": "info", "candidate": candidate}], False
+        warning = {**warning_base, "code": "COMPANY_IR_PAGE_CANDIDATE_AVAILABLE", "message": "Company IR page candidate is available for review but was not fetched.", "severity": "info", "candidate": candidate}
+        return _CompanyIrPageResult(([], [warning], False), {**diagnostics, "status": "CANDIDATE_AVAILABLE", "allowedAction": "review_and_promote", "candidates": [candidate]})
     if not _company_ir_page_registry_fresh(entry):
-        return [], [{**warning_base, "code": "COMPANY_IR_PAGE_REVALIDATION_DUE", "message": "Approved company IR page is past its revalidation date; skipped until reviewed.", "severity": "warning"}], False
+        warning = {**warning_base, "code": "COMPANY_IR_PAGE_REVALIDATION_DUE", "message": "Approved company IR page is past its revalidation date; skipped until reviewed.", "severity": "warning"}
+        return _CompanyIrPageResult(([], [warning], False), {**diagnostics, "status": "REVALIDATION_DUE", "allowedAction": "registry_review_required"})
     try:
         text, final_url, content_type = await _fetch_company_ir_page(entry)
         adapter = str(entry.get("adapter") or "")
+        # An html_article entry is approved for HTML only: a feed body fails validation (2.19.0, call #17).
+        if adapter == "html_article" and _looks_like_feed(text):
+            raise ValueError("unexpected feed body for html_article adapter")
         if adapter == "structured" or "json" in content_type:
             items = _parse_company_ir_page_json(ticker, entry, text, retrieved_at, final_url)
         else:
@@ -277,6 +322,14 @@ async def _collect_company_ir_page_events(
             item for item in items
             if _within_date_window(item.get("publishedAt"), start_date=start_date, end_date=end_date, lookback_days=lookback_days)
         ][:max_results]
-        return items, [], True
+        return _CompanyIrPageResult((items, [], True), {
+            **diagnostics,
+            "status": "APPROVED_SOURCE_OK" if items else "EMPTY_RESULT",
+            "allowedAction": "fetch_configured_source",
+            "finalUrl": final_url,
+            "rawCount": len(items),
+            "filteredCount": len(items),
+        })
     except Exception as exc:
-        return [], [{**warning_base, "code": "COMPANY_IR_PAGE_VALIDATION_FAILED", "message": f"Approved company IR page validation failed: {exc}", "severity": "warning"}], False
+        warning = {**warning_base, "code": "COMPANY_IR_PAGE_VALIDATION_FAILED", "message": f"Approved company IR page validation failed: {exc}", "severity": "warning"}
+        return _CompanyIrPageResult(([], [warning], False), {**diagnostics, "status": "SOURCE_VALIDATION_FAILED", "allowedAction": "registry_review_required"})
