@@ -3035,6 +3035,25 @@ F-024, F-026, F-029). Both runtimes change alike.
   - The other news tools are unchanged: they have no caller limit, so the two fields already agree.
 - **Rollback:** redeploy 2.20.0.
 
+## Untagged Fact Confidence Defaults to LOW (2.21.0)
+
+- **Why:** R5-shared (`R5SHARED_SPEC.md`, BR-ENV-001, approved Q3i call 21). The envelope gave a fact with no own or inherited `confidence` a default of `HIGH`, so a value nobody had rated read as high confidence. Release type: minor.
+- **Change:** the envelope gives a fact (a dict with `value`, `low`, `valueRatio` and similar) that has no own or inherited `confidence` the default `LOW`, in both runtimes.
+  - Until 2.21.0 the default was `HIGH` when `value`, `low` or `valueRatio` was non-null.
+  - A fact with only `high` or `valuePct`, or with null values, still gets `NOT_DECISION_GRADE`.
+  - Explicit and inherited confidences are unchanged. Normalisation is unchanged.
+- **Producers reaching the default:** an audit of every producer found four.
+  - `get_analyst_consensus` `priceTargets` and `get_earnings_analysis` `earningsEstimate[]` and `revenueEstimate[]` rows (Yahoo consensus data, already labelled contextual market data) now read `LOW` in both runtimes.
+  - `get_ownership_holders` institutional, fund and insider rows read `LOW` in the Worker only. Python rows use yfinance's `Value` column and are not enriched as facts (finding F17).
+  - `extract_dilution_bridge`: the `WARRANT_EXERCISE_NOT_OUTSTANDING` warning counts (inline-XBRL tagged warrant counts) are now tagged `HIGH` explicitly, so their output is unchanged.
+- **No other effect:** no `status`, `recommendedNextAction`, `decisionGrade` or warning depends on the post-enrichment confidence, so only the `confidence` string changes.
+- **Known differences, recorded and not changed:**
+  - F16: `compare_earnings_actual_vs_estimate` still rates Yahoo estimate rows by the comparison's confidence.
+  - F18: producer-level `HIGH` fallbacks.
+  - F19: `get_analyst_consensus` provenance fields are present in Python only, so the Worker's `priceTargets.sourceType` reads "unknown".
+  - F20.
+- **Rollback:** redeploy 2.20.1.
+
 ## Per-Person Access Keys (2.18.0)
 
 - **Why:** Phase 1b, approved by the owner on 2026-10-18, for sharing the hosted MCP with a few trusted people, non-commercially. Release type: minor. Worker only: the local Python server is single-user stdio.
