@@ -139,36 +139,10 @@ def _advertised_params(listing: str) -> set[str]:
     return names
 
 
-# Accepted optional params that a "Params:" line leaves out, frozen as of 2.20.0 (R-news Batch C). A param omitted from a line
-# reads as unsupported to an LLM, so a new omission fails the test below; these older ones are listed so they stay visible
-# until their catalog lines are completed. Remove an entry when its line is fixed (the test also fails on a stale entry).
-_KNOWN_UNADVERTISED_PARAMS: dict[str, set[str]] = {
-    "analyst_data.get_analyst_rating_changes": {"days_back"},
-    "earnings_intelligence.get_latest_earnings_release": {"period"},
-    "earnings_intelligence.compare_earnings_actual_vs_estimate": {"period"},
-    "earnings_intelligence.get_earnings_call_transcript": {"period"},
-    "earnings_intelligence.parse_public_transcript": {"raw_text", "topics"},
-    "options_analysis.get_option_chain": {"include_illiquid", "moneyness_window_pct", "sort_by"},
-    "options_analysis.summarize_options_flow": {"expiry_hint"},
-    "screening.search_ticker": {"exchange", "max_results"},
-    "screening.calculate_price_target_distance": {"io_pt"},
-    "sec_extractors.extract_exposure": {"filing_type", "include_risk_factors", "period"},
-    "sec_extractors.extract_geographic_revenue": {"detailLevel", "period"},
-    "sec_extractors.extract_segment_revenue": {"detailLevel"},
-    "sec_extractors.extract_revenue_exposure": {"detailLevel", "period"},
-    "sec_extractors.extract_china_exposure": {"accession_number", "detailLevel", "period"},
-    "sec_extractors.extract_risk_factor_mentions": {"detailLevel", "period"},
-    "sec_extractors.extract_customer_concentration": {"detailLevel", "period"},
-    "sec_filings.list_sec_company_filings": {"form_type", "max_filings"},
-    "sec_filings.get_sec_filing_outline": {"document_url", "filing_type", "period"},
-    "sec_filings.get_sec_filing_section": {"filing_type", "selector"},
-    "sec_filings.extract_sec_filing_fact": {"document_url", "fact", "fact_name", "period", "period_mode"},
-    "sec_filings.search_sec_filing_text": {"context_chars", "document_url", "selector"},
-    "sec_filings.get_sec_filing_index": {"filing_type", "period"},
-    "sec_filings.query_sec_filing_index": {"detailLevel", "filing_type", "period", "return_evidence"},
-    "stock_pricing.analyze_volume_ratio": {"period"},
-    "stock_pricing.get_technical_indicators": {"period"},
-}
+# Accepted optional params that a "Params:" line leaves out. A param omitted from a line reads as unsupported to an LLM, so an
+# omission fails the test below. The list frozen in 2.20.0 (R-news Batch C) was emptied in 2.22.0 (R-news D, F14) when those
+# catalog lines were completed; keep it empty. The test also fails on a stale entry, should one ever be added.
+_KNOWN_UNADVERTISED_PARAMS: dict[str, set[str]] = {}
 
 
 class TestCatalogDescribesExecutableParams(unittest.TestCase):

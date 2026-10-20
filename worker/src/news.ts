@@ -1343,6 +1343,9 @@ export async function verifyCompanyEvent(
     "company", "corporate", "latest", "news", "official", "press", "release",
     "report", "reported", "reports", "result", "results", "today", "update",
     "updated", "updates",
+    // Function words (2.22.0, F12): terms under 3 letters are already dropped.
+    "a", "an", "and", "are", "as", "at", "by", "for", "from", "in", "is", "it",
+    "its", "of", "on", "or", "the", "to", "with",
   ]);
   const normalizedQuery = normalizeEventText(eventQuery);
   const meaningfulTerms = normalizedQuery

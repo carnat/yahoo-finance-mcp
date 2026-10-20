@@ -53,7 +53,11 @@ async function fetchMarketauxJson(
         ? "RATE_LIMIT"
         : response.status === 401 || response.status === 403
           ? "AUTH_ERROR"
-          : providerHttpStatus(response.status, body);
+          // R-news D (2.22.0, F13a): a Marketaux 404 is a provider failure, not evidence of absence (Python's mapping);
+          // the shared providerHttpStatus keeps NOT_FOUND for the other providers.
+          : response.status === 404
+            ? "PROVIDER_ERROR"
+            : providerHttpStatus(response.status, body);
       return {
         payload: null,
         status,
@@ -67,7 +71,8 @@ async function fetchMarketauxJson(
     }
     const rawJson = await response.json();
     if (!rawJson || typeof rawJson !== "object" || Array.isArray(rawJson)) {
-      return { payload: null, status: "PROVIDER_ERROR", publicUrl, providerAttempted: true, cacheStatus: "MISS", message: "Marketaux returned a non-object payload." };
+      // R-news D (2.22.0, F13b): a non-object body is a changed contract, as in Python and the Finnhub non-array rule.
+      return { payload: null, status: "PROVIDER_CHANGED", publicUrl, providerAttempted: true, cacheStatus: "MISS", message: "Marketaux returned a non-object payload." };
     }
     const payload = rawJson as Record<string, unknown>;
     const fetchedAt = new Date().toISOString();
@@ -146,6 +151,9 @@ export async function collectMarketauxEvents(
     // status, `unavailable (<STATUS>).` otherwise.
     const message = status === "UNCONFIGURED"
       ? "Marketaux wire fallback is not configured; set MARKETAUX_API_TOKEN to enable it."
+      // R-news D (F13b): a non-object body is the same shape failure as a missing data array, so it reuses that message.
+      : status === "PROVIDER_CHANGED"
+        ? "Marketaux provider changed: expected a data array."
       : typeof provider.httpStatus === "number"
         ? `Marketaux wire fallback returned HTTP ${provider.httpStatus} (${status}).`
         : `Marketaux wire fallback unavailable (${status}).`;

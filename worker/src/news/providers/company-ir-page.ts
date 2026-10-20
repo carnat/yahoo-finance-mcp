@@ -280,7 +280,8 @@ export async function collectCompanyIrPageEvents(
       items: [],
       warnings,
       used: false,
-      diagnostics: { ...baseDiagnostics, status: "NOT_REGISTERED", approvalStatus: "not_registered", allowedAction: "registry_review_required" },
+      // R-news D (2.22.0, F11 rest): the row carries canonicalUrl (null, no entry) beside registrySchemaVersion, as Python's does.
+      diagnostics: { ...baseDiagnostics, canonicalUrl: null, status: "NOT_REGISTERED", approvalStatus: "not_registered", allowedAction: "registry_review_required" },
     };
   }
   const diagnostics: Record<string, unknown> = {

@@ -907,6 +907,7 @@ def _compute_source_status(
             "rawCount": len(company_ir_page_items),
             "filteredCount": len(company_ir_page_items),
             "registryVersion": registry_fields.get("registryVersion"),
+            "registrySchemaVersion": registry_fields.get("registrySchemaVersion"),
             "canonicalUrl": registry_fields.get("canonicalUrl"),
             "approvalStatus": registry_fields.get("approvalStatus"),
             "allowedAction": "fetch_configured_source" if fetched else (
@@ -1831,6 +1832,9 @@ async def verify_company_event(
         "company", "corporate", "latest", "news", "official", "press", "release",
         "report", "reported", "reports", "result", "results", "today", "update",
         "updated", "updates",
+        # Function words (2.22.0, F12): terms under 3 letters are already dropped.
+        "a", "an", "and", "are", "as", "at", "by", "for", "from", "in", "is", "it",
+        "its", "of", "on", "or", "the", "to", "with",
     }
     query_text = _normalize_event_text(event_query)
     meaningful_terms = [

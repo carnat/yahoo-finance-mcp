@@ -2792,6 +2792,38 @@ F-024, F-026, F-029). Both runtimes change alike.
 - **Note:** `latencyMs` can read 0 for a request with no I/O.
 - **Rollback:** revert the release.
 
+### Excluding synthetic traffic (Phase 4 comparison)
+
+- **Rule (F6):** rows with `credentialTransport` (blob7) = `header` are synthetic. Every CI canary, preview canary
+  and deploy audit authenticates with an `Authorization: Bearer` header (`scripts/live_smoke_utils.py`). The
+  owner's connector uses the path transport (`/mcp/<token>`). Blob7 is recorded on every row since 2.11.1, so
+  the rule applies to the 2026-10-17 baseline too. Tooling only: no runtime change.
+- **Daily export:** `excludingHeaderTransport` carries the same `totals` and per-action aggregates as
+  `analyticsEngine`, from the same three queries with `blob7 != 'header'` added. Every other key is unchanged.
+- **D10 bounds:** the exit comparison groups by action group (blob1 `domain`), weighted by `_sample_interval`.
+  It judges only groups with 30 or more requests in both windows. A judged group passes when:
+  - its p95 `latencyMs` is at most 1.2 × the baseline p95;
+  - its p50 `latencyMs` is at most 1.2 × the baseline p50;
+  - its error-plus-exception rate (`tool_error` + `rpc_error` + `exception` over all requests) is at most the
+    baseline rate + 1 percentage point. `rejected` is reported but does not count as an error.
+- **Run:** `python scripts/compare_telemetry_windows.py --compare-start <ISO> --compare-end <ISO> [--out report.json]`.
+  It needs `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_TELEMETRY_TOKEN`. The baseline defaults to
+  2026-10-17T00:00Z to 2026-10-24T00:00Z. The comparison window defaults to the 7 days before the current UTC hour.
+- **Exit codes:**
+  - 0: pass;
+  - 1: a judged group failed;
+  - 2: missing secrets or bad arguments;
+  - 3: no group has enough volume to judge;
+  - 4: a query failed.
+- **Report:** the JSON lists the judged, skipped (low-volume) and failed groups, each group's metrics and checks,
+  and the overall result. A failed group blocks the phase exit until it is explained or fixed.
+- **Caveat:** once Phase 1b personal keys exist, a real user could use header transport. Revisit the rule then.
+- **Logged invocations < Analytics Engine requests (OPS-TEL-4):** expected. Explained 2026-10-19 by two sources:
+  - preview canaries (F6), which add Analytics Engine requests (about 15 per deploy) without matching logged
+    invocations;
+  - rejected-auth requests, which are written to Analytics Engine (one data point per `/mcp` request,
+    rejections included) but are refused before dispatch, so they never log the dispatch-start line.
+
 ## Central Validation and Ticker Caps (2.12.0)
 
 - **Why:** R4 Q3b (central ticker and accession validation) and Q3c/Q12 (per-tool ticker caps). Release type:
@@ -3053,6 +3085,28 @@ F-024, F-026, F-029). Both runtimes change alike.
   - F19: `get_analyst_consensus` provenance fields are present in Python only, so the Worker's `priceTargets.sourceType` reads "unknown".
   - F20: status-like strings such as `EXTRACTION_FAILED` stored in `confidence` normalise to LOW.
 - **Rollback:** redeploy 2.20.1.
+
+## News Repairs, Batch D (2.22.0)
+
+- **Why:** the R-news batch D repairs (`RNEWS_D_SPEC.md`, from the approved `F_TRIAGE.md`; planner calls on F10 and F12). Release type: minor. There is no new field, enum value or warning code. Output values change for verify queries, Marketaux failure statuses and the company IR-page row, and the catalog text changes.
+- **F12, verify stop words:**
+  - The event-query stop list gains 19 function words: a, an, and, are, as, at, by, for, from, in, is, it, its, of, on, or, the, to, with.
+  - Terms shorter than 3 letters were already dropped, so only and, are, for, from, its, the and with change matching.
+  - Matching uses content words only.
+  - A query made up only of filler words now returns `INPUT_VALIDATION_ERROR`.
+- **F13, Marketaux failures:**
+  - HTTP 404 is now `PROVIDER_ERROR` in both runtimes (the Worker returned `NOT_FOUND`; a provider 404 is not evidence of absence). The message is `Marketaux wire fallback returned HTTP 404 (PROVIDER_ERROR).`
+  - A body that is not an object is `PROVIDER_CHANGED` in both runtimes, with the message `Marketaux provider changed: expected a data array.`
+  - Under the legacy envelope (`MCP_ENVELOPE_V2=false`) a Worker batch entry keeps its own error code (for example `INPUT_VALIDATION_ERROR`), and `retryable` follows the V2 rule.
+- **F11, IR-page row:** the `company_ir_page` row carries both `canonicalUrl` and `registrySchemaVersion` in both runtimes.
+- **F10, local RSS/Atom parsing:** the local Python server now parses RSS and Atom bodies for registry-approved IR-page entries, like the hosted Worker.
+  - Order: feed first, then structured JSON, then HTML.
+  - A DOCTYPE or ENTITY declaration is refused.
+  - The `Accept` header is the same as the Worker's.
+- **XML entities decode once:** in both runtimes a double-escaped `&amp;lt;` stays the text `&lt;`. The change is in the shared decoder used by GlobeNewswire and the company IR feeds, and it affects only double-escaped input.
+- **F14, catalog Params:** the `Params` line in `tool_catalog.json` now lists every accepted parameter for all actions. 25 actions gained parameters, and `get_analyst_recommendations` and `get_ownership_holders` gained a `Params` line. `test_grouped_contract_parity` now requires this with no exceptions.
+- **Not changed:** the other findings, which are scheduled elsewhere in `F_TRIAGE.md`.
+- **Rollback:** redeploy 2.21.0.
 
 ## Per-Person Access Keys (2.18.0)
 

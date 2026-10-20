@@ -15,6 +15,9 @@ Analytics Engine SQL and Workers Observability payloads.
 - Output: telemetry/<date>.json with aggregates only, no raw rows, no token;
   unsafe strings are counted as "invalid".
 - Failure modes: missing secrets, an SQL failure, a Workers Logs failure.
+- excludingHeaderTransport (Phase 4 prep, F6): the same Analytics Engine
+  aggregates from the three SQL queries re-run with `blob7 != 'header'`; every
+  pre-existing key is unchanged.
 """
 
 from __future__ import annotations
@@ -167,6 +170,24 @@ def events_payload(events: list[dict]) -> dict:
 
 OBSERVABILITY = events_payload(_events())
 
+# What the three SQL queries return with `blob7 != 'header'` (F6): 6 of the 40
+# price requests and every rejected request came from header-transport CI canaries.
+HEADER_FILTER = "blob7 != 'header'"
+HOURLY_NO_HEADER = {"meta": [], "data": [
+    {"hour": "2026-10-15 04:00:00", "action": PRICE, "domain": "stock_pricing", "requests": "34",
+     "outcome_ok": "33", "outcome_tool_error": "1", "outcome_rpc_error": "0", "outcome_rejected": "0",
+     "outcome_exception": "0", "latency_p50": 90, "latency_p95": 350, "latency_p99": 700,
+     "upstream_requests_sum": "34", "subrequests_used_sum": "68", "budget_refusals": "0",
+     "provider_timeouts": "0", "provider_retries": "1"},
+], "rows": 1}
+DAILY_NO_HEADER = {"meta": [], "data": [
+    {"action": PRICE, "requests": "34", "latency_p50": 90, "latency_p95": 350, "latency_p99": 700},
+], "rows": 1}
+BREAKDOWN_NO_HEADER = {"meta": [], "data": [
+    {"action": PRICE, "outcome": "ok", "error_code": "", "size_bucket": "1-10K", "requests": "33"},
+    {"action": PRICE, "outcome": "tool_error", "error_code": "RATE_LIMIT", "size_bucket": "<1K", "requests": "1"},
+], "rows": 2}
+
 
 class FakeTransport:
     def __init__(self, observability: object = OBSERVABILITY, fail_sql: bool = False, fail_logs: bool = False):
@@ -182,6 +203,14 @@ class FakeTransport:
             if self.fail_sql:
                 raise et.ExportError("HTTP 403 from https://api.cloudflare.com/client/v4/accounts/…")
             sql = body.decode()
+            if HEADER_FILTER in sql:
+                if "GROUP BY hour, action, domain" in sql:
+                    return json.dumps(HOURLY_NO_HEADER).encode()
+                if "GROUP BY action, outcome, error_code, size_bucket" in sql:
+                    return json.dumps(BREAKDOWN_NO_HEADER).encode()
+                if "GROUP BY action\n" in sql:
+                    return json.dumps(DAILY_NO_HEADER).encode()
+                raise AssertionError("unexpected filtered SQL")
             if "GROUP BY hour, action, domain" in sql:
                 return json.dumps(HOURLY).encode()
             if "GROUP BY action, outcome, error_code, size_bucket" in sql:
@@ -209,7 +238,8 @@ class TestRequests(unittest.TestCase):
         urls = [c[0] for c in t.calls]
         sql_url = f"https://api.cloudflare.com/client/v4/accounts/{ACCOUNT}/analytics_engine/sql"
         logs_url = f"https://api.cloudflare.com/client/v4/accounts/{ACCOUNT}/workers/observability/telemetry/query"
-        self.assertEqual(urls, [sql_url, sql_url, sql_url, sql_url, logs_url])
+        # Four SQL queries, Workers Logs, then the three header-excluded SQL queries (F6).
+        self.assertEqual(urls, [sql_url, sql_url, sql_url, sql_url, logs_url, sql_url, sql_url, sql_url])
         for _, headers, _ in t.calls:
             self.assertEqual(headers["Authorization"], f"Bearer {TOKEN}")
 
@@ -277,7 +307,7 @@ class TestRequests(unittest.TestCase):
         with mock.patch.object(et, "MAX_EVENT_PAGES", 3):
             doc, problems, t = _export(FakeTransport(observability=endless))
         self.assertFalse(doc["workersLogs"]["available"])
-        self.assertEqual(len(t.calls), 4 + 3)
+        self.assertEqual(len(t.calls), 4 + 3 + 3)
         self.assertTrue(problems and "more than 6000" in problems[0])
 
 
@@ -413,8 +443,8 @@ class TestOutput(unittest.TestCase):
             # Aggregates only: no raw API rows or SQL column names are copied.
             for raw_key in ('"data"', '"meta"', "upstream_requests_sum", "outcome_ok", "groups"):
                 self.assertNotIn(raw_key, text)
-            self.assertEqual(sorted(doc), ["analyticsEngine", "coverage", "dataset", "date", "schemaVersion", "scriptName",
-                                           "window", "workersLogs"])
+            self.assertEqual(list(doc), ["schemaVersion", "date", "window", "dataset", "scriptName", "analyticsEngine",
+                                         "workersLogs", "coverage", "excludingHeaderTransport"])
             self.assertEqual(doc["coverage"], {"warnings": []})
             self.assertNotIn("coverage warning", out.getvalue())
 
@@ -471,6 +501,59 @@ class TestOutput(unittest.TestCase):
         self.assertEqual(doc["analyticsEngine"]["totals"]["requests"], 0)
         self.assertEqual(doc["analyticsEngine"]["keys"], {})
         self.assertEqual(doc["workersLogs"]["invocations"], 0)
+
+
+class TestExcludingHeaderTransport(unittest.TestCase):
+    """F6 (Phase 4 prep): the daily export also carries the aggregates without header-transport (CI) rows."""
+
+    def test_unfiltered_queries_are_unchanged_and_filtered_ones_add_only_the_header_filter(self):
+        _, _, t = _export()
+        sql = [body.decode() for url, _, body in t.calls if url.endswith("/sql")]
+        self.assertEqual(len(sql), 7)
+        for text in sql[:4]:
+            self.assertNotIn("blob7", text)
+        start, stop = et.export_window(END)
+        self.assertEqual(sql[:3], [et.hourly_sql(et.DATASET, start, stop), et.daily_latency_sql(et.DATASET, start, stop),
+                                   et.breakdown_sql(et.DATASET, start, stop)])
+        window = f"timestamp >= toDateTime({START_S}) AND timestamp < toDateTime({END_S})"
+        for unfiltered, filtered in zip(sql[:3], sql[4:]):
+            self.assertIn(f"WHERE {window} AND blob7 != 'header'\n", filtered)
+            self.assertEqual(filtered.replace(" AND blob7 != 'header'", ""), unfiltered)
+
+    def test_filtered_view(self):
+        doc, problems, _ = _export()
+        self.assertEqual(problems, [])
+        view = doc["excludingHeaderTransport"]
+        self.assertEqual(list(view), ["excluded", "totals", "actions"])
+        self.assertEqual(view["excluded"], {"credentialTransport": "header"})
+        self.assertEqual(sorted(view["actions"]), [PRICE])
+        price = view["actions"][PRICE]
+        self.assertEqual(price["requests"], 34)
+        self.assertEqual(price["outcomes"], {"ok": 33, "tool_error": 1, "rpc_error": 0, "rejected": 0, "exception": 0})
+        self.assertEqual(price["latencyMs"], {"p50": 90, "p95": 350, "p99": 700})
+        self.assertEqual((price["upstreamRequestsMean"], price["subrequestsUsedMean"]), (1, 2))
+        self.assertEqual(price["errorCodes"], {"RATE_LIMIT": 1})
+        self.assertEqual(view["totals"]["requests"], 34)
+        self.assertEqual(view["totals"]["outcomes"]["rejected"], 0)
+        # The existing, unfiltered aggregates are untouched.
+        self.assertEqual(doc["analyticsEngine"]["totals"]["requests"], 46)
+        self.assertEqual(doc["analyticsEngine"]["actions"][PRICE]["requests"], 40)
+
+    def test_filtered_view_has_no_token_or_raw_rows(self):
+        doc, _, _ = _export()
+        text = json.dumps(doc["excludingHeaderTransport"])
+        for leaked in (TOKEN, ACCOUNT, '"data"', "outcome_ok", "upstream_requests_sum"):
+            self.assertNotIn(leaked, text)
+
+    def test_filtered_sql_failure_fails_the_export(self):
+        def transport(url: str, headers: dict, body: bytes) -> bytes:
+            if HEADER_FILTER in body.decode("utf-8", "replace"):
+                raise et.ExportError("HTTP 500 from https://api.cloudflare.com/client/v4/accounts/…")
+            return FakeTransport()(url, headers, body)
+
+        with self.assertRaises(et.ExportError) as ctx:
+            et.build_export(transport, ACCOUNT, TOKEN, END)
+        self.assertNotIn(TOKEN, str(ctx.exception))
 
 
 class TestCoverage(unittest.TestCase):
