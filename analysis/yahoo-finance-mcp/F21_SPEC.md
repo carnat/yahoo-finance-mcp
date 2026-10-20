@@ -54,3 +54,11 @@ Cases:
   - `china_exposure` riskFactorExposure evidence names it.
 - The same queries with a fake accession 0000320193-99-999999 return `ACCESSION_NOT_FOUND` (china_exposure keeps `FILING_NOT_FOUND_TRY_OTHER_TYPE`).
 - `total_revenue` without an accession: 416.161B FY2025, unchanged.
+
+## 4. Implementation notes (2026-10-20)
+
+- `r4b2.query.china_hit_reads_the_pinned_filing` now expects `evidenceAccessions: [GEOX_OLD_10K, None]`. The fixture's risk text now mentions China, which adds a risk-mention evidence row. Its shaped top-level row has no accession, the same in both runtimes and the same pre-existing shape AAPL shows live. The nested mention evidence names `GEOX_OLD_10K` (`f21.query.china_risk_block_reads_the_pinned_filing`). Accepted.
+- **New finding F23** (pre-existing, not caused by F21): `query_sec_filing_index` `segment_revenue` without an accession:
+  - the Worker appends the extractor's warnings (`POSSIBLE_20F_FILER` for GEOX);
+  - Python's query branch drops them.
+  - The case is pinned as `F21-SEGMENT-QUERY-WARNINGS`. Aligning means choosing which output is right, so it is not done here.
