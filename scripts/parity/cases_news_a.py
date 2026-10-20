@@ -1440,6 +1440,50 @@ CASES += [
               expect=_GENERIC_QUERY_ERROR),
 ]
 
+# R-news D (2.22.0, F12): English function words join the event-query stop list in both runtimes. Terms under 3 letters were
+# already dropped, so "and, are, for, from, its, the, with" are the words whose treatment changes.
+_F12_PORT = ("FINDING: 2.22.0 Worker side landed (R-news D F12): function words are event-query stop words in the Worker; "
+             "Python still counts 'the', 'and', 'with' ... as meaningful terms (port pending)")
+_F12_ROWS = [yahoo_row("Acme sets the dividend and the outlook", "2026-10-05T09:00:00Z"),
+             yahoo_row("Acme dividend buyback plan", "2026-10-06T09:00:00Z")]
+
+
+def _f12_match_view(v: dict) -> dict:
+    if v.get("ok") is False:
+        return {"error": v["error"]["code"], "message": v["error"]["message"]}
+    return {"status": v["status"], "policy": v["queryPolicy"],
+            "best": [(e["evidenceText"], e["queryMatch"]["method"], e["queryMatch"]["matchedTerms"]) for e in v["bestEvidence"]]}
+
+
+CASES += [
+    # TODO(python-mirror): R-news D F12 — add "a", "an", "and", "are", "as", "at", "by", "for", "from", "in", "is", "it", "its",
+    # "of", "on", "or", "the", "to", "with" to yfmcp/tools/news.py event_query_stopwords (~1829), as in worker/src/news.ts
+    # eventQueryStopwords. Then flip these three cases to equal with expect=<the expect_ts below>.
+    tool_case("verify.query_policy.function_words_only_query_is_input_validation_error", ["BR-NWS-138"], "verify",
+              ["ACME", "the and of", "", "", []], {"info": ACME_INFO}, select=_generic_query_view,
+              mode="pinned", decision=_F12_PORT,
+              expect_py={"policy": {"meaningfulTerms": ["the", "and"], "requiredTermMatches": 2, "matchedEvidenceCount": 0},
+                         "warnings": []},
+              expect_ts=_GENERIC_QUERY_ERROR),
+    tool_case("verify.query_policy.function_words_are_not_meaningful_terms", ["BR-NWS-138"], "verify",
+              ["ACME", "the earnings results", "", "", []], {"info": ACME_INFO}, select=lambda v: v["queryPolicy"],
+              mode="pinned", decision=_F12_PORT,
+              expect_py={"meaningfulTerms": ["the", "earnings"], "requiredTermMatches": 2, "matchedEvidenceCount": 0},
+              expect_ts={"meaningfulTerms": ["earnings"], "requiredTermMatches": 1, "matchedEvidenceCount": 0}),
+    # A mixed query matches on its content words only: "The dividend and the outlook" shares only filler words with the query
+    # beyond "dividend", so it no longer reaches the term threshold (Python today matches it on "the", "dividend", "and", "the").
+    tool_case("verify.query_policy.mixed_query_matches_on_content_words_only", ["BR-NWS-138"], "verify",
+              ["ACME", "the dividend and the buyback", "", "", ["yahoo_finance_news"]], {"info": ACME_INFO, "news": _F12_ROWS},
+              select=_f12_match_view, mode="pinned", decision=_F12_PORT,
+              expect_py={"status": "PARTIAL",
+                         "policy": {"meaningfulTerms": ["the", "dividend", "and", "the", "buyback"], "requiredTermMatches": 4,
+                                    "matchedEvidenceCount": 1},
+                         "best": [("Acme sets the dividend and the outlook", "TERM_THRESHOLD", ["the", "dividend", "and", "the"])]},
+              expect_ts={"status": "PARTIAL",
+                         "policy": {"meaningfulTerms": ["dividend", "buyback"], "requiredTermMatches": 2, "matchedEvidenceCount": 1},
+                         "best": [("Acme dividend buyback plan", "TERM_THRESHOLD", ["dividend", "buyback"])]}),
+]
+
 
 # ═══════════════════════════════════════════════════════════════════════════════════════════════
 # company_ir_page registry: BR-NWS-101, 102 (P0 lifecycle), 108 (P0 allow-list), 113 (record extraction), 142 (allowedAction),
@@ -1816,6 +1860,17 @@ CASES += [
               select=lambda v: v.get("__batchMeta"),
               mode="pinned", decision="FINDING: __batchMeta (here counting the malformed symbol as an error) exists in the Worker only; documented, not aligned",
               expect_py=None, expect_ts={"partialSuccess": True, "successCount": 1, "errorCount": 1}),
+    # R-news D (2.22.0, F13c): under the legacy envelope (MCP_ENVELOPE_V2=false) the Worker's normalizeBatchSymbolResult keeps the
+    # entry's own code, so the malformed symbol reads INPUT_VALIDATION_ERROR (until then the message heuristics made it PROVIDER_ERROR).
+    # Pinned only because __batchMeta is Worker-only (documented); the entry code agrees.
+    tool_case("batch.legacy_envelope_entry_keeps_its_input_validation_error_code", ["BR-NWS-143"], "news",
+              [["AAPL", "BAD TICKER!"], 5, 14, []], {"info": {}, "env": {"MCP_ENVELOPE_V2": "false"}},
+              select=lambda v: {"errors": {k: (_batch_entry_error(x) or [None])[0] for k, x in v.items() if _batch_entry_error(x)},
+                                "meta": v.get("__batchMeta")},
+              mode="pinned", decision="FINDING: __batchMeta exists in the Worker only; documented, not aligned",
+              expect_py={"errors": {"BAD TICKER!": "INPUT_VALIDATION_ERROR"}, "meta": None},
+              expect_ts={"errors": {"BAD TICKER!": "INPUT_VALIDATION_ERROR"},
+                         "meta": {"partialSuccess": True, "successCount": 1, "errorCount": 1}}),
 ]
 
 

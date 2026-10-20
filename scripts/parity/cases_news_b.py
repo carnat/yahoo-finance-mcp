@@ -1175,6 +1175,18 @@ CASES += [
                     expect=_mx_failed("RATE_LIMITED", "retry_after_quota_reset", "Marketaux wire fallback returned HTTP 402 (RATE_LIMITED).")),
     _marketaux_case("news.marketaux.http_500_is_provider_error_with_the_http_status_message", ["BR-NWS-230"], None, status=500, body="boom",
                     expect=_mx_failed("PROVIDER_ERROR", "retry_or_use_official_sources", "Marketaux wire fallback returned HTTP 500 (PROVIDER_ERROR).")),
+    # R-news D (2.22.0, F13a): a Marketaux 404 is PROVIDER_ERROR in both runtimes; a provider 404 is not evidence of absence (the
+    # Worker reported NOT_FOUND through the shared providerHttpStatus, which other providers still use).
+    _marketaux_case("news.marketaux.http_404_is_provider_error_with_the_http_status_message", ["BR-NWS-230"], None, status=404, body="missing",
+                    expect=_mx_failed("PROVIDER_ERROR", "retry_or_use_official_sources", "Marketaux wire fallback returned HTTP 404 (PROVIDER_ERROR).")),
+    # R-news D (2.22.0, F13b): a non-object JSON body is PROVIDER_CHANGED in both runtimes (the Worker said PROVIDER_ERROR). The status
+    # agrees; the warning text does not: the Worker uses the spec's 'unavailable (PROVIDER_CHANGED).' template, while Python (spec:
+    # no Python change) reaches its data-array branch. PLANNER CALL: align the text in one runtime, then flip to equal.
+    _marketaux_case("news.marketaux.non_object_body_is_provider_changed", ["BR-NWS-230"], [1, 2],
+                    mode="pinned",
+                    decision="FINDING: R-news D F13b (2.22.0) - the non-object body message differs; the spec's Worker text vs Python's data-array text (planner call)",
+                    expect_py=_mx_failed("PROVIDER_CHANGED", "inspect_provider_contract", "Marketaux provider changed: expected a data array."),
+                    expect_ts=_mx_failed("PROVIDER_CHANGED", "inspect_provider_contract", "Marketaux wire fallback unavailable (PROVIDER_CHANGED).")),
 ]
 
 
@@ -2193,6 +2205,81 @@ _IR_RSS = ('<rss version="2.0"><channel><title>t</title><item><title>RSS headlin
            '<link>https://www.iqep.com/investors/regulatory-news/r1</link><pubDate>Wed, 14 Oct 2026 12:00:00 GMT</pubDate>'
            '<description>desc</description></item></channel></rss>')
 
+# R-news D (2.22.0, F10): a structured entry answered with an RSS or Atom body is parsed as a feed, the Worker's dispatch (feed
+# first, then structured JSON, then HTML). Both runtimes get these same bytes. Each feed has one off-allow-list item (dropped);
+# the Atom feed also exercises rel selection (an enclosure link before the alternate one), a relative href, <updated> when
+# <published> is missing, and <content> when <summary> is missing.
+_IR_STRUCTURED_RSS = (
+    '<?xml version="1.0" encoding="UTF-8"?><rss version="2.0"><channel><title>IQE regulatory news</title>'
+    '<item><title>IQE announces Q3 results &amp; outlook</title>'
+    '<link>https://www.iqep.com/investors/regulatory-news/rss-1</link><pubDate>Tue, 13 Oct 2026 07:00:00 GMT</pubDate>'
+    '<description><![CDATA[<p>Third-quarter <b>revenue</b> rose.</p>]]></description></item>'
+    '<item><title>IQE board appointment notice</title><guid>https://www.iqep.com/investors/regulatory-news/rss-2</guid>'
+    '<pubDate>Mon, 12 Oct 2026 07:00:00 GMT</pubDate><description>Board change.</description></item>'
+    '<item><title>Offsite syndicated copy</title><link>https://othersite.com/investors/x</link>'
+    '<pubDate>Mon, 12 Oct 2026 08:00:00 GMT</pubDate></item>'
+    '</channel></rss>')
+_IR_STRUCTURED_ATOM = (
+    '<?xml version="1.0" encoding="utf-8"?><feed xmlns="http://www.w3.org/2005/Atom"><title>IQE news</title>'
+    '<entry><title>IQE signs supply agreement</title>'
+    '<link rel="enclosure" href="https://www.iqep.com/investors/files/a1.pdf"/>'
+    '<link rel="alternate" href="https://www.iqep.com/investors/regulatory-news/atom-1"/>'
+    '<published>2026-10-11T09:30:00Z</published><summary>Multi-year agreement.</summary></entry>'
+    '<entry><title>IQE trading update published</title><link href="/investors/regulatory-news/atom-2"/>'
+    '<updated>2026-10-10T09:30:00Z</updated><content type="html">&lt;p&gt;Trading in line.&lt;/p&gt;</content></entry>'
+    '<entry><title>Offsite atom copy</title><link href="https://othersite.com/investors/y"/>'
+    '<published>2026-10-10T10:00:00Z</published></entry>'
+    '</feed>')
+_IR_STRUCTURED_ENTRY = {**IR_ENTRY, "adapter": "structured"}
+_F10_PORT = ("FINDING: 2.22.0 R-news D F10 - the Worker parses RSS/Atom bodies for structured IR-page entries; Python parses them as "
+             "JSON and finds nothing (port pending)")
+
+
+def _ir_feed_view(v):
+    return {**_ir_view(v),
+            "items": [[i["title"], i["url"], re.sub(r"\.000Z$", "Z", i["publishedAt"] or ""), i["summary"], i["eventType"]]
+                      for i in v["items"]]}
+
+
+_IR_FEED_EMPTY_PY = {"count": 0, "status": "EMPTY_RESULT", "warnings": [], "collection": "NOT_FOUND", "sourcesUsed": ["company_ir_page"],
+                     "items": []}
+
+CASES += [
+    # TODO(python-mirror): R-news D F10 — port the Worker's feed handling (worker/src/news/providers/company-ir-page.ts) into
+    # yfmcp/news/providers/company_ir_page.py: looksLikeFeed-first dispatch in _collect_company_ir_page_events (feed, then
+    # structured JSON, then HTML; the html_article feed refusal stays first), parseCompanyIrFeedItems (DOCTYPE/ENTITY refusal,
+    # <item> then <entry> blocks), atomEntryLink and companyIrPageFeedItems; the fetch Accept header becomes the Worker's
+    # "application/json, application/rss+xml, application/atom+xml, application/xml, text/xml, text/html;q=0.9". Then flip these
+    # three cases to equal with expect=<the expect_ts below>.
+    _ir_page_case(
+        "news.ir_page.structured_entry_parses_an_rss_body", ["BR-NWS-202"], _IR_STRUCTURED_RSS,
+        entry=_IR_STRUCTURED_ENTRY, content_type="application/rss+xml; charset=utf-8", select=_ir_feed_view,
+        mode="pinned", decision=_F10_PORT, expect_py=_IR_FEED_EMPTY_PY, 
+        expect_ts={"count": 2, "status": "APPROVED_SOURCE_OK", "warnings": [], "collection": None, "sourcesUsed": ["company_ir_page"],
+                   "items": [["IQE announces Q3 results & outlook", "https://www.iqep.com/investors/regulatory-news/rss-1", "2026-10-13T07:00:00Z",
+                              "Third-quarter revenue rose.", "guidance"],
+                             ["IQE board appointment notice", "https://www.iqep.com/investors/regulatory-news/rss-2", "2026-10-12T07:00:00Z",
+                              "Board change.", "other"]]}),
+    _ir_page_case(
+        "news.ir_page.structured_entry_parses_an_atom_body", ["BR-NWS-202"], _IR_STRUCTURED_ATOM,
+        entry=_IR_STRUCTURED_ENTRY, content_type="application/atom+xml", select=_ir_feed_view,
+        mode="pinned", decision=_F10_PORT, expect_py=_IR_FEED_EMPTY_PY, 
+        expect_ts={"count": 2, "status": "APPROVED_SOURCE_OK", "warnings": [], "collection": None, "sourcesUsed": ["company_ir_page"],
+                   "items": [["IQE signs supply agreement", "https://www.iqep.com/investors/regulatory-news/atom-1", "2026-10-11T09:30:00Z",
+                              "Multi-year agreement.", "contract"],
+                             ["IQE trading update published", "https://www.iqep.com/investors/regulatory-news/atom-2", "2026-10-10T09:30:00Z",
+                              "Trading in line.", "other"]]}),
+    # The 2.17.0 DOCTYPE / ENTITY refusal applies to these feeds: validation fails instead of parsing.
+    _ir_page_case(
+        "news.ir_page.structured_feed_with_a_doctype_fails_validation", ["BR-NWS-202"],
+        _IR_STRUCTURED_RSS.replace('<rss version="2.0">', '<!DOCTYPE rss [<!ENTITY x "y">]><rss version="2.0">'),
+        entry=_IR_STRUCTURED_ENTRY, content_type="application/rss+xml", select=_ir_feed_view,
+        mode="pinned", decision=_F10_PORT, expect_py=_IR_FEED_EMPTY_PY, 
+        expect_ts={"count": 0, "status": "SOURCE_VALIDATION_FAILED", "collection": "SOURCE_LIMITED_NOT_FOUND", "sourcesUsed": [], "items": [],
+                   "warnings": [["COMPANY_IR_PAGE_VALIDATION_FAILED",
+                                 "Approved company IR page validation failed: unsupported XML declaration in company IR RSS/Atom"]]}),
+]
+
 CASES += [
     # Card 202: only the first 50 <article> blocks are read; the 'Q3' block (title under 6 characters), the off-allow-list link and the
     # undated block are dropped (undated items never pass the window); the rest are returned: 50 blocks - 3 = 47 items.
@@ -2242,15 +2329,25 @@ CASES += [
                 "warnings": [["COMPANY_IR_PAGE_VALIDATION_FAILED", "Approved company IR page validation failed: unexpected structured content type: text/html; charset=utf-8"]],
                 "collection": "SOURCE_LIMITED_NOT_FOUND", "sourcesUsed": []}),
     # F11 (R-news Batch C): the IR-page row for a ticker with no registry entry carries registryVersion and approvalStatus
-    # "not_registered" in both runtimes.
+    # "not_registered" in both runtimes. F11 rest (R-news D, 2.22.0): the full key set is compared; both rows carry canonicalUrl
+    # (null) and registrySchemaVersion (the registry file's schemaVersion). The Worker side landed first.
+    # TODO(python-mirror): R-news D F11 rest — in yfmcp/tools/news.py _compute_source_status (~905) the company_ir_page row gains
+    # "registrySchemaVersion": registry_fields.get("registrySchemaVersion") right after "registryVersion" (the NOT_REGISTERED
+    # diagnostic in yfmcp/news/providers/company_ir_page.py ~274 already sets it from the registry's schemaVersion). Then flip
+    # this case to equal with expect=<the expect_ts below>; run the whole parity suite, since the other company_ir_page rows
+    # (approved / candidate / disabled entries) gain the key too and the Worker rows already carry it.
     _scenario(
         "news.ir_page.unregistered_ticker_row_carries_registry_version_and_not_registered", ["BR-NWS-249"],
         lambda: server.get_company_news("AAPL", 10, 14, ["company_ir_page"]),
         'm.yahooFinance.getCompanyNews("AAPL", 10, 14, ["company_ir_page"])',
-        select=lambda v: {k: v["sourceStatus"]["company_ir_page"].get(k) for k in ("status", "approvalStatus", "allowedAction")}
-        | {"hasRegistryVersion": bool(v["sourceStatus"]["company_ir_page"].get("registryVersion"))},
-        expect={"status": "NOT_REGISTERED", "approvalStatus": "not_registered", "allowedAction": "registry_review_required",
-                "hasRegistryVersion": True}),
+        select=lambda v: {**v["sourceStatus"]["company_ir_page"],
+                          "registryVersion": bool(v["sourceStatus"]["company_ir_page"].get("registryVersion"))},
+        mode="pinned", decision="FINDING: R-news D F11 rest (2.22.0) Worker side landed; Python's row still lacks registrySchemaVersion (port pending)",
+        expect_py={"status": "NOT_REGISTERED", "rawCount": 0, "filteredCount": 0, "registryVersion": True, "canonicalUrl": None,
+                   "approvalStatus": "not_registered", "allowedAction": "registry_review_required"},
+        expect_ts={"status": "NOT_REGISTERED", "rawCount": 0, "filteredCount": 0, "registryVersion": True,
+                   "registrySchemaVersion": _SHIPPED_IR_REGISTRY["schemaVersion"], "canonicalUrl": None,
+                   "approvalStatus": "not_registered", "allowedAction": "registry_review_required"}),
     # Card 202 edge, call #17 (2.19.0): a feed-shaped body served to an html_article entry fails validation in both runtimes (the Worker
     # parsed it as RSS whatever the adapter, and Python as HTML, finding nothing, until then).
     _ir_page_case(

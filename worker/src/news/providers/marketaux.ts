@@ -53,7 +53,11 @@ async function fetchMarketauxJson(
         ? "RATE_LIMIT"
         : response.status === 401 || response.status === 403
           ? "AUTH_ERROR"
-          : providerHttpStatus(response.status, body);
+          // R-news D (2.22.0, F13a): a Marketaux 404 is a provider failure, not evidence of absence (Python's mapping);
+          // the shared providerHttpStatus keeps NOT_FOUND for the other providers.
+          : response.status === 404
+            ? "PROVIDER_ERROR"
+            : providerHttpStatus(response.status, body);
       return {
         payload: null,
         status,
@@ -67,7 +71,8 @@ async function fetchMarketauxJson(
     }
     const rawJson = await response.json();
     if (!rawJson || typeof rawJson !== "object" || Array.isArray(rawJson)) {
-      return { payload: null, status: "PROVIDER_ERROR", publicUrl, providerAttempted: true, cacheStatus: "MISS", message: "Marketaux returned a non-object payload." };
+      // R-news D (2.22.0, F13b): a non-object body is a changed contract, as in Python and the Finnhub non-array rule.
+      return { payload: null, status: "PROVIDER_CHANGED", publicUrl, providerAttempted: true, cacheStatus: "MISS", message: "Marketaux returned a non-object payload." };
     }
     const payload = rawJson as Record<string, unknown>;
     const fetchedAt = new Date().toISOString();
