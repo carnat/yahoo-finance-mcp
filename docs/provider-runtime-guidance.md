@@ -3108,6 +3108,31 @@ F-024, F-026, F-029). Both runtimes change alike.
 - **Not changed:** the other findings, which are scheduled elsewhere in `F_TRIAGE.md`.
 - **Rollback:** redeploy 2.21.0.
 
+## Pinned Revenue Reads And Producer Confidence Fallbacks (2.23.0)
+
+- **Why:** the R5-extractors repairs (`R5EXTRACTORS_SPEC.md`, from the approved `F_TRIAGE.md` rows F3, F4 and F18 and the Q3i rows BR-EXT-035 and BR-EXT-084). Release type: minor. There is no new field, enum value, warning code or `unresolvedReason`. Values change for pinned reads and for producer confidence fallbacks. The tool catalog and schemas are unchanged, so `manifestHash` and `schemaHash` should not change.
+- **F3, pinned revenue reads:**
+  - `extract_china_exposure` and `query_sec_filing_index` (`china_exposure`, `revenue_exposure`) with an `accession_number` now read revenue from that filing.
+  - Their evidence names the pinned filing instead of the latest 10-K.
+  - The public `extract_revenue_exposure` tool gains no parameter.
+  - `total_revenue`, `segment_revenue` and `customer_concentration` queries still ignore the pin (finding F21).
+- **F4, pinned geographic read with no XBRL fact:**
+  - A pinned `geographic_revenue` read with no XBRL fact now reads that filing's own table, as the unpinned read does, instead of returning `NO_FACT_FOR_ACCESSION`.
+  - Other fact types keep `NO_FACT_FOR_ACCESSION` and `SEC_FACTS_IFRS_ONLY`.
+  - Evidence names the filing that was read, including its real form. A pinned 20-F asked for as 10-K reports filingType 20-F.
+  - The existing 20-F retry still reads only the same accession.
+- **F18 and BR-EXT-035, producer confidence fallbacks:**
+  - A producer-level confidence fallback never claims HIGH.
+  - An untagged value falls to LOW.
+  - The geographic 20-F fallback falls to NOT_DISCLOSED, which is the primary path's default.
+  - Python follows JS `??`: only null falls back.
+  - Every upstream sets its own confidence today, so no live output is expected to change.
+- **BR-EXT-084, warrant vesting:**
+  - In share scenarios under `warrant_vesting=vested_only`, a warrant class with no `exercisable` key is unresolved ("count not tagged"). It was counted at outstanding.
+  - `all` is unchanged.
+  - This is latent: the capital-structure producer always emits the key.
+- **Rollback:** redeploy 2.22.0.
+
 ## Per-Person Access Keys (2.18.0)
 
 - **Why:** Phase 1b, approved by the owner on 2026-10-18, for sharing the hosted MCP with a few trusted people, non-commercially. Release type: minor. Worker only: the local Python server is single-user stdio.
