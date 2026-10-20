@@ -50,9 +50,9 @@
 |---|---|---|
 | **Phase 4 prep (scripts only)** | F6, OPS-TEL-4 docs | Before 2026-10-24. No runtime change, no version bump; a tooling PR. |
 | **R-news D (2.22.0)** | F11 rest, F13, F12*, F10*, F14 | Now; gates nothing |
-| **Phase 4 Python routing release** | F7 | Phase 4, after unit 1 (D2a) |
-| **R5-sec** | F1, F2 | Before Phase 5 unit 1 |
-| **R5-extractors** | F3, F4, F18 | Before Phase 5 unit 2 |
+| **Phase 4 Python routing release (2.24.0)** | F7, plus F1 and F2 (owner, 2026-10-20: it rewrites the same Python outline function) | Phase 4, after unit 1 (D2a) |
+| **R5-sec** | ~~F1, F2~~ moved to the Python EDGAR routing release (owner, 2026-10-20) | Before Phase 5 unit 1 |
+| **R5-extractors (2.23.0)** | F3, F4, F18, plus Q3i rows BR-EXT-035 and BR-EXT-084 (`R5EXTRACTORS_SPEC.md`) | Now (owner, 2026-10-20); gates nothing in Phase 4 |
 | **R5-fundamentals** | F19, plus the F17 deprecation notice | Before Phase 5 unit 4 |
 | **R5-earnings** | F16 | Before Phase 5 unit 6 |
 | **Phase 6 (major)** | F5, F17, F20; OPS-TEL-3 any time after the Phase 4 exit | — |
@@ -85,3 +85,5 @@ Approved by the owner on 2026-10-19, after "continue with the next triage while 
   - `schemaHash` changed, as expected from the F14 catalog text.
   - F10, F11, F12, F13 and F14 are closed. A double-decoding defect in the shared XML decoder was also fixed.
 - **Remaining:** F7 (Phase 4 routing release); F1, F2, F3, F4, F16, F18, F19 (R5 releases); F5, F17, F20 (Phase 6); OPS-TEL-3 (after the Phase 4 exit).
+- **2026-10-20 (owner: "do as recommended"):** 2.23.0 is R5-extractors and ships now; F1 and F2 move into the 2.24.0 Python EDGAR routing release.
+- **F21 (new, from the R5-extractors spec):** `query_sec_filing_index` `total_revenue`, `segment_revenue` and `customer_concentration` ignore a pinned accession and read the latest filing, so their evidence can name a different filing than the one pinned. Same class as F3. Not yet classified; proposed home R5-sec or the Phase 5 SEC unit.
