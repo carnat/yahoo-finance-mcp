@@ -87,3 +87,16 @@ The status-derived confidences (`china_exposure`, `customer_concentration`, Pyth
 - `query_sec_filing_index` AAPL `china_exposure` with an older 10-K accession: the revenue evidence names that accession.
 - `extract_geographic_revenue` AAPL China, unpinned: the value and confidence are unchanged from 2.22.0.
 - `query_sec_filing_index` AAPL `total_revenue`: the confidence is unchanged (upstream tagged).
+
+## 5. Status (2026-10-20)
+
+Released as 2.23.0 (#301), deploy run #280 green. Live checks at 07:45Z on build 2.23.0+git.4cdc53b:
+- `health_check` reports 2.23.0. `manifestHash` and `schemaHash` are unchanged from 2.22.0.
+- `query_sec_filing_index` AAPL `china_exposure` with the FY2024 10-K (0000320193-24-000123): the revenue block is now 66.952B of 391.035B (17.12%) from that filing, with its evidence naming it. On 2.22.0 it was the FY2025 figure (64.377B) from 0000320193-25-000079.
+- `revenue_exposure` "China" with the same accession: 66.952B, FY2024, evidence names the pinned filing.
+- `extract_geographic_revenue` AAPL China, unpinned: 64.377B, HIGH. Unchanged from 2.22.0.
+- `query_sec_filing_index` AAPL `total_revenue`: 416.161B, HIGH. Unchanged.
+
+**Finding (adds to F21):** in the pinned `china_exposure` result, the `riskFactorExposure` evidence still names the latest 10-K (0000320193-25-000079). The risk-factor read is not pinned either.
+
+R5-extractors is complete.
