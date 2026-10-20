@@ -1453,7 +1453,7 @@ def _f12_match_view(v: dict) -> dict:
             "best": [(e["evidenceText"], e["queryMatch"]["method"], e["queryMatch"]["matchedTerms"]) for e in v["bestEvidence"]]}
 
 
-    # eventQueryStopwords. Then flip these three cases to equal with expect=<the expect_ts below>.
+CASES += [
     tool_case("verify.query_policy.function_words_only_query_is_input_validation_error", ["BR-NWS-138"], "verify",
               ["ACME", "the and of", "", "", []], {"info": ACME_INFO}, select=_generic_query_view,
               expect=_GENERIC_QUERY_ERROR),
