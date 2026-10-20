@@ -1126,6 +1126,11 @@ function normalizeBatchSymbolResult(parsed: unknown, ticker: string): Record<str
     }
     if (p.error === true || p.error != null) {
       const message = typeof p.message === "string" ? p.message : (typeof p.error === "string" ? p.error : `Error for ${ticker}`);
+      // R-news D (2.22.0, F13c): a legacy-envelope entry (MCP_ENVELOPE_V2=false) keeps its own code, read as the V2 branch above
+      // reads error.code; the message heuristics below only classify entries without one.
+      if (typeof p.code === "string") {
+        return { ok: false, data: null, error: toBatchError(message, p.code, p.retryable === true || p.code === "PROVIDER_TIMEOUT") };
+      }
       const lower = message.toLowerCase();
       if (lower.includes("no data found for ticker") || lower.includes("not found") || lower.includes("api error 404")) {
         return { ok: false, data: null, error: toBatchError(message, "TICKER_NOT_FOUND", false) };

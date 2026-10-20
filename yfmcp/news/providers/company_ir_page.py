@@ -173,6 +173,73 @@ def _looks_like_feed(text: str) -> bool:
     return bool(_re.search(r"<rss\b", text or "", flags=_re.I) or _re.search(r"<feed\b", text or "", flags=_re.I))
 
 
+def _decode_xml_text(value: str) -> str:
+    """CDATA, then entities decoded once with html.unescape (RNEWS3 decision 5). The Worker's decodeXmlText decodes
+    `&amp;` last, so a double-escaped `&amp;lt;` reads as the text `&lt;` in both runtimes (R-news D)."""
+    value = _re.sub(r"<!\[CDATA\[([\s\S]*?)\]\]>", r"\1", value or "", flags=_re.I)
+    return _html_module.unescape(value)
+
+
+def _extract_xml_tag(xml: str, tag_name: str) -> str:
+    match = _re.search(rf"<{_re.escape(tag_name)}(?:\s[^>]*)?>([\s\S]*?)</{_re.escape(tag_name)}>", xml or "", flags=_re.I)
+    return _decode_xml_text(match.group(1)).strip() if match else ""
+
+
+def _parse_company_ir_feed_items(xml: str) -> list[tuple[str, str]]:
+    # Same guard as the GlobeNewswire feed (2.17.0): a DOCTYPE or ENTITY declaration is refused.
+    if _re.search(r"<!doctype|<!entity", xml or "", flags=_re.I):
+        raise ValueError("unsupported XML declaration in company IR RSS/Atom")
+    if not _looks_like_feed(xml):
+        raise ValueError("invalid company IR RSS/Atom XML")
+    item_xmls: list[tuple[str, str]] = []
+    for m in _re.finditer(r"<item\b[^>]*>([\s\S]*?)</item>", xml, flags=_re.I):
+        item_xmls.append(("rss", m.group(1)))
+    for m in _re.finditer(r"<entry\b[^>]*>([\s\S]*?)</entry>", xml, flags=_re.I):
+        item_xmls.append(("atom", m.group(1)))
+    return item_xmls
+
+
+def _feed_attr(attrs: str, name: str) -> str:
+    match = _re.search(rf"{_re.escape(name)}\s*=\s*(\"([^\"]*)\"|'([^']*)'|([^\s\"'>]+))", attrs or "", flags=_re.I)
+    if not match:
+        return ""
+    for group in (match.group(2), match.group(3), match.group(4)):
+        if group is not None:
+            return _decode_xml_text(group.strip())
+    return ""
+
+
+def _atom_entry_link(entry_xml: str) -> str:
+    for m in _re.finditer(r"<link\b([^>]*)/?>", entry_xml or "", flags=_re.I):
+        rel = _feed_attr(m.group(1), "rel").lower()
+        href = _feed_attr(m.group(1), "href")
+        if href and (not rel or rel == "alternate"):
+            return href
+    return _extract_xml_tag(entry_xml, "link")
+
+
+def _parse_company_ir_page_feed(ticker: str, entry: dict, xml: str, retrieved_at: str, final_url: str) -> list[dict]:
+    items: list[dict] = []
+    for kind, feed_item in _parse_company_ir_feed_items(xml):
+        title = _extract_xml_tag(feed_item, "title")
+        if not title:
+            continue
+        if kind == "atom":
+            summary_raw = _extract_xml_tag(feed_item, "summary") or _extract_xml_tag(feed_item, "content")
+            raw_link = _atom_entry_link(feed_item)
+            published_raw = _extract_xml_tag(feed_item, "published") or _extract_xml_tag(feed_item, "updated")
+        else:
+            summary_raw = _extract_xml_tag(feed_item, "description") or _extract_xml_tag(feed_item, "content:encoded")
+            raw_link = _extract_xml_tag(feed_item, "link") or _extract_xml_tag(feed_item, "guid")
+            published_raw = _extract_xml_tag(feed_item, "pubDate")
+        item = _company_ir_page_item(
+            ticker, entry, title, _strip_html_tags(summary_raw), raw_link or None, _to_iso_utc(published_raw), retrieved_at, final_url,
+        )
+        if item:
+            items.append(item)
+    return items
+
+
 def _parse_company_ir_page_html(ticker: str, entry: dict, html_text: str, retrieved_at: str, final_url: str) -> list[dict]:
     blocks = _re.findall(r"<article\b[^>]*>[\s\S]*?</article>", html_text or "", flags=_re.I)
     if not blocks:
@@ -222,7 +289,7 @@ async def _fetch_company_ir_page(entry: dict) -> tuple[str, str, str]:
             canonical_url,
             headers={
                 "User-Agent": "yahoo-finance-mcp/ir-page-registry",
-                "Accept": "application/json, application/xml, text/xml, text/html;q=0.9",
+                "Accept": "application/json, application/rss+xml, application/atom+xml, application/xml, text/xml, text/html;q=0.9",
             },
         )
         with _url_policy.urlopen(req, timeout=15) as resp:
@@ -317,7 +384,9 @@ async def _collect_company_ir_page_events(
         # An html_article entry is approved for HTML only: a feed body fails validation (2.19.0, call #17).
         if adapter == "html_article" and _looks_like_feed(text):
             raise ValueError("unexpected feed body for html_article adapter")
-        if adapter == "structured" or "json" in content_type:
+        if _looks_like_feed(text):
+            items = _parse_company_ir_page_feed(ticker, entry, text, retrieved_at, final_url)
+        elif adapter == "structured":
             items = _parse_company_ir_page_json(ticker, entry, text, retrieved_at, final_url)
         else:
             items = _parse_company_ir_page_html(ticker, entry, text, retrieved_at, final_url)

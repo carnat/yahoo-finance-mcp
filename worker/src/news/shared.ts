@@ -146,12 +146,13 @@ export function withinDateWindow(publishedAt: string | null, startDate = "", end
 export function decodeXmlText(value: string): string {
   return value
     .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/gi, "$1")
-    .replace(/&(?:amp|#38);/gi, "&")
     .replace(/&(?:lt|#60);/gi, "<")
     .replace(/&(?:gt|#62);/gi, ">")
     .replace(/&(?:quot|#34);/gi, "\"")
     .replace(/&(?:apos|#39);/gi, "'")
-    .replace(/&#(\d+);/g, (_m, code) => String.fromCharCode(Number(code)));
+    .replace(/&#(\d+);/g, (_m, code) => String.fromCharCode(Number(code)))
+    // `&amp;` last, so a double-escaped `&amp;lt;` decodes once to the text `&lt;` (R-news D), as Python's html.unescape does.
+    .replace(/&(?:amp|#38);/gi, "&");
 }
 export function extractXmlTag(xml: string, tagName: string): string {
   const escaped = tagName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
