@@ -93,3 +93,5 @@ Approved by the owner on 2026-10-19, after "continue with the next triage while 
 - **2026-10-20 (owner: "ok yes"):** F21 is classified REPAIR and ships as 2.24.0 (`F21_SPEC.md`). F19 and F16 ship as 2.25.0 (`R5_F19_F16_SPEC.md`). The Python EDGAR routing release becomes 2.26.0.
 - **F22 (new):** in `compare_earnings_actual_vs_estimate`, `actual.eps` is a Yahoo row and inherits the comparison's confidence. It is an actual, not a consensus estimate, so rating it needs its own decision. Unclassified.
 - **F23 (new):** `query_sec_filing_index` `segment_revenue` without an accession: the Worker passes the extractor's warnings through and Python drops them. Pinned as `F21-SEGMENT-QUERY-WARNINGS`. Unclassified.
+- **F24 (new, from the 2.25.0 port):** after the envelope runs, the `compare_earnings_actual_vs_estimate` `estimate.*` rows have 9 keys in Python and 6 in the Worker. It looks like envelope enrichment that only Python applies. It is pre-existing, and parity cases compare values only. Unclassified.
+- **F21: released as 2.24.0 (#302) and live-verified 2026-10-20 08:39Z** (`F21_SPEC.md` §5).
