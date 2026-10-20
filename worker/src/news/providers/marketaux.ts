@@ -151,6 +151,9 @@ export async function collectMarketauxEvents(
     // status, `unavailable (<STATUS>).` otherwise.
     const message = status === "UNCONFIGURED"
       ? "Marketaux wire fallback is not configured; set MARKETAUX_API_TOKEN to enable it."
+      // R-news D (F13b): a non-object body is the same shape failure as a missing data array, so it reuses that message.
+      : status === "PROVIDER_CHANGED"
+        ? "Marketaux provider changed: expected a data array."
       : typeof provider.httpStatus === "number"
         ? `Marketaux wire fallback returned HTTP ${provider.httpStatus} (${status}).`
         : `Marketaux wire fallback unavailable (${status}).`;

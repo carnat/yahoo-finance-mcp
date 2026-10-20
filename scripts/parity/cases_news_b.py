@@ -1183,10 +1183,8 @@ CASES += [
     # agrees; the warning text does not: the Worker uses the spec's 'unavailable (PROVIDER_CHANGED).' template, while Python (spec:
     # no Python change) reaches its data-array branch. PLANNER CALL: align the text in one runtime, then flip to equal.
     _marketaux_case("news.marketaux.non_object_body_is_provider_changed", ["BR-NWS-230"], [1, 2],
-                    mode="pinned",
-                    decision="FINDING: R-news D F13b (2.22.0) - the non-object body message differs; the spec's Worker text vs Python's data-array text (planner call)",
-                    expect_py=_mx_failed("PROVIDER_CHANGED", "inspect_provider_contract", "Marketaux provider changed: expected a data array."),
-                    expect_ts=_mx_failed("PROVIDER_CHANGED", "inspect_provider_contract", "Marketaux wire fallback unavailable (PROVIDER_CHANGED).")),
+                    # R-news D F13b (2.22.0): PROVIDER_CHANGED in both runtimes, with the data-array message (planner decision 1).
+                    expect=_mx_failed("PROVIDER_CHANGED", "inspect_provider_contract", "Marketaux provider changed: expected a data array.")),
 ]
 
 

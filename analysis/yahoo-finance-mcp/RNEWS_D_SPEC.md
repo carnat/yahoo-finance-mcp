@@ -33,3 +33,8 @@
 - `verify_company_event` AAPL "the and of" returns `INPUT_VALIDATION_ERROR`.
 - `verify_company_event` AAPL "earnings results" returns CONFIRMED as before.
 - `tools/list` descriptions show the new Params lines.
+
+## 4. Planner decisions (2026-10-20)
+
+1. **F13b message.** A non-object body uses Python's existing text for the same shape failure, `Marketaux provider changed: expected a data array.`, in both runtimes. This replaces the template text in §1. Python is unchanged. The Worker maps a `PROVIDER_CHANGED` fetch result to that message.
+2. **F13c.** The Worker step also applies the V2 branch's `retryable` rule to legacy entries with a code (`retryable === true` or `PROVIDER_TIMEOUT`). This is accepted: it keeps legacy and V2 entries consistent and adds no new value.
