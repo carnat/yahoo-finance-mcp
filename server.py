@@ -6533,10 +6533,22 @@ async def extract_segment_revenue(
     period: _FilingPeriodParam = "latest",
     detailLevel: str = "compact",
 ) -> str:
+    return await _extract_segment_revenue(ticker, filing_type, period, detailLevel)
+
+
+async def _extract_segment_revenue(
+    ticker: str,
+    filing_type: str = "10-K",
+    period: str = "latest",
+    detailLevel: str = "compact",
+    # Internal only (not a tool param): a pinned caller reads the pinned filing (2.24.0, F21).
+    accession_number: str | None = None,
+) -> str:
     failure = _filing_period_failure("extract_segment_revenue", period)
     if failure:
         return failure
-    payload = _safe_json_loads(await get_filing_data(ticker=ticker, fact_type=FilingFactType.segment_revenue, filing_type=filing_type, period=period))
+    pin = str(accession_number).strip() if accession_number is not None and str(accession_number).strip() else None
+    payload = _safe_json_loads(await get_filing_data(ticker=ticker, fact_type=FilingFactType.segment_revenue, filing_type=filing_type, period=period, accession_number=pin))
     segments = payload.get("allSegments") if isinstance(payload.get("allSegments"), list) else []
     rows = []
     for seg in segments:
@@ -6556,9 +6568,14 @@ async def extract_segment_revenue(
     warnings: list[dict] = []
     # Automatic 20-F fallback for foreign private issuers
     if not rows and str(filing_type or "").upper() == "10-K":
-        maybe_20f = await _may_be_20f_filer(ticker)
+        if pin:
+            # A pinned read stays pinned: the 20-F retry reads the same filing, and only when that filing is a 20-F (2.24.0, F21).
+            pinned_filing, _pin_error = await _resolve_sec_filing(ticker, filing_type, pin)
+            maybe_20f = pinned_filing is not None and str(pinned_filing.get("filingType") or "").upper() == "20-F"
+        else:
+            maybe_20f = await _may_be_20f_filer(ticker)
         if maybe_20f:
-            fb_payload = _safe_json_loads(await get_filing_data(ticker=ticker, fact_type=FilingFactType.segment_revenue, filing_type="20-F", period=period))
+            fb_payload = _safe_json_loads(await get_filing_data(ticker=ticker, fact_type=FilingFactType.segment_revenue, filing_type="20-F", period=period, accession_number=pin))
             fb_segments = fb_payload.get("allSegments") if isinstance(fb_payload.get("allSegments"), list) else []
             fb_rows = []
             for seg in fb_segments:
@@ -6601,10 +6618,21 @@ async def extract_total_revenue(
     filing_type: str = "10-K",
     period: _FilingPeriodParam = "latest",
 ) -> str:
+    return await _extract_total_revenue(ticker, filing_type, period)
+
+
+async def _extract_total_revenue(
+    ticker: str,
+    filing_type: str = "10-K",
+    period: str = "latest",
+    # Internal only (not a tool param): a pinned caller reads the pinned filing (2.24.0, F21).
+    accession_number: str | None = None,
+) -> str:
     failure = _filing_period_failure("extract_total_revenue", period)
     if failure:
         return failure
-    payload = _safe_json_loads(await get_filing_data(ticker=ticker, fact_type=FilingFactType.total_revenue, filing_type=filing_type, period=period))
+    pin = str(accession_number).strip() if accession_number is not None and str(accession_number).strip() else None
+    payload = _safe_json_loads(await get_filing_data(ticker=ticker, fact_type=FilingFactType.total_revenue, filing_type=filing_type, period=period, accession_number=pin))
     val = payload.get("value")
     status = "FOUND" if val is not None else _as_status(payload)
     source_evidence = _sec_xbrl_source_evidence(payload)
@@ -6787,6 +6815,18 @@ async def extract_risk_factor_mentions(
     period: str = "latest",
     detailLevel: str = "compact",
 ) -> str:
+    return await _extract_risk_factor_mentions(ticker, terms, filing_type, period, detailLevel)
+
+
+async def _extract_risk_factor_mentions(
+    ticker: str,
+    terms: list[str],
+    filing_type: str = "10-K",
+    period: str = "latest",
+    detailLevel: str = "compact",
+    # Internal only (not a tool param): a pinned caller reads the pinned filing (2.24.0, F21).
+    accession_number: str | None = None,
+) -> str:
     matches: list[dict] = []
     rejected_noise_count = 0
     raw_match_count = 0
@@ -6796,6 +6836,7 @@ async def extract_risk_factor_mentions(
             search_terms=[str(term)],
             section_hint="Risk Factors",
             filing_type=filing_type,
+            accession_number=accession_number,
         ))
         raw_match_count += int(search.get("matchCount") or 0)
         for m in (search.get("matches") if isinstance(search.get("matches"), list) else [])[:3]:
@@ -6850,9 +6891,20 @@ async def extract_customer_concentration(
     period: str = "latest",
     detailLevel: str = "compact",
 ) -> str:
+    return await _extract_customer_concentration(ticker, filing_type, period, detailLevel)
+
+
+async def _extract_customer_concentration(
+    ticker: str,
+    filing_type: str = "10-K",
+    period: str = "latest",
+    detailLevel: str = "compact",
+    # Internal only (not a tool param): a pinned caller reads the pinned filing (2.24.0, F21).
+    accession_number: str | None = None,
+) -> str:
     # Mirrors the Worker: revenue-concentration rules live in yfmcp/extraction_rules.py.
     searched_terms = ["major customer", "customers", "customer accounted", "accounted for", "of our revenue", "of total revenue", "of net sales", "percent of revenue"]
-    search = _safe_json_loads(await search_sec_filing_text(ticker=ticker, search_terms=searched_terms, filing_type=filing_type, context_chars=1200))
+    search = _safe_json_loads(await search_sec_filing_text(ticker=ticker, search_terms=searched_terms, filing_type=filing_type, accession_number=accession_number, context_chars=1200))
     matches = [m for m in (search.get("matches") if isinstance(search.get("matches"), list) else []) if isinstance(m, dict)]
     # The rows of a significant-customer table in the same filing, which the prose search does not reach (2.5.32,
     # F-024: MRVL's "Distributor A | 37% | 34% | 24%").
@@ -8086,7 +8138,7 @@ async def extract_china_exposure(
         ) if resolved_filing else (_no_index() if resolve_error else get_sec_filing_index(
             ticker=ticker, filing_type=filing_type, period=period, accession_number=accession_number)),
         _extract_revenue_exposure(ticker=ticker, exposure_query="China", filing_type=filing_type, period=period, accession_number=accession_number),
-        extract_risk_factor_mentions(ticker=ticker, terms=risk_terms, filing_type=filing_type, period=period),
+        _extract_risk_factor_mentions(ticker=ticker, terms=risk_terms, filing_type=filing_type, period=period, accession_number=accession_number),
     )
     idx = _safe_json_loads(idx_raw)
     revenue = _safe_json_loads(revenue_raw)
@@ -8696,17 +8748,29 @@ async def query_sec_filing_index(
         confidence = "HIGH" if status == "ANSWERED" else ("NOT_DISCLOSED" if overall == "NOT_DISCLOSED" else "LOW")
         return _result(status, answer, confidence, evidence, warnings)
 
+    # An explicit accession that is not among the company's filings fails closed for the pinned reads too, as
+    # geographic_revenue_share does; checked after each query's own params (2.24.0, F21).
+    async def _accession_miss() -> str | None:
+        if accession_number is None or not str(accession_number).strip():
+            return None
+        _resolved, resolve_error = await _resolve_sec_filing(ticker, filing_type, str(accession_number).strip())
+        return _accession_not_found_envelope(resolve_error) if _resolved is None and _is_accession_not_found(resolve_error) else None
+
     if query == "risk_factor_mentions":
         terms = routed_params.get("terms")
         terms_list = [str(t) for t in terms] if isinstance(terms, list) else []
         if not terms_list:
             return _missing_param("terms")
-        risk = _safe_json_loads(await extract_risk_factor_mentions(
+        risk_miss = await _accession_miss()
+        if risk_miss:
+            return risk_miss
+        risk = _safe_json_loads(await _extract_risk_factor_mentions(
             ticker=ticker,
             terms=terms_list,
             filing_type=filing_type,
             period=period,
             detailLevel=detail,
+            accession_number=accession_number,
         ))
         matches = [m for m in (risk.get("matches") if isinstance(risk.get("matches"), list) else []) if isinstance(m, dict)]
         evidence = [_shape_evidence(m.get("evidence")) for m in matches if isinstance(m.get("evidence"), dict)]
@@ -8724,11 +8788,15 @@ async def query_sec_filing_index(
 
     if query == "customer_concentration":
         customer_label = str(routed_params.get("customer_label") or "").strip()
-        cust = _safe_json_loads(await extract_customer_concentration(
+        cust_miss = await _accession_miss()
+        if cust_miss:
+            return cust_miss
+        cust = _safe_json_loads(await _extract_customer_concentration(
             ticker=ticker,
             filing_type=filing_type,
             period=period,
             detailLevel=detail,
+            accession_number=accession_number,
         ))
         customers = [c for c in (cust.get("customers") if isinstance(cust.get("customers"), list) else []) if isinstance(c, dict)]
         if customer_label:
@@ -8747,10 +8815,14 @@ async def query_sec_filing_index(
         )
 
     if query == "total_revenue":
-        total = _safe_json_loads(await extract_total_revenue(
+        total_miss = await _accession_miss()
+        if total_miss:
+            return total_miss
+        total = _safe_json_loads(await _extract_total_revenue(
             ticker=ticker,
             filing_type=filing_type,
             period=period,
+            accession_number=accession_number,
         ))
         evidence_obj = total.get("evidence") if isinstance(total.get("evidence"), dict) else {}
         evidence = [_shape_evidence(evidence_obj)] if evidence_obj else []
@@ -8767,11 +8839,15 @@ async def query_sec_filing_index(
         )
 
     segment_name = str(routed_params.get("segment") or "").strip()
-    seg = _safe_json_loads(await extract_segment_revenue(
+    seg_miss = await _accession_miss()
+    if seg_miss:
+        return seg_miss
+    seg = _safe_json_loads(await _extract_segment_revenue(
         ticker=ticker,
         filing_type=filing_type,
         period=period,
         detailLevel=detail,
+        accession_number=accession_number,
     ))
     segments = [s for s in (seg.get("segments") if isinstance(seg.get("segments"), list) else []) if isinstance(s, dict)]
     if segment_name:

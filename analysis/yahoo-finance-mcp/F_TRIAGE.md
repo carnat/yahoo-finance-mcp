@@ -87,3 +87,9 @@ Approved by the owner on 2026-10-19, after "continue with the next triage while 
 - **Remaining:** F7 (Phase 4 routing release); F1, F2, F3, F4, F16, F18, F19 (R5 releases); F5, F17, F20 (Phase 6); OPS-TEL-3 (after the Phase 4 exit).
 - **2026-10-20 (owner: "do as recommended"):** 2.23.0 is R5-extractors and ships now; F1 and F2 move into the 2.24.0 Python EDGAR routing release.
 - **F21 (new, from the R5-extractors spec):** `query_sec_filing_index` `total_revenue`, `segment_revenue` and `customer_concentration` ignore a pinned accession and read the latest filing, so their evidence can name a different filing than the one pinned. Same class as F3. Not yet classified; proposed home R5-sec or the Phase 5 SEC unit.
+- **R5-extractors: released as 2.23.0 (#301) and live-verified 2026-10-20 07:45Z on build 2.23.0+git.4cdc53b** (`R5EXTRACTORS_SPEC.md` §5). F3, F4 and F18 are closed, along with Q3i rows BR-EXT-035 and BR-EXT-084.
+  - F21 is widened: the risk-factor block of a pinned `china_exposure` read also names the latest 10-K.
+- **Remaining:** F7, F1 and F2 (2.24.0 routing release, after the 2026-10-24 gate); F16 and F19 (R5 releases); F21 (unclassified); F5, F17 and F20 (Phase 6); OPS-TEL-3 (after the Phase 4 exit).
+- **2026-10-20 (owner: "ok yes"):** F21 is classified REPAIR and ships as 2.24.0 (`F21_SPEC.md`). F19 and F16 ship as 2.25.0 (`R5_F19_F16_SPEC.md`). The Python EDGAR routing release becomes 2.26.0.
+- **F22 (new):** in `compare_earnings_actual_vs_estimate`, `actual.eps` is a Yahoo row and inherits the comparison's confidence. It is an actual, not a consensus estimate, so rating it needs its own decision. Unclassified.
+- **F23 (new):** `query_sec_filing_index` `segment_revenue` without an accession: the Worker passes the extractor's warnings through and Python drops them. Pinned as `F21-SEGMENT-QUERY-WARNINGS`. Unclassified.

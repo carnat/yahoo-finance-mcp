@@ -11579,8 +11579,10 @@ export function extractSegmentTableFromHtml(html: string): { result: SegmentTabl
   return { result: null, segmentTablesSeen, tablesScanned: tableIndex + 1 };
 }
 
-export async function extractSegmentRevenue(ticker: string, filingType = "10-K", period = "latest", detailLevel = "compact"): Promise<string> {
-  const payload = parseObjectJson(await getFilingData(ticker, "segment_revenue", null, filingType, period));
+// accessionNumber is internal (not a tool param): a pinned query reads the pinned filing (2.24.0, F21).
+export async function extractSegmentRevenue(ticker: string, filingType = "10-K", period = "latest", detailLevel = "compact", accessionNumber: string | null = null): Promise<string> {
+  const pin = accessionNumber && accessionNumber.trim() ? accessionNumber.trim() : null;
+  const payload = parseObjectJson(await getFilingData(ticker, "segment_revenue", null, filingType, period, "auto", pin));
   const segsRaw = Array.isArray(payload.allSegments) ? payload.allSegments : [];
   let segments = segsRaw
     .filter((s) => typeof s === "object" && s != null)
@@ -11600,9 +11602,16 @@ export async function extractSegmentRevenue(ticker: string, filingType = "10-K",
   const warnings: Array<Record<string, unknown>> = [];
   // Automatic 20-F fallback for foreign private issuers
   if (segments.length === 0 && filingType.toUpperCase() === "10-K") {
-    const possible20F = await mayBe20FFiler(ticker);
+    // A pinned read stays pinned: the 20-F retry reads the same filing, and only when that filing is a 20-F (2.24.0, F21).
+    let possible20F: boolean;
+    if (pin) {
+      const resolved = await resolveSecFiling(ticker, filingType, pin);
+      possible20F = resolved.ok && String(resolved.filing.filingType ?? "").toUpperCase() === "20-F";
+    } else {
+      possible20F = await mayBe20FFiler(ticker);
+    }
     if (possible20F) {
-      const fbPayload = parseObjectJson(await getFilingData(ticker, "segment_revenue", null, "20-F", period));
+      const fbPayload = parseObjectJson(await getFilingData(ticker, "segment_revenue", null, "20-F", period, "auto", pin));
       const fbSegsRaw = Array.isArray(fbPayload.allSegments) ? fbPayload.allSegments : [];
       const fbSegments = fbSegsRaw
         .filter((s) => typeof s === "object" && s != null)
@@ -11774,8 +11783,10 @@ export function isDecisionGradeXbrlFact(
     .every((field) => sourceEvidence[field] != null && String(sourceEvidence[field]).trim() !== "");
 }
 
-export async function extractTotalRevenue(ticker: string, filingType = "10-K", period = "latest"): Promise<string> {
-  const payload = parseObjectJson(await getFilingData(ticker, "total_revenue", null, filingType, period));
+// accessionNumber is internal (not a tool param): a pinned query reads the pinned filing (2.24.0, F21).
+export async function extractTotalRevenue(ticker: string, filingType = "10-K", period = "latest", accessionNumber: string | null = null): Promise<string> {
+  const pin = accessionNumber && accessionNumber.trim() ? accessionNumber.trim() : null;
+  const payload = parseObjectJson(await getFilingData(ticker, "total_revenue", null, filingType, period, "auto", pin));
   const value = payload.value ?? null;
   const status = value != null ? "FOUND" : normalizeStatus(payload);
   const sourceEvidence = xbrlSourceEvidence(payload);
@@ -11861,13 +11872,15 @@ export async function extractRiskFactorMentions(
   filingType = "10-K",
   _period = "latest",
   detailLevel = "compact",
+  // Internal only (not a tool param): a pinned caller reads the pinned filing (2.24.0, F21).
+  accessionNumber: string | null = null,
 ): Promise<string> {
   const matches: Record<string, unknown>[] = [];
   let rawMatchCount = 0;
   let rejectedNoiseCount = 0;
   const warnings: Record<string, unknown>[] = [];
   for (const term of terms ?? []) {
-    const search = parseObjectJson(await searchFilingText(ticker, [term], "Risk Factors", filingType, null, 1200, false));
+    const search = parseObjectJson(await searchFilingText(ticker, [term], "Risk Factors", filingType, accessionNumber, 1200, false));
     rawMatchCount += Number(search.matchCount ?? 0);
     const list = Array.isArray(search.matches) ? search.matches : [];
     for (const row of list.slice(0, 3)) {
@@ -11972,9 +11985,11 @@ export async function extractCustomerConcentration(
   filingType = "10-K",
   _period = "latest",
   detailLevel = "compact",
+  // Internal only (not a tool param): a pinned caller reads the pinned filing (2.24.0, F21).
+  accessionNumber: string | null = null,
 ): Promise<string> {
   const searchedTerms = ["major customer", "customers", "customer accounted", "accounted for", "of our revenue", "of total revenue", "of net sales", "percent of revenue"];
-  const search = parseObjectJson(await searchFilingText(ticker, searchedTerms, null, filingType, null, 1200, false));
+  const search = parseObjectJson(await searchFilingText(ticker, searchedTerms, null, filingType, accessionNumber, 1200, false));
   const list = Array.isArray(search.matches) ? search.matches : [];
   const filingEvidence = {
     filingDate: search.filingDate ?? null,
@@ -12916,7 +12931,7 @@ export async function extractChinaExposure(
   const entityTerms = ["Tongmei", "JinMei", "BoYu"];
   const bankTerms = ["Bank of China"];
   const manuTerms = ["manufacturing", "production", "supply chain", "fab"];
-  const riskMentions = parseObjectJson(await extractRiskFactorMentions(ticker, ["China", "tariff", "export control", "Bank of China"], filingType, period, "compact"));
+  const riskMentions = parseObjectJson(await extractRiskFactorMentions(ticker, ["China", "tariff", "export control", "Bank of China"], filingType, period, "compact", accessionNumber));
 
   const entityCollected = collect(entityTerms, "entity");
   const bankCollected = collect(bankTerms, "bank");
@@ -13457,10 +13472,20 @@ export async function querySecFilingIndex(
     return result(status, answer, confidence, evidence, warnings);
   }
 
+  // An explicit accession that is not among the company's filings fails closed for the pinned reads too, as
+  // geographic_revenue_share does; checked after each query's own params (2.24.0, F21).
+  const accessionMiss = async (): Promise<string | null> => {
+    if (!accessionNumber || !accessionNumber.trim()) return null;
+    const resolved = await resolveSecFiling(ticker, filingType, accessionNumber.trim());
+    return !resolved.ok && isAccessionNotFound(resolved.error) ? accessionNotFoundEnvelope(resolved.error) : null;
+  };
+
   if (query === "risk_factor_mentions") {
     const terms = Array.isArray(params.terms) ? params.terms.map((t) => String(t)) : [];
     if (terms.length === 0) return missingParam("terms");
-    const risk = parseObjectJson(await extractRiskFactorMentions(ticker, terms, filingType, period, detail));
+    const riskMiss = await accessionMiss();
+    if (riskMiss) return riskMiss;
+    const risk = parseObjectJson(await extractRiskFactorMentions(ticker, terms, filingType, period, detail, accessionNumber));
     const matches = Array.isArray(risk.matches) ? risk.matches.filter((m) => m && typeof m === "object") as Record<string, unknown>[] : [];
     const evidence = matches
       .map((m) => (m.evidence && typeof m.evidence === "object" && !Array.isArray(m.evidence)) ? shapeEvidence(m.evidence as Record<string, unknown>) : null)
@@ -13475,7 +13500,9 @@ export async function querySecFilingIndex(
 
   if (query === "customer_concentration") {
     const customerLabel = String(params.customer_label ?? "").trim();
-    const cust = parseObjectJson(await extractCustomerConcentration(ticker, filingType, period, detail));
+    const custMiss = await accessionMiss();
+    if (custMiss) return custMiss;
+    const cust = parseObjectJson(await extractCustomerConcentration(ticker, filingType, period, detail, accessionNumber));
     let customers = Array.isArray(cust.customers) ? cust.customers.filter((c) => c && typeof c === "object") as Record<string, unknown>[] : [];
     if (customerLabel) customers = customers.filter((c) => String(c.label ?? "").toLowerCase() === customerLabel.toLowerCase());
     const evidence = customers
@@ -13491,7 +13518,9 @@ export async function querySecFilingIndex(
   }
 
   if (query === "total_revenue") {
-    const total = parseObjectJson(await extractTotalRevenue(ticker, filingType, period));
+    const totalMiss = await accessionMiss();
+    if (totalMiss) return totalMiss;
+    const total = parseObjectJson(await extractTotalRevenue(ticker, filingType, period, accessionNumber));
     const evidenceObj = total.evidence && typeof total.evidence === "object" ? total.evidence as Record<string, unknown> : {};
     const evidence = Object.keys(evidenceObj).length > 0 ? [shapeEvidence(evidenceObj)] : [];
     let status = total.value != null ? "ANSWERED" : String(total.status ?? "NOT_FOUND");
@@ -13509,7 +13538,9 @@ export async function querySecFilingIndex(
   }
 
   const segmentName = String(params.segment ?? "").trim();
-  const seg = parseObjectJson(await extractSegmentRevenue(ticker, filingType, period, detail));
+  const segMiss = await accessionMiss();
+  if (segMiss) return segMiss;
+  const seg = parseObjectJson(await extractSegmentRevenue(ticker, filingType, period, detail, accessionNumber));
   let segments = Array.isArray(seg.segments) ? seg.segments.filter((s) => s && typeof s === "object") as Record<string, unknown>[] : [];
   if (segmentName) segments = segments.filter((s) => String(s.label ?? "").toLowerCase() === segmentName.toLowerCase());
   const evidence = segments
