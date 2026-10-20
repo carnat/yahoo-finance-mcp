@@ -382,9 +382,13 @@ GEOX_MISSING = "0000777001-99-999999"
 GEOX_BASE = "https://www.sec.gov/Archives/edgar/data/777001"
 
 
-def _geo_html(year: int, china: int | None, total: int) -> str:
+def _geo_html(year: int, china: int | None, total: int, customer_pct: int | None = None) -> str:
     china_row = f"<tr><td>China</td><td>{china}</td></tr>" if china is not None else ""
-    return (f"<html><body><h2>Item 8. Financial Statements</h2>"
+    # 2.24.0 (F21): a year-specific customer sentence and a Risk Factors section, so the filing read shows in the value.
+    f21_prose = (f"<h2>Item 1A. Risk Factors</h2><p>Our fiscal {year} results depend on suppliers located in China.</p>"
+                 f"<h2>Item 7. Management's Discussion</h2><p>Customer A accounted for {customer_pct}% of net sales in fiscal {year}.</p>"
+                 if customer_pct is not None else "")
+    return (f"<html><body>{f21_prose}<h2>Item 8. Financial Statements</h2>"
             f"<p>Revenue by geographic area (in millions) for fiscal {year}:</p>"
             f"<table><tr><td>Geographic area</td><td>{year}</td></tr>"
             f"<tr><td>United States</td><td>{total - (china or 0)}</td></tr>{china_row}"
@@ -398,6 +402,8 @@ def _geox_fact(accn: str, form: str, fy: int, filed: str, val: int) -> dict:
 
 GEOX_FACTS = {"units": {"USD": [
     _geox_fact(GEOX_NEW_10K, "10-K", 2025, "2025-11-01", 500_000_000),
+    # 2.24.0 (F21): the FY2025 10-K's own prior-year comparative (FY2024, same accn), which a pinned read must not pick.
+    _geox_fact(GEOX_NEW_10K, "10-K", 2024, "2025-11-01", 450_000_000),
     _geox_fact(GEOX_OLD_10K, "10-K", 2024, "2024-11-01", 400_000_000),
 ]}}
 GEOX_ROUTES = {
@@ -420,8 +426,8 @@ GEOX_ROUTES = {
     f"https://data.sec.gov/api/xbrl/companyconcept/CIK{GEOX_CIK}/*": {"status": 404, "body": "not found"},
     f"https://data.sec.gov/api/xbrl/companyfacts/CIK{GEOX_CIK}.json":
         {"json": {"facts": {"us-gaap": {"RevenueFromContractWithCustomerExcludingAssessedTax": GEOX_FACTS}}}},
-    f"{GEOX_BASE}/000077700125000010/geox-2025.htm": {"body": _geo_html(2025, 200, 500)},
-    f"{GEOX_BASE}/000077700124000010/geox-2024.htm": {"body": _geo_html(2024, 100, 400)},
+    f"{GEOX_BASE}/000077700125000010/geox-2025.htm": {"body": _geo_html(2025, 200, 500, 12)},
+    f"{GEOX_BASE}/000077700124000010/geox-2024.htm": {"body": _geo_html(2024, 100, 400, 15)},
     f"{GEOX_BASE}/000077700123000010/geox-20f.htm": {"body": _geo_html(2023, None, 300)},
 }
 
@@ -541,10 +547,96 @@ CASES += [
     # latest 10-K; 2.23.0 (F3) pins the revenue read, so the evidence now names the pinned filing.
     Case(name="r4b2.query.china_hit_reads_the_pinned_filing", ids=["R4-ACC-QUERY"], py=_q("GEOX", "china_exposure", GEOX_OLD_10K, {}),
          ts=_q_ts("GEOX", "china_exposure", GEOX_OLD_10K, {}), routes=GEOX_ROUTES, select=query_view,
-         expect={"status": "ANSWERED", "value": None, "evidenceAccessions": [GEOX_OLD_10K]}),
+         # 2.24.0 (F21): the risk-factor read is pinned too. GEOX's 10-Ks now carry a China risk sentence, so the risk block adds a
+         # second evidence row: its outer row has no filing fields (shapeEvidence of the mention), which is why it reads None; the
+         # accession the risk block names is checked in f21.query.china_risk_block_reads_the_pinned_filing.
+         expect={"status": "ANSWERED", "value": None, "evidenceAccessions": [GEOX_OLD_10K, None]}),
     Case(name="r4b2.query.china_miss_unchanged", ids=["R4-ACC-QUERY"], py=_q("GEOX", "china_exposure", GEOX_MISSING, {}),
          ts=_q_ts("GEOX", "china_exposure", GEOX_MISSING, {}), routes=GEOX_ROUTES, select=query_view,
          expect={"status": "FILING_NOT_FOUND_TRY_OTHER_TYPE", "value": None, "evidenceAccessions": []}),
+]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+# 2.24.0 (F21; spec analysis/yahoo-finance-mcp/F21_SPEC.md §2): every pinned query_sec_filing_index read uses the pinned
+# filing. risk_factor_mentions, customer_concentration, total_revenue and segment_revenue pass the accession into their
+# read, and an accession that is not among the company's filings fails closed with ACCESSION_NOT_FOUND (GEOX_NOT_FOUND),
+# checked after the query's own params. The GEOX fixture carries a FY2024 comparative inside the 2025 10-K (450M), a
+# customer sentence (2025: 12%, 2024: 15%) and a China risk-factor sentence in each 10-K.
+# ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+def f21_view(v):
+    """An error envelope as {ok, error}; a query answer as status, value, period, customer percentages, segment count, the
+    filings its evidence names and its warning codes."""
+    if not isinstance(v, dict):
+        return v
+    if v.get("ok") is False and isinstance(v.get("error"), dict):
+        return {"ok": False, "error": v["error"]}
+    answer = v.get("answer") if isinstance(v.get("answer"), dict) else {}
+    return {"status": v.get("status"), "value": answer.get("value"), "period": answer.get("period"),
+            "customerPcts": [c.get("valuePct") for c in answer.get("customers") or [] if isinstance(c, dict)],
+            "riskTerms": [m.get("term") for m in answer.get("matches") or [] if isinstance(m, dict)],
+            "segmentCount": len(answer["segments"]) if isinstance(answer.get("segments"), list) else None,
+            "evidenceAccessions": [e.get("accessionNumber") for e in v.get("evidence") or [] if isinstance(e, dict)],
+            "warnings": sorted(w.get("code") for w in v.get("warnings") or [] if isinstance(w, dict))}
+
+
+def f21_china_risk_view(v):
+    """The accessions the china_exposure riskFactorExposure block names in its mentions' own evidence."""
+    if not isinstance(v, dict) or v.get("ok") is False:
+        return f21_view(v)
+    risk = (v.get("answer") or {}).get("riskFactorExposure") or {}
+    return {"status": risk.get("status"),
+            "mentionAccessions": [(m.get("evidence") or {}).get("accessionNumber") for m in risk.get("evidence") or [] if isinstance(m, dict)]}
+
+
+def _f21_case(name: str, query_type: str, acc, params: dict, expect: dict) -> Case:
+    return Case(name=f"f21.query.{name}", ids=["F21"], py=_q("GEOX", query_type, acc, params),
+                ts=_q_ts("GEOX", query_type, acc, params), routes=GEOX_ROUTES, select=f21_view, expect=expect)
+
+
+F21_RISK = {"terms": ["China"]}
+
+def _f21_expect(acc: str | None, *, status: str = "ANSWERED", value=None, period=None, pcts=(), terms=(), segments=None, warnings=()) -> dict:
+    return {"status": status, "value": value, "period": period, "customerPcts": list(pcts), "riskTerms": list(terms),
+            "segmentCount": segments, "evidenceAccessions": [acc] if acc else [], "warnings": list(warnings)}
+
+
+CASES += [
+    _f21_case("total_revenue_pinned", "total_revenue", GEOX_OLD_10K, {},
+                _f21_expect(GEOX_OLD_10K, value=400_000_000, period="FY2024")),
+    _f21_case("total_revenue_pinned_newest_period_of_that_filing", "total_revenue", GEOX_NEW_10K, {},
+                _f21_expect(GEOX_NEW_10K, value=500_000_000, period="FY2025")),
+    _f21_case("total_revenue_no_accession_unchanged", "total_revenue", None, {},
+                _f21_expect(GEOX_NEW_10K, value=500_000_000, period="FY2025")),
+    _f21_case("total_revenue_accession_miss_fails_closed", "total_revenue", GEOX_MISSING, {}, GEOX_NOT_FOUND),
+    _f21_case("customer_concentration_pinned", "customer_concentration", GEOX_OLD_10K, {}, _f21_expect(GEOX_OLD_10K, pcts=[15])),
+    _f21_case("customer_concentration_no_accession_unchanged", "customer_concentration", None, {}, _f21_expect(GEOX_NEW_10K, pcts=[12])),
+    _f21_case("customer_concentration_accession_miss_fails_closed", "customer_concentration", GEOX_MISSING, {}, GEOX_NOT_FOUND),
+    _f21_case("risk_factor_mentions_pinned", "risk_factor_mentions", GEOX_OLD_10K, F21_RISK,
+                _f21_expect(GEOX_OLD_10K, terms=["China"])),
+    _f21_case("risk_factor_mentions_no_accession_unchanged", "risk_factor_mentions", None, F21_RISK,
+                _f21_expect(GEOX_NEW_10K, terms=["China"])),
+    _f21_case("risk_factor_mentions_accession_miss_fails_closed", "risk_factor_mentions", GEOX_MISSING, F21_RISK, GEOX_NOT_FOUND),
+    _f21_case("risk_factor_mentions_missing_terms_beats_accession_miss", "risk_factor_mentions", GEOX_MISSING, {},
+                _f21_expect(None, status="INPUT_VALIDATION_ERROR", warnings=["INPUT_VALIDATION_ERROR"])),
+    _f21_case("segment_revenue_pinned", "segment_revenue", GEOX_OLD_10K, {},
+                _f21_expect(None, status="NOT_DISCLOSED", segments=0)),  # a pinned 10-K: no POSSIBLE_20F_FILER
+    # PLANNER (open, not F21): the Worker's query adds the extractor's warnings to the answer (POSSIBLE_20F_FILER for an
+    # unpinned 10-K that finds no segments, as GEOX files a 20-F); Python's query_sec_filing_index drops them. Pinned to
+    # each runtime's value; the pinned case above is equal because a pinned 10-K raises no such warning.
+    Case(name="f21.query.segment_revenue_no_accession_unchanged", ids=["F21"], py=_q("GEOX", "segment_revenue", None, {}),
+         ts=_q_ts("GEOX", "segment_revenue", None, {}), routes=GEOX_ROUTES, select=f21_view, mode="pinned",
+         decision="F21-SEGMENT-QUERY-WARNINGS",
+         expect_py=_f21_expect(None, status="NOT_DISCLOSED", segments=0),
+         expect_ts=_f21_expect(None, status="NOT_DISCLOSED", segments=0, warnings=["POSSIBLE_20F_FILER"])),
+    Case(name="f21.query.china_risk_block_reads_the_pinned_filing", ids=["F21"], py=_q("GEOX", "china_exposure", GEOX_OLD_10K, {}),
+         ts=_q_ts("GEOX", "china_exposure", GEOX_OLD_10K, {}), routes=GEOX_ROUTES, select=f21_china_risk_view,
+         expect={"status": "FOUND", "mentionAccessions": [GEOX_OLD_10K]}),
+    Case(name="f21.query.china_risk_block_no_accession_unchanged", ids=["F21"], py=_q("GEOX", "china_exposure", None, {}),
+         ts=_q_ts("GEOX", "china_exposure", None, {}), routes=GEOX_ROUTES, select=f21_china_risk_view,
+         expect={"status": "FOUND", "mentionAccessions": [GEOX_NEW_10K]}),
+    _f21_case("segment_revenue_accession_miss_fails_closed", "segment_revenue", GEOX_MISSING, {}, GEOX_NOT_FOUND),
 ]
 
 
