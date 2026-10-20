@@ -3148,6 +3148,19 @@ F-024, F-026, F-029). Both runtimes change alike.
 - **Not changed:** finding F23 (segment query warnings pass-through differs between runtimes) is recorded, not fixed.
 - **Rollback:** redeploy 2.23.0.
 
+## Consensus Provenance And Estimate Confidence (2.25.0)
+
+- **Why:** findings F19 (R5-fundamentals) and F16 (R5-earnings), see `R5_F19_F16_SPEC.md`. Release type: minor. There is no new field, enum value, warning code or `unresolvedReason`: every value already existed in the other runtime. The tool catalog and schemas are unchanged.
+- **Consensus provenance (F19):**
+  - The Worker's `get_analyst_consensus` now carries the top-level `source: "yahoo_finance"`, `evidenceClass: "CONTEXTUAL_MARKET_DATA"`, `decisionGrade: false` and `recommendedNextAction: "NONE"` that Python already set.
+  - `priceTargets.sourceType` is therefore `yahoo_finance` in both runtimes (it was `unknown` in the Worker). `priceTargets.confidence` stays LOW.
+- **Estimate confidence (F16):**
+  - In `compare_earnings_actual_vs_estimate`, `estimate.revenue` and `estimate.eps` carry `confidence: "LOW"` in both runtimes. This matches how `get_earnings_analysis` has rated the same Yahoo consensus rows since 2.21.0.
+  - The comparison's own top-level confidence is unchanged.
+  - Not changed: `actual.eps` (finding F22).
+- **Deprecation notice (R5-fundamentals):** in the Phase 6 major release, Python `get_ownership_holders` rows will be renamed to the Worker's camelCase shape (`Value` becomes `value`, F17). There is no runtime change now.
+- **Rollback:** redeploy 2.24.0.
+
 ## Per-Person Access Keys (2.18.0)
 
 - **Why:** Phase 1b, approved by the owner on 2026-10-18, for sharing the hosted MCP with a few trusted people, non-commercially. Release type: minor. Worker only: the local Python server is single-user stdio.
