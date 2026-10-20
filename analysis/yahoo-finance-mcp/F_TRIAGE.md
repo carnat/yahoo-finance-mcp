@@ -95,3 +95,5 @@ Approved by the owner on 2026-10-19, after "continue with the next triage while 
 - **F23 (new):** `query_sec_filing_index` `segment_revenue` without an accession: the Worker passes the extractor's warnings through and Python drops them. Pinned as `F21-SEGMENT-QUERY-WARNINGS`. Unclassified.
 - **F24 (new, from the 2.25.0 port):** after the envelope runs, the `compare_earnings_actual_vs_estimate` `estimate.*` rows have 9 keys in Python and 6 in the Worker. It looks like envelope enrichment that only Python applies. It is pre-existing, and parity cases compare values only. Unclassified.
 - **F21: released as 2.24.0 (#302) and live-verified 2026-10-20 08:39Z** (`F21_SPEC.md` §5).
+- **F19 and F16: released as 2.25.0 (#303) and live-verified 2026-10-20 08:58Z on build 2.25.0+git.9424789** (`R5_F19_F16_SPEC.md`, Status).
+- **Remaining:** F7, F1 and F2 (2.26.0 routing release, after the 2026-10-24 gate); F22, F23 and F24 (unclassified); F5, F17 and F20 (Phase 6); OPS-TEL-3 (after the Phase 4 exit).

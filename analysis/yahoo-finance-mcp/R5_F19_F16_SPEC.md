@@ -30,3 +30,17 @@
 - `health_check` reports 2.25.0.
 - `get_analyst_consensus` AAPL: top-level `source` is `yahoo_finance`, `evidenceClass` is `CONTEXTUAL_MARKET_DATA`, `decisionGrade` is false, `priceTargets.sourceType` is `yahoo_finance`, and `priceTargets.confidence` is LOW.
 - `compare_earnings_actual_vs_estimate` AAPL: the `estimate.*` confidence is LOW, and the top-level confidence is unchanged from 2.24.0.
+
+## Status (2026-10-20)
+
+Released as 2.25.0 (#303), deploy run #282 green. Live checks at 08:58Z on build 2.25.0+git.9424789:
+- `health_check` reports 2.25.0. `manifestHash` (bfcedb2e…) and `schemaHash` (7723da27…) are unchanged.
+- `get_analyst_consensus` AAPL:
+  - top-level `source` is `yahoo_finance`, `evidenceClass` is `CONTEXTUAL_MARKET_DATA`, `decisionGrade` is false and `recommendedNextAction` is `NONE`;
+  - `priceTargets.sourceType` is `yahoo_finance` (it was `unknown` before), and `priceTargets.confidence` is LOW.
+- `compare_earnings_actual_vs_estimate` AAPL (FY2026 Q3, MATCHED):
+  - `estimate.revenue.confidence` and `estimate.eps.confidence` are LOW;
+  - the top-level confidence is MEDIUM, because no Yahoo revenue estimate exists (`REVENUE_ESTIMATE_UNAVAILABLE`), so it is unaffected by F16;
+  - `actual.eps` (a Yahoo row) is still MEDIUM, inheriting the top-level confidence, as recorded in F22.
+
+F19 and F16 are complete.
