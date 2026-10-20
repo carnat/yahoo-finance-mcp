@@ -2584,25 +2584,25 @@ async def _get_filing_data_unchecked(
     chosen = _sf.pick_concept_facts(fetched_concepts, filing_type, pinned_accession, "larger" if fact_type == FilingFactType.total_revenue else "first")
     concept_used = chosen["concept"] if chosen else concept_primary
     filtered = list(chosen["facts"]) if chosen else []
-    if not filtered and pinned_accession:
-        if fact_type != FilingFactType.geographic_revenue:
-            # A pinned IFRS filing was searched for us-gaap concepts only: say IFRS was not read, not that the
-            # filing has no such fact (2.5.30, F-018).
-            if not companyfacts_read:
-                companyfacts_read.append(await _read_sec_json(companyfacts_url, "companyfacts", None))
-            cf = companyfacts_read[0]
-            taxonomies = cf.get("facts") if isinstance(cf, dict) else None
-            if failed_reads:
-                return await _sec_read_failed(concept_used)
-            if isinstance(taxonomies, dict) and taxonomies.get("ifrs-full") and not taxonomies.get("us-gaap"):
-                return await _unavailable_structured_fact(
-                    "SEC_FACTS_IFRS_ONLY",
-                    f"{ticker.upper()} reports its SEC facts under IFRS (ifrs-full), which this action does not read, so accession "
-                    f"{pinned_accession} was searched for {' / '.join(candidate_names)} (us-gaap) only and its IFRS facts were not searched; "
-                    "reconcile_metric_sources reads IFRS facts in the reporting currency.",
-                    concept_used,
-                    pinned_accession,
-                )
+    # A pinned geographic read with no XBRL fact reads that filing's own table below, as the unpinned read does (2.23.0, F4).
+    if not filtered and pinned_accession and fact_type != FilingFactType.geographic_revenue:
+        # A pinned IFRS filing was searched for us-gaap concepts only: say IFRS was not read, not that the
+        # filing has no such fact (2.5.30, F-018).
+        if not companyfacts_read:
+            companyfacts_read.append(await _read_sec_json(companyfacts_url, "companyfacts", None))
+        cf = companyfacts_read[0]
+        taxonomies = cf.get("facts") if isinstance(cf, dict) else None
+        if failed_reads:
+            return await _sec_read_failed(concept_used)
+        if isinstance(taxonomies, dict) and taxonomies.get("ifrs-full") and not taxonomies.get("us-gaap"):
+            return await _unavailable_structured_fact(
+                "SEC_FACTS_IFRS_ONLY",
+                f"{ticker.upper()} reports its SEC facts under IFRS (ifrs-full), which this action does not read, so accession "
+                f"{pinned_accession} was searched for {' / '.join(candidate_names)} (us-gaap) only and its IFRS facts were not searched; "
+                "reconcile_metric_sources reads IFRS facts in the reporting currency.",
+                concept_used,
+                pinned_accession,
+            )
         # A failed pin names the filing that was asked for, never the latest one (the Worker's unavailableStructuredFact).
         return await _unavailable_structured_fact(
             "NO_FACT_FOR_ACCESSION",
@@ -6497,7 +6497,7 @@ async def extract_geographic_revenue(
                 shaped["valueRatio"] = fallback_payload.get("valueRatio") if fallback_denominator else None
                 shaped["valuePct"] = fallback_payload.get("valuePct") if fallback_denominator else None
                 shaped["extractionMethod"] = _nn(fallback_payload.get("extractionMethod"), "NONE")
-                shaped["confidence"] = _nn(fallback_payload.get("confidence"), "HIGH")
+                shaped["confidence"] = _nn(fallback_payload.get("confidence"), "NOT_DISCLOSED")
                 shaped["evidence"] = _evidence(fallback_payload, fallback_idx, "20-F")
                 shaped["calculation"] = fallback_payload.get("calculation")
                 shaped["scanCoverage"] = fallback_payload.get("scanCoverage")
@@ -6627,7 +6627,7 @@ async def extract_total_revenue(
         # No value, no unit: a missing fact has no currency (2.5.15).
         "unit": (payload.get("unit") or "USD") if val is not None else None,
         "unitScale": payload.get("unitScale"),
-        "confidence": payload.get("confidence", "NOT_DISCLOSED" if val is None else "HIGH"),
+        "confidence": _nn(payload.get("confidence"), "NOT_DISCLOSED" if val is None else "LOW"),
         "extractionMethod": payload.get("extractionMethod", "NONE"),
         "evidence": source_evidence if decision_grade else filing_evidence,
         "sourceEvidence": source_evidence,
@@ -6652,10 +6652,22 @@ async def extract_revenue_exposure(
     period: _FilingPeriodParam = "latest",
     detailLevel: str = "compact",
 ) -> str:
+    return await _extract_revenue_exposure(ticker, exposure_query, filing_type, period, detailLevel)
+
+
+async def _extract_revenue_exposure(
+    ticker: str,
+    exposure_query: str,
+    filing_type: str = "10-K",
+    period: str = "latest",
+    detailLevel: str = "compact",
+    # Internal only (not a tool param): a pinned caller reads the pinned filing (2.23.0, F3).
+    accession_number: str | None = None,
+) -> str:
     failure = _filing_period_failure("extract_revenue_exposure", period)
     if failure:
         return failure
-    geo = _safe_json_loads(await extract_geographic_revenue(ticker=ticker, region=exposure_query, filing_type=filing_type, period=period, detailLevel=detailLevel))
+    geo = _safe_json_loads(await extract_geographic_revenue(ticker=ticker, region=exposure_query, filing_type=filing_type, period=period, accession_number=accession_number, detailLevel=detailLevel))
     found = geo.get("value") is not None
     status = "FOUND_REVENUE_EXPOSURE" if found else _as_status(geo)
     warnings = geo["warnings"] if isinstance(geo.get("warnings"), list) else []
@@ -6669,7 +6681,7 @@ async def extract_revenue_exposure(
             "valueRatio": geo.get("valueRatio"),
             "valuePct": geo.get("valuePct"),
             "period": geo.get("period"),
-            "confidence": _nn(geo.get("confidence"), "HIGH"),
+            "confidence": _nn(geo.get("confidence"), "LOW"),
             "evidence": _nn(geo.get("evidence"), {}),
         })
     geo_evidence = geo["evidence"] if isinstance(geo.get("evidence"), dict) else {}
@@ -8073,7 +8085,7 @@ async def extract_china_exposure(
             accession_number=resolved_filing["accessionNumber"],
         ) if resolved_filing else (_no_index() if resolve_error else get_sec_filing_index(
             ticker=ticker, filing_type=filing_type, period=period, accession_number=accession_number)),
-        extract_revenue_exposure(ticker=ticker, exposure_query="China", filing_type=filing_type, period=period),
+        _extract_revenue_exposure(ticker=ticker, exposure_query="China", filing_type=filing_type, period=period, accession_number=accession_number),
         extract_risk_factor_mentions(ticker=ticker, terms=risk_terms, filing_type=filing_type, period=period),
     )
     idx = _safe_json_loads(idx_raw)
@@ -8612,7 +8624,7 @@ async def query_sec_filing_index(
             "valuePct": geo.get("valuePct"),
             "unit": geo.get("unit", "USD"),
         }
-        confidence = str(geo.get("confidence") or ("HIGH" if status == "ANSWERED" else "NOT_DISCLOSED"))
+        confidence = str(_nn(geo.get("confidence"), "LOW" if status == "ANSWERED" else "NOT_DISCLOSED"))
         if status == "NOT_FOUND":
             confidence = "NOT_DISCLOSED" if str(geo.get("confidence") or "").upper() == "NOT_DISCLOSED" else "LOW"
         return _result(status, answer, confidence, evidence, warnings)
@@ -8621,12 +8633,13 @@ async def query_sec_filing_index(
         exposure_query = str(routed_params.get("exposure_query") or "").strip()
         if not exposure_query:
             return _missing_param("exposure_query")
-        rex = _safe_json_loads(await extract_revenue_exposure(
+        rex = _safe_json_loads(await _extract_revenue_exposure(
             ticker=ticker,
             exposure_query=exposure_query,
             filing_type=filing_type,
             period=period,
             detailLevel=detail,
+            accession_number=accession_number,
         ))
         matches = rex.get("matches") if isinstance(rex.get("matches"), list) else []
         first = matches[0] if matches and isinstance(matches[0], dict) else {}
@@ -8644,7 +8657,7 @@ async def query_sec_filing_index(
             "valuePct": first.get("valuePct"),
             "period": first.get("period"),
         }
-        confidence = str(first.get("confidence") or ("HIGH" if status == "ANSWERED" else "NOT_DISCLOSED"))
+        confidence = str(_nn(first.get("confidence"), "LOW" if status == "ANSWERED" else "NOT_DISCLOSED"))
         return _result(status, answer, confidence, evidence, warnings)
 
     if query == "china_exposure":
@@ -8748,7 +8761,7 @@ async def query_sec_filing_index(
         return _result(
             status,
             {"value": total.get("value"), "period": total.get("period"), "unit": "USD"},
-            str(total.get("confidence") or ("HIGH" if status == "ANSWERED" else "NOT_DISCLOSED")),
+            str(_nn(total.get("confidence"), "LOW" if status == "ANSWERED" else "NOT_DISCLOSED")),
             evidence,
             warnings,
         )

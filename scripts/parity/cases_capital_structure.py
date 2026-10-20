@@ -487,15 +487,17 @@ add(_scen("cap.scen.in_the_money_boundary_options_vs_convertibles", ["BR-EXT-003
                                   {"component": "convertible_debt", "inTheMoney": True, "thresholdPrice": 10, "incrementalShares": 1_000_000}]}},
           note="repair: one in-the-money boundary rule across instruments (Q3f)"))
 
-# Finding (Phase 2, for Q3i triage): a class with no `exercisable` key (Python: `"exercisable" not in cls`, Worker: `cls.exercisable === undefined`)
-# is read at its full outstanding count under vested_only, still labelled countBasis "vested_exercisable". The dilution bridge always sends the
-# key (null when unknown), so this only matters for hand-built inventories. Both runtimes agree. share_scenarios.py:184, share-scenarios.ts:190.
-# A class with no `exercisable` key at all (as opposed to a null one, above) is read at its outstanding count under vested_only.
-add(_scen("cap.scen.warrant_without_exercisable_key_uses_outstanding", ["BR-EXT-019"],
-          {"r": {"bridge": _inv([{"component": "warrants", "classes": [{"class": "Plain", "outstanding": 1_000_000, "exercisePrice": 10.0}]}]),
-                 "scenarios": [_sc("p25", 25)]}},
+# 2.23.0 (BR-EXT-084): a class with no `exercisable` key at all is untagged exactly like a null one: under vested_only its count is
+# unknown ("count not tagged"), never its outstanding count; under warrant_vesting "all" the outstanding count is used.
+_PLAIN_WARRANT = lambda: _inv([{"component": "warrants", "classes": [{"class": "Plain", "outstanding": 1_000_000, "exercisePrice": 10.0}]}])
+add(_scen("cap.scen.warrant_without_exercisable_key_is_unresolved", ["BR-EXT-019", "BR-EXT-084"],
+          {"r": {"bridge": _PLAIN_WARRANT(), "scenarios": [_sc("p25", 25)]}},
           lines(fields=("count", "countBasis", "incrementalShares")),
-          expect={"r": {"p25": [{"count": 1_000_000, "countBasis": "vested_exercisable", "incrementalShares": 600_000}]}}))
+          expect={"r": {"p25": [{"count": None, "countBasis": "vested_exercisable", "incrementalShares": None}]}}))
+add(_scen("cap.scen.warrant_without_exercisable_key_all_vesting_uses_outstanding", ["BR-EXT-019", "BR-EXT-084"],
+          {"r": {"bridge": _PLAIN_WARRANT(), "scenarios": [_sc("p25", 25, warrant_vesting="all")]}},
+          lines(fields=("count", "countBasis", "incrementalShares")),
+          expect={"r": {"p25": [{"count": 1_000_000, "countBasis": "outstanding", "incrementalShares": 600_000}]}}))
 
 # ═════════════════════════════════════════════════════ dilution bridge (BR-EXT-007 / 008 / 025 / 027 / 004 / 026 / 013)
 _OPT_N = "us-gaap:ShareBasedCompensationArrangementByShareBasedPaymentAwardOptionsOutstandingNumber"

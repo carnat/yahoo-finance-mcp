@@ -1258,7 +1258,7 @@ class TestPr2DataQuality(unittest.TestCase):
             return json.dumps({"matches": []})
 
         old_index = srv.get_sec_filing_index
-        old_revenue = srv.extract_revenue_exposure
+        old_revenue = srv._extract_revenue_exposure
         old_risk = srv.extract_risk_factor_mentions
         old_resolve = srv._resolve_sec_filing
         old_search = srv.search_sec_filing_text
@@ -1266,12 +1266,12 @@ class TestPr2DataQuality(unittest.TestCase):
             srv._resolve_sec_filing = fake_resolve
             srv.search_sec_filing_text = fake_search
             srv.get_sec_filing_index = fake_index
-            srv.extract_revenue_exposure = fake_revenue
+            srv._extract_revenue_exposure = fake_revenue
             srv.extract_risk_factor_mentions = fake_risk
             data = json.loads(_run(srv.extract_china_exposure("MRVL")))
         finally:
             srv.get_sec_filing_index = old_index
-            srv.extract_revenue_exposure = old_revenue
+            srv._extract_revenue_exposure = old_revenue
             srv.extract_risk_factor_mentions = old_risk
             srv._resolve_sec_filing = old_resolve
             srv.search_sec_filing_text = old_search
