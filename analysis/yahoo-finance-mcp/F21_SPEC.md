@@ -62,3 +62,17 @@ Cases:
   - the Worker appends the extractor's warnings (`POSSIBLE_20F_FILER` for GEOX);
   - Python's query branch drops them.
   - The case is pinned as `F21-SEGMENT-QUERY-WARNINGS`. Aligning means choosing which output is right, so it is not done here.
+
+## 5. Status (2026-10-20)
+
+Released as 2.24.0 (#302). Live checks at 08:39Z on build 2.24.0+git.7d7874a:
+- `health_check` reports 2.24.0. `manifestHash` and `schemaHash` are unchanged.
+- Pinned to 0000320193-24-000123:
+  - `total_revenue` returns 391.035B FY2024, with evidence naming that accession;
+  - `risk_factor_mentions` ["China"] has all evidence naming it;
+  - `china_exposure` riskFactorExposure evidence names it (on 2.23.0 it named the FY2025 filing).
+- A fake accession 0000320193-99-999999 on `total_revenue` returns `ACCESSION_NOT_FOUND`.
+- `total_revenue` without an accession returns 416.161B FY2025, unchanged.
+- `customer_concentration` returns `EXTRACTION_FAILED` with no evidence, pinned and unpinned alike. AAPL discloses no major customer, so this is unchanged from 2.23.0.
+
+F21 is complete.

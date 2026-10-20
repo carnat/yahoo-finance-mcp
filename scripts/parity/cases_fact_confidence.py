@@ -11,8 +11,8 @@ The producers that reached the default (spec section 1):
   C. get_ownership_holders rows with Yahoo's lowercase `value` -> LOW (Worker only; Python's rows use `Value`, finding F17)
   D. extract_dilution_bridge WARRANT_EXERCISE_NOT_OUTSTANDING counts[] -> tagged HIGH at the producer, so unchanged
 
-F19 (recorded, not fixed): Python's get_analyst_consensus sets a top-level source / evidenceClass / decisionGrade /
-recommendedNextAction and the Worker sets none, so priceTargets.sourceType differs.
+F19 (fixed in 2.25.0): the Worker's get_analyst_consensus now sets the top-level source / evidenceClass / decisionGrade /
+recommendedNextAction that Python always set, so priceTargets.sourceType is "yahoo_finance" in both runtimes.
 """
 
 from __future__ import annotations
@@ -128,15 +128,10 @@ CASES += [
                     lambda v: {"priceTargets": v["data"]["priceTargets"]["confidence"],
                                "priceTargetsDecisionGrade": v["data"]["priceTargets"]["decisionGrade"]},
                     expect={"priceTargets": "LOW", "priceTargetsDecisionGrade": False}),
-    # F19 (R5-shared spec 2.5): Python's tool sets the top-level provenance fields and the Worker's sets none, so the
-    # envelope gives priceTargets the parent source "yahoo_finance" in Python and "unknown" in the Worker. Recorded, not fixed.
-    _consensus_case("confidence.analyst_consensus.finding_f19_top_level_provenance_and_price_targets_source_type_differ",
-                    _f19_view, mode="pinned",
-                    decision="FINDING F19 (R5-shared): Python get_analyst_consensus sets top-level source/evidenceClass/decisionGrade/recommendedNextAction, the Worker sets none, so priceTargets.sourceType differs",
-                    expect_py={"source": "yahoo_finance", "evidenceClass": "CONTEXTUAL_MARKET_DATA", "decisionGrade": False,
-                               "recommendedNextAction": "NONE", "hasSource": True, "priceTargetsSourceType": "yahoo_finance"},
-                    expect_ts={"source": None, "evidenceClass": None, "decisionGrade": None, "recommendedNextAction": None,
-                               "hasSource": False, "priceTargetsSourceType": "unknown"}),
+    # F19 (2.25.0): the Worker now sets the top-level provenance Python always set, so priceTargets inherits "yahoo_finance" in both.
+    _consensus_case("confidence.analyst_consensus.top_level_provenance_matches", _f19_view,
+                    expect={"source": "yahoo_finance", "evidenceClass": "CONTEXTUAL_MARKET_DATA", "decisionGrade": False,
+                            "recommendedNextAction": "NONE", "hasSource": True, "priceTargetsSourceType": "yahoo_finance"}),
 ]
 
 

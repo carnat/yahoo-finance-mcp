@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import json
 import os
 from unittest.mock import AsyncMock, patch
@@ -946,6 +947,24 @@ CASES += [
     _compare_case("ern.compare.zero_eps_estimate_gives_no_delta", ["BR-ERN-031", "BR-ERN-018"], "ZCK", 820011, _REL_Q2, _ROW(0.10, 0.0), _REVEST,
                   _cmp(actualEps=0.1, estimateEps=0.0, epsSurprisePct=None, epsDelta=None, confidence="NOT_DISCLOSED", warningCodes=["EPS_ESTIMATE_UNAVAILABLE"]),
                   mode="pinned", decision="Q3i", note="repair: a zero EPS estimate should still give epsDelta"),
+]
+
+
+def _estimate_confidence_view(v):
+    d = _unwrap(v)
+    est = d.get("estimate") or {}
+    return {"estimateRevenueConfidence": (est.get("revenue") or {}).get("confidence"),
+            "estimateEpsConfidence": (est.get("eps") or {}).get("confidence"),
+            "confidence": d.get("confidence")}
+
+
+# 2.25.0 (F16): the Yahoo estimate rows are LOW, as in get_earnings_analysis; the comparison keeps its own confidence (HIGH here).
+CASES += [
+    dataclasses.replace(
+        _compare_case("ern.compare.yahoo_estimate_rows_are_low_while_comparison_confidence_is_high", ["BR-ERN-001", "BR-ERN-018"], "ZCL", 820012, _REL_Q2,
+                      _ROW(0.55, 0.50), _REVEST, None),
+        select=_estimate_confidence_view,
+        expect={"estimateRevenueConfidence": "LOW", "estimateEpsConfidence": "LOW", "confidence": "HIGH"}),
 ]
 
 
