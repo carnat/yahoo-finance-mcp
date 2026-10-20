@@ -78,4 +78,10 @@ Approved by the owner on 2026-10-19, after "continue with the next triage while 
 
 **Progress:**
 - **F6:** done as a Phase 4 prep tooling commit (`scripts/compare_telemetry_windows.py` and the export's `excludingHeaderTransport` view). No runtime change.
-- **Next:** R-news D (2.22.0), covering F10, F11 rest, F12, F13 and F14.
+- **R-news D: released as 2.22.0 (#300, from branch `claude/rnews-d`) and live-verified 2026-10-20 03:11Z on build 2.22.0+git.bcc5274.**
+  - `verify_company_event` AAPL "the and of" returns `INPUT_VALIDATION_ERROR`.
+  - "earnings results" returns CONFIRMED with meaningfulTerms ["earnings"].
+  - The company_ir_page row carries `canonicalUrl: null` and `registrySchemaVersion`.
+  - `schemaHash` changed, as expected from the F14 catalog text.
+  - F10, F11, F12, F13 and F14 are closed. A double-decoding defect in the shared XML decoder was also fixed.
+- **Remaining:** F7 (Phase 4 routing release); F1, F2, F3, F4, F16, F18, F19 (R5 releases); F5, F17, F20 (Phase 6); OPS-TEL-3 (after the Phase 4 exit).
