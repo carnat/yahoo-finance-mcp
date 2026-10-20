@@ -1442,8 +1442,6 @@ CASES += [
 
 # R-news D (2.22.0, F12): English function words join the event-query stop list in both runtimes. Terms under 3 letters were
 # already dropped, so "and, are, for, from, its, the, with" are the words whose treatment changes.
-_F12_PORT = ("FINDING: 2.22.0 Worker side landed (R-news D F12): function words are event-query stop words in the Worker; "
-             "Python still counts 'the', 'and', 'with' ... as meaningful terms (port pending)")
 _F12_ROWS = [yahoo_row("Acme sets the dividend and the outlook", "2026-10-05T09:00:00Z"),
              yahoo_row("Acme dividend buyback plan", "2026-10-06T09:00:00Z")]
 
@@ -1455,31 +1453,18 @@ def _f12_match_view(v: dict) -> dict:
             "best": [(e["evidenceText"], e["queryMatch"]["method"], e["queryMatch"]["matchedTerms"]) for e in v["bestEvidence"]]}
 
 
-CASES += [
-    # TODO(python-mirror): R-news D F12 — add "a", "an", "and", "are", "as", "at", "by", "for", "from", "in", "is", "it", "its",
-    # "of", "on", "or", "the", "to", "with" to yfmcp/tools/news.py event_query_stopwords (~1829), as in worker/src/news.ts
     # eventQueryStopwords. Then flip these three cases to equal with expect=<the expect_ts below>.
     tool_case("verify.query_policy.function_words_only_query_is_input_validation_error", ["BR-NWS-138"], "verify",
               ["ACME", "the and of", "", "", []], {"info": ACME_INFO}, select=_generic_query_view,
-              mode="pinned", decision=_F12_PORT,
-              expect_py={"policy": {"meaningfulTerms": ["the", "and"], "requiredTermMatches": 2, "matchedEvidenceCount": 0},
-                         "warnings": []},
-              expect_ts=_GENERIC_QUERY_ERROR),
+              expect=_GENERIC_QUERY_ERROR),
     tool_case("verify.query_policy.function_words_are_not_meaningful_terms", ["BR-NWS-138"], "verify",
               ["ACME", "the earnings results", "", "", []], {"info": ACME_INFO}, select=lambda v: v["queryPolicy"],
-              mode="pinned", decision=_F12_PORT,
-              expect_py={"meaningfulTerms": ["the", "earnings"], "requiredTermMatches": 2, "matchedEvidenceCount": 0},
-              expect_ts={"meaningfulTerms": ["earnings"], "requiredTermMatches": 1, "matchedEvidenceCount": 0}),
+              expect={"meaningfulTerms": ["earnings"], "requiredTermMatches": 1, "matchedEvidenceCount": 0}),
     # A mixed query matches on its content words only: "The dividend and the outlook" shares only filler words with the query
     # beyond "dividend", so it no longer reaches the term threshold (Python today matches it on "the", "dividend", "and", "the").
     tool_case("verify.query_policy.mixed_query_matches_on_content_words_only", ["BR-NWS-138"], "verify",
               ["ACME", "the dividend and the buyback", "", "", ["yahoo_finance_news"]], {"info": ACME_INFO, "news": _F12_ROWS},
-              select=_f12_match_view, mode="pinned", decision=_F12_PORT,
-              expect_py={"status": "PARTIAL",
-                         "policy": {"meaningfulTerms": ["the", "dividend", "and", "the", "buyback"], "requiredTermMatches": 4,
-                                    "matchedEvidenceCount": 1},
-                         "best": [("Acme sets the dividend and the outlook", "TERM_THRESHOLD", ["the", "dividend", "and", "the"])]},
-              expect_ts={"status": "PARTIAL",
+              select=_f12_match_view, expect={"status": "PARTIAL",
                          "policy": {"meaningfulTerms": ["dividend", "buyback"], "requiredTermMatches": 2, "matchedEvidenceCount": 1},
                          "best": [("Acme dividend buyback plan", "TERM_THRESHOLD", ["dividend", "buyback"])]}),
 ]
