@@ -3133,6 +3133,21 @@ F-024, F-026, F-029). Both runtimes change alike.
   - This is latent: the capital-structure producer always emits the key.
 - **Rollback:** redeploy 2.22.0.
 
+## Pinned Filing Reads In query_sec_filing_index (2.24.0)
+
+- **Why:** finding F21 (`F21_SPEC.md`), which completes F3 (2.23.0) for every query type. Release type: minor. There is no new field, enum value, warning code or `unresolvedReason`. Values and evidence change for pinned reads. The tool catalog and schemas are unchanged. Both runtimes change alike.
+- **Pinned reads:**
+  - With `accession_number`, `query_sec_filing_index` `total_revenue`, `segment_revenue`, `customer_concentration` and `risk_factor_mentions` now read that filing, so values and evidence come from it.
+  - `total_revenue` takes the filing's own newest period, not a prior-year comparative.
+  - The risk-factor block of `china_exposure` is pinned too.
+- **Fail closed on a missing accession:**
+  - An accession not among the company's filings returns `ACCESSION_NOT_FOUND` for those four query types, after their own parameter checks. `geographic_revenue_share` has done this since 2.15.0.
+  - `china_exposure` keeps `FILING_NOT_FOUND_TRY_OTHER_TYPE`.
+- **20-F retry:** a pinned `segment_revenue` read retries as 20-F only when the pinned filing is a 20-F, and reads the same accession.
+- **Public tools:** the extractor tools gain no parameter. The catalog and schemas are unchanged.
+- **Not changed:** finding F23 (segment query warnings pass-through differs between runtimes) is recorded, not fixed.
+- **Rollback:** redeploy 2.23.0.
+
 ## Per-Person Access Keys (2.18.0)
 
 - **Why:** Phase 1b, approved by the owner on 2026-10-18, for sharing the hosted MCP with a few trusted people, non-commercially. Release type: minor. Worker only: the local Python server is single-user stdio.
