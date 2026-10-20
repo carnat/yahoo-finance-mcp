@@ -90,12 +90,20 @@ _UNIT_SCALE_RE = _re.compile(
 _UNIT_SCALE_WORD = {"billions": 1e9, "millions": 1e6, "thousands": 1e3, "000": 1e3}
 
 
+def _is_share_scale_statement(text: str, index: int) -> bool:
+    """A scale statement about share counts, not amounts ("shares in thousands", or a scale after "except" in the
+    same parenthetical); mirrors the Worker's isShareScaleStatement (2.25.1, F25)."""
+    lead = text[max(0, index - 80):index]
+    clause = lead[max(lead.rfind("("), lead.rfind(")"), lead.rfind(";")) + 1:]
+    return bool(_re.search(r"\b(?:except|shares?)\b", clause, _re.I | _re.A))
+
+
 def _stated_unit_scales(html: str) -> list[float]:
     text = _re.sub(r"<[^>]+>", " ", html)
     text = _re.sub(r"&nbsp;|&#160;|&#xa0;", " ", text, flags=_re.I)
     text = _re.sub(r"&#36;|&dollar;", "$", text, flags=_re.I)
     text = _re.sub(r"[\t\n\x0b\x0c\r \xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]+", " ", text)
-    return [_UNIT_SCALE_WORD[next(g for g in m.groups() if g).lower()] for m in _UNIT_SCALE_RE.finditer(text)]
+    return [_UNIT_SCALE_WORD[next(g for g in m.groups() if g).lower()] for m in _UNIT_SCALE_RE.finditer(text) if not _is_share_scale_statement(text, m.start())]
 
 
 # Where a table's scale came from (2.5.21). ASSUMED_MILLIONS: neither the table nor its lead-in states one, so amounts
@@ -215,3 +223,32 @@ def _html_to_markdown_fallback(html: str, section_start: int, section_end: int) 
     # Clean up whitespace
     text = _re.sub(r'\n{3,}', '\n\n', text)
     return text.strip()
+
+
+_TABLE_UNIT_RE = _re.compile(
+    r"\bin\s+(thousands|millions|billions)\b|\$\s*(thousands|millions|billions)\b|\b(thousands|millions|billions)\s+of\s+(?:u\.s\.\s+)?dollars\b",
+    _re.I | _re.A,
+)
+
+
+def _worker_strip_html_tags(html_str: str) -> str:
+    """The Worker's stripHtmlTags: comments, scripts, styles and handler attributes go first, then tags and entities."""
+    text = _COMMENT_RE.sub(" ", html_str)
+    text = _SCRIPT_RE.sub(" ", text)
+    text = _STYLE_RE.sub(" ", text)
+    text = _HANDLER_ATTR_RE.sub(" ", text)
+    return _strip_html_tags(text)
+
+
+def _table_unit_scale(table_html: str, before_html: str) -> str:
+    """Port of the Worker's tableUnitScale: the unit a table states in its first 1,500 chars, else the last statement
+    in the 800 chars before it; share-count scales are skipped (2.25.1, F25). "unknown" when none is stated."""
+    table_text = _worker_strip_html_tags(table_html)[:1500]
+    in_table = [m for m in _TABLE_UNIT_RE.finditer(table_text) if not _is_share_scale_statement(table_text, m.start())]
+    if in_table:
+        return next(g for g in in_table[0].groups() if g).lower()
+    before_text = _worker_strip_html_tags(before_html)[-800:]
+    before = [m for m in _TABLE_UNIT_RE.finditer(before_text) if not _is_share_scale_statement(before_text, m.start())]
+    if before:
+        return next(g for g in before[-1].groups() if g).lower()
+    return "unknown"

@@ -404,6 +404,7 @@ Each R-release is a set of **separately released** behaviour changes that must b
   - **Providers:** eligibility policy fails closed.
   - **Shared (Form 4):** multi-line parsing.
   - **Fundamentals and providers** each get a **Q7** targeted rule extraction before their R5 release.
+- **2.25.0 functional audit (2026-10-20):** 23 new findings, F25–F47, are classified in `F_TRIAGE.md` §5. F25–F28 ship as the 2.25.1 repair patch; the rest join the R5 releases above or Phase 6, pending owner approval.
 - **Entry criteria (each R-release):**
   - [ ] Its pinned assertions exist (Phase 2).
   - [x] Any new name it introduces is confirmed in §7 Q11 (all accepted 2026-10-15; a name not in that table needs a new owner decision).
