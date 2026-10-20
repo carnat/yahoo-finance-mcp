@@ -21,6 +21,11 @@
   - That fallback already resolves the pinned accession (`resolveSecFiling(ticker, filingType, pinnedAccession)` honours the accession whatever its form).
   - Non-geographic fact types keep `NO_FACT_FOR_ACCESSION` / `SEC_FACTS_IFRS_ONLY` unchanged.
 - The existing 20-F retry in `extractGeographicRevenue` then behaves as today: for a pinned read it runs only when the pinned filing is a 20-F, and it reads the same accession.
+- **Observed on the Worker (GEOX fixture):**
+  - A pinned 20-F asked for as 10-K for "China", where the 20-F table has no China row, gives `NOT_DISCLOSED`, evidence naming the 20-F (`filingType` "20-F", which is the filing actually read), and the existing `POSSIBLE_20F_FILER` warning from the retry.
+  - The same filing for "United States" gives FOUND 300,000,000 from the 20-F.
+  - Before this release, both returned `SEC_FACT_NOT_AVAILABLE` / `NO_FACT_FOR_ACCESSION`.
+  - The `POSSIBLE_20F_FILER` wording ("retry with filing_type='20-F'") is not precise for a pinned 20-F that the retry has already read. It is an existing code on an existing path, so it is left as is and recorded for the Phase 6 warning-text pass.
 
 ### F18 and BR-EXT-035: no producer-level HIGH fallback
 
@@ -61,7 +66,7 @@ The status-derived confidences (`china_exposure`, `customer_concentration`, Pyth
   - Keep `china_miss_unchanged` as it is.
 - **F4:** flip `r4b2.geo.pinned_20f_with_10k_filing_type_reads_that_accession` to the table read of the 20-F (China absent, so it is not found). Record the actual status and warnings both runtimes produce, and they must be equal.
   - Add `r5x.geo.pinned_20f_table_read`: `extract_geographic_revenue` GEOX "United States", 10-K, pinned `GEOX_20F` returns 300,000,000 with evidence naming `GEOX_20F`.
-- **F18 / BR-EXT-035:** unit cases that stub the upstream to return a value with no `confidence`. The stub's level (an extractor function patch) is up to the implementer, provided both runtimes are stubbed the same way:
+- **F18 / BR-EXT-035 (not added, 2026-10-20):** the harness stubs SEC HTTP routes only, and both runtimes' `getFilingData` always set `confidence`, so no route-based case reaches these branches. A Python-only patch would not be a parity case. The change is covered by review and the existing suites. Originally planned: unit cases that stub the upstream to return a value with no `confidence`. The stub's level (an extractor function patch) is up to the implementer, provided both runtimes are stubbed the same way:
   - the 20-F fallback gives `NOT_DISCLOSED`;
   - `extract_total_revenue` gives `LOW`;
   - the revenue-exposure match gives `LOW`;
