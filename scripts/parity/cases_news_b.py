@@ -2246,6 +2246,14 @@ CASES += [
                               "Third-quarter revenue rose.", "guidance"],
                              ["IQE board appointment notice", "https://www.iqep.com/investors/regulatory-news/rss-2", "2026-10-12T07:00:00Z",
                               "Board change.", "other"]]}),
+    # R-news D: entities are decoded once in both runtimes, so a double-escaped `&amp;lt;b&amp;gt;` stays the text `&lt;b&gt;`
+    # and never turns into markup.
+    _ir_page_case(
+        "news.ir_page.structured_feed_double_escaped_entities_decode_once", ["BR-NWS-202"],
+        _IR_STRUCTURED_RSS.replace("IQE announces Q3 results &amp; outlook", "IQE announces Q3 &amp;lt;b&amp;gt; results"),
+        entry=_IR_STRUCTURED_ENTRY, content_type="application/rss+xml; charset=utf-8",
+        select=lambda v: [i["title"] for i in v["items"]][:1],
+        expect=["IQE announces Q3 &lt;b&gt; results"]),
     _ir_page_case(
         "news.ir_page.structured_entry_parses_an_atom_body", ["BR-NWS-202"], _IR_STRUCTURED_ATOM,
         entry=_IR_STRUCTURED_ENTRY, content_type="application/atom+xml", select=_ir_feed_view,

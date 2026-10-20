@@ -38,3 +38,8 @@
 
 1. **F13b message.** A non-object body uses Python's existing text for the same shape failure, `Marketaux provider changed: expected a data array.`, in both runtimes. This replaces the template text in §1. Python is unchanged. The Worker maps a `PROVIDER_CHANGED` fetch result to that message.
 2. **F13c.** The Worker step also applies the V2 branch's `retryable` rule to legacy entries with a code (`retryable === true` or `PROVIDER_TIMEOUT`). This is accepted: it keeps legacy and V2 entries consistent and adds no new value.
+3. **Entities decode once (found in review).**
+   - The Python port first ran the Worker's replace sequence and then `html.unescape`, which decodes twice. The Worker's shared `decodeXmlText` also decoded `&amp;` first. Either way, a double-escaped `&amp;lt;` became `<`.
+   - Both now decode once. Python strips CDATA and runs `html.unescape`. The Worker replaces `&amp;` last.
+   - `decodeXmlText` is shared with the GlobeNewswire and company IR feeds, so this also corrects them for double-escaped input. No other output changes.
+   - New case: `news.ir_page.structured_feed_double_escaped_entities_decode_once`.

@@ -174,14 +174,9 @@ def _looks_like_feed(text: str) -> bool:
 
 
 def _decode_xml_text(value: str) -> str:
-    """The Worker's decodeXmlText (CDATA, the five named / numeric entities); html.unescape then decodes the rest
-    (RNEWS3 decision 5: where Python decodes more, keep it)."""
+    """CDATA, then entities decoded once with html.unescape (RNEWS3 decision 5). The Worker's decodeXmlText decodes
+    `&amp;` last, so a double-escaped `&amp;lt;` reads as the text `&lt;` in both runtimes (R-news D)."""
     value = _re.sub(r"<!\[CDATA\[([\s\S]*?)\]\]>", r"\1", value or "", flags=_re.I)
-    value = _re.sub(r"&(?:amp|#38);", "&", value, flags=_re.I)
-    value = _re.sub(r"&(?:lt|#60);", "<", value, flags=_re.I)
-    value = _re.sub(r"&(?:gt|#62);", ">", value, flags=_re.I)
-    value = _re.sub(r"&(?:quot|#34);", '"', value, flags=_re.I)
-    value = _re.sub(r"&(?:apos|#39);", "'", value, flags=_re.I)
     return _html_module.unescape(value)
 
 
