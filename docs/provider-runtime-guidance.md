@@ -3086,6 +3086,28 @@ F-024, F-026, F-029). Both runtimes change alike.
   - F20: status-like strings such as `EXTRACTION_FAILED` stored in `confidence` normalise to LOW.
 - **Rollback:** redeploy 2.20.1.
 
+## News Repairs, Batch D (2.22.0)
+
+- **Why:** the R-news batch D repairs (`RNEWS_D_SPEC.md`, from the approved `F_TRIAGE.md`; planner calls on F10 and F12). Release type: minor. There is no new field, enum value or warning code. Output values change for verify queries, Marketaux failure statuses and the company IR-page row, and the catalog text changes.
+- **F12, verify stop words:**
+  - The event-query stop list gains 19 function words: a, an, and, are, as, at, by, for, from, in, is, it, its, of, on, or, the, to, with.
+  - Terms shorter than 3 letters were already dropped, so only and, are, for, from, its, the and with change matching.
+  - Matching uses content words only.
+  - A query made up only of filler words now returns `INPUT_VALIDATION_ERROR`.
+- **F13, Marketaux failures:**
+  - HTTP 404 is now `PROVIDER_ERROR` in both runtimes (the Worker returned `NOT_FOUND`; a provider 404 is not evidence of absence). The message is `Marketaux wire fallback returned HTTP 404 (PROVIDER_ERROR).`
+  - A body that is not an object is `PROVIDER_CHANGED` in both runtimes, with the message `Marketaux provider changed: expected a data array.`
+  - Under the legacy envelope (`MCP_ENVELOPE_V2=false`) a Worker batch entry keeps its own error code (for example `INPUT_VALIDATION_ERROR`), and `retryable` follows the V2 rule.
+- **F11, IR-page row:** the `company_ir_page` row carries both `canonicalUrl` and `registrySchemaVersion` in both runtimes.
+- **F10, local RSS/Atom parsing:** the local Python server now parses RSS and Atom bodies for registry-approved IR-page entries, like the hosted Worker.
+  - Order: feed first, then structured JSON, then HTML.
+  - A DOCTYPE or ENTITY declaration is refused.
+  - The `Accept` header is the same as the Worker's.
+- **XML entities decode once:** in both runtimes a double-escaped `&amp;lt;` stays the text `&lt;`. The change is in the shared decoder used by GlobeNewswire and the company IR feeds, and it affects only double-escaped input.
+- **F14, catalog Params:** the `Params` line in `tool_catalog.json` now lists every accepted parameter for all actions. 25 actions gained parameters, and `get_analyst_recommendations` and `get_ownership_holders` gained a `Params` line. `test_grouped_contract_parity` now requires this with no exceptions.
+- **Not changed:** the other findings, which are scheduled elsewhere in `F_TRIAGE.md`.
+- **Rollback:** redeploy 2.21.0.
+
 ## Per-Person Access Keys (2.18.0)
 
 - **Why:** Phase 1b, approved by the owner on 2026-10-18, for sharing the hosted MCP with a few trusted people, non-commercially. Release type: minor. Worker only: the local Python server is single-user stdio.

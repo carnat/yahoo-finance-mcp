@@ -1179,9 +1179,8 @@ CASES += [
     # Worker reported NOT_FOUND through the shared providerHttpStatus, which other providers still use).
     _marketaux_case("news.marketaux.http_404_is_provider_error_with_the_http_status_message", ["BR-NWS-230"], None, status=404, body="missing",
                     expect=_mx_failed("PROVIDER_ERROR", "retry_or_use_official_sources", "Marketaux wire fallback returned HTTP 404 (PROVIDER_ERROR).")),
-    # R-news D (2.22.0, F13b): a non-object JSON body is PROVIDER_CHANGED in both runtimes (the Worker said PROVIDER_ERROR). The status
-    # agrees; the warning text does not: the Worker uses the spec's 'unavailable (PROVIDER_CHANGED).' template, while Python (spec:
-    # no Python change) reaches its data-array branch. PLANNER CALL: align the text in one runtime, then flip to equal.
+    # R-news D (2.22.0, F13b): a non-object JSON body is PROVIDER_CHANGED in both runtimes (the Worker said PROVIDER_ERROR), with
+    # Python's data-array message for the same shape failure (RNEWS_D_SPEC planner decision 1).
     _marketaux_case("news.marketaux.non_object_body_is_provider_changed", ["BR-NWS-230"], [1, 2],
                     # R-news D F13b (2.22.0): PROVIDER_CHANGED in both runtimes, with the data-array message (planner decision 1).
                     expect=_mx_failed("PROVIDER_CHANGED", "inspect_provider_contract", "Marketaux provider changed: expected a data array.")),
