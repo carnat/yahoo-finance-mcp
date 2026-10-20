@@ -794,8 +794,8 @@ async def compare_earnings_actual_vs_estimate(ticker: str, period: str = "latest
             "eps": {"value": actual_eps, "unit": "USD/share", "source": "yahoo", "period": estimate_period or reported_date, "decisionGrade": False},
         },
         "estimate": {
-            "revenue": {"value": revenue_est, "unit": "USD", "source": "yahoo", "period": estimate_period or reported_date, "decisionGrade": False},
-            "eps": {"value": eps_est, "unit": "USD/share", "source": "yahoo", "period": estimate_period or reported_date, "decisionGrade": False},
+            "revenue": {"value": revenue_est, "unit": "USD", "source": "yahoo", "period": estimate_period or reported_date, "decisionGrade": False, "confidence": "LOW"},
+            "eps": {"value": eps_est, "unit": "USD/share", "source": "yahoo", "period": estimate_period or reported_date, "decisionGrade": False, "confidence": "LOW"},
         },
         "surprise": {
             "revenueSurprisePct": None,
