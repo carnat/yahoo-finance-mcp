@@ -6440,21 +6440,20 @@ async function getFilingDataUnchecked(
   const chosen = pickConceptFacts(fetchedConcepts, filingType, pinnedAccession, factType === "total_revenue" ? "larger" : "first");
   const concept = chosen?.concept ?? config.primary;
   let filtered = chosen?.facts ?? [];
-  if (!filtered.length && pinnedAccession) {
-    if (factType !== "geographic_revenue") {
-      // A pinned IFRS filing was searched for us-gaap concepts only: say IFRS was not read, not that the filing
-      // has no such fact (2.5.30, F-018).
-      companyfacts ??= readSecJson(companyfactsUrl, "companyfacts", null);
-      const taxonomies = (((await companyfacts)?.facts ?? {}) as Record<string, unknown>);
-      if (failedReads.length) return secReadFailed(concept);
-      if (taxonomies["ifrs-full"] && !taxonomies["us-gaap"]) {
-        return unavailableStructuredFact(
-          "SEC_FACTS_IFRS_ONLY",
-          `${ticker.toUpperCase()} reports its SEC facts under IFRS (ifrs-full), which this action does not read, so accession ${pinnedAccession} was searched for ${candidateNames.join(" / ")} (us-gaap) only and its IFRS facts were not searched; reconcile_metric_sources reads IFRS facts in the reporting currency.`,
-          concept,
-          pinnedAccession,
-        );
-      }
+  // A pinned geographic read with no XBRL fact reads that filing's own table below, as the unpinned read does (2.23.0, F4).
+  if (!filtered.length && pinnedAccession && factType !== "geographic_revenue") {
+    // A pinned IFRS filing was searched for us-gaap concepts only: say IFRS was not read, not that the filing
+    // has no such fact (2.5.30, F-018).
+    companyfacts ??= readSecJson(companyfactsUrl, "companyfacts", null);
+    const taxonomies = (((await companyfacts)?.facts ?? {}) as Record<string, unknown>);
+    if (failedReads.length) return secReadFailed(concept);
+    if (taxonomies["ifrs-full"] && !taxonomies["us-gaap"]) {
+      return unavailableStructuredFact(
+        "SEC_FACTS_IFRS_ONLY",
+        `${ticker.toUpperCase()} reports its SEC facts under IFRS (ifrs-full), which this action does not read, so accession ${pinnedAccession} was searched for ${candidateNames.join(" / ")} (us-gaap) only and its IFRS facts were not searched; reconcile_metric_sources reads IFRS facts in the reporting currency.`,
+        concept,
+        pinnedAccession,
+      );
     }
     return unavailableStructuredFact(
       "NO_FACT_FOR_ACCESSION",
@@ -11422,7 +11421,8 @@ export async function extractGeographicRevenue(
         out.valueRatio = fallbackPayload.denominator != null ? (fallbackPayload.valueRatio ?? null) : null;
         out.valuePct = fallbackPayload.denominator != null ? (fallbackPayload.valuePct ?? null) : null;
         out.extractionMethod = fallbackPayload.extractionMethod ?? "NONE";
-        out.confidence = fallbackPayload.confidence ?? "HIGH";
+        // An untagged fallback is never HIGH: it takes the primary path's default (2.23.0, BR-EXT-035).
+        out.confidence = fallbackPayload.confidence ?? "NOT_DISCLOSED";
         out.evidence = {
           filingType: fallbackIdx.filingType ?? fallbackPayload.filingType ?? "20-F",
           filingDate: fallbackIdx.filingDate ?? fallbackPayload.filingDate ?? null,
@@ -11794,7 +11794,8 @@ export async function extractTotalRevenue(ticker: string, filingType = "10-K", p
     // No value, no unit: a missing fact has no currency (2.5.15).
     unit: value != null ? (payload.unit ?? "USD") : null,
     unitScale: payload.unitScale ?? null,
-    confidence: payload.confidence ?? (value != null ? "HIGH" : "NOT_DISCLOSED"),
+    // An untagged value is LOW, never HIGH (2.23.0, F18).
+    confidence: payload.confidence ?? (value != null ? "LOW" : "NOT_DISCLOSED"),
     extractionMethod: payload.extractionMethod ?? "NONE",
     evidence: decisionGrade ? sourceEvidence : filingEvidence,
     sourceEvidence,
@@ -11817,8 +11818,10 @@ export async function extractRevenueExposure(
   filingType = "10-K",
   period = "latest",
   detailLevel = "compact",
+  // Internal only (not a tool param): a pinned caller reads the pinned filing (2.23.0, F3).
+  accessionNumber: string | null = null,
 ): Promise<string> {
-  const geo = parseObjectJson(await extractGeographicRevenue(ticker, exposureQuery, filingType, period, null, detailLevel));
+  const geo = parseObjectJson(await extractGeographicRevenue(ticker, exposureQuery, filingType, period, accessionNumber, detailLevel));
   const found = geo.value != null;
   const status = found ? "FOUND_REVENUE_EXPOSURE" : normalizeStatus(geo);
   const warnings = Array.isArray(geo.warnings) ? geo.warnings : [];
@@ -11831,7 +11834,7 @@ export async function extractRevenueExposure(
         valueRatio: geo.valueRatio ?? null,
         valuePct: geo.valuePct ?? null,
         period: geo.period ?? null,
-        confidence: geo.confidence ?? "HIGH",
+        confidence: geo.confidence ?? "LOW",
         evidence: geo.evidence ?? {},
       }]
     : [];
@@ -12825,7 +12828,8 @@ export async function extractChinaExposure(
   detailLevel = "compact",
 ): Promise<string> {
   let idx = parseObjectJson(await getSecFilingIndex(ticker, filingType, period, accessionNumber));
-  const revenue = parseObjectJson(await extractRevenueExposure(ticker, "China", filingType, period, "compact"));
+  // The revenue read is pinned too, so its evidence names the pinned filing (2.23.0, F3).
+  const revenue = parseObjectJson(await extractRevenueExposure(ticker, "China", filingType, period, "compact", accessionNumber));
   if (idx.ok === false && idx.error && typeof idx.error === "object" && isAccessionNotFound(idx.error as Record<string, unknown>)) {
     // Not one of the actions 2.13.0 fails closed on an accession miss: it reads as FILING_NOT_FOUND_TRY_OTHER_TYPE,
     // as before (the index's payload for a filing not found), rather than falling through to the latest filing.
@@ -13394,14 +13398,14 @@ export async function querySecFilingIndex(
       valuePct: geo.valuePct ?? null,
       unit: geo.unit ?? "USD",
     };
-    const confidence = String(geo.confidence ?? (status === "ANSWERED" ? "HIGH" : "NOT_DISCLOSED"));
+    const confidence = String(geo.confidence ?? (status === "ANSWERED" ? "LOW" : "NOT_DISCLOSED"));
     return result(status, answer, confidence, evidence, warnings);
   }
 
   if (query === "revenue_exposure") {
     const exposureQuery = String(params.exposure_query ?? "").trim();
     if (!exposureQuery) return missingParam("exposure_query");
-    const rex = parseObjectJson(await extractRevenueExposure(ticker, exposureQuery, filingType, period, detail));
+    const rex = parseObjectJson(await extractRevenueExposure(ticker, exposureQuery, filingType, period, detail, accessionNumber));
     const matches = Array.isArray(rex.matches) ? rex.matches.filter((m) => m && typeof m === "object") as Record<string, unknown>[] : [];
     const first = matches.length > 0 ? matches[0] : {};
     const evidenceObj = first.evidence && typeof first.evidence === "object" ? first.evidence as Record<string, unknown> : {};
@@ -13418,7 +13422,7 @@ export async function querySecFilingIndex(
       valueRatio: first.valueRatio ?? null,
       valuePct: first.valuePct ?? null,
       period: first.period ?? null,
-    }, String(first.confidence ?? (status === "ANSWERED" ? "HIGH" : "NOT_DISCLOSED")), evidence, warnings);
+    }, String(first.confidence ?? (status === "ANSWERED" ? "LOW" : "NOT_DISCLOSED")), evidence, warnings);
   }
 
   if (query === "china_exposure") {
@@ -13498,7 +13502,7 @@ export async function querySecFilingIndex(
     return result(
       status,
       { value: total.value ?? null, period: total.period ?? null, unit: "USD" },
-      String(total.confidence ?? (status === "ANSWERED" ? "HIGH" : "NOT_DISCLOSED")),
+      String(total.confidence ?? (status === "ANSWERED" ? "LOW" : "NOT_DISCLOSED")),
       evidence,
       warnings,
     );
@@ -13516,8 +13520,8 @@ export async function querySecFilingIndex(
     status = "NOT_FOUND";
     warnings.push({ code: "EVIDENCE_REQUIRED", message: "ANSWERED responses require evidence." });
   }
-  const segmentConfidence = segments.length > 0 ? String(segments[0].confidence ?? "HIGH") : null;
-  const confidence = status === "ANSWERED" ? segmentConfidence ?? "HIGH" : (status === "NOT_DISCLOSED" ? "NOT_DISCLOSED" : "LOW");
+  const segmentConfidence = segments.length > 0 ? String(segments[0].confidence ?? "LOW") : null;
+  const confidence = status === "ANSWERED" ? segmentConfidence ?? "LOW" : (status === "NOT_DISCLOSED" ? "NOT_DISCLOSED" : "LOW");
   if (Array.isArray(seg.warnings)) warnings.push(...seg.warnings as Record<string, unknown>[]);
   return result(status, { segment: segmentName || null, segments }, confidence, evidence, warnings);
 }

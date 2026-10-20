@@ -187,7 +187,8 @@ function scenarioLines(bridge: Rec, s: ShareScenario): Line[] {
     for (const cls of (Array.isArray(warrants.classes) ? warrants.classes : []) as Rec[]) {
       const all = t.warrant_vesting === "all";
       // A class that vests on untagged conditions has no known exercisable count; it is never taken as all outstanding (2.5.9).
-      const count = all ? num(cls.outstanding) : cls.exercisable === undefined ? num(cls.outstanding) : num(cls.exercisable);
+      // A class with no exercisable key at all is untagged too (2.23.0, BR-EXT-084).
+      const count = all ? num(cls.outstanding) : num(cls.exercisable);
       lines.push(exercisable("warrants", String(cls.class ?? "Warrants"), count, all ? "outstanding" : "vested_exercisable", num(cls.exercisePrice), t.warrants, price));
     }
   }
