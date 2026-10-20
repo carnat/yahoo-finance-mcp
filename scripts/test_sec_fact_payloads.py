@@ -723,10 +723,14 @@ class TestGeographicUnavailableAgrees(unittest.TestCase):
         self.assertEqual(list(data)[-3:], ["_manualLookup", "retryable", "failedReads"])
 
     def test_a_pinned_accession_with_no_fact_is_the_full_unavailable_payload(self) -> None:
-        for name in ("geo_pinned_no_fact_filing_data", "pinned_no_fact_filing_data"):
-            data = self._same_payload(name)
-            self.assertEqual((data["status"], data["code"], data["accessionNumber"], data["requestedAccession"], data["evidence"]), ("SEC_FACT_NOT_AVAILABLE", "NO_FACT_FOR_ACCESSION", ACCN_20F, ACCN_20F, {}), name)
-            self.assertIn("_manualLookup", data)
+        data = self._same_payload("pinned_no_fact_filing_data")
+        self.assertEqual((data["status"], data["code"], data["accessionNumber"], data["requestedAccession"], data["evidence"]), ("SEC_FACT_NOT_AVAILABLE", "NO_FACT_FOR_ACCESSION", ACCN_20F, ACCN_20F, {}))
+        self.assertIn("_manualLookup", data)
+        # 2.23.0 (F4): a pinned geographic read with no XBRL fact reads the pinned filing's own table instead, so it is no longer
+        # NO_FACT_FOR_ACCESSION (here the pinned 20-F is not a 10-K in the fixture's submissions, so the table read finds no filing).
+        geo = self._same_payload("geo_pinned_no_fact_filing_data")
+        self.assertNotEqual(geo["code"], "NO_FACT_FOR_ACCESSION")
+        self.assertEqual((geo["status"], geo["code"]), ("FILING_NOT_FOUND_TRY_OTHER_TYPE", "FILING_NOT_FOUND_TRY_OTHER_TYPE"))
 
     def test_extract_geographic_revenue_reads_a_failed_read_alike(self) -> None:
         """2.5.18: the tool returns the Worker's whole payload, status, code, scanCoverage, searchedTerms and
@@ -802,9 +806,10 @@ _GEO_EXPECTED: dict[str, dict[str, tuple[str, str | None]]] = {
     "read_429": {"get_filing_data": ("PROVIDER_ERROR", "SEC_READ_FAILED"), "extract_geographic_revenue": ("PROVIDER_ERROR", "SEC_READ_FAILED"), "extract_revenue_exposure": ("PROVIDER_ERROR", "SEC_READ_FAILED"), "extract_china_exposure": ("PROVIDER_ERROR", "SEC_READ_FAILED")},
     "read_429_with_risk_text": {"get_filing_data": ("PROVIDER_ERROR", "SEC_READ_FAILED"), "extract_geographic_revenue": ("PROVIDER_ERROR", "SEC_READ_FAILED"), "extract_revenue_exposure": ("PROVIDER_ERROR", "SEC_READ_FAILED"), "extract_china_exposure": ("FOUND_NON_REVENUE_EXPOSURE", "SEC_READ_FAILED")},
     "pinned_older_filing": {"get_filing_data": ("FOUND", None), "extract_geographic_revenue": ("FOUND", None), "extract_revenue_exposure": ("FOUND_REVENUE_EXPOSURE", None), "extract_china_exposure": ("FOUND_REVENUE_EXPOSURE", None)},
-    # extract_geographic_revenue passes the pin (2.15.0), so it reads the older filing and finds no document; the other tools do not
-    # pass the pin to get_filing_data and read the latest 10-K (which has its document here).
-    "pinned_older_filing_no_doc": {"get_filing_data": ("EXTRACTION_FAILED", "FILING_TEXT_NOT_AVAILABLE"), "extract_geographic_revenue": ("EXTRACTION_FAILED", "FILING_TEXT_NOT_AVAILABLE"), "extract_revenue_exposure": ("FOUND_REVENUE_EXPOSURE", None), "extract_china_exposure": ("FOUND_REVENUE_EXPOSURE", None)},
+    # extract_geographic_revenue passes the pin (2.15.0), so it reads the older filing and finds no document; extract_revenue_exposure
+    # called without an accession reads the latest 10-K (which has its document here). extract_china_exposure passes its accession
+    # to the revenue read since 2.23.0 (F3), so it reads the older filing too.
+    "pinned_older_filing_no_doc": {"get_filing_data": ("EXTRACTION_FAILED", "FILING_TEXT_NOT_AVAILABLE"), "extract_geographic_revenue": ("EXTRACTION_FAILED", "FILING_TEXT_NOT_AVAILABLE"), "extract_revenue_exposure": ("FOUND_REVENUE_EXPOSURE", None), "extract_china_exposure": ("EXTRACTION_FAILED", "EXTRACTION_FAILED")},
     "pinned_filing_not_listed": {"get_filing_data": (_FND, _FND), "extract_geographic_revenue": ("ACCESSION_NOT_FOUND", "ACCESSION_NOT_FOUND"), "extract_revenue_exposure": ("FOUND_REVENUE_EXPOSURE", None), "extract_china_exposure": (_FND, _FND)},
     "china_manufacturing_text": {"get_filing_data": ("EXTRACTION_FAILED", "EXTRACTION_FAILED"), "extract_geographic_revenue": ("EXTRACTION_FAILED", "EXTRACTION_FAILED"), "extract_revenue_exposure": ("EXTRACTION_FAILED", "EXTRACTION_FAILED"), "extract_china_exposure": ("FOUND_NON_REVENUE_EXPOSURE", "EXTRACTION_FAILED")},
     "china_bank_risk_text": {"get_filing_data": ("EXTRACTION_FAILED", "EXTRACTION_FAILED"), "extract_geographic_revenue": ("EXTRACTION_FAILED", "EXTRACTION_FAILED"), "extract_revenue_exposure": ("EXTRACTION_FAILED", "EXTRACTION_FAILED"), "extract_china_exposure": ("FOUND_NON_REVENUE_EXPOSURE", "EXTRACTION_FAILED")},

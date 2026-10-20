@@ -512,15 +512,22 @@ CASES += [
               _ts("extractGeographicRevenue", "GEOX", "Japan", "10-K", "latest", None), geo_view,
               expect={"value": None, "status": "NOT_DISCLOSED", "evidenceAccession": GEOX_NEW_10K, "evidenceFilingType": "10-K",
                       "warnings": ["POSSIBLE_20F_FILER"]}),
-    # A pinned 20-F asked for as filing_type 10-K: the pinned read has no 10-K XBRL fact in that accession, so getFilingData's
-    # existing pinned path answers NO_FACT_FOR_ACCESSION for that accession (no HTML fallback, no 20-F retry: the result is
-    # not NOT_DISCLOSED). Recorded so the port reproduces it; evidenceFilingType echoes the requested filing_type.
+    # 2.23.0 (F4): a pinned 20-F asked for as filing_type 10-K has no 10-K XBRL fact in that accession, so the pinned read falls
+    # through to that accession's own HTML table (as the unpinned read does) instead of NO_FACT_FOR_ACCESSION. The 20-F has no
+    # China row, so NOT_DISCLOSED; the existing pinned 20-F retry reads the same accession. evidenceFilingType is the 20-F's.
     _pending("r4b2.geo.pinned_20f_with_10k_filing_type_reads_that_accession",
              _py(server.extract_geographic_revenue, "GEOX", "China", "10-K", "latest", GEOX_20F),
              _ts("extractGeographicRevenue", "GEOX", "China", "10-K", "latest", GEOX_20F), geo_view,
              today_py=NEW_CHINA,
-             target={"value": None, "status": "SEC_FACT_NOT_AVAILABLE", "evidenceAccession": GEOX_20F, "evidenceFilingType": "10-K",
-                     "warnings": ["NO_FACT_FOR_ACCESSION"]}),
+             target={"value": None, "status": "NOT_DISCLOSED", "evidenceAccession": GEOX_20F, "evidenceFilingType": "20-F",
+                     "warnings": ["POSSIBLE_20F_FILER"]}),
+    _geo_case("r5x.geo.pinned_20f_table_read",
+              _py(server.extract_geographic_revenue, "GEOX", "United States", "10-K", "latest", GEOX_20F),
+              _ts("extractGeographicRevenue", "GEOX", "United States", "10-K", "latest", GEOX_20F), geo_view,
+              expect={"value": 300_000_000, "status": "FOUND", "evidenceAccession": GEOX_20F, "evidenceFilingType": "20-F", "warnings": []}),
+    Case(name="r5x.query.revenue_exposure_pinned", ids=["R5-EXTRACTORS"], py=_q("GEOX", "revenue_exposure", GEOX_OLD_10K, {"exposure_query": "China"}),
+         ts=_q_ts("GEOX", "revenue_exposure", GEOX_OLD_10K, {"exposure_query": "China"}), routes=GEOX_ROUTES, select=query_view,
+         expect={"status": "ANSWERED", "value": 100_000_000, "evidenceAccessions": [GEOX_OLD_10K]}),
     # §1b: one hit and one miss per query type with an accession.
     _pending("r4b2.query.geographic_hit", _q("GEOX", "geographic_revenue_share", GEOX_OLD_10K, GEO),
              _q_ts("GEOX", "geographic_revenue_share", GEOX_OLD_10K, GEO), query_view, ids=("R4-ACC-QUERY",),
@@ -530,11 +537,11 @@ CASES += [
              _q_ts("GEOX", "geographic_revenue_share", GEOX_MISSING, GEO), query_view, ids=("R4-ACC-QUERY",),
              today_py={"status": "ANSWERED", "value": 200_000_000, "evidenceAccessions": [GEOX_NEW_10K]},
              target=GEOX_NOT_FOUND),
-    # china_exposure is unchanged by 2.15.0 in both runtimes. PLANNER (finding): with a found accession its evidence still
-    # names the latest 10-K (its revenue read is not pinned), so a hit is not proof the pinned filing was read.
-    Case(name="r4b2.query.china_hit_unchanged", ids=["R4-ACC-QUERY"], py=_q("GEOX", "china_exposure", GEOX_OLD_10K, {}),
+    # china_exposure was unchanged by 2.15.0. PLANNER (finding, closed): its revenue read was not pinned, so a hit named the
+    # latest 10-K; 2.23.0 (F3) pins the revenue read, so the evidence now names the pinned filing.
+    Case(name="r4b2.query.china_hit_reads_the_pinned_filing", ids=["R4-ACC-QUERY"], py=_q("GEOX", "china_exposure", GEOX_OLD_10K, {}),
          ts=_q_ts("GEOX", "china_exposure", GEOX_OLD_10K, {}), routes=GEOX_ROUTES, select=query_view,
-         expect={"status": "ANSWERED", "value": None, "evidenceAccessions": [GEOX_NEW_10K]}),
+         expect={"status": "ANSWERED", "value": None, "evidenceAccessions": [GEOX_OLD_10K]}),
     Case(name="r4b2.query.china_miss_unchanged", ids=["R4-ACC-QUERY"], py=_q("GEOX", "china_exposure", GEOX_MISSING, {}),
          ts=_q_ts("GEOX", "china_exposure", GEOX_MISSING, {}), routes=GEOX_ROUTES, select=query_view,
          expect={"status": "FILING_NOT_FOUND_TRY_OTHER_TYPE", "value": None, "evidenceAccessions": []}),

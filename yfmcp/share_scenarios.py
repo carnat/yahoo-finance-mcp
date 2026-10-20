@@ -181,7 +181,8 @@ def _scenario_lines(bridge: dict, s: dict) -> list[dict]:
         for cls in warrants.get("classes") if isinstance(warrants.get("classes"), list) else []:
             all_ = t["warrant_vesting"] == "all"
             # A class that vests on untagged conditions has no known exercisable count; it is never taken as all outstanding (2.5.9).
-            count = _num(cls.get("outstanding")) if all_ or "exercisable" not in cls else _num(cls.get("exercisable"))
+            # A class with no exercisable key at all is untagged too (2.23.0, BR-EXT-084).
+            count = _num(cls.get("outstanding")) if all_ else _num(cls.get("exercisable"))
             lines.append(_exercisable("warrants", str(_first(cls.get("class"), "Warrants")), count, "outstanding" if all_ else "vested_exercisable",
                                       _num(cls.get("exercisePrice")), t["warrants"], price))
 
