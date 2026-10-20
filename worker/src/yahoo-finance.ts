@@ -2654,6 +2654,11 @@ export async function getAnalystConsensus(ticker: string | string[]): Promise<st
 
   const output: Record<string, unknown> = {
     ticker,
+    // The same provenance Python sets: Yahoo consensus is contextual market data (2.25.0, F19).
+    source: "yahoo_finance",
+    evidenceClass: "CONTEXTUAL_MARKET_DATA",
+    decisionGrade: false,
+    recommendedNextAction: "NONE",
     priceTargets: {
       current: lastPrice,
       low: raw(fd.targetLowPrice),
@@ -14541,8 +14546,9 @@ export async function compareEarningsActualVsEstimate(ticker: string, period = "
       eps: { value: actualEps, unit: "USD/share", source: "yahoo", period: estimatePeriod ?? estimateQuarterEnd, decisionGrade: false },
     },
     estimate: {
-      revenue: { value: estRevenue, unit: "USD", source: "yahoo", period: estimatePeriod ?? estimateQuarterEnd, decisionGrade: false },
-      eps: { value: estEps, unit: "USD/share", source: "yahoo", period: estimatePeriod ?? estimateQuarterEnd, decisionGrade: false },
+      // Yahoo consensus estimates are LOW, as in get_earnings_analysis; the comparison keeps its own confidence (2.25.0, F16).
+      revenue: { value: estRevenue, unit: "USD", source: "yahoo", period: estimatePeriod ?? estimateQuarterEnd, decisionGrade: false, confidence: "LOW" },
+      eps: { value: estEps, unit: "USD/share", source: "yahoo", period: estimatePeriod ?? estimateQuarterEnd, decisionGrade: false, confidence: "LOW" },
     },
     surprise: {
       revenueSurprisePct: null,
