@@ -3033,7 +3033,16 @@ def capital_structure(ticker: str, source: IxSource, funding_matches: list[TextM
     if cash and cash["concept"].endswith("RestrictedCashEquivalents"):
         warnings.append({"code": "CASH_INCLUDES_RESTRICTED", "message": "Only a cash figure that includes restricted cash was tagged.", "severity": "info"})
     funding = funding_statements(funding_matches)
-    status = ("COMPUTED" if cash and debt else "PARTIAL") if (cash or debt or instrument_rows) else "NOT_FOUND"
+    # Debt with no maturity anywhere (no tagged ladder, no instrument maturities) is not a computed capital structure:
+    # a 10-Q usually leaves the ladder to the 10-K (2.25.4 audit, F37: AAPL's 10-Q read COMPUTED at 0% coverage).
+    debt_unladdered = debt_value is not None and debt_value > 0 and not ladder and not instrument_ladder
+    if debt_unladdered and not any(w.get("code") == "MATURITY_LADDER_INCOMPLETE" for w in warnings):
+        warnings.append({
+            "code": "MATURITY_LADDER_INCOMPLETE",
+            "message": f"The filing tags no debt maturities (no maturity ladder and no instrument maturity dates), so total debt {_js_number(debt_value)} is not laddered; an annual report (filing_type \"10-K\") usually tags the ladder.",
+            "severity": "warning",
+        })
+    status = ("COMPUTED" if cash and debt and not debt_unladdered else "PARTIAL") if (cash or debt or instrument_rows) else "NOT_FOUND"
     return {
         "ticker": ticker,
         "status": status,

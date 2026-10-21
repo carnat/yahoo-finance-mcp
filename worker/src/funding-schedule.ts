@@ -150,6 +150,8 @@ const REPORTED_RE = /\bnet cash (?:used|provided)\b|\b(?:during|for|in) the (?:f
 const GUIDED_RE = /\bexpects?\b|\bexpected\b|\banticipates?\b|\banticipated\b|\bplans?\b|\bplanned\b|\bintends?\b|\bestimates?\b|\bestimated\b|\bprojects?\b|\bbudget(?:s|ed)?\b|\bguidance\b|\bforecasts?\b/i;
 // "expenditures for property, plant, and equipment" is capex wording too (MU, 2.5.21).
 const CAPEX_RE = /\bcapital expenditures?\b|\b(?:expenditures for|purchases? of) property,? plant,? and equipment\b|\bcapex\b|\bconstruction\b|\bpurchase (?:commitments?|obligations?)\b|\binvest(?:ment)?s? (?:of|in)\b|\bspend(?:ing)?\b|\bfacilit(?:y|ies)\b|\bmanufactur\w*\b|\bsatellites?\b|\bdeploy\w*\b/i;
+const PURCHASE_OBLIGATION_RE = /\bpurchase (?:commitments?|obligations?)\b/i;
+const PURCHASE_OBLIGATION_STRIP_RE = /\bpurchase (?:commitments?|obligations?)\b|\bmanufactur\w*\b/gi;
 const FUNDING_RE = /\bfund(?:s|ed|ing)?\b|\bfinanc\w*|\bliquidity\b|\bcash\b|\bproceeds\b/i;
 const RANGE_JOIN_RE = /^\s*(?:to|-|–|—|and)\s*$/i;
 
@@ -212,7 +214,11 @@ export function timingOf(sentence: string): Rec {
 /** A funding or capex sentence's classification, or null when it speaks to neither. */
 export function classifySentence(sentence: string): { classification: string; category: string } | null {
   const contingent = CONTINGENT_RE.test(sentence.replace(INCENTIVE_OFFSET_RE, " ")) && !EQUITY_AWARD_RE.test(sentence);
-  const capex = CAPEX_RE.test(sentence);
+  // Purchase obligations are commitments, not capex, unless the sentence also names a capital purpose: "manufacturing
+  // purchase obligations" are supplier orders (2.25.4 audit, F38: AAPL's $56.2B read capital_expenditure).
+  const capex = PURCHASE_OBLIGATION_RE.test(sentence)
+    ? CAPEX_RE.test(sentence.replace(PURCHASE_OBLIGATION_STRIP_RE, " "))
+    : CAPEX_RE.test(sentence);
   const committed = COMMITTED_RE.test(sentence);
   if (!contingent && !capex && !committed) return null;
   if (!contingent && !committed && !FUNDING_RE.test(sentence) && !/\$\s?\d/.test(sentence)) return null;
@@ -241,9 +247,16 @@ function textItems(statements: Statement[], limit: number): Rec[] {
       if (seen.has(key)) continue;
       seen.add(key);
       const classification = amt.amountStatus === "NOT_STATED" ? "UNRESOLVED" : cls.classification;
+      const timing = timingOf(sentence);
+      // The bare verb "committed" with no amount and no date is not a commitment: "committed to inclusion" (2.25.4
+      // audit, F38). Commitments, non-cancelable or purchase obligations stay commitments without an amount.
+      const statedType = cls.classification === "COMPANY_DISCLOSED_COMMITTED" && amt.amountStatus === "NOT_STATED" && timing.basis === "UNSTATED"
+        && !COMMITTED_RE.test(sentence.replace(/\bcommitted\b/gi, " "))
+        ? "UNRESOLVED"
+        : cls.classification;
       out.push({
         classification,
-        statedType: cls.classification,
+        statedType,
         category: cls.category,
         amountLow: amt.low,
         amountHigh: amt.high,
@@ -251,7 +264,7 @@ function textItems(statements: Statement[], limit: number): Rec[] {
         amountStatus: amt.amountStatus,
         amountAsWritten: amt.asWritten,
         currency: amt.amountStatus === "NOT_STATED" ? null : "USD",
-        timing: timingOf(sentence),
+        timing,
         unresolvedReason: classification === "UNRESOLVED" ? (amt.amountStatus === "NOT_STATED" ? "no amount stated" : "type not stated") : null,
         evidence: {
           sentence: sentence.slice(0, 600),

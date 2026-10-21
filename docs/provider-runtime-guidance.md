@@ -3190,6 +3190,19 @@ F-024, F-026, F-029). Both runtimes change alike.
 - **Tests:** 21 new parity cases in `scripts/parity/cases_audit_2251.py`.
 - **Rollback:** redeploy 2.25.0.
 
+## Audit Repairs, Part 4 (2.25.4)
+
+- **Why:** the approved F35–F40 and F43 from the 2.25.0 audit (`analysis/yahoo-finance-mcp/F_TRIAGE.md` §5). No new fields, statuses, warning codes or enum values; Python gains the Worker's existing `extract_exposure` `code` fields.
+- **F43, `get_sec_recent_events` and the news timeline:** the default forms now include `8-K/A`. An amendment keeps its `filingType` ("8-K/A") and title, and its `eventType` is the form it amends (an 8-K/A is `regulatory`, a 10-K/A is `earnings`).
+- **F35, `extract_exposure` revenue status:** when the region is named only in the filing's text and no table title, header or row label names it, the revenue status is `NOT_FOUND` rather than `EXTRACTION_FAILED`. A region in a table that could not be parsed, or a truncated read, keeps `EXTRACTION_FAILED`.
+- **F36, `extract_management_commentary`:** an excerpt is returned only when its visible text shows the topic. A long unpunctuated statement header that names the topic past the cut is skipped for the next sentence that shows it.
+- **F37, `get_capital_structure`:** total debt with no maturity ladder and no instrument maturity dates is `PARTIAL` with `MATURITY_LADDER_INCOMPLETE`, which says the 10-K usually tags the ladder. Debt with a ladder stays `COMPUTED`.
+- **F38, `get_funding_schedule`:** "purchase obligations" and "purchase commitments" are category `commitment`, even beside "manufacturing", not `capital_expenditure`. A sentence whose only commitment word is the bare verb "committed", with no amount or date, is `UNRESOLVED`; "non-cancelable commitments" without an amount stays committed.
+- **F39, `extract_china_exposure`:** manufacturing evidence also matches "manufactured", "outsourcing partner" and "contract manufacturer", so Apple's "manufactured by outsourcing partners located primarily in China mainland" is found.
+- **F40, `extract_revenue_exposure`:** a value read from a product or category table (lead-in "by product", "by category", "disaggregated") is `exposureType` `segment_revenue`; a region from the geographic table stays `geographic_revenue`. The cached filing is re-read, so it costs no extra request.
+- **Tests:** `scripts/parity/cases_audit_2254.py`; the default-forms case in `scripts/parity/cases_news_b.py`.
+- **Rollback:** redeploy 2.25.3.
+
 ## Audit Repairs, Part 3 (2.25.3)
 
 - **Why:** the approved F32 and F46 from the 2.25.0 audit (`analysis/yahoo-finance-mcp/F_TRIAGE.md` §5). No new fields, statuses, warning codes or enum values.

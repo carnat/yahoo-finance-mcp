@@ -267,10 +267,10 @@ def extract_geo_revenue_from_html(html: str, region: str) -> dict | None:
         if len(rows) < 2:
             continue
         score = 2 if _re.search(r"geograph|by region|by country|by location|region of|country of|location of (?:the )?customer", context) else 1
-        candidates.append((-score, pos, table_html, rows))
+        candidates.append((-score, pos, table_html, rows, lead))
     candidates.sort(key=lambda c: (c[0], c[1]))
 
-    for neg_score, pos, table_html, rows in candidates:
+    for neg_score, pos, table_html, rows, lead in candidates:
         region_row = next((i for i, row in enumerate(rows) if any(_text_contains_geo_region(cell, region) for cell in row)), None)
         if region_row is None:
             continue
@@ -322,8 +322,15 @@ def extract_geo_revenue_from_html(html: str, region: str) -> dict | None:
             ],
             "sourceColumns": [source_column] if source_column else [],
             "statedPct": stated_share,
+            # The chosen table's lead-in (in memory only, for extract_revenue_exposure's exposureType).
+            "tableLead": lead,
         }
     return None
+
+
+# A table lead-in that introduces a product or category breakdown ("net sales by category", "disaggregated net sales"),
+# not a geographic one (2.25.4 audit, F40).
+PRODUCT_BREAKDOWN_LEAD_RE = _re.compile(r"\bby (?:product|products|category|categories|product (?:line|category))\b|\bdisaggregat\w*", _re.IGNORECASE)
 
 
 _YEAR_CELL_RE = _re.compile(r"(?:fy\s*)?(?:19|20)\d{2}", _re.IGNORECASE | _re.ASCII)

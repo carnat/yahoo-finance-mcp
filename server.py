@@ -87,8 +87,9 @@ from yfmcp.parsing.html import (
 )
 from yfmcp.parsing.extractors import (
     _normalize_segment_label, _region_matches,
-    _extract_geo_revenue_from_html, extract_segment_table_from_html, _geo_region_aliases, _js_round,
+    _extract_geo_revenue_from_html, extract_segment_table_from_html, _geo_region_aliases, _text_contains_geo_region, _js_round,
     _extract_xbrl_latest_annual,
+    extract_geo_revenue_from_html as _extract_geo_table, PRODUCT_BREAKDOWN_LEAD_RE as _PRODUCT_BREAKDOWN_LEAD_RE,
 )
 
 # ---------------------------------------------------------------------------
@@ -6860,10 +6861,20 @@ async def _extract_revenue_exposure(
     found = geo.get("value") is not None
     status = "FOUND_REVENUE_EXPOSURE" if found else _as_status(geo)
     warnings = geo["warnings"] if isinstance(geo.get("warnings"), list) else []
+    # A value read from a product or category table ("iPhone" in "net sales by category") is segment revenue, not
+    # geographic revenue (2.25.4 audit, F40). The filing is cached, so re-reading its chosen table costs no request.
+    exposure_type = "geographic_revenue"
+    parsed_evidence = geo.get("evidence") if isinstance(geo.get("evidence"), dict) else {}
+    parsed_url = parsed_evidence.get("documentUrl") or geo.get("documentUrl")
+    if found and geo.get("extractionMethod") == "PARSED_TABLE" and isinstance(parsed_url, str) and parsed_url:
+        html_text = await _edgar_get_html(parsed_url, max_bytes=5_000_000)
+        table = _extract_geo_table(html_text, exposure_query) if html_text else None
+        if table and _PRODUCT_BREAKDOWN_LEAD_RE.search(table.get("tableLead") or ""):
+            exposure_type = "segment_revenue"
     matches = []
     if found:
         matches.append({
-            "exposureType": "geographic_revenue",
+            "exposureType": exposure_type,
             "label": exposure_query,
             "value": geo.get("value"),
             "denominator": geo.get("denominator"),
@@ -8370,7 +8381,9 @@ async def extract_china_exposure(
 
     entity_terms = ["Tongmei", "JinMei", "BoYu"]
     bank_terms = ["Bank of China"]
-    manuf_terms = ["manufacturing", "production", "supply chain", "fab"]
+    # "manufactured by outsourcing partners located primarily in China mainland" (AAPL) names manufacturing without the
+    # word "manufacturing" (2.25.4 audit, F39). New phrases go after the old ones, so an old term still reports first.
+    manuf_terms = ["manufacturing", "production", "supply chain", "fab", "manufactured", "outsourcing partner", "contract manufacturer"]
 
     entity_evidence, entity_rejected = _collect(entity_terms, "entity")
     bank_evidence, bank_rejected = _collect(bank_terms, "bank")
@@ -8543,8 +8556,20 @@ async def extract_exposure(
     else:
         geo_evidence = {}
 
+    # A named limitation (EXTRACTION_FAILED, TABLE_NOT_PARSED, ...) is the revenue status, as in the Worker. A failed
+    # table parse needs a table to have failed on: when the region is only in the filing's text and no indexed table
+    # names it, the status is NOT_FOUND (2.25.4 audit, F35: AAPL India).
+    geo_warnings = [w for w in geo.get("warnings") or [] if isinstance(w, dict)]
+    geo_warning_codes = {w.get("code") for w in geo_warnings}
+    explicit_revenue_status = _explicit_revenue_limitation_status(geo.get("status") or geo.get("code"), geo_warnings)
+    if (explicit_revenue_status in ("EXTRACTION_FAILED", "TABLE_NOT_PARSED") and "TABLE_NOT_PARSED" in geo_warning_codes
+            and "FILING_READ_TRUNCATED" not in geo_warning_codes and _index_tables_name_region(idx, topic_lower) is False):
+        explicit_revenue_status = None
+
     if geo_value is not None:
         rev_status = "FOUND"
+    elif explicit_revenue_status:
+        rev_status = explicit_revenue_status
     elif geo_conf == "NOT_DISCLOSED":
         rev_status = "NOT_DISCLOSED"
     else:
@@ -8560,7 +8585,8 @@ async def extract_exposure(
         "region": geo_evidence.get("sectionHeading") or region_label,
         "period": geo.get("period"),
         "extractionMethod": geo_method,
-        "confidence": "LOW" if geo_conf == "NOT_DISCLOSED" else (geo_conf if geo_value is not None else "LOW"),
+        "confidence": geo_conf if geo_value is not None else (explicit_revenue_status or "LOW"),
+        "code": explicit_revenue_status,
         "evidence": {
             "sectionHeading": geo_evidence.get("sectionHeading"),
             "sourceRows": geo_evidence.get("sourceRows") if isinstance(geo_evidence.get("sourceRows"), list) else [],
@@ -8671,6 +8697,8 @@ async def extract_exposure(
         overall_status = "FOUND_REVENUE_EXPOSURE"
     elif non_revenue_found:
         overall_status = "FOUND_NON_REVENUE_EXPOSURE"
+    elif explicit_revenue_status:
+        overall_status = explicit_revenue_status
     elif rev_status == "NOT_DISCLOSED":
         overall_status = "NOT_DISCLOSED"
     else:
@@ -8688,8 +8716,22 @@ async def extract_exposure(
         "entityExposure": entity_exposure,
         "riskFactorExposure": risk_factor_exposure,
         "overallStatus": overall_status,
-        "warnings": warnings,
+        "code": explicit_revenue_status,
+        # The revenue extraction's warnings, after this tool's own, as in the Worker.
+        "warnings": [*warnings, *geo_warnings],
     })
+
+
+def _index_tables_name_region(index_payload: dict, region: str) -> bool | None:
+    """The Worker's indexTablesNameRegion: whether any indexed table names the region; None with no tables to read."""
+    index = index_payload.get("index") if isinstance(index_payload.get("index"), dict) else None
+    tables = index.get("tables") if index and isinstance(index.get("tables"), list) else None
+    if not tables:
+        return None
+    def words(v):
+        return " ".join(str(x) for x in v) if isinstance(v, list) else ""
+    return any(isinstance(t, dict) and _text_contains_geo_region(
+        f"{t.get('title') or ''} {words(t.get('headers'))} {words(t.get('rowLabels'))}", region) for t in tables)
 
 
 @yfinance_server.tool(
