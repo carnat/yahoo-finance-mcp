@@ -5297,8 +5297,55 @@ async def list_sec_filing_tables(
     offset: int = 0,
     limit: int = 50,
 ) -> str:
-    resolved_doc_url = document_url or await _resolve_latest_sec_doc_url(ticker, filing_type)
-    return await list_filing_tables(ticker, str(resolved_doc_url), offset, limit)
+    if document_url:
+        return await list_filing_tables(ticker, document_url, offset, limit)
+    # Without a document URL the Worker lists the filing index's tables (secIndexTablesPayload), so each row carries
+    # its title, row labels, section and unit scale; Python listed the raw document instead (2.25.3 audit, F46).
+    err = _validate_ticker(ticker)
+    if err:
+        return _mcp_failure("list_sec_filing_tables", ErrorCode.INPUT_VALIDATION_ERROR, err)
+    return _sec_index_tables_payload(await _get_sec_filing_index_impl(ticker, filing_type, None), offset, limit)
+
+
+def _sec_index_tables_payload(index_result: str, offset: int, limit: int) -> str:
+    """The Worker's secIndexTablesPayload: a page of the filing index's tables in the list_sec_filing_tables shape."""
+    payload = json.loads(index_result)
+    if not isinstance(payload, dict) or payload.get("ok") is False or payload.get("error"):
+        return index_result
+    safe_offset = max(0, int(offset))
+    safe_limit = min(100, max(1, int(limit or 50)))
+    index = payload.get("index") if isinstance(payload.get("index"), dict) else {}
+    all_tables = index.get("tables") if isinstance(index.get("tables"), list) else []
+    raw_count = index.get("rawTableCount")
+    raw_count = raw_count if isinstance(raw_count, (int, float)) and not isinstance(raw_count, bool) else len(all_tables)
+    excluded = index.get("excludedTableCount")
+    excluded = excluded if isinstance(excluded, (int, float)) and not isinstance(excluded, bool) else max(0, raw_count - len(all_tables))
+    tables = [{
+        "tableIndex": table.get("tableId") if table.get("tableId") is not None else safe_offset + i,
+        "title": table.get("title"),
+        "headers": table.get("headers") if isinstance(table.get("headers"), list) else [],
+        "rowLabels": table.get("rowLabels") if isinstance(table.get("rowLabels"), list) else [],
+        "sectionId": table.get("sectionId"),
+        "unitScale": table.get("unitScale") if table.get("unitScale") is not None else "unknown",
+        "confidence": table.get("confidence") if table.get("confidence") is not None else "LOW",
+    } for i, table in enumerate(all_tables[safe_offset:safe_offset + safe_limit])]
+    return json.dumps({
+        "ticker": payload.get("ticker"),
+        "filingType": payload.get("filingType"),
+        "filingDate": payload.get("filingDate"),
+        "accessionNumber": payload.get("accessionNumber"),
+        "documentUrl": payload.get("documentUrl"),
+        "status": "OK" if all_tables else "NO_USABLE_TABLES",
+        "tableCount": raw_count,
+        "usableTableCount": len(all_tables),
+        "excludedTableCount": excluded,
+        "returnedCount": len(tables),
+        "offset": safe_offset,
+        "limit": safe_limit,
+        "hasMore": safe_offset + len(tables) < len(all_tables),
+        "tables": tables,
+        "recommendedNextAction": "GET_SEC_FILING_TABLE" if all_tables else "SEARCH_FILING_TEXT",
+    })
 
 
 @yfinance_server.tool(name="get_sec_filing_table", description="Get a selected SEC table; unusable layout tables return an explicit recovery action.")
@@ -6099,21 +6146,15 @@ def _section_heading_matches(requested: str, heading: str) -> bool:
 
 
 def _bold_item_headings(html: str) -> list[tuple[int, int, str, str]]:
-    """Return structurally bold SEC Item headings with offsets and normalized tokens."""
-    bold_open = (
-        r"(?:<b\b[^>]*>|<strong\b[^>]*>|"
-        r"<span\b[^>]*style\s*=\s*['\"][^'\"]*"
-        r"font-weight\s*:\s*(?:bold|[6-9]00)[^'\"]*['\"][^>]*>)"
-    )
-    item_re = _re.compile(
-        rf"{bold_open}\s*(?P<body>(?:<[^>]+>\s*)*Item(?:\s|&nbsp;|&#160;)+"
-        r"\d+[A-Z]?(?:\s*\([^)]+\))?[^<]{0,160})",
-        _re.IGNORECASE,
-    )
+    """Structurally bold SEC Item headings with offsets and normalized tokens (the Worker's boldItemHeadings).
+
+    The bold pattern matches the style value per quote character, because inline-XBRL filings quote font names
+    inside it (style="font-family:'Helvetica';font-weight:700"); the old pattern stopped at the inner quote, so
+    no Apple 10-K Item heading matched (2.25.2 audit, F32)."""
     matches: list[tuple[int, int, str, str]] = []
-    for match in item_re.finditer(html):
-        text = _html_module.unescape(_strip_html_tags(match.group("body"))).replace("\xa0", " ")
-        text = " ".join(text.split())
+    for match in _fs._BOLD_ITEM_RE.finditer(html):
+        text = _fs._heading_block_text(html, match.start()) or " ".join(
+            _fs.strip_html_tags(match.group(1)).replace("\xa0", " ").split())
         token = _section_item_token(text)
         if token:
             matches.append((match.start(), match.end(), text, token))

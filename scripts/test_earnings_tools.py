@@ -597,7 +597,9 @@ class TestNewFixesAndFeatures(unittest.TestCase):
         self.assertIsNone(err_code)
         self.assertIsNotNone(start_idx)
         self.assertTrue(toc_skipped)
-        self.assertEqual(found_heading, "Item 1A. Risk Factors")
+        # The heading is the bold span's whole block, as in the Worker; this span has no block of its own, so the
+        # block runs to the paragraph's close (2.25.3, F32; parity case audit2253.section_bounds.*).
+        self.assertEqual(found_heading, "Item 1A. Risk Factors This is the actual risk factor disclosure.")
         section_html = html[start_idx:end_idx]
         self.assertIn("actual risk factor disclosure", section_html)
         self.assertNotIn("next section", section_html)

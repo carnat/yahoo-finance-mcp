@@ -9794,8 +9794,9 @@ export async function getSecFilingSectionMarkdown(
   // Convert paragraphs/divs
   sectionHtml = sectionHtml.replace(/<(?:p|div|br)[^>]*\/?>/gi, "\n");
   sectionHtml = sectionHtml.replace(/<\/(?:p|div)>/gi, "\n");
-  // Strip remaining tags
-  let markdown = sectionHtml.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+  // Strip remaining tags, then decode entities, as Python's _strip_html_tags does: the markdown kept &#160; and
+  // &#8217; (2.25.3 audit, F32). Decoding after the strip keeps a decoded "&lt;" from reading as a tag.
+  let markdown = decodeHtmlEntities(sectionHtml.replace(/<[^>]+>/g, " ")).replace(/\s+/g, " ").trim();
   markdown = markdown.replace(/\n{3,}/g, "\n\n");
 
   // Count tables
