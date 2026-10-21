@@ -961,15 +961,16 @@ CASES += [
         _sec_recent(["8-K"] * 25, [1, 2, 3, 200, 201, 202, 203] + [5 + i for i in range(18)]),
         select=lambda v: [i["accessionNumber"][-6:] for i in v["items"]],
         expect=["000001", "000002", "000003", "000008", "000009", "000010", "000011", "000012", "000013", "000014"]),
-    # Cards 215 / 216 / 236: the default news form set is 8-K, 10-Q, 10-K, S-3, DEF14A, matched exactly (case-insensitively) on
-    # the whole form string. 8-K/A, 'DEF 14A' (EDGAR's spelling), 424B5, 4, PRE14A and S-1 are dropped; a form literally
-    # spelled 'DEF14A' is kept and mapped to regulatory.
+    # Cards 215 / 216 / 236: the default news form set is 8-K, 8-K/A (2.25.4, F43), 10-Q, 10-K, S-3, DEF14A, matched exactly
+    # (case-insensitively) on the whole form string. 'DEF 14A' (EDGAR's spelling), 424B5, 4, PRE14A and S-1 are dropped; a form
+    # literally spelled 'DEF14A' is kept and mapped to regulatory. An 8-K/A types as the 8-K it amends.
     _sec_scenario(
         "news.sec.default_news_forms_match_exactly_so_def_14a_is_dropped", ["BR-NWS-215", "BR-NWS-216", "BR-NWS-236", "BR-NWS-261"],
         lambda: server.get_company_news("ACME", 20, 30, ["sec"]),
         'm.yahooFinance.getCompanyNews("ACME", 20, 30, ["sec"])',
         _sec_recent(_ALL_FORMS, _ALL_FORM_DAYS), select=_sec_view,
         expect={"items": [["8-K", "regulatory", "2026-10-14T14:00:00Z", "HIGH", "000001"],
+                          ["8-K/A", "regulatory", "2026-10-13T14:00:00Z", "HIGH", "000002"],
                           ["10-Q", "earnings", "2026-10-12T14:00:00Z", "HIGH", "000003"],
                           ["DEF14A", "regulatory", "2026-10-08T14:00:00Z", "HIGH", "000007"],
                           ["S-3", "financing", "2026-10-07T14:00:00Z", "HIGH", "000008"],
@@ -987,7 +988,8 @@ CASES += [
                           ["S-3", "financing", "2026-10-07T14:00:00Z", "HIGH", "000008"],
                           ["PRE14A", "regulatory", "2026-10-05T14:00:00Z", "HIGH", "000010"],
                           ["S-1", "financing", "2026-10-04T14:00:00Z", "HIGH", "000011"],
-                          ["10-K/A", "other", "2026-10-03T14:00:00Z", "HIGH", "000012"],
+                          # An amendment types as the form it amends (2.25.4, F43).
+                          ["10-K/A", "earnings", "2026-10-03T14:00:00Z", "HIGH", "000012"],
                           ["424B", "financing", "2026-10-02T14:00:00Z", "HIGH", "000013"]],
                 "warnings": [], "status": None, "sourcesUsed": ["sec"]}),
     # Card 261: no acceptance time -> publishedAt is the filing date at 00:00:00Z with PUBLISHED_AT_ESTIMATED, confidence MEDIUM

@@ -1097,7 +1097,7 @@ async def _collect_company_events(
     sec_result, company_ir_result, page_result, yahoo_result, finnhub_result = await asyncio.gather(
         _watched(["sec"], _collect_sec_events(
             ticker,
-            filing_types=sec_filing_types or ["8-K", "10-Q", "10-K", "S-3", "DEF14A"],
+            filing_types=sec_filing_types or ["8-K", "8-K/A", "10-Q", "10-K", "S-3", "DEF14A"],
             **window,
         )) if "sec" in selected_sources else _skipped(),
         _watched(["company_ir"], _collect_company_ir_events(ticker, **window)) if "company_ir" in selected_sources else _skipped(),
@@ -1666,6 +1666,11 @@ async def get_company_press_releases(
     return json.dumps(_mark_no_source_selected(payload, sources))
 
 
+# Default forms for get_sec_recent_events; 8-K/A is included so an amended current report is not missed, and its
+# filingType and title ("8-K/A filed") mark it as an amendment (2.25.4 audit, F43).
+_SEC_RECENT_EVENT_DEFAULT_FORMS = ["8-K", "8-K/A", "10-Q", "10-K"]
+
+
 @yfinance_server.tool(
     name="get_sec_recent_events",
     description="""Get recent SEC filing events with filing metadata and SEC archive URLs.
@@ -1682,7 +1687,7 @@ async def get_sec_recent_events(
     err = _validate_ticker(ticker)
     if err:
         return _mcp_failure("get_sec_recent_events", ErrorCode.INPUT_VALIDATION_ERROR, err)
-    selected_types = [str(ft).upper() for ft in (filing_types or ["8-K", "10-Q", "10-K"]) if str(ft).strip()]
+    selected_types = [str(ft).upper() for ft in (filing_types or _SEC_RECENT_EVENT_DEFAULT_FORMS) if str(ft).strip()]
     if not selected_types:
         return _mcp_failure("get_sec_recent_events", ErrorCode.INPUT_VALIDATION_ERROR, "filing_types must not be empty")
     retrieved_at = _utc_now_iso()

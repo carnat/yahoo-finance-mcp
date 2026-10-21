@@ -473,7 +473,8 @@ class TestValuationEndToEnd(unittest.TestCase):
         self.assertEqual((s["shares"]["diluted"], s["shares"]["bridgeStatus"], s["balances"]["basis"], s["balances"]["periodEnd"]),
                          (123_399_996, "PARTIAL", "sec_filing_period_end", "2025-03-31"))
         self.assertEqual(s["enterpriseValue"], 25 * 123_399_996 + 380_000_000 - 300_000_000 - 140_000_000)
-        self.assertEqual(s["warnings"], [])
+        # The fixture's debt has no tagged maturities (2.25.4, F37).
+        self.assertEqual([(w["code"], w["source"]) for w in s["warnings"]], [("MATURITY_LADDER_INCOMPLETE", "extract_capital_structure")])
 
     def test_supplied_price_reruns_the_bridge(self) -> None:
         s = self.data("snapshot_at_40")

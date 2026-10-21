@@ -16,7 +16,8 @@ import {
 import type { NewsProviderResult } from "./types.js";
 
 function eventTypeFromForm(formType: string): string {
-  const f = formType.toUpperCase();
+  // An amendment (8-K/A) types as the form it amends (2.25.4, F43).
+  const f = formType.toUpperCase().replace(/\/A$/, "");
   if (f === "10-Q" || f === "10-K") return "earnings";
   if (f === "S-3" || f === "S-1" || f === "424B") return "financing";
   if (f === "8-K" || f === "DEF14A" || f === "PRE14A") return "regulatory";

@@ -2774,7 +2774,18 @@ export function capitalStructure(input: CapitalStructureInput): Record<string, u
     warnings.push({ code: "CASH_INCLUDES_RESTRICTED", message: "Only a cash figure that includes restricted cash was tagged.", severity: "info" });
   }
   const funding = fundingStatements(input.fundingMatches);
-  const status = cash || debt || instrumentRows.length > 0 ? (cash && debt ? "COMPUTED" : "PARTIAL") : "NOT_FOUND";
+  // Debt with no maturity anywhere (no tagged ladder, no instrument maturities) is not a computed capital structure:
+  // a 10-Q usually leaves the ladder to the 10-K (2.25.4 audit, F37: AAPL's 10-Q read COMPUTED at 0% coverage).
+  const debtUnladdered = debtValue != null && debtValue > 0 && ladder.length === 0 && instrumentLadder.length === 0;
+  if (debtUnladdered && !warnings.some((w) => w.code === "MATURITY_LADDER_INCOMPLETE")) {
+    warnings.push({
+      code: "MATURITY_LADDER_INCOMPLETE",
+      message: `The filing tags no debt maturities (no maturity ladder and no instrument maturity dates), so total debt ${debtValue} is not laddered`
+        + (String(source.filingType ?? "").toUpperCase().startsWith("10-K") ? "." : '; an annual report (filing_type "10-K") usually tags the ladder.'),
+      severity: "warning",
+    });
+  }
+  const status = cash || debt || instrumentRows.length > 0 ? (cash && debt && !debtUnladdered ? "COMPUTED" : "PARTIAL") : "NOT_FOUND";
   return {
     ticker: input.ticker,
     status,

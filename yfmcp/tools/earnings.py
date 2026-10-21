@@ -174,7 +174,11 @@ def _first_sentence_for_topic(text: str, topic: str) -> str | None:
     topic_l = topic.lower()
     for sent in _re.split(r"(?<=[.!?])\s+", text):
         if topic_l in sent.lower():
-            return _compact_excerpt(sent, max_len=220)
+            excerpt = _compact_excerpt(sent, max_len=220)
+            # The excerpt must show the topic: a long unpunctuated run (an income-statement header) matched it past
+            # the cut (2.25.4 audit, F36).
+            if topic_l in excerpt.lower():
+                return excerpt
     return None
 
 

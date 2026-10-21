@@ -26,7 +26,8 @@ from yfmcp.news.shared import (
 
 
 def _event_type_from_form(form_type: str) -> str:
-    ft = (form_type or "").upper()
+    # An amendment (8-K/A) types as the form it amends (2.25.4, F43).
+    ft = (form_type or "").upper().removesuffix("/A")
     if ft in ("10-Q", "10-K"):
         return "earnings"
     if ft in ("S-3", "S-1", "424B"):

@@ -5977,6 +5977,8 @@ export function extractGeoRevenueFromHtml(
   sourceRows: string[][];
   sourceColumns: string[];
   statedPct: number | null;
+  /** The chosen table's lead-in text (in memory only, for extract_revenue_exposure's exposureType). */
+  tableLead: string;
 } | null {
   const documentScale = lazyDocumentScale(html);
   // Every table that names the region and is about revenue is a candidate
@@ -5984,7 +5986,7 @@ export function extractGeoRevenueFromHtml(
   // filings). Tables introduced as a geographic breakdown come first; a
   // table without revenue or sales in it or its lead-in (a properties list
   // of square footage by location) never counts.
-  const candidateTables: { pos: number; tableHtml: string; rows: string[][]; score: number }[] = [];
+  const candidateTables: { pos: number; tableHtml: string; rows: string[][]; score: number; lead: string }[] = [];
   let scanned = 0;
   for (const m of html.matchAll(/<table[^>]*>[\s\S]*?<\/table>/gi)) {
     if (++scanned > 800) break;
@@ -6002,7 +6004,7 @@ export function extractGeoRevenueFromHtml(
     const rows = parseFinancialTableRows(tableHtml);
     if (rows.length < 2) continue;
     const score = /geograph|by region|by country|by location|region of|country of|location of (?:the )?customer/.test(context) ? 2 : 1;
-    candidateTables.push({ pos, tableHtml, rows, score });
+    candidateTables.push({ pos, tableHtml, rows, score, lead });
   }
   if (candidateTables.length === 0) return null;
   candidateTables.sort((a, b) => b.score - a.score || a.pos - b.pos);
@@ -6084,11 +6086,16 @@ export function extractGeoRevenueFromHtml(
       sourceRows,
       sourceColumns: sourceColumn ? [sourceColumn] : [],
       statedPct: statedShare,
+      tableLead: tbl.lead,
     };
   }
 
   return null;
 }
+
+/** A table lead-in that introduces a product or category breakdown ("net sales by category", "disaggregated net
+ * sales"), not a geographic one (2.25.4 audit, F40). */
+export const PRODUCT_BREAKDOWN_LEAD_RE = /\bby (?:product|products|category|categories|product (?:line|category))\b|\bdisaggregat\w*/i;
 
 function filingHasRelevantGeoText(html: string, region: string): boolean {
   const htmlLower = html.toLowerCase();
@@ -11895,11 +11902,21 @@ export async function extractRevenueExposure(
 ): Promise<string> {
   const geo = parseObjectJson(await extractGeographicRevenue(ticker, exposureQuery, filingType, period, accessionNumber, detailLevel));
   const found = geo.value != null;
+  // A value read from a product or category table ("iPhone" in "net sales by category") is segment revenue, not
+  // geographic revenue (2.25.4 audit, F40). The filing is cached, so re-reading its chosen table costs no request.
+  let exposureType = "geographic_revenue";
+  const geoEvidence = geo.evidence && typeof geo.evidence === "object" ? geo.evidence as Record<string, unknown> : {};
+  const parsedUrl = typeof geoEvidence.documentUrl === "string" ? geoEvidence.documentUrl : typeof geo.documentUrl === "string" ? geo.documentUrl : null;
+  if (found && geo.extractionMethod === "PARSED_TABLE" && parsedUrl) {
+    const html = await edgarGetHtml(parsedUrl, 5_000_000);
+    const table = html ? extractGeoRevenueFromHtml(html, exposureQuery) : null;
+    if (table && PRODUCT_BREAKDOWN_LEAD_RE.test(table.tableLead)) exposureType = "segment_revenue";
+  }
   const status = found ? "FOUND_REVENUE_EXPOSURE" : normalizeStatus(geo);
   const warnings = Array.isArray(geo.warnings) ? geo.warnings : [];
   const matches = found
     ? [{
-        exposureType: "geographic_revenue",
+        exposureType,
         label: exposureQuery,
         value: geo.value ?? null,
         denominator: geo.denominator ?? null,
@@ -12991,7 +13008,9 @@ export async function extractChinaExposure(
 
   const entityTerms = ["Tongmei", "JinMei", "BoYu"];
   const bankTerms = ["Bank of China"];
-  const manuTerms = ["manufacturing", "production", "supply chain", "fab"];
+  // "manufactured by outsourcing partners located primarily in China mainland" (AAPL) names manufacturing without the
+  // word "manufacturing" (2.25.4 audit, F39). New phrases go after the old ones, so an old term still reports first.
+  const manuTerms = ["manufacturing", "production", "supply chain", "fab", "manufactured", "outsourcing partner", "contract manufacturer"];
   const riskMentions = parseObjectJson(await extractRiskFactorMentions(ticker, ["China", "tariff", "export control", "Bank of China"], filingType, period, "compact", accessionNumber));
 
   const entityCollected = collect(entityTerms, "entity");
@@ -13096,6 +13115,17 @@ const CHINA_NAMED_ENTITIES = ["foxconn", "tsmc", "luxshare", "catl", "byd", "ton
 // Operational terms for geographic exposure scanning
 const OPERATIONAL_TERMS = ["manufacturing", "assembly", "supply chain", "factory", "production facility"];
 
+/** Whether any table in a get_sec_filing_index payload names the region (title, headers or row labels); null when
+ * the index has no tables to read. */
+export function indexTablesNameRegion(indexPayload: Record<string, unknown>, region: string): boolean | null {
+  const index = indexPayload.index && typeof indexPayload.index === "object" ? indexPayload.index as Record<string, unknown> : null;
+  const tables = index && Array.isArray(index.tables) ? index.tables as Record<string, unknown>[] : null;
+  if (!tables || tables.length === 0) return null;
+  const words = (v: unknown): string => (Array.isArray(v) ? v.map(String).join(" ") : "");
+  return tables.some((t) => t && typeof t === "object"
+    && textContainsGeoRegion(`${String(t.title ?? "")} ${words(t.headers)} ${words(t.rowLabels)}`, region));
+}
+
 export async function extractExposure(
   ticker: string,
   topic: string,
@@ -13164,7 +13194,14 @@ export async function extractExposure(
     ? (geoEvidenceRaw.find((ev) => ev && typeof ev === "object") as Record<string, unknown> | undefined) ?? {}
     : (geoEvidenceRaw && typeof geoEvidenceRaw === "object" ? geoEvidenceRaw as Record<string, unknown> : {});
   const revenueStatus = String(revenueRaw.status ?? revenueRaw.code ?? "").toUpperCase();
-  const explicitRevenueStatus = explicitRevenueLimitationStatus(revenueStatus, revenueWarnings);
+  let explicitRevenueStatus = explicitRevenueLimitationStatus(revenueStatus, revenueWarnings);
+  // A failed table parse needs a table to have failed on: when the region is only in the filing's text and no
+  // indexed table names it, the revenue exposure is NOT_FOUND, not a parser failure (2.25.4 audit, F35: AAPL India).
+  if ((explicitRevenueStatus === "EXTRACTION_FAILED" || explicitRevenueStatus === "TABLE_NOT_PARSED")
+      && hasWarningCode(revenueWarnings, "TABLE_NOT_PARSED") && !hasWarningCode(revenueWarnings, "FILING_READ_TRUNCATED")
+      && indexTablesNameRegion(idx, topicLower) === false) {
+    explicitRevenueStatus = null;
+  }
   let revStatus: string;
   if (geoValue != null) {
     revStatus = "FOUND";
@@ -13730,7 +13767,7 @@ function isManagementCommentaryBoilerplate(sentence: string): boolean {
   return /emerging growth company|smaller reporting company|accelerated filer|shell company|check mark|exchange act|securities act/i.test(sentence);
 }
 
-function sentenceForTopic(text: string, topic: string): { excerpt: string; matchedTerms: string[] } | null {
+export function sentenceForTopic(text: string, topic: string): { excerpt: string; matchedTerms: string[] } | null {
   const terms = managementCommentaryTerms(topic);
   const sentences = text
     .replace(/\s+/g, " ")
@@ -13748,7 +13785,12 @@ function sentenceForTopic(text: string, topic: string): { excerpt: string; match
     const context = sentence.length < 90 && sentences[i + 1]
       ? `${sentence} ${sentences[i + 1]}`
       : sentence;
-    const candidate = { score, excerpt: compactExcerpt(context, 320), matchedTerms };
+    const excerpt = compactExcerpt(context, 320);
+    // The evidence excerpt (its first 240 characters) must show a matched term: a long unpunctuated run such as an
+    // income-statement header matched "Greater China" past its cut (2.25.4 audit, F36).
+    const shown = matchedTerms.filter((term) => commentaryTermMatches(excerpt.slice(0, 240), term));
+    if (!shown.length) continue;
+    const candidate = { score, excerpt, matchedTerms };
     if (!best || candidate.score > best.score) best = candidate;
   }
   return best ? { excerpt: best.excerpt, matchedTerms: best.matchedTerms } : null;

@@ -118,6 +118,8 @@ _REPORTED_RE = re.compile(r"\bnet cash (?:used|provided)\b|\b(?:during|for|in) t
 _GUIDED_RE = re.compile(r"\bexpects?\b|\bexpected\b|\banticipates?\b|\banticipated\b|\bplans?\b|\bplanned\b|\bintends?\b|\bestimates?\b|\bestimated\b|\bprojects?\b|\bbudget(?:s|ed)?\b|\bguidance\b|\bforecasts?\b", _F)
 # "expenditures for property, plant, and equipment" is capex wording too (MU, 2.5.21).
 _CAPEX_RE = re.compile(r"\bcapital expenditures?\b|\b(?:expenditures for|purchases? of) property,? plant,? and equipment\b|\bcapex\b|\bconstruction\b|\bpurchase (?:commitments?|obligations?)\b|\binvest(?:ment)?s? (?:of|in)\b|\bspend(?:ing)?\b|\bfacilit(?:y|ies)\b|\bmanufactur\w*\b|\bsatellites?\b|\bdeploy\w*\b", _F)
+_PURCHASE_OBLIGATION_RE = re.compile(r"\bpurchase (?:commitments?|obligations?)\b", _F)
+_PURCHASE_OBLIGATION_STRIP_RE = re.compile(r"\bpurchase (?:commitments?|obligations?)\b|\bmanufactur\w*\b", _F)
 _FUNDING_RE = re.compile(r"\bfund(?:s|ed|ing)?\b|\bfinanc\w*|\bliquidity\b|\bcash\b|\bproceeds\b", _F)
 _RANGE_JOIN_RE = re.compile(r"^\s*(?:to|-|–|—|and)\s*$", re.I)
 
@@ -189,7 +191,12 @@ def timing_of(sentence: str) -> dict:
 def classify_sentence(sentence: str) -> dict | None:
     """A funding or capex sentence's classification, or None when it speaks to neither."""
     contingent = bool(_CONTINGENT_RE.search(_INCENTIVE_OFFSET_RE.sub(" ", sentence))) and not _EQUITY_AWARD_RE.search(sentence)
-    capex = bool(_CAPEX_RE.search(sentence))
+    # Purchase obligations are commitments, not capex, unless the sentence also names a capital purpose: "manufacturing
+    # purchase obligations" are supplier orders (2.25.4 audit, F38: AAPL's $56.2B read capital_expenditure).
+    if _PURCHASE_OBLIGATION_RE.search(sentence):
+        capex = bool(_CAPEX_RE.search(_PURCHASE_OBLIGATION_STRIP_RE.sub(" ", sentence)))
+    else:
+        capex = bool(_CAPEX_RE.search(sentence))
     committed = bool(_COMMITTED_RE.search(sentence))
     if not contingent and not capex and not committed:
         return None
@@ -228,9 +235,15 @@ def _text_items(statements: list[dict], limit: int) -> list[dict]:
                 continue
             seen.add(key)
             classification = "UNRESOLVED" if amt["amountStatus"] == "NOT_STATED" else cls["classification"]
+            timing = timing_of(sentence)
+            # The bare verb "committed" with no amount and no date is not a commitment: "committed to inclusion" (2.25.4
+            # audit, F38). Commitments, non-cancelable or purchase obligations stay commitments without an amount.
+            stated_type = ("UNRESOLVED" if cls["classification"] == "COMPANY_DISCLOSED_COMMITTED"
+                           and amt["amountStatus"] == "NOT_STATED" and timing.get("basis") == "UNSTATED"
+                           and not _COMMITTED_RE.search(re.sub(r"\bcommitted\b", " ", sentence, flags=_F)) else cls["classification"])
             out.append({
                 "classification": classification,
-                "statedType": cls["classification"],
+                "statedType": stated_type,
                 "category": cls["category"],
                 "amountLow": amt["low"],
                 "amountHigh": amt["high"],
@@ -238,7 +251,7 @@ def _text_items(statements: list[dict], limit: int) -> list[dict]:
                 "amountStatus": amt["amountStatus"],
                 "amountAsWritten": amt["asWritten"],
                 "currency": None if amt["amountStatus"] == "NOT_STATED" else "USD",
-                "timing": timing_of(sentence),
+                "timing": timing,
                 "unresolvedReason": ("no amount stated" if amt["amountStatus"] == "NOT_STATED" else "type not stated") if classification == "UNRESOLVED" else None,
                 "evidence": {
                     "sentence": sentence[:600],

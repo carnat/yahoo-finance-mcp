@@ -695,7 +695,7 @@ async function collectCompanyEvents(
     startDate = "",
     endDate = "",
     sources,
-    secFilingTypes = ["8-K", "10-Q", "10-K", "S-3", "DEF14A"],
+    secFilingTypes = ["8-K", "8-K/A", "10-Q", "10-K", "S-3", "DEF14A"],
     searchQuery = "",
     keepAll = false,
   }: {
@@ -1245,15 +1245,18 @@ export async function getCompanyPressReleases(
   return JSON.stringify(markNoSourceSelected(payload, requestedSources));
 }
 /** SEC row statuses that are an outage (not absence, not ineligibility, not an operator switch-off). */
+/** Default forms for get_sec_recent_events; 8-K/A is included so an amended current report is not missed, and its
+ * filingType and title ("8-K/A filed") mark it as an amendment (2.25.4 audit, F43). */
+export const SEC_RECENT_EVENT_DEFAULT_FORMS = ["8-K", "8-K/A", "10-Q", "10-K"];
 const SEC_OUTAGE_STATUSES = new Set(["PROVIDER_ERROR", "PROVIDER_BUDGET_EXHAUSTED", "RATE_LIMITED", "TIMEOUT", "AUTH_ERROR", "PROVIDER_CHANGED"]);
 export async function getSecRecentEvents(
   ticker: string,
-  filingTypes: string[] = ["8-K", "10-Q", "10-K"],
+  filingTypes: string[] = SEC_RECENT_EVENT_DEFAULT_FORMS,
   lookbackDays = 90,
   maxResults = 20
 ): Promise<string> {
   // [] means the default forms and a list of only blank types is rejected (2.19.0, B-G8; Python behaviour).
-  const selectedTypes = (filingTypes.length > 0 ? filingTypes : ["8-K", "10-Q", "10-K"]).filter(ft => String(ft).trim() !== "");
+  const selectedTypes = (filingTypes.length > 0 ? filingTypes : SEC_RECENT_EVENT_DEFAULT_FORMS).filter(ft => String(ft).trim() !== "");
   if (selectedTypes.length === 0) {
     return mcpFailure("get_sec_recent_events", ErrorCode.INPUT_VALIDATION_ERROR, "filing_types must not be empty");
   }
