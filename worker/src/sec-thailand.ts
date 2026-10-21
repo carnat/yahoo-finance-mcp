@@ -761,6 +761,10 @@ async function factsheetTopHoldings(identity: FundIdentity): Promise<RecordValue
   }
 }
 
+const URLS_DETAIL =
+  "URLs are returned as official references only; this tool does not fetch or parse PDFs. "
+  + "amcUrlFactsheet is the share class's document; pdfFactsheet is the SEC's one document for the whole project.";
+
 async function factsheetUrls(identity: FundIdentity): Promise<RecordValue> {
   try {
     const response = await secGet("/factsheet/urls", { proj_id: identity.projId, fund_class_name: identity.fundClassName, page_size: MAX_PAGE_SIZE });
@@ -773,8 +777,9 @@ async function factsheetUrls(identity: FundIdentity): Promise<RecordValue> {
       pdfFactsheet: row.pdf_factsheet ?? null, asOfDate: row.as_of_date ?? null, lastUpdatedAt: row.last_upd_date ?? null,
     }));
     return {
-      status: data.length ? "OK" : "EMPTY_RESULT", scope: "SHARE_CLASS", asOfDate, data,
-      recovery: recovery(data.length ? "NONE" : "CHECK_LATER", "URLs are returned as official references only; this tool does not fetch or parse PDFs."),
+      // amcUrlFactsheet is per class, but the SEC pdfFactsheet is one document for the project (2.25.7).
+      status: data.length ? "OK" : "EMPTY_RESULT", scope: "MIXED", asOfDate, data,
+      recovery: recovery(data.length ? "NONE" : "CHECK_LATER", URLS_DETAIL),
     };
   } catch (error) {
     return factsheetSectionError("urls", error as ProviderError);
@@ -810,6 +815,11 @@ export async function getThaiFundFactsheet(
   return mcpSuccess(tool, JSON.stringify(payload), { source: SOURCE });
 }
 
+const DIVIDEND_COMPLETE_DETAIL = "Dividend history is project scoped; this page holds the project's complete history.";
+const DIVIDEND_PARTIAL_DETAIL =
+  "Dividend history is project scoped and this page is part of a longer history. dataDate is withheld "
+  + "because the provider's row order is undocumented, so the newest dividend may be on another page.";
+
 export async function getThaiFundDividendHistory(
   fundClassNameRaw: unknown,
   projIdRaw: unknown,
@@ -840,12 +850,17 @@ export async function getThaiFundDividendHistory(
       bookCloseDate: row.book_close_date ?? null, dividendDate: row.dividend_date ?? null,
       dividendValue: row.dividend_value ?? null, lastUpdatedAt: row.last_upd_date ?? null,
     }));
-  const dataDate = dividends.map((row) => optionalString(row.dividendDate)).filter((value): value is string => value != null).sort().at(-1) ?? null;
   const nextCursor = optionalString(response.next_cursor);
+  // Provider row order is undocumented, so the newest dividend is known only when
+  // one page holds the whole history: no cursor sent and none returned (2.25.7).
+  const complete = optionalString(nextCursorRaw) == null && !nextCursor;
+  const dataDate = complete
+    ? dividends.map((row) => optionalString(row.dividendDate)).filter((value): value is string => value != null).sort().at(-1) ?? null
+    : null;
   const payload = basePayload(dividends.length ? "OK" : "EMPTY_RESULT");
   Object.assign(payload, {
     scope: "PROJECT", identity, dataDate, dividends, nextCursor, hasMore: Boolean(nextCursor),
-    recovery: recovery(nextCursor ? "FETCH_NEXT_PAGE" : "NONE", "Dividend history is project scoped and this response covers only the returned page."),
+    recovery: recovery(nextCursor ? "FETCH_NEXT_PAGE" : "NONE", complete ? DIVIDEND_COMPLETE_DETAIL : DIVIDEND_PARTIAL_DETAIL),
   });
   return mcpSuccess(tool, JSON.stringify(payload), { source: SOURCE, dataDate });
 }

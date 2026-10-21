@@ -989,6 +989,12 @@ async def _factsheet_top_holdings(identity: FundIdentity) -> dict[str, object]:
     }
 
 
+_URLS_DETAIL = (
+    "URLs are returned as official references only; this tool does not fetch or parse PDFs. "
+    "amcUrlFactsheet is the share class's document; pdfFactsheet is the SEC's one document for the whole project."
+)
+
+
 async def _factsheet_urls(identity: FundIdentity) -> dict[str, object]:
     try:
         payload = await _request_json("/factsheet/urls", {
@@ -1005,7 +1011,8 @@ async def _factsheet_urls(identity: FundIdentity) -> dict[str, object]:
     as_of = next((row.get("as_of_date") for row in rows if row.get("as_of_date")), None)
     return {
         "status": "OK" if rows else "EMPTY_RESULT",
-        "scope": "SHARE_CLASS",
+        # amcUrlFactsheet is per class, but the SEC pdfFactsheet is one document for the project (2.25.7).
+        "scope": "MIXED",
         "asOfDate": as_of,
         "data": [{
             "prospectusType": row.get("prospectus_type"), "amcUrlFactsheet": row.get("amc_url_factsheet"),
@@ -1014,7 +1021,7 @@ async def _factsheet_urls(identity: FundIdentity) -> dict[str, object]:
         } for row in rows],
         "recovery": _recovery(
             "CHECK_LATER" if not rows else "NONE",
-            "URLs are returned as official references only; this tool does not fetch or parse PDFs.",
+            _URLS_DETAIL,
         ),
     }
 
@@ -1076,6 +1083,13 @@ async def get_thai_fund_factsheet(
     return _mcp_success("get_thai_fund_factsheet", payload, source=_SOURCE)
 
 
+_DIVIDEND_COMPLETE_DETAIL = "Dividend history is project scoped; this page holds the project's complete history."
+_DIVIDEND_PARTIAL_DETAIL = (
+    "Dividend history is project scoped and this page is part of a longer history. dataDate is withheld "
+    "because the provider's row order is undocumented, so the newest dividend may be on another page."
+)
+
+
 @yfinance_server.tool(
     name="get_thai_fund_dividend_history",
     description="""Return one page of official Thai SEC mutual-fund dividend history.
@@ -1124,17 +1138,20 @@ async def get_thai_fund_dividend_history(
         "lastUpdatedAt": row.get("last_upd_date"),
     } for row in rows]
     next_value = _optional_str(payload.get("next_cursor"))
+    # Provider row order is undocumented, so the newest dividend is known only when
+    # one page holds the whole history: no cursor sent and none returned (2.25.7).
+    complete = _optional_str(next_cursor) is None and not next_value
     base = _base_payload("OK" if dividends else "EMPTY_RESULT")
     base.update({
         "scope": "PROJECT",
         "identity": identity.compact(),
-        "dataDate": max((item["dividendDate"] for item in dividends if isinstance(item["dividendDate"], str)), default=None),
+        "dataDate": max((item["dividendDate"] for item in dividends if isinstance(item["dividendDate"], str)), default=None) if complete else None,
         "dividends": dividends,
         "nextCursor": next_value,
         "hasMore": bool(next_value),
         "recovery": _recovery(
             "FETCH_NEXT_PAGE" if next_value else "NONE",
-            "Dividend history is project scoped and this response covers only the returned page.",
+            _DIVIDEND_COMPLETE_DETAIL if complete else _DIVIDEND_PARTIAL_DETAIL,
         ),
     })
     return _mcp_success(

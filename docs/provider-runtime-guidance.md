@@ -3190,6 +3190,15 @@ F-024, F-026, F-029). Both runtimes change alike.
 - **Tests:** 21 new parity cases in `scripts/parity/cases_audit_2251.py`.
 - **Rollback:** redeploy 2.25.0.
 
+## Thai Fund Audit Repairs, Part 2 (2.25.7)
+
+- **Why:** the two remaining code findings from the Thai fund audit (TF3, TF7), which the owner asked to fix on 2026-10-21. Both runtimes change alike. No new fields, statuses or warning codes; `MIXED` is an existing scope value.
+- **TF3, `get_thai_fund_dividend_history`:** the SEC does not document row order, so the newest dividend on one page is not necessarily the fund's newest. `dataDate` (payload and meta) is now reported only when one page holds the whole history: no `next_cursor` was sent and none came back. A page of a longer history returns `dataDate: null`, and its recovery detail says why. Rows are still sorted newest first within the page, and the one-page contract is unchanged.
+- **TF7, factsheet `urls`:** the section's scope is `MIXED` instead of `SHARE_CLASS`, because `amcUrlFactsheet` is the share class's document but `pdfFactsheet` is the SEC's one document for the whole project. The recovery detail says which is which.
+- **Still open:** TF9, empty dividend history for dividend-paying funds, waits on a raw provider call with `SEC_OPEN_DATA_API_KEY` in the cloud environment.
+- **Tests:** `scripts/test_thai_funds.py` (complete versus partial dividend history, URL scope, Worker source parity).
+- **Rollback:** redeploy 2.25.6.
+
 ## Thai Fund Audit Repairs (2.25.6)
 
 - **Why:** the Thai fund audit against the Thai SEC Open Data API spec (`/mnt/project-files/audits/thai-funds-audit-2026-10-21.md`, items TF2, TF4, TF5, TF6, TF8), approved by the owner on 2026-10-21. Both runtimes change alike. No new fields, statuses, warning codes or enum values.
