@@ -184,9 +184,10 @@ class TestExtractEarningsMetrics(unittest.TestCase):
             "Revenue was $123.0 billion for the fourth quarter of fiscal 2026. "
             "Diluted earnings per share was $2.31. Gross margin was 47.8%."
         )
+        # The XBRL quarter tier (2.25.5, F29) is stubbed empty: this test covers the release-text tier.
         with patch("yfmcp.tools.earnings._resolve_latest_earnings_release", new_callable=AsyncMock) as mocked_release, patch(
             "yfmcp.tools.earnings._edgar_get_html", new_callable=AsyncMock
-        ) as mocked_html:
+        ) as mocked_html, patch("yfmcp.tools.earnings._xbrl_quarter_metrics", new=AsyncMock(return_value=[])):
             mocked_release.return_value = {
                 "ticker": "AAPL",
                 "period": "FY2026 Q2",

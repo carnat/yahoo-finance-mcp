@@ -3190,6 +3190,18 @@ F-024, F-026, F-029). Both runtimes change alike.
 - **Tests:** 21 new parity cases in `scripts/parity/cases_audit_2251.py`.
 - **Rollback:** redeploy 2.25.0.
 
+## Audit Repairs, Part 5 (2.25.5)
+
+- **Why:** the approved F29 from the 2.25.0 audit (`analysis/yahoo-finance-mcp/F_TRIAGE.md` §5). Python only; no new fields, statuses, warning codes or enum values.
+- **F29, `extract_earnings_metrics` (Python):** Python had no SEC XBRL tier, so revenue, gross margin, operating income, free cash flow and capex came only from the release text at `LOW`, or were empty. It now reads the Worker's tier 1 first:
+  - For each metric it reads the SEC companyconcept facts (revenue across the equivalent revenue concepts, the latest quarter winning) and picks the latest fiscal quarter with the Worker's `selectQuarterFact`. A three-month fact is `DIRECT_QUARTER`. A cash-flow or fourth-quarter value is the year-to-date fact less the prior year-to-date fact (`YTD_DIFFERENCE`). EPS is never derived.
+  - A 10-Q filed before the release is not used, every metric must share the revenue (or EPS) quarter, and the quarter must have ended within 120 days.
+  - When it applies, the metrics are `HIGH` with `periodStart`, `periodEnd`, `derivation` and `sec_xbrl_10q`/`sec_xbrl_10k` evidence, and the release text is not mined for metrics (it is still read for the stated period).
+  - Live AAPL output now matches the Worker for all six metrics.
+- **Not changed:** Python still has no 8-K iXBRL tier (tier 2), and an empty metric's confidence on the text path is still `NOT_DECISION_GRADE` in Python and `NOT_DISCLOSED` in the Worker.
+- **Tests:** `scripts/parity/cases_audit_2255.py`; `scripts/test_earnings_tools.py` stubs the XBRL tier in its release-text test.
+- **Rollback:** redeploy 2.25.4.
+
 ## Audit Repairs, Part 4 (2.25.4)
 
 - **Why:** the approved F35–F40 and F43 from the 2.25.0 audit (`analysis/yahoo-finance-mcp/F_TRIAGE.md` §5). No new fields, statuses, warning codes or enum values; Python gains the Worker's existing `extract_exposure` `code` fields.

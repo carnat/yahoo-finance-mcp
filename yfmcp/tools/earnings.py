@@ -418,6 +418,139 @@ async def index_earnings_release(ticker: str, period: str = "latest", source_url
     _tool_cache.set(cache_key, result, TTL_EDGAR)
     return result
 
+_DAY_S = 86_400
+
+
+def _select_quarter_fact(facts: list, min_filed: str | None, derive: bool) -> dict | None:
+    """The Worker's selectQuarterFact: the latest fiscal quarter's value among SEC companyconcept facts (2.25.5, F29).
+
+    The latest period end comes from 10-Q/10-K facts filed on or after min_filed. A three-month fact for that end is
+    used as is. Otherwise, with derive, the longest fact for that end less the fact with the same start that ends one
+    quarter earlier gives the quarter. A longer period is never returned as a quarter.
+    """
+    def _is_quarter(days: int) -> bool:
+        return 80 <= days <= 100
+
+    usable = []
+    for f in facts if isinstance(facts, list) else []:
+        if not isinstance(f, dict):
+            continue
+        form = str(f.get("form") or "").upper()
+        if not _re.match(r"^10-[QK]", form) or f.get("segment"):
+            continue
+        val = f.get("val")
+        if isinstance(val, bool) or not isinstance(val, (int, float)) or not math.isfinite(val):
+            continue
+        start, end = str(f.get("start") or ""), str(f.get("end") or "")
+        try:
+            start_d, end_d = datetime.date.fromisoformat(start), datetime.date.fromisoformat(end)
+        except ValueError:
+            continue
+        if end_d <= start_d:
+            continue
+        usable.append({"value": val, "start": start, "end": end, "filed": str(f.get("filed") or ""), "form": form,
+                       "days": (end_d - start_d).days})
+    recent = [f for f in usable if not min_filed or f["filed"] >= min_filed]
+    if not recent:
+        return None
+    target_end = max(f["end"] for f in recent)
+
+    def _newest_first(rows: list) -> list:
+        return sorted(rows, key=lambda f: f["filed"], reverse=True)
+
+    direct = _newest_first([f for f in recent if f["end"] == target_end and _is_quarter(f["days"])])
+    if direct:
+        d = direct[0]
+        return {"value": d["value"], "start": d["start"], "end": d["end"], "filed": d["filed"], "form": d["form"], "method": "DIRECT_QUARTER"}
+    if not derive:
+        return None
+    cumulative = sorted(_newest_first([f for f in recent if f["end"] == target_end and f["days"] > 100]), key=lambda f: f["days"], reverse=True)
+    if not cumulative:
+        return None
+    cum = cumulative[0]
+    prior = sorted(_newest_first([f for f in usable if f["start"] == cum["start"] and f["end"] < target_end and _is_quarter(cum["days"] - f["days"])]),
+                   key=lambda f: f["end"], reverse=True)
+    if not prior:
+        return None
+    quarter_start = datetime.date.fromisoformat(prior[0]["end"]) + datetime.timedelta(days=1)
+    return {"value": cum["value"] - prior[0]["value"], "start": quarter_start.isoformat(), "end": cum["end"], "filed": cum["filed"],
+            "form": cum["form"], "method": "YTD_DIFFERENCE"}
+
+
+async def _xbrl_quarter_metrics(ticker: str, cik_padded: str, release_filing_date: str, retrieved_at: str) -> list[tuple[str, dict]]:
+    """The Worker's tier 1: confirmed 10-Q/10-K XBRL quarter facts at HIGH, in the Worker's metric order (2.25.5, F29)."""
+    from yfmcp.sec_facts import REVENUE_CONCEPTS
+    read_json = _server_attr("_edgar_read_json")
+
+    async def _quarterly(primary, fallback: str | None = None, unit: str = "USD") -> dict | None:
+        concepts = list(primary) if isinstance(primary, list) else [primary, *([fallback] if fallback else [])]
+        best = None
+        for concept in concepts:
+            read = await read_json(f"https://data.sec.gov/api/xbrl/companyconcept/CIK{cik_padded}/us-gaap/{concept}.json")
+            data = read.get("json") if read.get("ok") else None
+            units = data.get("units") if isinstance(data, dict) else None
+            facts = units.get(unit) if isinstance(units, dict) else None
+            # A filing that predates the release cannot be its metric; per-share amounts are never derived.
+            quarter = _select_quarter_fact(facts if isinstance(facts, list) else [], release_filing_date or None, unit == "USD")
+            if quarter and not isinstance(primary, list):
+                return {**quarter, "concept": concept}
+            if quarter and (best is None or quarter["end"] > best["end"]):
+                best = {**quarter, "concept": concept}
+        return best
+
+    x_rev, x_eps, x_gp, x_oi, x_capex, x_ocf = await asyncio.gather(
+        _quarterly(list(REVENUE_CONCEPTS)),
+        _quarterly("EarningsPerShareDiluted", None, "USD/shares"),
+        _quarterly("GrossProfit"),
+        _quarterly("OperatingIncomeLoss"),
+        _quarterly("PaymentsToAcquirePropertyPlantAndEquipment", "CapitalExpenditures"),
+        _quarterly("NetCashProvidedByUsedInOperatingActivities"),
+    )
+    # Every metric must describe the same quarter as revenue (or EPS).
+    quarter_end = (x_rev or {}).get("end") or (x_eps or {}).get("end")
+
+    def _same(fact):
+        return fact if fact and (quarter_end is None or fact["end"] == quarter_end) else None
+
+    x_eps, x_gp, x_oi, x_capex, x_ocf = _same(x_eps), _same(x_gp), _same(x_oi), _same(x_capex), _same(x_ocf)
+    # Only a period that ended within 120 days (the 10-Q lag window) applies.
+    period_end = (x_rev or {}).get("end") or (x_eps or {}).get("end")
+    if not period_end:
+        return []
+    end_dt = datetime.datetime.fromisoformat(period_end).replace(tzinfo=datetime.timezone.utc)
+    if (datetime.datetime.now(datetime.timezone.utc) - end_dt).total_seconds() >= 120 * _DAY_S:
+        return []
+
+    def _ev(fact: dict) -> dict:
+        derived = fact["method"] == "YTD_DIFFERENCE"
+        return {
+            "url": f"https://data.sec.gov/api/xbrl/companyconcept/CIK{cik_padded}/us-gaap/{fact['concept']}.json",
+            "sourceType": "sec_xbrl_10k" if fact["form"].startswith("10-K") else "sec_xbrl_10q",
+            "publishedAt": None,
+            "retrievedAt": retrieved_at,
+            "excerpt": (f"XBRL {fact['concept']} quarter {fact['start']} to {fact['end']}, derived as the {fact['form']} year-to-date value less the prior year-to-date value"
+                        if derived else f"XBRL {fact['concept']} quarter {fact['start']} to {fact['end']}"),
+        }
+
+    def _q(fact: dict) -> dict:
+        return {"periodStart": fact["start"], "periodEnd": fact["end"], "derivation": fact["method"]}
+
+    out: list[tuple[str, dict]] = []
+    if x_rev:
+        out.append(("revenue", {"value": x_rev["value"], "unit": "USD", "rawValue": None, "confidence": "HIGH", **_q(x_rev), "evidence": _ev(x_rev)}))
+    if x_eps:
+        out.append(("epsDiluted", {"value": x_eps["value"], "unit": "USD/share", "rawValue": None, "confidence": "HIGH", **_q(x_eps), "evidence": _ev(x_eps)}))
+    if x_gp and x_rev and x_rev["value"] != 0:
+        ratio = x_gp["value"] / x_rev["value"]
+        out.append(("grossMargin", {"valueRatio": float(f"{ratio:.6f}"), "valuePct": float(f"{ratio * 100:.2f}"), "rawValue": None, "confidence": "HIGH", **_q(x_gp), "evidence": _ev(x_gp)}))
+    if x_oi:
+        out.append(("operatingIncome", {"value": x_oi["value"], "unit": "USD", "rawValue": None, "confidence": "HIGH", **_q(x_oi), "evidence": _ev(x_oi)}))
+    if x_capex:
+        out.append(("capex", {"value": abs(x_capex["value"]), "unit": "USD", "rawValue": None, "confidence": "HIGH", **_q(x_capex), "evidence": _ev(x_capex)}))
+    if x_ocf and x_capex:
+        out.append(("freeCashFlow", {"value": x_ocf["value"] - abs(x_capex["value"]), "unit": "USD", "rawValue": None, "confidence": "HIGH", **_q(x_ocf), "evidence": _ev(x_ocf)}))
+    return out
+
 
 @yfinance_server.tool(
     name="extract_earnings_metrics",
@@ -460,10 +593,19 @@ async def extract_earnings_metrics(
     retrieved_at = _utc_now_iso()
     period_info = _extract_earnings_period_from_text("")
 
+    # Tier 1, as in the Worker: confirmed 10-Q/10-K XBRL quarter facts (2.25.5, F29). The release text below is read
+    # only when no XBRL quarter applies.
+    cik_padded = str(src.get("cikPadded") or "") or (await _server_attr("_resolve_cik_for_ticker")(ticker)) or ""
+    xbrl_metrics = await _xbrl_quarter_metrics(ticker, cik_padded, str(src.get("filingDate") or ""), retrieved_at) if cik_padded else []
+    for key, value in xbrl_metrics:
+        metrics[key] = value
+        evidence_items.append(value["evidence"])
+
     if src_url and src_url.startswith("https://www.sec.gov/Archives/"):
         html = await _edgar_get_html(src_url, max_bytes=5_000_000)
         text = _strip_html_blocks(_sanitize_sec_html(html or ""))
         period_info = _extract_earnings_period_from_text(text)
+    if not xbrl_metrics and src_url.startswith("https://www.sec.gov/Archives/"):
         hits = {key: _extract_release_text_metric(text, key) for key in ("revenue", "epsDiluted", "grossMargin", "operatingIncome", "freeCashFlow", "capex")}
 
         def _ev(excerpt: str | None) -> dict | None:
@@ -507,7 +649,7 @@ async def extract_earnings_metrics(
                 "code": "TEXT_METRIC_VERIFY_REQUIRED",
                 "message": "EX-99 prose extraction is contextual but not decision-grade without a structured period-matched table or XBRL fact.",
             })
-    else:
+    elif not xbrl_metrics:
         warnings.append({"code": "PUBLIC_RELEASE_NOT_FOUND", "message": "No SEC 8-K earnings release source available"})
 
     overall_conf = "NOT_DISCLOSED"
