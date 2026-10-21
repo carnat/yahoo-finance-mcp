@@ -3190,6 +3190,17 @@ F-024, F-026, F-029). Both runtimes change alike.
 - **Tests:** 21 new parity cases in `scripts/parity/cases_audit_2251.py`.
 - **Rollback:** redeploy 2.25.0.
 
+## Audit Repairs, Part 3 (2.25.3)
+
+- **Why:** the approved F32 and F46 from the 2.25.0 audit (`analysis/yahoo-finance-mcp/F_TRIAGE.md` §5). No new fields, statuses, warning codes or enum values.
+- **F32, `get_sec_filing_section_markdown`:**
+  - **Python** matched a bold Item heading only when the `style` value held no inner quote. Inline-XBRL filings quote font names inside it (`style="font-family:'Helvetica';font-weight:700"`), so every Apple 10-K Item heading was missed and "Item 7" returned `NO_FILING_DATA`. Python now uses the Worker's bold-heading pattern and the heading's full block text, so both runtimes find the same section and report the same heading.
+  - **Worker** markdown kept raw entities such as `&#160;` and `&#8217;`. It now decodes them after the tags are stripped, as Python does.
+  - `word_count` still counts the returned (possibly truncated) markdown, and `truncated` says when it was cut.
+- **F46, `list_sec_filing_tables` without `document_url` (Python):** lists the filing index's tables, as the Worker does, so each row carries `tableIndex`, `title`, `headers`, `rowLabels`, `sectionId`, `unitScale` and `confidence`, and the payload carries the filing's `filingType`, `filingDate` and `accessionNumber`. With `document_url` both runtimes still list the raw document (`rowCount`, `qualityStatus`).
+- **Tests:** `scripts/parity/cases_audit_2253.py`.
+- **Rollback:** redeploy 2.25.2.
+
 ## Audit Repairs, Part 2 (2.25.2)
 
 - **Why:** the approved F30, F31, F33, F34 and F42 from the 2.25.0 audit (`analysis/yahoo-finance-mcp/F_TRIAGE.md` §5). No new fields, statuses, warning codes or enum values.
