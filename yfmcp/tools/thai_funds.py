@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 import hashlib
 import json
+import math
 import os
 from typing import Any
 from urllib import error as _urlerror
@@ -366,12 +367,20 @@ def _resolution_response(
     return _mcp_success(tool, payload, source=_SOURCE)
 
 
+_RETRYABLE_PROVIDER_CODES = frozenset({"PROVIDER_TIMEOUT", "RATE_LIMIT"})
+
+
 def _provider_failure(tool: str, error: SecThailandProviderError) -> str:
     meta_extra: dict[str, object] = {
         "recoveryAction": error.recovery_action,
         "evidenceClass": _EVIDENCE_CLASS,
         "decisionGrade": False,
     }
+    # Timeouts and rate limits are transient, as for every other provider (2.25.6).
+    # The Worker carries it on both meta and error; the canary reads error.retryable.
+    if error.code in _RETRYABLE_PROVIDER_CODES:
+        meta_extra["retryable"] = True
+        meta_extra["error_extra"] = {"retryable": True}
     if error.diagnostics is not None:
         meta_extra["diagnostics"] = error.diagnostics
     return _mcp_failure(
@@ -597,6 +606,40 @@ async def _explicit_project_nav_payload(
     lookback_days: int,
 ) -> dict[str, object]:
     """Fetch one project directly, retaining the source class without inference."""
+    # Ask for the requested class first: an unfiltered page of a multi-class
+    # project can hold more than 100 rows and push this class past page 1 (2.25.6).
+    filtered = await _request_json("/daily-info/nav", {
+        "proj_id": proj_id,
+        "fund_class_name": requested_fund_class_name,
+        "start_nav_date": start_date.isoformat(),
+        "end_nav_date": end_date.isoformat(),
+        "page_size": _MAX_PAGE_SIZE,
+    })
+    class_rows = [
+        row for row in filtered["items"]
+        if isinstance(row, dict) and _safe_date(row.get("nav_date"))
+        and str(row.get("fund_class_name") or "") == requested_fund_class_name
+    ]
+    if class_rows:
+        class_identity = FundIdentity.from_nav(
+            class_rows[0], proj_id=proj_id, requested_fund_class_name=requested_fund_class_name,
+        )
+        return _nav_result(
+            class_identity,
+            class_rows,
+            next_cursor=_optional_str(filtered.get("next_cursor")),
+            start_date=start_date,
+            end_date=end_date,
+            lookback_days=lookback_days,
+            identity_resolution={
+                "status": "NAV_PROJECT_ID_AND_SEC_CLASS_CONFIRMED",
+                "method": "EXPLICIT_PROJ_ID_DIRECT_NAV",
+                "requestedFundClassName": requested_fund_class_name,
+                "sourceFundClassName": class_identity.fund_class_name,
+            },
+        )
+    # No row under that class name: read the project unfiltered, where a single
+    # SEC class ("main" or "-") is accepted as an alias for a public code.
     response = await _request_json("/daily-info/nav", {
         "proj_id": proj_id,
         "start_nav_date": start_date.isoformat(),
@@ -908,6 +951,14 @@ async def _factsheet_statistics(identity: FundIdentity) -> dict[str, object]:
     }
 
 
+def _asset_rank(row: dict) -> float:
+    try:
+        rank = float(row.get("asset_seq"))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return math.inf
+    return rank if math.isfinite(rank) else math.inf
+
+
 async def _factsheet_top_holdings(identity: FundIdentity) -> dict[str, object]:
     try:
         payload = await _request_json("/factsheet/top5-holdings", {
@@ -919,6 +970,8 @@ async def _factsheet_top_holdings(identity: FundIdentity) -> dict[str, object]:
         return _factsheet_section_error("top_holdings", error)
     rows = [row for row in payload["items"] if isinstance(row, dict)]
     as_of = next((row.get("end_date") or row.get("start_date") for row in rows if row.get("end_date") or row.get("start_date")), None)
+    # Provider order is undocumented; present holdings by their factsheet rank (2.25.6).
+    rows.sort(key=_asset_rank)
     return {
         "status": "OK" if rows else "EMPTY_RESULT",
         "scope": "PROJECT",
@@ -946,6 +999,9 @@ async def _factsheet_urls(identity: FundIdentity) -> dict[str, object]:
     except SecThailandProviderError as error:
         return _factsheet_section_error("urls", error)
     rows = [row for row in payload["items"] if isinstance(row, dict)]
+    # The endpoint has no latest filter, so date the section by its newest row
+    # and list rows newest first (2.25.6).
+    rows.sort(key=lambda row: str(row.get("as_of_date") or ""), reverse=True)
     as_of = next((row.get("as_of_date") for row in rows if row.get("as_of_date")), None)
     return {
         "status": "OK" if rows else "EMPTY_RESULT",

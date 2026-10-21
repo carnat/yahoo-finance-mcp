@@ -27,14 +27,39 @@ share-class scoped, fetch a factsheet PDF, or crawl AMC websites.
   directly without requiring profile lookup: one returned SEC class (including
   `main`) is accepted as a source-class alias, while multiple classes remain
   an explicit ambiguity. The v1 result selects the maximum returned `nav_date`
-  rather than trusting row order.
+  rather than trusting row order. Since 2.25.6 the explicit-project path asks
+  for the requested `fund_class_name` first and reads the project unfiltered
+  only when that returns no row for the class, so a multi-class project's
+  first page can no longer hide the requested class. Non-class funds appear as
+  `main` in the data dictionary and `-` in the spec sample; both reach the
+  alias path.
 - Factsheet records with `latest=true` still retain their own historical
   period/as-of date. They are dated evidence, not live holdings.
 - `/factsheet/top5-holdings` and `/daily-info/dividend-history` are project
   scoped. `class_abbr_name` is retained on dividend rows but does not make
   the endpoint share-class scoped.
 - URL records are returned only as official references. PDF fetching/parsing is
-  intentionally out of scope.
+  intentionally out of scope. `/factsheet/urls` has no `latest` filter, so the
+  section is dated by its newest `as_of_date` and lists rows newest first.
+  `amc_url_factsheet` is per share class, but `pdf_factsheet` is one document
+  for the whole project (the spec says it consolidates every class).
+- Top-five holdings are listed by `asset_seq`, since provider row order is not
+  documented.
+- `PROVIDER_TIMEOUT` and `RATE_LIMIT` failures carry `retryable: true`, as other
+  providers' transient failures do.
+
+## Spec Source and Endpoint Inventory Check (2026-10-21)
+
+- The official developer portal is `secopendata.sec.or.th`; the earlier
+  `api-portal.sec.or.th` was migrated there and announced to close on
+  30 June 2026. The portal's firewall blocks automated and cloud clients,
+  including a headless browser, so this contract was checked against an
+  unofficial mirror of the portal's spec
+  (`github.com/Sitthinut/sec-open-data-api-spec`, captured 2026-05-26).
+- The live gateway answers 401 (route exists, key required) for each of the
+  21 fund endpoints in that spec and 404 for paths outside it, so the mirror
+  matched the gateway on 2026-10-21. Six endpoints are in use; the other 15
+  are listed below.
 
 ## Verified Discovery and Batch Notes
 
@@ -56,6 +81,7 @@ share-class scoped, fetch a factsheet PDF, or crawl AMC websites.
 | `/factsheet/dividend-policy`, `/factsheet/fees` | Product comparison | Policy/fee disclosure is distinct from actual dividend history. |
 | `/general-info/specifications`, `/general-info/mutual-fund-fees`, `/factsheet/subscription-redemption-minimums`, `/factsheet/subscription-redemption-periods`, `/factsheet/ipos`, `/general-info/involve-parties` | Product discovery and transaction terms | Terms must be modeled independently from market-data/NAV evidence. |
 | `/outstanding/portfolio`, `/outstanding/portfolio-asset-type` | Broader portfolio exposure | Pagination, reporting date, and stale-record handling require validation first. |
+| `/general-info/amcs` | Fund-house directory | Search already accepts `company_info`; a separate AMC list adds no fund evidence on its own. |
 
 ## Promotion Criteria
 

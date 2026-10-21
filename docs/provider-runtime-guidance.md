@@ -3190,6 +3190,18 @@ F-024, F-026, F-029). Both runtimes change alike.
 - **Tests:** 21 new parity cases in `scripts/parity/cases_audit_2251.py`.
 - **Rollback:** redeploy 2.25.0.
 
+## Thai Fund Audit Repairs (2.25.6)
+
+- **Why:** the Thai fund audit against the Thai SEC Open Data API spec (`/mnt/project-files/audits/thai-funds-audit-2026-10-21.md`, items TF2, TF4, TF5, TF6, TF8), approved by the owner on 2026-10-21. Both runtimes change alike. No new fields, statuses, warning codes or enum values.
+- **TF2, explicit `proj_id` NAV (`get_thai_fund_nav`, `get_thai_fund_nav_batch`):** the direct NAV read now passes `fund_class_name` first. Rows for that class are `NAV_PROJECT_ID_AND_SEC_CLASS_CONFIRMED`. Only when it returns no row for the class does the tool read the project unfiltered, where one SEC class (`main` or `-`) is still the alias and several classes are still `AMBIGUOUS_SHARE_CLASS`. Before, the unfiltered first page of a multi-class project (SCBSEMI already exceeds 100 rows in 45 days) could hide the class's newest NAV. An alias fund now costs two provider calls, so a 20-fund batch stays within the Worker's 45-subrequest budget.
+- **TF4, factsheet `urls`:** rows are listed newest `as_of_date` first and the section's `asOfDate` is the newest one, since the endpoint has no `latest` filter.
+- **TF5, factsheet `top_holdings`:** rows are listed by `asset_seq`, unranked rows last.
+- **TF6, errors:** Thai `PROVIDER_TIMEOUT` and `RATE_LIMIT` failures carry `retryable: true` on `error` and `meta`, so clients and the deployed canary retry them like other providers' transient failures.
+- **TF8, docs:** `docs/thai-sec-fund-phase2.md` names its spec source, records the portal migration, lists `/general-info/amcs`, and records that the live gateway exposes exactly the 21 documented fund endpoints.
+- **Not changed:** dividend history (TF3, TF9) and the URL section's `SHARE_CLASS` scope (TF7) wait on a provider check and the owner's call.
+- **Tests:** `scripts/test_thai_funds.py` (class-filtered NAV, alias fallback call order, retryable codes, factsheet ordering, Worker source parity).
+- **Rollback:** redeploy 2.25.5.
+
 ## Audit Repairs, Part 5 (2.25.5)
 
 - **Why:** the approved F29 from the 2.25.0 audit (`analysis/yahoo-finance-mcp/F_TRIAGE.md` §5). Python only; no new fields, statuses, warning codes or enum values.

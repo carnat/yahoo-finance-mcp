@@ -90,8 +90,66 @@ class ThaiFundFixtureTest(unittest.TestCase):
         self.assertEqual(data["identityResolution"]["status"], "NAV_PROJECT_ID_CONFIRMED_CLASS_ALIAS")
         self.assertEqual(data["identityResolution"]["method"], "EXPLICIT_PROJ_ID_DIRECT_NAV")
         self.assertEqual(data["nav"]["navDate"], "2026-07-10")
-        self.assertEqual([path for path, _params in calls], ["/daily-info/nav"])
-        self.assertNotIn("fund_class_name", calls[0][1])
+        # The class-filtered read finds no KFINFRASSF row, so the unfiltered read decides the alias (2.25.6).
+        self.assertEqual([path for path, _params in calls], ["/daily-info/nav", "/daily-info/nav"])
+        self.assertEqual(calls[0][1]["fund_class_name"], "KFINFRASSF")
+        self.assertNotIn("fund_class_name", calls[1][1])
+
+    def test_explicit_project_nav_filters_by_class_before_reading_the_project(self) -> None:
+        # An unfiltered page of a multi-class project would not reach this class (2.25.6).
+        calls: list[tuple[str, dict[str, object]]] = []
+        class_page = {"message": "success", "page_size": 100, "next_cursor": "", "items": [
+            {"proj_id": "M0999_2564", "fund_class_name": "CLASS-B", "nav_date": "2026-07-08", "last_val": 2.0},
+            {"proj_id": "M0999_2564", "fund_class_name": "CLASS-B", "nav_date": "2026-07-10", "last_val": 2.1},
+        ]}
+
+        async def fake_request(path: str, params: dict[str, object]) -> dict:
+            calls.append((path, params))
+            if params.get("fund_class_name") == "CLASS-B":
+                return copy.deepcopy(class_page)
+            return {"message": "success", "page_size": 100, "next_cursor": "page-2", "items": [
+                {"proj_id": "M0999_2564", "fund_class_name": "CLASS-A", "nav_date": "2026-07-10", "last_val": 1.0},
+            ]}
+
+        thai._request_json = fake_request
+        data = decode(asyncio.run(thai.get_thai_fund_nav("CLASS-B", "M0999_2564", "2026-07-10", 5)))["data"]
+        self.assertEqual(data["status"], "OK")
+        self.assertEqual(data["nav"]["navDate"], "2026-07-10")
+        self.assertEqual(data["nav"]["lastValue"], 2.1)
+        self.assertEqual(data["identityResolution"]["status"], "NAV_PROJECT_ID_AND_SEC_CLASS_CONFIRMED")
+        self.assertFalse(data["hasMore"])
+        self.assertEqual(len(calls), 1)
+
+    def test_transient_provider_failures_are_retryable(self) -> None:
+        for code, retryable in (("PROVIDER_TIMEOUT", True), ("RATE_LIMIT", True), ("PROVIDER_ERROR", None)):
+            self.set_responses({"/daily-info/nav": thai.SecThailandProviderError(code, "failed", "RETRY_LATER")})
+            response = decode(asyncio.run(thai.get_thai_fund_nav("SCBSEMI(E)", "M0232_2564", "2026-07-10", 5)))
+            self.assertFalse(response["ok"])
+            self.assertEqual(response["error"]["code"], code)
+            self.assertEqual(response["error"].get("retryable"), retryable)
+
+    def test_factsheet_orders_holdings_by_rank_and_dates_urls_by_newest_row(self) -> None:
+        holdings = copy.deepcopy(FIXTURES["top_holdings"])
+        holdings["items"] = [
+            dict(holdings["items"][0], asset_seq=2, asset_name="Second"),
+            dict(holdings["items"][0], asset_seq=None, asset_name="Unranked"),
+            dict(holdings["items"][0], asset_seq=1, asset_name="First"),
+        ]
+        urls = copy.deepcopy(FIXTURES["urls"])
+        urls["items"] = [
+            dict(urls["items"][0], as_of_date="2026-04-30"),
+            dict(urls["items"][0], as_of_date="2026-05-31"),
+        ]
+        self.set_responses({
+            "/general-info/profiles": FIXTURES["profile"],
+            "/factsheet/statistics": FIXTURES["statistics"],
+            "/factsheet/top5-holdings": holdings,
+            "/factsheet/urls": urls,
+        })
+        data = decode(asyncio.run(thai.get_thai_fund_factsheet("SCBSEMI(E)", "M0232_2564")))["data"]
+        self.assertEqual([row["assetName"] for row in data["sections"]["top_holdings"]["data"]], ["First", "Second", "Unranked"])
+        self.assertEqual(data["sections"]["urls"]["asOfDate"], "2026-05-31")
+        self.assertEqual([row["asOfDate"] for row in data["sections"]["urls"]["data"]], ["2026-05-31", "2026-04-30"])
 
     def test_explicit_project_nav_does_not_infer_multiple_sec_classes(self) -> None:
         self.set_responses({"/daily-info/nav": FIXTURES["nav_multiple_classes"]})
@@ -224,8 +282,9 @@ class ThaiFundFixtureTest(unittest.TestCase):
         self.assertEqual(data["items"][1]["status"], "RATE_LIMIT")
         self.assertEqual(data["incompleteReferences"], ["semi"])
         self.assertEqual(data["recovery"]["action"], "RETRY_INCOMPLETE_FUNDS")
-        self.assertEqual([path for path, _params in calls], ["/daily-info/nav", "/daily-info/nav"])
-        self.assertTrue(all("fund_class_name" not in params for _path, params in calls))
+        # Each fund is read by class first; only the alias fund needs the unfiltered read (2.25.6).
+        self.assertEqual([path for path, _params in calls], ["/daily-info/nav"] * 3)
+        self.assertEqual([params.get("fund_class_name") for _path, params in calls], ["KFINFRASSF", None, "SCBSEMI(E)"])
 
     def test_factsheet_preserves_success_when_one_section_fails(self) -> None:
         self.set_responses({
@@ -414,6 +473,11 @@ class ThaiFundWorkerParityTest(unittest.TestCase):
         self.assertIn("MAX_NAV_BATCH_FUNDS", worker)
         self.assertIn('scope: "PROJECT"', worker)
         self.assertIn("rows.reduce", worker)
+        # 2.25.6 parity: class-filtered NAV read first, retryable transient errors, ordered factsheet rows.
+        self.assertIn("fund_class_name: requestedFundClassName", worker)
+        self.assertIn('RETRYABLE_PROVIDER_CODES = new Set(["PROVIDER_TIMEOUT", "RATE_LIMIT"])', worker)
+        self.assertIn("rank(a) - rank(b)", worker)
+        self.assertIn("String(b.as_of_date", worker)
 
 
 if __name__ == "__main__":
