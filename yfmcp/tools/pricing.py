@@ -308,8 +308,21 @@ async def get_fast_info(ticker: str | list[str]) -> str:
     # timezone is always null via yfinance and not useful — omit to reduce noise
     data.pop("timezone", None)
 
-    # Normalize any empty-dict values (Yahoo API sometimes returns {} for missing scalars)
-    data = {k: (None if isinstance(v, dict) and not v else v) for k, v in data.items()}
+    # Normalize any empty-dict values (Yahoo API sometimes returns {} for missing scalars), and NaN, which is not
+    # JSON (2.25.2, F30: an unknown ticker returned yearHigh/yearLow NaN).
+    data = {
+        k: (None if (isinstance(v, dict) and not v) or (isinstance(v, float) and v != v) else v)
+        for k, v in data.items()
+    }
+
+    # An unknown ticker gets every field null from yfinance; the Worker's quoteSummary 404 is TICKER_NOT_FOUND (F30).
+    if data.get("lastPrice") is None and data.get("currency") is None and data.get("quoteType") is None:
+        return _mcp_failure(
+            "get_market_quote",
+            ErrorCode.TICKER_NOT_FOUND,
+            "No provider data was found for the requested ticker.",
+            meta_extra={"retryable": False},
+        )
 
     result = json.dumps(data)
     _tool_cache.set(cache_key, result, _PRICE_TTL)

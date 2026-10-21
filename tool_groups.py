@@ -8,6 +8,7 @@ checks can share one machine-readable catalog.
 from __future__ import annotations
 
 import copy
+import enum
 import inspect
 import json
 import types
@@ -89,6 +90,10 @@ def _matches_annotation(value: Any, annotation: Any, max_items: int | None = Non
         return isinstance(value, (int, float)) and not isinstance(value, bool)
     if annotation is int:
         return isinstance(value, int) and not isinstance(value, bool)
+    if isinstance(annotation, type) and issubclass(annotation, enum.Enum):
+        # A JSON caller sends an enum's value, never the Enum member; as with Literal, the boundary checks the type
+        # and the handler owns the value (2.25.2, F31: every get_ownership_holders holder_type was refused).
+        return isinstance(value, annotation) or any(isinstance(value, type(member.value)) for member in annotation)
     if isinstance(annotation, type):
         return isinstance(value, annotation)
     return True

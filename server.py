@@ -4493,6 +4493,16 @@ async def get_etf_info(
     except Exception as e:
         return f"Error: getting ETF info for {ticker}: {e}"
 
+    # A stock is not a fund: say so instead of sections that recommend a retry (2.25.2, F33; the Worker's FUND_QUOTE_TYPES).
+    fund_quote_type = info.get("quoteType") if isinstance(info, dict) else None
+    if isinstance(fund_quote_type, str) and fund_quote_type and fund_quote_type.upper() not in {"ETF", "MUTUALFUND", "MONEYMARKET"}:
+        return _mcp_failure(
+            "get_fund_profile",
+            ErrorCode.INPUT_VALIDATION_ERROR,
+            f"{ticker} is quote type {fund_quote_type}, not an ETF or fund; get_fund_profile reads fund data only. "
+            "Use get_company_profile for a company.",
+        )
+
     data: dict = {k: info.get(k) for k in _ETF_INFO_FIELDS}
     data.update({
         "ticker": ticker,
@@ -4842,12 +4852,10 @@ async def get_price_target_bracket(
 ) -> str:
     """Return bracket and distance fields for current price vs reference target."""
     target_price = reference_target_price if reference_target_price is not None else io_pt
-    if target_price is None or target_price <= 0:
-        return json.dumps({
-            "error": True,
-            "message": "reference_target_price (or io_pt alias) must be a positive number",
-            "ticker": ticker,
-        })
+    if target_price is None or not target_price > 0:
+        # A caller's bad input, not a provider failure (2.25.2, F42).
+        return _mcp_failure("calculate_price_target_distance", ErrorCode.INPUT_VALIDATION_ERROR,
+                            "reference_target_price (or io_pt alias) must be a positive number")
 
     company = yf.Ticker(ticker)
     try:

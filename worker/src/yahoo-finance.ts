@@ -1278,6 +1278,12 @@ function normalizeFundEquityHoldings(
   return { values, providerRaw: changed ? providerRaw : null, methods };
 }
 
+const FUND_QUOTE_TYPES = new Set(["ETF", "MUTUALFUND", "MONEYMARKET"]);
+
+export function notAFundMessage(ticker: string, quoteType: string): string {
+  return `${ticker} is quote type ${quoteType}, not an ETF or fund; get_fund_profile reads fund data only. Use get_company_profile for a company.`;
+}
+
 export async function getEtfInfo(ticker: string | string[], sections?: string[] | null): Promise<string> {
   if (Array.isArray(ticker)) {
     return runPartialBatch(ticker, (t) => getEtfInfo(t, sections), tickerCap("get_fund_profile"));
@@ -1319,6 +1325,12 @@ export async function getEtfInfo(ticker: string | string[], sections?: string[] 
 
     const pick = (src: Record<string, unknown> | undefined, key: string): unknown =>
       src ? raw(src[key]) : null;
+
+    // A stock is not a fund: say so instead of empty sections that recommend a retry (2.25.2, F33).
+    const fundQuoteType = pick(priceData, "quoteType");
+    if (typeof fundQuoteType === "string" && fundQuoteType && !FUND_QUOTE_TYPES.has(fundQuoteType.toUpperCase())) {
+      return mcpFailure("get_fund_profile", ErrorCode.INPUT_VALIDATION_ERROR, notAFundMessage(ticker, fundQuoteType));
+    }
 
     const data: Record<string, unknown> = {
       ticker,
@@ -1578,7 +1590,10 @@ export async function getStockInfo(ticker: string | string[], includeAll = false
   for (const mod of Object.values(result)) {
     if (mod && typeof mod === "object") {
       for (const [k, v] of Object.entries(mod as Record<string, unknown>)) {
-        info[k] = raw(v);
+        // A later module's empty value never replaces an earlier one's (2.25.2, F34: AAPL's
+        // priceToSalesTrailing12Months read null; Python's merged info keeps it).
+        const value = raw(v);
+        if (value != null || !(k in info)) info[k] = value;
       }
     }
   }
@@ -7760,12 +7775,9 @@ export async function getOptionsFlowScan(ticker: string, windowLabel: string): P
 // ── get_price_target_bracket ──────────────────────────────────────────────────
 
 export async function getPriceTargetBracket(ticker: string, ioPt: number): Promise<string> {
-  if (ioPt <= 0) {
-    return JSON.stringify({
-      error: true,
-      message: "reference_target_price (or io_pt alias) must be a positive number",
-      ticker,
-    });
+  if (!(ioPt > 0)) {
+    // A caller's bad input, not a provider failure (2.25.2, F42).
+    return mcpFailure("calculate_price_target_distance", ErrorCode.INPUT_VALIDATION_ERROR, "reference_target_price (or io_pt alias) must be a positive number");
   }
   try {
     const fi = JSON.parse(await getFastInfo(ticker)) as Record<string, unknown>;
