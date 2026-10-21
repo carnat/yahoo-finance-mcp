@@ -149,6 +149,7 @@ class ThaiFundFixtureTest(unittest.TestCase):
         data = decode(asyncio.run(thai.get_thai_fund_factsheet("SCBSEMI(E)", "M0232_2564")))["data"]
         self.assertEqual([row["assetName"] for row in data["sections"]["top_holdings"]["data"]], ["First", "Second", "Unranked"])
         self.assertEqual(data["sections"]["urls"]["asOfDate"], "2026-05-31")
+        self.assertEqual(data["sections"]["urls"]["scope"], "MIXED")
         self.assertEqual([row["asOfDate"] for row in data["sections"]["urls"]["data"]], ["2026-05-31", "2026-04-30"])
 
     def test_explicit_project_nav_does_not_infer_multiple_sec_classes(self) -> None:
@@ -312,6 +313,26 @@ class ThaiFundFixtureTest(unittest.TestCase):
         self.assertEqual(data["nextCursor"], "cursor-page-2")
         self.assertEqual([row["dividendDate"] for row in data["dividends"]], ["2026-01-12", "2025-12-12"])
         self.assertEqual(data["dividends"][0]["classAbbrName"], "SCBSEMI")
+        # A later page may hold a newer dividend, so the date is withheld (2.25.7).
+        self.assertIsNone(data["dataDate"])
+        self.assertIsNone(response["meta"]["dataDate"])
+        self.assertIn("dataDate is withheld", data["recovery"]["detail"])
+
+    def test_dividend_date_is_reported_only_for_a_complete_history(self) -> None:
+        single_page = copy.deepcopy(FIXTURES["dividends_unordered"])
+        single_page["next_cursor"] = ""
+        self.set_responses({
+            "/general-info/profiles": FIXTURES["profile"],
+            "/daily-info/dividend-history": single_page,
+        })
+        response = decode(asyncio.run(thai.get_thai_fund_dividend_history("SCBSEMI(E)", "M0232_2564", 100)))
+        self.assertEqual(response["data"]["dataDate"], "2026-01-12")
+        self.assertEqual(response["meta"]["dataDate"], "2026-01-12")
+        self.assertEqual(response["data"]["recovery"]["action"], "NONE")
+        # The last page of a paged read is not the whole history either.
+        response = decode(asyncio.run(thai.get_thai_fund_dividend_history("SCBSEMI(E)", "M0232_2564", 100, "cursor-page-2")))
+        self.assertIsNone(response["data"]["dataDate"])
+        self.assertFalse(response["data"]["hasMore"])
 
     def test_missing_secret_and_http_auth_are_safe(self) -> None:
         os.environ.pop("SEC_OPEN_DATA_API_KEY", None)
@@ -478,6 +499,10 @@ class ThaiFundWorkerParityTest(unittest.TestCase):
         self.assertIn('RETRYABLE_PROVIDER_CODES = new Set(["PROVIDER_TIMEOUT", "RATE_LIMIT"])', worker)
         self.assertIn("rank(a) - rank(b)", worker)
         self.assertIn("String(b.as_of_date", worker)
+        # 2.25.7 parity: dividend dataDate only for a complete history; URL section scope MIXED.
+        self.assertIn("optionalString(nextCursorRaw) == null && !nextCursor", worker)
+        self.assertIn(thai._DIVIDEND_COMPLETE_DETAIL, worker)
+        self.assertIn('status: data.length ? "OK" : "EMPTY_RESULT", scope: "MIXED"', worker)
 
 
 if __name__ == "__main__":

@@ -42,7 +42,11 @@ share-class scoped, fetch a factsheet PDF, or crawl AMC websites.
   intentionally out of scope. `/factsheet/urls` has no `latest` filter, so the
   section is dated by its newest `as_of_date` and lists rows newest first.
   `amc_url_factsheet` is per share class, but `pdf_factsheet` is one document
-  for the whole project (the spec says it consolidates every class).
+  for the whole project (the spec says it consolidates every class), so since
+  2.25.7 the section's scope is `MIXED`.
+- Dividend history row order is undocumented. Since 2.25.7 `dataDate` is
+  reported only when one page holds the whole history (no cursor sent and none
+  returned); a page of a longer history has `dataDate: null`.
 - Top-five holdings are listed by `asset_seq`, since provider row order is not
   documented.
 - `PROVIDER_TIMEOUT` and `RATE_LIMIT` failures carry `retryable: true`, as other
