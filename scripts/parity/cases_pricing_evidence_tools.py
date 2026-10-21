@@ -1546,9 +1546,13 @@ CASES += [
     _bracket_case("prc.bracket.below_forty_pct_is_speculative", ["BR-PRC-022"], 39.9, 100.0, market_time=QUOTE_TIME,
                   keys=("referenceTargetPct", "bracket", "inferredTag"),
                   expect={"referenceTargetPct": 39.9, "bracket": "STRONG_BUY", "inferredTag": "SPECULATIVE"}),
-    _bracket_case("prc.bracket.non_positive_target_is_rejected", ["BR-PRC-022"], 70.0, 0.0, market_time=QUOTE_TIME,
-                  keys=("error", "message"),
-                  expect={"error": True, "message": "reference_target_price (or io_pt alias) must be a positive number"}),
+    # 2.25.2 (F42): a non-positive target is the caller's input error, not a provider error.
+    _bracket_case("prc.bracket.non_positive_target_is_rejected", ["BR-PRC-022", "F42"], 70.0, 0.0, market_time=QUOTE_TIME,
+                  keys=("ok", "error"),
+                  expect={"ok": False, "error": {"code": "INPUT_VALIDATION_ERROR", "message": "reference_target_price (or io_pt alias) must be a positive number"}}),
+    _bracket_case("prc.bracket.negative_target_is_an_input_error_through_the_envelope", ["BR-PRC-022", "F42"], 70.0, -10.0,
+                  market_time=QUOTE_TIME, via="envelope", keys=("ok", "error"),
+                  expect={"ok": False, "error": {"code": "INPUT_VALIDATION_ERROR", "message": "reference_target_price (or io_pt alias) must be a positive number"}}),
     # Q3d: thresholds compare the value rounded to 1 dp: 75.04 reads as 75.0 and is STRONG_BUY.
     _bracket_case("prc.bracket.q3d_threshold_uses_the_rounded_percentage", ["BR-PRC-022"], 75.04, 100.0, market_time=QUOTE_TIME,
                   keys=("referenceTargetPct", "bracket"), mode="pinned", decision="Q3d",

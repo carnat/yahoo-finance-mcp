@@ -269,6 +269,23 @@ class TestPythonRegressions(unittest.TestCase):
             data = json.loads(_run(srv.get_earnings_momentum("ASTS")))
         self.assertAlmostEqual(data["avgSurprisePct"], (-233.7 - 1.3) / 2, places=1)
 
+    def test_unknown_ticker_quote_is_ticker_not_found_not_nan(self) -> None:
+        """2.25.2 (F30): yfinance answers an unknown ticker with nulls and NaN; the quote is TICKER_NOT_FOUND, as the Worker's."""
+        from yfmcp.tools import pricing
+
+        nan = float("nan")
+
+        class _Ticker:
+            fast_info = {"currency": None, "lastPrice": None, "quoteType": None, "yearHigh": nan, "yearLow": nan}
+            info = {}
+
+        pricing._tool_cache.clear() if hasattr(pricing._tool_cache, "clear") else None
+        with patch.object(pricing.yf, "Ticker", return_value=_Ticker()):
+            text = _run(pricing.get_fast_info("ZZZZQQ"))
+        self.assertNotIn("NaN", text)
+        data = json.loads(text)
+        self.assertEqual((data["ok"], data["error"]["code"]), (False, "TICKER_NOT_FOUND"))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -3190,6 +3190,17 @@ F-024, F-026, F-029). Both runtimes change alike.
 - **Tests:** 21 new parity cases in `scripts/parity/cases_audit_2251.py`.
 - **Rollback:** redeploy 2.25.0.
 
+## Audit Repairs, Part 2 (2.25.2)
+
+- **Why:** the approved F30, F31, F33, F34 and F42 from the 2.25.0 audit (`analysis/yahoo-finance-mcp/F_TRIAGE.md` §5). No new fields, statuses, warning codes or enum values.
+- **F30, `get_market_quote` for an unknown ticker (Python):** returns `TICKER_NOT_FOUND` ("No provider data was found for the requested ticker.", `retryable: false`), as the Worker does. It used to return `ok: true` with every field null and `yearHigh`/`yearLow` as NaN, which is not valid JSON. NaN fields are now null in every Python quote.
+- **F31, enum parameters in Python grouped calls:** the grouped boundary refused every value of an enum-typed parameter, so `get_ownership_holders` (every `holder_type`) and `get_analyst_recommendations` (every `recommendation_type`) failed with `INPUT_VALIDATION_ERROR`. It now accepts the value's type, as it already did for `Literal` parameters; the tool still rejects a value it does not support.
+- **F33, `get_fund_profile` on a company:** returns `INPUT_VALIDATION_ERROR` naming the quote type ("TICKER is quote type EQUITY, not an ETF or fund; ...") instead of empty or failed sections that recommended a retry. ETF, MUTUALFUND and MONEYMARKET are funds. Both runtimes.
+- **F34, Worker company profile:** a later quoteSummary module's empty value no longer overwrites an earlier one's, so `priceToSalesTrailing12Months` (and any field in the same position) is kept, as in Python.
+- **F42, `calculate_price_target_distance`:** a missing, zero or negative target is `INPUT_VALIDATION_ERROR`, not `PROVIDER_ERROR`. Both runtimes.
+- **Tests:** `scripts/parity/cases_audit_2252.py`, the updated price-target cases, and a Python regression for F30.
+- **Rollback:** redeploy 2.25.1.
+
 ## Per-Person Access Keys (2.18.0)
 
 - **Why:** Phase 1b, approved by the owner on 2026-10-18, for sharing the hosted MCP with a few trusted people, non-commercially. Release type: minor. Worker only: the local Python server is single-user stdio.
