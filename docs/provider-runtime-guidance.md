@@ -33,6 +33,16 @@ Sources checked through 2026-08-04:
   next UTC day, so repeated calls are not spent on a known refusal.
 - The Alpha Vantage free key allows 25 requests a day and is shared by every
   client that uses it; the deploy canaries and smokes never call Alpha.
+- One busy session can spend the whole free quota: the 2.25.0 audit
+  (2026-10-20) used it up by about 10:10 UTC (F44). Until the next UTC day these
+  degrade, with explicit statuses rather than errors: the curve cross-check
+  (`CROSS_CHECK_DEGRADED`), the expanded-ownership fallback, the historical
+  put/call ratio, and the last transcript fallback. Yahoo-backed results are
+  unaffected.
+- On the current Finnhub plan the ownership endpoint answers 403
+  `ENTITLEMENT_REQUIRED`, so `get_expanded_institutional_ownership` has no
+  source left once the Alpha quota is spent. The owner chose to keep the free
+  keys and document the limit (2026-10-21).
 - Worker Cache API storage is best effort and data-center local. It reduces
   duplicate requests but is not global quota accounting or a persistent rate
   limiter.
