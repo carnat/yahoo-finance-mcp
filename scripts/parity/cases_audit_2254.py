@@ -109,6 +109,10 @@ CASES += [
              expect={"status": "PARTIAL", "ladderWarning": [
                  "The filing tags no debt maturities (no maturity ladder and no instrument maturity dates), so total debt 84000000 is not laddered; "
                  'an annual report (filing_type "10-K") usually tags the ladder.']}),
+    # A 10-K that tags no ladder gets no "use the 10-K" hint.
+    _capital("audit2254.capital_structure.unladdered_10k_has_no_annual_report_hint", ["F37"], _debt_filing([], 84_000_000), filing="10-K",
+             select=_cap_view, expect={"status": "PARTIAL", "ladderWarning": [
+                 "The filing tags no debt maturities (no maturity ladder and no instrument maturity dates), so total debt 84000000 is not laddered."]}),
     _capital("audit2254.capital_structure.laddered_note_stays_computed", ["F37"], _debt_filing([_N130], 130_000_000), select=_cap_view,
              expect={"status": "COMPUTED", "ladderWarning": []}),
 ]

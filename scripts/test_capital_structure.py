@@ -1122,7 +1122,8 @@ class TestCapitalStructureValues(unittest.TestCase):
         self.assertEqual(bal["totalDebt"], 2_971_916_000)
         self.assertEqual(bal["netCash"], -683_663_000)
         codes = [w["code"] for w in c["warnings"]]
-        self.assertEqual(codes, ["ROUNDED_FACT_IGNORED"])
+        # The fixture tags no debt maturities, so the debt is not laddered (2.25.4, F37).
+        self.assertEqual(codes, ["ROUNDED_FACT_IGNORED", "MATURITY_LADDER_INCOMPLETE"])
         self.assertIn("ShortTermInvestments 2300000000", c["warnings"][0]["message"])
         # Precise facts are unaffected: the base fixture keeps its investments.
         self.assertEqual(self.out["capital"]["warnings"], [])
@@ -1135,21 +1136,21 @@ class TestCapitalStructureValues(unittest.TestCase):
         c = self.out["capitalOverlap"]
         self.assertEqual(c["balances"]["shortTermInvestments"], 120_000_000)
         self.assertEqual(c["balances"]["netCash"], 470_000_000)
-        self.assertEqual([w["code"] for w in c["warnings"]], ["OVERLAPS_CASH_EQUIVALENTS"])
+        self.assertEqual([w["code"] for w in c["warnings"]], ["OVERLAPS_CASH_EQUIVALENTS", "MATURITY_LADDER_INCOMPLETE"])
         self.assertIn("money market funds", c["warnings"][0]["sentence"])
 
     def test_filing_aggregate_equal_to_cash_drops_investments(self) -> None:
         c = self.out["capitalAggregate"]
         self.assertIsNone(c["balances"]["shortTermInvestments"])
         self.assertEqual(c["balances"]["netCash"], 490_000_000)
-        self.assertEqual([(w["code"], w["severity"]) for w in c["warnings"]], [("CASH_AGGREGATE_MISMATCH", "info")])
+        self.assertEqual([(w["code"], w["severity"]) for w in c["warnings"]], [("CASH_AGGREGATE_MISMATCH", "info"), ("MATURITY_LADDER_INCOMPLETE", "warning")])
 
     def test_held_to_maturity_treasury_bills_are_short_term_investments(self) -> None:
         bal = self.out["capitalVrt"]["balances"]
         self.assertEqual((bal["cashAndEquivalents"], bal["shortTermInvestments"], bal["currency"]), (2_810_600_000, 300_000_000, "USD"))
         self.assertEqual(bal["shortTermInvestmentsConcept"], "us-gaap:DebtSecuritiesHeldToMaturityAmortizedCostAfterAllowanceForCreditLossCurrent")
         self.assertEqual(bal["netCash"], 2_810_600_000 + 300_000_000 - 2_939_800_000)
-        self.assertEqual(self.out["capitalVrt"]["warnings"], [])
+        self.assertEqual([w["code"] for w in self.out["capitalVrt"]["warnings"]], ["MATURITY_LADDER_INCOMPLETE"])
         parts = self.out["capitalParts"]["balances"]
         self.assertEqual(parts["shortTermInvestments"], 100_000_000)
         self.assertEqual(parts["shortTermInvestmentsConcept"], "us-gaap:AvailableForSaleSecuritiesDebtSecuritiesCurrent + us-gaap:HeldToMaturitySecuritiesCurrent")
@@ -1307,11 +1308,12 @@ class TestCapitalStructureValues(unittest.TestCase):
     def test_debt_tagged_only_with_finance_leases(self) -> None:
         # 2.5.27: MU tags DebtAndCapitalLeaseObligations and FinanceLeaseLiability; debt is the difference, its notes.
         mu = self.out["capital_lease_total_q"]
-        self.assertEqual((mu["status"], mu["balances"]["totalDebt"], mu["balances"]["netCash"]), ("COMPUTED", 3_052_000_000, 5_948_000_000))
+        # No maturities are tagged, so the structure is PARTIAL (2.25.4, F37).
+        self.assertEqual((mu["status"], mu["balances"]["totalDebt"], mu["balances"]["netCash"]), ("PARTIAL", 3_052_000_000, 5_948_000_000))
         self.assertEqual(mu["balances"]["totalDebtBasis"], "DebtAndCapitalLeaseObligations (debt including finance leases) less FinanceLeaseLiability")
         self.assertEqual(mu["balances"]["totalDebtComponents"], [{"concept": "us-gaap:DebtAndCapitalLeaseObligations", "amount": 5_722_000_000},
                                                                  {"concept": "us-gaap:FinanceLeaseLiability", "amount": -2_670_000_000}])
-        self.assertEqual([w["code"] for w in mu["warnings"]], ["FINANCE_LEASES_SUBTRACTED"])
+        self.assertEqual([w["code"] for w in mu["warnings"]], ["FINANCE_LEASES_SUBTRACTED", "MATURITY_LADDER_INCOMPLETE"])
         self.assertEqual(mu["warnings"][0]["message"], "The filing tags debt only with finance leases included; total debt is "
                          "DebtAndCapitalLeaseObligations (debt including finance leases) less FinanceLeaseLiability = 3052000000.")
         # Current and long-term parts, with lease parts.
@@ -1321,9 +1323,9 @@ class TestCapitalStructureValues(unittest.TestCase):
                          "FinanceLeaseLiabilityCurrent + FinanceLeaseLiabilityNoncurrent")
         # XOM: parts and no lease liability. Debt includes the leases, and says so; it is no longer a false zero.
         xom = self.out["capital_lease_unsplit_q"]
-        self.assertEqual((xom["status"], xom["balances"]["totalDebt"]), ("COMPUTED", 42_368_000_000))
+        self.assertEqual((xom["status"], xom["balances"]["totalDebt"]), ("PARTIAL", 42_368_000_000))
         self.assertEqual(xom["balances"]["totalDebtBasis"], "DebtCurrent + LongTermDebtAndCapitalLeaseObligations (debt including finance leases; no finance-lease liability tagged to take out)")
-        self.assertEqual([w["code"] for w in xom["warnings"]], ["TOTAL_DEBT_INCLUDES_FINANCE_LEASES"])
+        self.assertEqual([w["code"] for w in xom["warnings"]], ["TOTAL_DEBT_INCLUDES_FINANCE_LEASES", "MATURITY_LADDER_INCOMPLETE"])
         self.assertNotIn("NO_BORROWINGS_TAGGED", [w["code"] for w in xom["warnings"]])
         self.assertFalse(cs._tags_no_borrowings(cs.parse_ixbrl(LEASE_UNSPLIT_Q)))
 

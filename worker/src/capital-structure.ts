@@ -2780,7 +2780,8 @@ export function capitalStructure(input: CapitalStructureInput): Record<string, u
   if (debtUnladdered && !warnings.some((w) => w.code === "MATURITY_LADDER_INCOMPLETE")) {
     warnings.push({
       code: "MATURITY_LADDER_INCOMPLETE",
-      message: `The filing tags no debt maturities (no maturity ladder and no instrument maturity dates), so total debt ${debtValue} is not laddered; an annual report (filing_type "10-K") usually tags the ladder.`,
+      message: `The filing tags no debt maturities (no maturity ladder and no instrument maturity dates), so total debt ${debtValue} is not laddered`
+        + (String(source.filingType ?? "").toUpperCase().startsWith("10-K") ? "." : '; an annual report (filing_type "10-K") usually tags the ladder.'),
       severity: "warning",
     });
   }

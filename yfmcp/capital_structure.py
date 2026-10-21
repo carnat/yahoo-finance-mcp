@@ -3039,7 +3039,8 @@ def capital_structure(ticker: str, source: IxSource, funding_matches: list[TextM
     if debt_unladdered and not any(w.get("code") == "MATURITY_LADDER_INCOMPLETE" for w in warnings):
         warnings.append({
             "code": "MATURITY_LADDER_INCOMPLETE",
-            "message": f"The filing tags no debt maturities (no maturity ladder and no instrument maturity dates), so total debt {_js_number(debt_value)} is not laddered; an annual report (filing_type \"10-K\") usually tags the ladder.",
+            "message": f"The filing tags no debt maturities (no maturity ladder and no instrument maturity dates), so total debt {_js_number(debt_value)} is not laddered"
+                       + ("." if str(source.filing_type or "").upper().startswith("10-K") else "; an annual report (filing_type \"10-K\") usually tags the ladder."),
             "severity": "warning",
         })
     status = ("COMPUTED" if cash and debt and not debt_unladdered else "PARTIAL") if (cash or debt or instrument_rows) else "NOT_FOUND"
