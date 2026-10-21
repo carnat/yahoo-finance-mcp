@@ -126,6 +126,8 @@ function bangkokToday(): string {
   return `${values.year}-${values.month}-${values.day}`;
 }
 
+const RETRYABLE_PROVIDER_CODES = new Set(["PROVIDER_TIMEOUT", "RATE_LIMIT"]);
+
 function errorResult(tool: string, error: ProviderError): string {
   return mcpFailure(tool, error.code, error.message, {
     source: SOURCE,
@@ -133,6 +135,8 @@ function errorResult(tool: string, error: ProviderError): string {
       recoveryAction: error.recoveryAction,
       evidenceClass: EVIDENCE_CLASS,
       decisionGrade: false,
+      // Timeouts and rate limits are transient, as for every other provider (2.25.6).
+      ...(RETRYABLE_PROVIDER_CODES.has(error.code) ? { retryable: true } : {}),
     },
     diagnostics: error.diagnostics,
   });
@@ -490,6 +494,27 @@ async function explicitProjectNavPayload(
   asOfDate: string,
   lookbackDays: number,
 ): Promise<RecordValue> {
+  // Ask for the requested class first: an unfiltered page of a multi-class
+  // project can hold more than 100 rows and push this class past page 1 (2.25.6).
+  const filtered = await secGet("/daily-info/nav", {
+    proj_id: projId,
+    fund_class_name: requestedFundClassName,
+    start_nav_date: startDate,
+    end_nav_date: asOfDate,
+    page_size: MAX_PAGE_SIZE,
+  });
+  const classRows = filtered.items.filter((row) => isIsoDate(row.nav_date) && String(row.fund_class_name ?? "") === requestedFundClassName);
+  if (classRows.length) {
+    const identity = identityFromNav(classRows[0], projId, requestedFundClassName);
+    return navPayload(identity, classRows, optionalString(filtered.next_cursor), startDate, asOfDate, lookbackDays, {
+      status: "NAV_PROJECT_ID_AND_SEC_CLASS_CONFIRMED",
+      method: "EXPLICIT_PROJ_ID_DIRECT_NAV",
+      requestedFundClassName,
+      sourceFundClassName: identity.fundClassName,
+    });
+  }
+  // No row under that class name: read the project unfiltered, where a single
+  // SEC class ("main" or "-") is accepted as an alias for a public code.
   const response = await secGet("/daily-info/nav", {
     proj_id: projId,
     start_nav_date: startDate,
@@ -720,7 +745,9 @@ async function factsheetTopHoldings(identity: FundIdentity): Promise<RecordValue
   try {
     const response = await secGet("/factsheet/top5-holdings", { proj_id: identity.projId, latest: true, page_size: 5 });
     const asOfDate = response.items.map((row) => row.end_date ?? row.start_date).find((value) => value != null) ?? null;
-    const data = response.items.map((row) => ({
+    // Provider order is undocumented; present holdings by their factsheet rank (2.25.6).
+    const rank = (row: RecordValue) => { const n = Number(row.asset_seq); return row.asset_seq == null || row.asset_seq === "" || !Number.isFinite(n) ? Number.POSITIVE_INFINITY : n; };
+    const data = [...response.items].sort((a, b) => rank(a) - rank(b)).map((row) => ({
       assetName: row.asset_name ?? null, assetRatio: row.asset_ratio ?? null, assetSequence: row.asset_seq ?? null,
       startDate: row.start_date ?? null, endDate: row.end_date ?? null, prospectusType: row.prospectus_type ?? null,
       lastUpdatedAt: row.last_upd_date ?? null,
@@ -737,8 +764,11 @@ async function factsheetTopHoldings(identity: FundIdentity): Promise<RecordValue
 async function factsheetUrls(identity: FundIdentity): Promise<RecordValue> {
   try {
     const response = await secGet("/factsheet/urls", { proj_id: identity.projId, fund_class_name: identity.fundClassName, page_size: MAX_PAGE_SIZE });
-    const asOfDate = response.items.map((row) => row.as_of_date).find((value) => value != null) ?? null;
-    const data = response.items.map((row) => ({
+    // The endpoint has no latest filter, so date the section by its newest row
+    // and list rows newest first (2.25.6).
+    const rows = [...response.items].sort((a, b) => String(b.as_of_date ?? "").localeCompare(String(a.as_of_date ?? "")));
+    const asOfDate = rows.map((row) => optionalString(row.as_of_date)).find((value) => value != null) ?? null;
+    const data = rows.map((row) => ({
       prospectusType: row.prospectus_type ?? null, amcUrlFactsheet: row.amc_url_factsheet ?? null,
       pdfFactsheet: row.pdf_factsheet ?? null, asOfDate: row.as_of_date ?? null, lastUpdatedAt: row.last_upd_date ?? null,
     }));
