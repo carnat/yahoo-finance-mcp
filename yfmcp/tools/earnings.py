@@ -254,6 +254,26 @@ async def _resolve_latest_earnings_sec_source(ticker: str) -> dict | None:
     return None
 
 
+def _latest_past_earnings_date(dates: list, now: datetime.datetime | None = None) -> str | None:
+    """The latest calendar earningsDate string at or before now (the Worker's resolveLatestEarningsRelease filter)."""
+    now_ts = (now or datetime.datetime.now(datetime.timezone.utc)).timestamp()
+    dated: list[tuple[float, str]] = []
+    for d in dates:
+        if not isinstance(d, str):
+            continue
+        iso = _to_iso_utc(d)
+        if iso is None:
+            continue
+        try:
+            ts = datetime.datetime.fromisoformat(iso.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            continue
+        if ts <= now_ts:
+            dated.append((ts, d))
+    dated.sort(key=lambda item: -item[0])
+    return dated[0][1] if dated else None
+
+
 async def _resolve_latest_earnings_release(ticker: str) -> dict:
     sec = await _resolve_latest_earnings_sec_source(ticker)
     if sec:
@@ -274,7 +294,9 @@ async def _resolve_latest_earnings_release(ticker: str) -> dict:
     cal_raw = await _server_attr("get_calendar")(ticker=ticker.upper())
     cal = _safe_json_loads(cal_raw)
     earnings_dates = (((cal.get("calendar") or {}).get("earnings") or {}).get("earningsDate") or [])
-    published = earnings_dates[0] if isinstance(earnings_dates, list) and earnings_dates else None
+    # Yahoo's calendar lists the next (estimated) report date: a date still ahead is not the latest release
+    # (2.25.1, F27).
+    published = _latest_past_earnings_date(earnings_dates if isinstance(earnings_dates, list) else [])
     if published:
         return {
             "ticker": ticker.upper(),

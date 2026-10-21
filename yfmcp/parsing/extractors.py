@@ -326,6 +326,119 @@ def extract_geo_revenue_from_html(html: str, region: str) -> dict | None:
     return None
 
 
+_YEAR_CELL_RE = _re.compile(r"(?:fy\s*)?(?:19|20)\d{2}", _re.IGNORECASE | _re.ASCII)
+
+
+def extract_segment_table_from_html(html: str, fiscal_year: int | None = None) -> dict:
+    """The Worker's extractSegmentTableFromHtml: a reportable-segment revenue table whose rows sum to its total (1%).
+
+    Returns {result, segmentTablesSeen, tablesScanned, yearsSeen}. Without a fiscal year the latest year column is read;
+    with one, only the column headed with that year, and a table without it is skipped (2.25.1, F26).
+    """
+    document_scale = _lazy_document_scale(html)
+    table_index = -1
+    segment_tables_seen = 0
+    years_seen: set[int] = set()
+
+    def finish(result: dict | None) -> dict:
+        return {"result": result, "segmentTablesSeen": segment_tables_seen, "tablesScanned": table_index + 1,
+                "yearsSeen": sorted(years_seen, reverse=True)}
+
+    for m in _re.finditer(r"<table[^>]*>([\s\S]*?)</table>", html, _re.IGNORECASE):
+        table_index += 1
+        if table_index > 800:
+            break
+        pos = m.start()
+        before = _re.sub(r"\s+", " ", _geo_strip_html_tags(html[max(0, pos - 2_000): pos])).strip()
+        lead = before[-400:].lower()
+        if "segment" not in lead or not _re.search(r"revenue|net sales|sales", lead):
+            continue
+        segment_tables_seen += 1
+        rows = _financial_table_rows(m.group(0))
+        header_idx = next((i for i, row in enumerate(rows) if any(_YEAR_CELL_RE.fullmatch(cell) for cell in row)), -1)
+        header = rows[header_idx] if header_idx >= 0 else None
+        year_col: int | None = None
+        if header is not None:
+            latest = -1
+            for i, cell in enumerate(header):
+                if not _YEAR_CELL_RE.fullmatch(cell):
+                    continue
+                year = int(_re.sub(r"\D", "", cell, flags=_re.ASCII))
+                years_seen.add(year)
+                if (year == fiscal_year and year_col is None) if fiscal_year is not None else year > latest:
+                    latest = year
+                    year_col = i
+        # A named year needs a column headed with it; a table without year columns cannot show which year it is.
+        if fiscal_year is not None and (header is None or year_col is None):
+            continue
+        # Without a year column, a "Total" column is the company figure (2.5.20).
+        total_header_idx = -1
+        if header_idx < 0:
+            total_header_idx = next((i for i, row in enumerate(rows)
+                                     if any(_re.fullmatch(r"total", cell.strip(), _re.IGNORECASE) for cell in row[1:])
+                                     and not any(_geo_parse_numeric_cell(cell) is not None for cell in row)), -1)
+        column_header = header if header is not None else (rows[total_header_idx] if total_header_idx >= 0 else None)
+        if header is not None:
+            value_col: int | None = year_col
+        elif total_header_idx >= 0:
+            value_col = next((i for i, cell in enumerate(rows[total_header_idx]) if i > 0 and _re.fullmatch(r"total", cell.strip(), _re.IGNORECASE)), -1)
+        else:
+            value_col = None
+
+        def value_of(row: list[str]) -> tuple[str, float] | None:
+            if column_header is not None and value_col is not None:
+                offset = max(0, len(row) - len(column_header))
+                idx = value_col + offset
+                raw = row[idx] if 0 <= idx < len(row) else None
+                value = _geo_parse_numeric_cell(raw) if raw is not None else None
+                return (raw, value) if raw is not None and value is not None else None
+            for raw in row[1:]:
+                value = _geo_parse_numeric_cell(raw)
+                if value is not None:
+                    return raw, value
+            return None
+
+        segments: list[dict] = []
+        total: dict | None = None
+        for row in rows[max(header_idx, total_header_idx) + 1:]:
+            label = (row[0] if row else "").strip()
+            cell = value_of(row) if len(row) > 1 else None
+            if not label:
+                # An unlabeled numeric row after the segment rows is their total.
+                if cell and len(segments) >= 2:
+                    total = {"label": "Total", "rawValue": cell[0], "value": cell[1]}
+                if total:
+                    break
+                continue
+            if not cell:
+                # A label-only row after segment rows starts another block; before them it is a heading.
+                if segments:
+                    break
+                continue
+            if _re.match(r"total\b", label, _re.IGNORECASE | _re.ASCII) or _re.fullmatch(r"(?:consolidated|net sales|total net sales|total revenues?)", label, _re.IGNORECASE):
+                total = {"label": label, "rawValue": cell[0], "value": cell[1]}
+                break
+            segments.append({"label": label, "rawValue": cell[0], "value": cell[1]})
+        if not total or len(segments) < 2 or total["value"] <= 0:
+            continue
+        total_sum = sum(r["value"] for r in segments)
+        if abs(total_sum - total["value"]) > total["value"] * 0.01:
+            continue
+        multiplier, source = _detect_unit_scale(m.group(0), html[max(0, pos - 3_000): pos], document_scale)
+        parts = _re.split(r"(?<=[.:])\s+", before[-300:])
+        return finish({
+            "segments": segments,
+            "total": total,
+            "tableIndex": table_index,
+            "title": parts[-1],
+            "column": column_header[value_col] if column_header is not None and value_col is not None else None,
+            "unitScale": "billions" if multiplier == 1e9 else "millions" if multiplier == 1e6 else "thousands" if multiplier == 1e3 else "actual",
+            "unitMultiplier": multiplier,
+            "unitScaleSource": source,
+        })
+    return finish(None)
+
+
 def _extract_geo_revenue_from_html(
     html_text: str,
     region: str,

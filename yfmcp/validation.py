@@ -81,6 +81,38 @@ def ticker_cap_failure(name: str, args: dict) -> str | None:
     )
 
 
+# Earnings tools whose schema allows only period "latest": another value was silently read as the latest release
+# (2.25.1, F28). The Worker checks this in _dispatchTool (LATEST_ONLY_PERIOD_TOOLS).
+LATEST_ONLY_PERIOD_TOOLS = frozenset({
+    "get_latest_earnings_release",
+    "index_earnings_release",
+    "extract_earnings_metrics",
+    "extract_guidance",
+    "extract_management_commentary",
+    "compare_earnings_actual_vs_estimate",
+    "get_earnings_call_transcript",
+})
+
+
+def latest_only_period_failure(name: str, args: dict) -> str | None:
+    """INPUT_VALIDATION_ERROR when a latest-only earnings tool is given a period other than "latest"."""
+    if name not in LATEST_ONLY_PERIOD_TOOLS or not isinstance(args, dict):
+        return None
+    period = args.get("period")
+    if period is None:
+        return None
+    if isinstance(period, str) and _re.fullmatch(r"\s*latest\s*", period, _re.IGNORECASE):
+        return None
+    from yfmcp.envelope import ErrorCode, _mcp_failure
+    from yfmcp.sec_facts import _js_string
+
+    return _mcp_failure(
+        name,
+        ErrorCode.INPUT_VALIDATION_ERROR,
+        f"period supports only \"latest\" for {name}; it reads the latest earnings release. Got '{_js_string(period)}'.",
+    )
+
+
 def validate_tool_args(name: str, args: dict) -> str | None:
     """INPUT_VALIDATION_ERROR (echoing the caller's raw value) or BATCH_LIMIT_EXCEEDED as failure-envelope
     JSON, else None. An unknown tool name is left to the dispatcher."""
@@ -108,7 +140,7 @@ def validate_tool_args(name: str, args: dict) -> str | None:
         error = _validate_accession(value)
         if error:
             return _mcp_failure(name, ErrorCode.INPUT_VALIDATION_ERROR, error)
-    return None
+    return latest_only_period_failure(name, args)
 
 
 def _validate_sec_url(url: str) -> str | None:

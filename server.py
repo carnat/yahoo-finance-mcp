@@ -83,11 +83,11 @@ from yfmcp.clients.edgar import (
 )
 from yfmcp.parsing.html import (
     _strip_html_tags, _strip_html_blocks, _parse_html_table, _parse_numeric_cell, _detect_unit_multiplier, _UNIT_SCALE_ASSUMED_WARNING,
-    _MD_MAX_CELL_CHARS, _html_table_to_markdown, _html_to_markdown_fallback,
+    _MD_MAX_CELL_CHARS, _html_table_to_markdown, _html_to_markdown_fallback, _table_unit_scale,
 )
 from yfmcp.parsing.extractors import (
     _normalize_segment_label, _region_matches,
-    _extract_geo_revenue_from_html, _geo_region_aliases, _js_round,
+    _extract_geo_revenue_from_html, extract_segment_table_from_html, _geo_region_aliases, _js_round,
     _extract_xbrl_latest_annual,
 )
 
@@ -5614,16 +5614,7 @@ def _build_filing_index_from_html(html: str) -> dict:
                     row_labels.append(label)
 
         # Unit scale: default to "unknown"; detect explicitly from context.
-        pre_context = sanitized[max(0, table_start - 2000):table_start].lower()
-        table_context = table_html.lower() + pre_context
-        if "billion" in table_context:
-            unit_scale = "billions"
-        elif "million" in table_context:
-            unit_scale = "millions"
-        elif "thousand" in table_context:
-            unit_scale = "thousands"
-        else:
-            unit_scale = "unknown"
+        unit_scale = _table_unit_scale(table_html, sanitized[max(0, table_start - 2000):table_start])
 
         # Confidence: also lower when unitScale is unknown
         has_year_headers = any(_re.search(r'\b20\d\d\b', h) for h in headers)
@@ -6605,11 +6596,132 @@ async def _extract_segment_revenue(
                     "message": "POSSIBLE_20F_FILER: Ticker may file 20-F. Retry with filing_type='20-F' or use IR web search.",
                     "severity": "warning",
                 })
+    if not rows and payload.get("code") == "INVALID_PERIOD":
+        # A fiscal year with a quarterly filing type: no table read can answer it either (2.25.1, F26).
+        invalid = next((w for w in (payload.get("warnings") if isinstance(payload.get("warnings"), list) else [])
+                        if isinstance(w, dict) and w.get("code") == "INVALID_PERIOD"), None)
+        out.update({"status": "INVALID_PERIOD", "code": "INVALID_PERIOD", "message": invalid.get("message") if invalid else None})
+    elif not rows:
+        # SEC companyconcept facts carry no segment dimensions, so most filers need the filing's own segment table;
+        # the table read honours the period and a pinned filing (2.25.1, F26).
+        out.update(await _segment_revenue_from_filing_table(ticker, filing_type, warnings, period, pin))
     if warnings:
         out["warnings"] = warnings
     if str(detailLevel).lower() == "raw":
         out["rawContext"] = payload
     return json.dumps(out)
+
+
+async def _segment_revenue_from_filing_table(
+    ticker: str,
+    filing_type: str,
+    warnings: list[dict],
+    period: str = "latest",
+    pin: str | None = None,
+) -> dict:
+    """The Worker's segmentRevenueFromFilingTable: segment rows parsed from the filing's own table (2.25.1, F26)."""
+    named = _sf.parse_filing_period(period)
+    fiscal_year = named["year"] if named and named["kind"] == "fiscalYear" else None
+    filing, error = await _resolve_sec_filing(ticker, filing_type, pin)
+    if filing is None:
+        error = error or {}
+        return {"status": str(error.get("status") or error.get("code") or "FILING_NOT_FOUND"), "code": error.get("code"), "message": error.get("message")}
+    warnings.extend(filing["warnings"])
+    filing_meta = {
+        "filingType": filing["filingType"],
+        "filingDate": filing["filingDate"],
+        "accessionNumber": filing["accessionNumber"],
+        "documentUrl": filing["documentUrl"],
+    }
+    html = await _edgar_get_html(filing["documentUrl"], max_bytes=_SEC_DOCUMENT_READ_MAX_CHARS + 1)
+    # The read is bounded in UTF-16 code units, as the Worker's string length.
+    html_length = _utf16_length(html) if html else 0
+    if html and html_length > _SEC_DOCUMENT_READ_MAX_CHARS:
+        html = html.encode("utf-16-le", "surrogatepass")[: 2 * _SEC_DOCUMENT_READ_MAX_CHARS].decode("utf-16-le", "ignore")
+        html_length = _utf16_length(html)
+    if not html:
+        return {**filing_meta, "status": "PROVIDER_ERROR", "code": "PROVIDER_ERROR", "message": "The filing document could not be read."}
+    parsed = extract_segment_table_from_html(html, fiscal_year)
+    result, tables_seen, tables_scanned, years_seen = parsed["result"], parsed["segmentTablesSeen"], parsed["tablesScanned"], parsed["yearsSeen"]
+    truncated = html_length >= _SEC_DOCUMENT_READ_MAX_CHARS
+    searched_terms = ["segment", "revenue", "net sales"]
+    scan_coverage = {
+        "sourceType": "sec_primary_html",
+        "documentUrl": filing["documentUrl"],
+        "charsScanned": html_length,
+        "tablesScanned": tables_scanned,
+        "segmentTablesSeen": tables_seen,
+        "filingReadTruncated": truncated,
+        "searchedTerms": searched_terms,
+    }
+    if result:
+        result_period = f"FY{_re.sub(r'[^0-9]', '', result['column'])}" if result["column"] else None
+        scale_assumed = result["unitScaleSource"] == "ASSUMED_MILLIONS"
+        if scale_assumed:
+            warnings.append(_UNIT_SCALE_ASSUMED_WARNING)
+        mult = result["unitMultiplier"]
+        total = result["total"]
+        return {
+            **filing_meta,
+            "status": "FOUND",
+            "extractionMethod": "PARSED_TABLE",
+            "decisionGrade": False,
+            "unitScale": result["unitScale"],
+            "unitScaleSource": result["unitScaleSource"],
+            "segments": [{
+                "label": row["label"],
+                "value": row["value"] * mult,
+                "rawValue": row["rawValue"],
+                "period": result_period,
+                "confidence": "LOW" if scale_assumed else "MEDIUM",
+                "evidence": {
+                    "documentUrl": filing["documentUrl"],
+                    "filingType": filing["filingType"],
+                    "accessionNumber": filing["accessionNumber"],
+                    "filingDate": filing["filingDate"],
+                    "sourceTableId": result["tableIndex"],
+                    "tableTitle": result["title"],
+                    "sourceRows": [[row["label"], row["rawValue"]], [total["label"], total["rawValue"]]],
+                    "sourceColumns": [result["column"]] if result["column"] else [],
+                },
+            } for row in result["segments"]],
+            # A parsed table's total is no surer than its rows (2.5.21).
+            "total": {"label": total["label"], "value": total["value"] * mult, "rawValue": total["rawValue"], "confidence": "LOW" if scale_assumed else "MEDIUM"},
+            "evidence": {
+                "sourceType": "sec_filing_table",
+                "documentUrl": filing["documentUrl"],
+                "tableIndex": result["tableIndex"],
+                "tableTitle": result["title"],
+                "column": result["column"],
+            },
+            "calculation": {"check": "segments sum to the table total within 1%"},
+            "recommendedNextAction": "VERIFY_TABLE_PERIOD_AND_UNITS",
+        }
+    if fiscal_year is not None and years_seen and fiscal_year not in years_seen:
+        # The filing's segment tables report other years: say so rather than return another year's rows (2.25.1, F26).
+        return {
+            **filing_meta,
+            "status": "PERIOD_NOT_FOUND",
+            "decisionGrade": False,
+            "message": f"The segment tables in this {filing['filingType']} (filed {filing['filingDate']}) have columns for {', '.join(str(y) for y in years_seen)}, not fiscal year {fiscal_year}.",
+            "fiscalYearsAvailable": years_seen,
+            "scanCoverage": scan_coverage,
+            "searchedTerms": searched_terms,
+        }
+    if tables_seen > 0 or truncated:
+        if tables_seen > 0:
+            warnings.append({"code": "TABLE_NOT_PARSED", "message": "The filing has tables introduced as segment revenue, but none parsed into segments that sum to a total.", "severity": "warning"})
+        if truncated:
+            warnings.append({"code": "FILING_READ_TRUNCATED", "message": "Only the first part of the filing was scanned; segment tables may appear later.", "severity": "warning"})
+        return {**filing_meta, "status": "EXTRACTION_FAILED", "code": "EXTRACTION_FAILED", "decisionGrade": False, "scanCoverage": scan_coverage, "searchedTerms": searched_terms, "recommendedNextAction": "LIST_SEC_FILING_TABLES"}
+    return {
+        **filing_meta,
+        "status": "NOT_DISCLOSED",
+        "decisionGrade": False,
+        "scanCoverage": scan_coverage,
+        "searchedTerms": searched_terms,
+        "notDisclosedBasis": "No XBRL segment facts and no table introduced as segment revenue in the full filing.",
+    }
 
 
 @yfinance_server.tool(name="extract_total_revenue", description="Extract total revenue from official SEC facts or filing tables with evidence metadata.")
@@ -8857,10 +8969,13 @@ async def query_sec_filing_index(
     if status == "ANSWERED" and not evidence:
         status = "NOT_FOUND"
         warnings.append({"code": "EVIDENCE_REQUIRED", "message": "ANSWERED responses require evidence."})
+    # The table fallback's rows carry their own confidence (MEDIUM, or LOW when the scale was assumed), as the Worker reads it.
+    segment_confidence = str(segments[0].get("confidence") or "LOW") if segments else None
+    confidence = (segment_confidence or "LOW") if status == "ANSWERED" else ("NOT_DISCLOSED" if status == "NOT_DISCLOSED" else "LOW")
     return _result(
         status,
         {"segment": segment_name or None, "segments": segments},
-        "HIGH" if status == "ANSWERED" else ("NOT_DISCLOSED" if status == "NOT_DISCLOSED" else "LOW"),
+        confidence,
         evidence,
         warnings,
     )

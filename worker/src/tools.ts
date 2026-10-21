@@ -2140,11 +2140,26 @@ const FILING_PERIOD_TOOLS = new Set([
   "query_sec_filing_index",
 ]);
 
+// Earnings tools whose schema allows only period "latest": another value was silently read as the latest
+// release, so "FY2025 Q4" returned FY2026 Q3 with no mismatch (2.25.1, F28).
+export const LATEST_ONLY_PERIOD_TOOLS = new Set([
+  "get_latest_earnings_release",
+  "index_earnings_release",
+  "extract_earnings_metrics",
+  "extract_guidance",
+  "extract_management_commentary",
+  "compare_earnings_actual_vs_estimate",
+  "get_earnings_call_transcript",
+]);
+
 async function _dispatchTool(name: string, args: Record<string, unknown>): Promise<string> {
   const gateFailure = validateToolArgs(name, args);
   if (gateFailure) return gateFailure;
   if (FILING_PERIOD_TOOLS.has(name) && args.period != null && !parseFilingPeriod(String(args.period))) {
     return mcpFailure(name, ErrorCode.INPUT_VALIDATION_ERROR, `${FILING_PERIOD_HELP} Got '${String(args.period)}'.`);
+  }
+  if (LATEST_ONLY_PERIOD_TOOLS.has(name) && args.period != null && !/^\s*latest\s*$/i.test(String(args.period))) {
+    return mcpFailure(name, ErrorCode.INPUT_VALIDATION_ERROR, `period supports only "latest" for ${name}; it reads the latest earnings release. Got '${String(args.period)}'.`);
   }
   switch (name) {
     case "search_thai_funds":

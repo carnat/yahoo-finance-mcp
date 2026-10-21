@@ -5821,9 +5821,22 @@ const SHARE_HEADER_RE = /%\s*of\b|\bpercent(?:age)?\s+of\b/i;
 const UNIT_SCALE_RE = /\bin\s+(billions|millions|thousands)\b|\$\s*(billions|millions|thousands)\b|\b(billions|millions|thousands)\s+of\s+(?:u\.?s\.?\s+)?dollars\b|\(\s*(?:in\s+)?\$?\s*(000)'?s?\s*\)|\$\s*(000)'?s\b/gi;
 const UNIT_SCALE_WORD: Record<string, number> = { billions: 1e9, millions: 1e6, thousands: 1e3, "000": 1e3 };
 
+/**
+ * A scale statement about share counts, not amounts: "shares in thousands", or a scale after "except" in the same
+ * parenthetical, as in Apple's "(In millions, except number of shares, which are reflected in thousands ...)"
+ * (2.25.1, F25: the share scale was read as the table's monetary scale, 1000x too small).
+ */
+export function isShareScaleStatement(text: string, index: number): boolean {
+  const lead = text.slice(Math.max(0, index - 80), index);
+  const clause = lead.slice(Math.max(lead.lastIndexOf("("), lead.lastIndexOf(")"), lead.lastIndexOf(";")) + 1);
+  return /\b(?:except|shares?)\b/i.test(clause);
+}
+
 function statedUnitScales(html: string): number[] {
   const text = html.replace(/<[^>]+>/g, " ").replace(/&nbsp;|&#160;|&#xa0;/gi, " ").replace(/&#36;|&dollar;/gi, "$").replace(/\s+/g, " ");
-  return [...text.matchAll(UNIT_SCALE_RE)].map((m) => UNIT_SCALE_WORD[(m.slice(1).find(Boolean) ?? "").toLowerCase()]);
+  return [...text.matchAll(UNIT_SCALE_RE)]
+    .filter((m) => !isShareScaleStatement(text, m.index ?? 0))
+    .map((m) => UNIT_SCALE_WORD[(m.slice(1).find(Boolean) ?? "").toLowerCase()]);
 }
 
 // Where a table's scale came from (2.5.21). ASSUMED_MILLIONS: neither the table nor its lead-in states one, so
@@ -9216,10 +9229,12 @@ export function tableUnitScale(tableHtml: string, beforeHtml: string): "thousand
   const unitRe = /\bin\s+(thousands|millions|billions)\b|\$\s*(thousands|millions|billions)\b|\b(thousands|millions|billions)\s+of\s+(?:u\.s\.\s+)?dollars\b/gi;
   const scaleOf = (m: RegExpMatchArray): "thousands" | "millions" | "billions" =>
     (m[1] ?? m[2] ?? m[3]).toLowerCase() as "thousands" | "millions" | "billions";
+  // A share-count scale is not the table's monetary scale (2.25.1, F25).
   const tableText = stripHtmlTags(tableHtml).slice(0, 1_500);
-  const inTable = [...tableText.matchAll(unitRe)];
+  const inTable = [...tableText.matchAll(unitRe)].filter((m) => !isShareScaleStatement(tableText, m.index ?? 0));
   if (inTable.length > 0) return scaleOf(inTable[0]);
-  const before = [...stripHtmlTags(beforeHtml).slice(-800).matchAll(unitRe)];
+  const beforeText = stripHtmlTags(beforeHtml).slice(-800);
+  const before = [...beforeText.matchAll(unitRe)].filter((m) => !isShareScaleStatement(beforeText, m.index ?? 0));
   if (before.length > 0) return scaleOf(before[before.length - 1]);
   return "unknown";
 }
@@ -11494,11 +11509,14 @@ const YEAR_CELL = /^(?:fy\s*)?(?:19|20)\d{2}$/i;
  * table must follow text that mentions segments and revenue or sales.
  * Returns the tables it considered (segmentTablesSeen) even when none of
  * them parses, so callers can tell "not parsed" from "not disclosed".
+ * With `fiscalYear`, only that year's column is read; a table without it is skipped, and the year columns the
+ * segment tables do have are returned as `yearsSeen` (2.25.1, F26: the latest column was returned for any year).
  */
-export function extractSegmentTableFromHtml(html: string): { result: SegmentTableResult | null; segmentTablesSeen: number; tablesScanned: number } {
+export function extractSegmentTableFromHtml(html: string, fiscalYear: number | null = null): { result: SegmentTableResult | null; segmentTablesSeen: number; tablesScanned: number; yearsSeen: number[] } {
   const documentScale = lazyDocumentScale(html);
   let tableIndex = -1;
   let segmentTablesSeen = 0;
+  const yearsSeen = new Set<number>();
   for (const m of html.matchAll(/<table[^>]*>([\s\S]*?)<\/table>/gi)) {
     tableIndex++;
     if (tableIndex > 800) break;
@@ -11515,12 +11533,16 @@ export function extractSegmentTableFromHtml(html: string): { result: SegmentTabl
       let latest = -1;
       header.forEach((cell, i) => {
         const year = YEAR_CELL.test(cell) ? Number(cell.replace(/\D/g, "")) : NaN;
-        if (Number.isFinite(year) && year > latest) {
+        if (!Number.isFinite(year)) return;
+        yearsSeen.add(year);
+        if (fiscalYear != null ? year === fiscalYear && yearCol == null : year > latest) {
           latest = year;
           yearCol = i;
         }
       });
     }
+    // A named year needs a column headed with it; a table without year columns cannot show which year it is.
+    if (fiscalYear != null && (header == null || yearCol == null)) continue;
     // Without a year column, a "Total" column is the company figure: VRT's disaggregation table is by region
     // ("Americas | Asia Pacific | EMEA | Total"), and its first amount column is the Americas (2.5.20).
     const totalHeaderIdx = headerIdx >= 0 ? -1 : rows.findIndex((row) => row.slice(1).some((cell) => /^total$/i.test(cell.trim())) && !row.some((cell) => parseNumericCell(cell) != null));
@@ -11579,9 +11601,10 @@ export function extractSegmentTableFromHtml(html: string): { result: SegmentTabl
       },
       segmentTablesSeen,
       tablesScanned: tableIndex + 1,
+      yearsSeen: [...yearsSeen].sort((a, b) => b - a),
     };
   }
-  return { result: null, segmentTablesSeen, tablesScanned: tableIndex + 1 };
+  return { result: null, segmentTablesSeen, tablesScanned: tableIndex + 1, yearsSeen: [...yearsSeen].sort((a, b) => b - a) };
 }
 
 // accessionNumber is internal (not a tool param): a pinned query reads the pinned filing (2.24.0, F21).
@@ -11650,11 +11673,15 @@ export async function extractSegmentRevenue(ticker: string, filingType = "10-K",
     }
   }
   const out: Record<string, unknown> = { ticker, factType: "segment_revenue", segments, status: segments.length > 0 ? "FOUND" : "NOT_DISCLOSED" };
-  if (segments.length === 0) {
+  if (segments.length === 0 && payload.code === "INVALID_PERIOD") {
+    // A fiscal year with a quarterly filing type: no table read can answer it either (2.25.1, F26).
+    const invalid = (Array.isArray(payload.warnings) ? payload.warnings : []).find((w) => (w as Record<string, unknown> | null)?.code === "INVALID_PERIOD") as Record<string, unknown> | undefined;
+    Object.assign(out, { status: "INVALID_PERIOD", code: "INVALID_PERIOD", message: invalid?.message ?? null });
+  } else if (segments.length === 0) {
     // SEC companyconcept facts carry no segment dimensions, so most filers
     // need the filing's own segment table; absence is only reported with
-    // the scan that supports it.
-    Object.assign(out, await segmentRevenueFromFilingTable(ticker, filingType, warnings));
+    // the scan that supports it. The table read honours the period and a pinned filing (2.25.1, F26).
+    Object.assign(out, await segmentRevenueFromFilingTable(ticker, filingType, warnings, period, pin));
   }
   if (warnings.length > 0) out.warnings = warnings;
   if (String(detailLevel).toLowerCase() === "raw") out.rawContext = payload;
@@ -11665,8 +11692,12 @@ async function segmentRevenueFromFilingTable(
   ticker: string,
   filingType: string,
   warnings: Array<Record<string, unknown>>,
+  period = "latest",
+  pin: string | null = null,
 ): Promise<Record<string, unknown>> {
-  const resolved = await resolveSecFiling(ticker, filingType, null);
+  const named = parseFilingPeriod(period);
+  const fiscalYear = named?.kind === "fiscalYear" ? named.year : null;
+  const resolved = await resolveSecFiling(ticker, filingType, pin);
   if (!resolved.ok) {
     return { status: String(resolved.error.status ?? resolved.error.code ?? "FILING_NOT_FOUND"), code: resolved.error.code ?? null, message: resolved.error.message ?? null };
   }
@@ -11682,7 +11713,7 @@ async function segmentRevenueFromFilingTable(
   if (!html) {
     return { ...filingMeta, status: "PROVIDER_ERROR", code: "PROVIDER_ERROR", message: "The filing document could not be read." };
   }
-  const { result, segmentTablesSeen, tablesScanned } = extractSegmentTableFromHtml(html);
+  const { result, segmentTablesSeen, tablesScanned, yearsSeen } = extractSegmentTableFromHtml(html, fiscalYear);
   const filingReadTruncated = html.length >= SEC_DOCUMENT_READ_MAX_CHARS;
   const searchedTerms = ["segment", "revenue", "net sales"];
   const scanCoverage = {
@@ -11733,6 +11764,18 @@ async function segmentRevenueFromFilingTable(
       },
       calculation: { check: "segments sum to the table total within 1%" },
       recommendedNextAction: "VERIFY_TABLE_PERIOD_AND_UNITS",
+    };
+  }
+  if (fiscalYear != null && yearsSeen.length > 0 && !yearsSeen.includes(fiscalYear)) {
+    // The filing's segment tables report other years: say so rather than return another year's rows (2.25.1, F26).
+    return {
+      ...filingMeta,
+      status: "PERIOD_NOT_FOUND",
+      decisionGrade: false,
+      message: `The segment tables in this ${String(filing.filingType)} (filed ${String(filing.filingDate)}) have columns for ${yearsSeen.join(", ")}, not fiscal year ${fiscalYear}.`,
+      fiscalYearsAvailable: yearsSeen,
+      scanCoverage,
+      searchedTerms,
     };
   }
   if (segmentTablesSeen > 0 || filingReadTruncated) {
@@ -13825,7 +13868,12 @@ async function resolveLatestEarningsRelease(ticker: string): Promise<Record<stri
   const calendar = parseObjectJson(await getCalendar(ticker));
   const earningsDates = ((((calendar.calendar as Record<string, unknown> | undefined)?.earnings as Record<string, unknown> | undefined)?.earningsDate as unknown[]) ?? [])
     .filter((d) => typeof d === "string") as string[];
-  const first = earningsDates[0] ?? null;
+  // Yahoo's calendar lists the next (estimated) report date: a date still ahead is not the latest release
+  // (2.25.1, F27: 7203.T reported 2026-11-05 as its latest release on 2026-10-20).
+  const nowMs = Date.now();
+  const first = earningsDates
+    .filter((d) => { const t = Date.parse(toIsoUtc(d) ?? ""); return Number.isFinite(t) && t <= nowMs; })
+    .sort((a, b) => Date.parse(toIsoUtc(b) ?? "") - Date.parse(toIsoUtc(a) ?? ""))[0] ?? null;
   if (first) {
     return {
       ticker: ticker.toUpperCase(),

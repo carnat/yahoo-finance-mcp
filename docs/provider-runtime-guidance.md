@@ -3161,6 +3161,25 @@ F-024, F-026, F-029). Both runtimes change alike.
 - **Deprecation notice (R5-fundamentals):** in the Phase 6 major release, Python `get_ownership_holders` rows will be renamed to the Worker's camelCase shape (`Value` becomes `value`, F17). There is no runtime change now.
 - **Rollback:** redeploy 2.24.0.
 
+## Audit Repairs (2.25.1)
+
+- **Why:** the 2.25.0 functional audit, findings F25 to F28 in `analysis/yahoo-finance-mcp/F_TRIAGE.md` section 5. Both runtimes change alike. There is no new field, status, warning code or enum value: every status used already existed.
+- **F25, table unit scale:**
+  - A scale statement about share counts is no longer read as a table's monetary scale. A scale after "except", or about shares, inside the same parenthetical is skipped.
+  - Apple's "(In millions, except number of shares, which are reflected in thousands, and per-share amounts)" now reads as millions, not thousands. It was 1000x low on the table paths: `list_sec_filing_tables` and `get_sec_filing_index` `unitScale`, `index_earnings_release`, and every table extractor that uses the shared scale detector.
+  - Python's filing-index builder took any "billion" in nearby prose. It now uses the Worker's rule: the table's own statement, else the last statement in the 800 characters before it.
+- **F26, `extract_segment_revenue` on the filing-table path honours `period`:**
+  - A fiscal year reads that year's column. For AAPL FY2024, Americas is 167,045M; it was the FY2025 column for any year.
+  - If the filing's segment tables have no column for that year, the status is `PERIOD_NOT_FOUND`, with `fiscalYearsAvailable` and a message naming the years found.
+  - A fiscal year with a quarterly filing type returns `INVALID_PERIOD`.
+  - The table read also uses a pinned accession, which closes a gap left after F21 in 2.24.0.
+  - Python gains the Worker's segment-table path. It previously returned `NOT_DISCLOSED` for filers such as AAPL whose segments are only in the filing table.
+  - `query_sec_filing_index` `segment_revenue` confidence in Python now follows the rows, as in the Worker. A table answer is MEDIUM (LOW when the scale is assumed) rather than HIGH.
+- **F27, latest earnings release without an SEC 8-K source:** `get_latest_earnings_release`, and the tools built on it, no longer treat a future Yahoo calendar date as the latest release. Only a date at or before now counts; otherwise the status is `NOT_FOUND`. Before, 7203.T reported 2026-11-05 at MEDIUM on 2026-10-20.
+- **F28, `period` validation on the latest-only earnings tools:** `get_latest_earnings_release`, `index_earnings_release`, `extract_earnings_metrics`, `extract_guidance`, `extract_management_commentary`, `compare_earnings_actual_vs_estimate` and `get_earnings_call_transcript` allow only period "latest" in their schema. They now reject any other value with `INPUT_VALIDATION_ERROR` before any fetch. Before, "FY2025 Q4" silently returned the latest quarter (FY2026 Q3).
+- **Tests:** 21 new parity cases in `scripts/parity/cases_audit_2251.py`.
+- **Rollback:** redeploy 2.25.0.
+
 ## Per-Person Access Keys (2.18.0)
 
 - **Why:** Phase 1b, approved by the owner on 2026-10-18, for sharing the hosted MCP with a few trusted people, non-commercially. Release type: minor. Worker only: the local Python server is single-user stdio.
