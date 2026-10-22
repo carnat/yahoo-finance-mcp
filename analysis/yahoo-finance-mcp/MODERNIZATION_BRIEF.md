@@ -20,6 +20,30 @@ v2 (2026-10-15) folds in the owner's answers to every v1 open question. The sour
 | Q7 news rules in the harness, RN neutrality deprecation | 2.8.0 | #278 | 8/8 PASS |
 | Phase 3 pilot, news move | 2.8.1 | #279 | 18/18, no structure diff; manifest/schema hashes unchanged |
 
+**Progress as of 2026-10-22.** Releases 2.23.0 to 2.25.7 are merged, deployed and live-verified. Details per finding are in `F_TRIAGE.md` §4 and §5.
+
+| Item | Release | PR | Live verification |
+|---|---|---|---|
+| R5-extractors (F3, F4, F18; BR-EXT-035, BR-EXT-084) | 2.23.0 | #301 | 2026-10-20 07:45Z, build 2.23.0+git.4cdc53b |
+| F21 pinned filing reads | 2.24.0 | #302 | 2026-10-20 08:39Z |
+| F19 consensus provenance, F16 estimate rows LOW | 2.25.0 | #303 | 2026-10-20; the baseline for the functional audit |
+| Audit repairs F25–F28 | 2.25.1 | #304 | 2026-10-21 01:15Z, build 2.25.1+git.93451d9 |
+| F44 docs (Alpha Vantage free-key limit), certifi lock | docs only | #305 | n/a |
+| Audit repairs F30, F31, F33, F34, F42 | 2.25.2 | #306 | 2026-10-21 |
+| Audit repairs F32, F46 | 2.25.3 | #307 | 2026-10-21 |
+| Audit repairs F35–F40, F43 | 2.25.4 | #308 | 2026-10-21 |
+| Audit repair F29; Thai fund repairs TF2, TF4, TF5, TF6, TF8 | 2.25.5, 2.25.6 | #309 | 2026-10-21 |
+| Thai fund repairs TF3, TF7 | 2.25.7 | #310 | 2026-10-21 |
+
+**Still open:**
+- **2.26.0, the Python EDGAR routing release (F7, F1, F2; D9).** It follows Phase 4 unit 1 (EDGAR client move), which is on its branch and merges only after the telemetry baseline gate (first eligible day 2026-10-24).
+- **F22, F23, F24:** logged but unclassified. They need an owner decision before anyone builds them.
+- **Phase 6 major release (F5, F17, F20, F45, F47):** breaking changes, so a major version. A fresh functional audit runs first (owner, 2026-10-22), to set a new baseline.
+- **F41:** deferred (a new capability, P5).
+- **TF9 (Thai dividend history empty):** deferred until `SEC_OPEN_DATA_API_KEY` is a cloud environment secret.
+- **OPS-TEL-3:** after the Phase 4 exit comparison.
+- The low-severity items in `F_TRIAGE.md` §5 are unclassified.
+
 **Universal information outlet (owner direction, 2026-10-15; §7 Q14).** The MCP is a doctrine-neutral information outlet. It publishes facts, provenance and evidence quality in universal language, so any caller can use the data whatever decision framework they follow. It does not carry any one doctrine's vocabulary, permissions or strategy thresholds. Consequences:
 - Doctrine-specific fields are replaced with universal equivalents, through a deprecation window (N1–N3).
 - The Sniper Doctrine no longer gates this plan. It is one downstream consumer, notified through deprecation notices like any other (N4).
@@ -370,6 +394,7 @@ Each R-release is a set of **separately released** behaviour changes that must b
       - R-news part 3 is complete: Batch C in 2.20.0 (#297), plus the F15 patch 2.20.1 (#298).
       - **R5-shared (BR-ENV-001) is released as 2.21.0 (#299) and live-verified.**
       - Phase 4 unit 1 (EDGAR client move, both runtimes) is on the branch, unmerged until the telemetry baseline gate (2026-10-24).
+    - **2026-10-20 to 2026-10-21:** 2.23.0 to 2.25.7 shipped and were live-verified (table at the top). The Python EDGAR routing release (F7, F1, F2) is now numbered 2.26.0 and follows Phase 4 unit 1.
   - Q3a: the Worker honours exact `accession_number` with fail-closed semantics.
   - Q3b: central ticker and accession validation in both runtimes, on every relevant action, including the Python paths that skip it.
   - Q3c + Q12: the per-tool ticker caps from the §7 Q12 table, advertised as schema `maxItems` and rejected with `BATCH_LIMIT_EXCEEDED` in both runtimes. Measure `get_market_snapshot` first and set its cap. Correct the stale comment at `yahoo-finance.ts:58–64`.
@@ -405,6 +430,7 @@ Each R-release is a set of **separately released** behaviour changes that must b
   - **Shared (Form 4):** multi-line parsing.
   - **Fundamentals and providers** each get a **Q7** targeted rule extraction before their R5 release.
 - **2.25.0 functional audit (2026-10-20):** 23 new findings, F25–F47, are classified in `F_TRIAGE.md` §5. F25–F28 ship as the 2.25.1 repair patch; the rest join the R5 releases above or Phase 6, pending owner approval.
+  - *Status 2026-10-22:* the owner approved F29–F47 as recommended on 2026-10-21. 2.25.1 to 2.25.5 (#304, #306–#309) closed F25–F40, F42, F43 and F46, and F44 closed by docs (#305). All are live-verified. F41 is deferred; F45 and F47 wait for Phase 6. The Thai fund audit (2026-10-21) shipped as 2.25.6 and 2.25.7 (#309, #310); TF9 waits on the SEC Open Data API key.
 - **Entry criteria (each R-release):**
   - [ ] Its pinned assertions exist (Phase 2).
   - [x] Any new name it introduces is confirmed in §7 Q11 (all accepted 2026-10-15; a name not in that table needs a new owner decision).
@@ -504,8 +530,10 @@ Each R-release is a set of **separately released** behaviour changes that must b
   - Q3i items triaged as "preserve" get documented as intentional.
   - **Neutrality removal release (N1–N3):** after at least one minor version since RN, remove `doctrineUse`, the seven null boundary fields, `bracket`, `inferredTag`, the fixed liquidity-gate fields and the four `t*_inputs` groups from both runtimes. This is a breaking public-contract change, so it needs a **major version bump** under the README's semver policy (or the owner records an exception). Rename the internal `DoctrineToolStatus` type and `TOOL_DOCTRINE_STATUS` table to neutral names.
   - **Neutrality audit:** every label-producing field in the contract must be either a factual classification or derived from documented thresholds the caller can override. Doctrine or strategy vocabulary stays out of names, enums and descriptions (extends `docs/tool-naming.md`). Generic market terms (bullish/bearish, credit tiers) are reviewed against that rule.
+  - **Triaged findings for the major release:** F5 and F45 (retire `meta.decisionGrade`), F17 (Python holder row shape), F20 (status strings out of `confidence`), F47 (Python events calendar keys). Each gets its deprecation notice first, per `F_TRIAGE.md`.
 - **Entry criteria:**
   - [ ] Phase 5 exit criteria are met.
+  - [ ] A fresh functional audit of the deployed release is done, so the breaking changes start from a current baseline (owner, 2026-10-22).
 - **Exit criteria:**
   - [ ] Python reads nothing under `worker/src`.
   - [ ] `docs/architecture.md` is merged.

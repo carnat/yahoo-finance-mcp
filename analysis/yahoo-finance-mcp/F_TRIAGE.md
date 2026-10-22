@@ -50,7 +50,7 @@
 |---|---|---|
 | **Phase 4 prep (scripts only)** | F6, OPS-TEL-4 docs | Before 2026-10-24. No runtime change, no version bump; a tooling PR. |
 | **R-news D (2.22.0)** | F11 rest, F13, F12*, F10*, F14 | Now; gates nothing |
-| **Phase 4 Python routing release (2.24.0)** | F7, plus F1 and F2 (owner, 2026-10-20: it rewrites the same Python outline function) | Phase 4, after unit 1 (D2a) |
+| **Phase 4 Python routing release (2.26.0; first planned as 2.24.0)** | F7, plus F1 and F2 (owner, 2026-10-20: it rewrites the same Python outline function) | Phase 4, after unit 1 (D2a) |
 | **R5-sec** | ~~F1, F2~~ moved to the Python EDGAR routing release (owner, 2026-10-20) | Before Phase 5 unit 1 |
 | **R5-extractors (2.23.0)** | F3, F4, F18, plus Q3i rows BR-EXT-035 and BR-EXT-084 (`R5EXTRACTORS_SPEC.md`) | Now (owner, 2026-10-20); gates nothing in Phase 4 |
 | **R5-fundamentals** | F19, plus the F17 deprecation notice | Before Phase 5 unit 4 |
@@ -134,7 +134,7 @@ Approved by the owner on 2026-10-19, after "continue with the next triage while 
 **Progress:**
 - **F25–F28: released as 2.25.1 (#304) and live-verified 2026-10-21 01:15Z on build 2.25.1+git.93451d9.** AAPL 10-K tables 22, 24 and 28 report `unitScale` millions; `extract_segment_revenue` FY2024 returns the FY2024 column (Americas 167,045M, total 391,035M) and FY2022 returns `PERIOD_NOT_FOUND` with fiscal years 2025, 2024, 2023; 7203.T `get_latest_earnings_release` is NOT_FOUND; `extract_earnings_metrics` period "FY2025 Q4" gets `INPUT_VALIDATION_ERROR`.
 - **F44:** closed (documented).
-- **Remaining from §5:** F29, F36 (R5-earnings); F30 (R5-pricing); F31, F33, F34, F42 (R5-fundamentals); F32, F46 (R5-sec); F35, F37, F38, F39, F40 (next extractor release); F43 (R-news follow-up); F41, F45, F47 (Phase 6 or later). The low-severity list is unclassified.
+- **Remaining from §5 (as of 2026-10-21 01:15Z; superseded by the status at the end of this list):** F29, F36 (R5-earnings); F30 (R5-pricing); F31, F33, F34, F42 (R5-fundamentals); F32, F46 (R5-sec); F35, F37, F38, F39, F40 (next extractor release); F43 (R-news follow-up); F41, F45, F47 (Phase 6 or later). The low-severity list is unclassified.
 - **2026-10-21 (owner: "Proceed remaining fix"):** the remaining §5 items ship as patch releases, keeping 2.26.0 for the Python EDGAR routing release: 2.25.2 (F30, F31, F33, F34, F42), 2.25.3 (F32, F46), 2.25.4 (F35–F40, F43), 2.25.5 (F29). F41 stays deferred; F45 and F47 wait for Phase 6.
 - **F31 widened:** the Python grouped boundary refused every enum-typed parameter value, not only `insider_transactions`: all `holder_type` and `recommendation_type` values failed.
 - **2.25.3 (F32, F46):** Python's section markdown uses the Worker's bold-heading pattern and block title; the Worker decodes entities in section markdown; Python `list_sec_filing_tables` without `document_url` lists the filing index's tables as the Worker does. `word_count` keeps counting the returned markdown (with `truncated`), so no field changes.
@@ -142,3 +142,13 @@ Approved by the owner on 2026-10-19, after "continue with the next triage while 
 - **2.25.5 (F29):** Python `extract_earnings_metrics` reads the Worker's XBRL quarter tier first (`selectQuarterFact`, YTD derivation, release-date floor, 120-day window). Left open: Python has no 8-K iXBRL tier, and empty text-path metrics say `NOT_DECISION_GRADE` in Python and `NOT_DISCLOSED` in the Worker.
 - **2.25.6 (Thai fund audit TF2, TF4, TF5, TF6, TF8):** explicit-project NAV reads by class first; factsheet URLs dated by newest row; holdings by rank; Thai transient errors retryable; Thai spec source documented. Open: TF3/TF9 dividend history (needs a raw provider check with the production key), TF7 URL scope label. Report: `/mnt/project-files/audits/thai-funds-audit-2026-10-21.md`.
 - **2.25.7 (Thai TF3, TF7):** dividend `dataDate` only for a complete one-page history; factsheet URL section scope `MIXED`. TF9 (empty dividend history) deferred until `SEC_OPEN_DATA_API_KEY` is a cloud environment secret.
+- **Status 2026-10-22: every release above is merged and live-verified.** 2.25.2 (#306), 2.25.3 (#307), 2.25.4 (#308), 2.25.5 and 2.25.6 (#309) and 2.25.7 (#310) were each checked live on 2026-10-21. F44 closed by docs (#305).
+  - **Closed from §5:** F25–F40, F42, F43, F44, F46.
+  - **Thai fund audit:** TF2–TF8 closed.
+  - **Open:**
+    - **2.26.0** (Python EDGAR routing): F7, F1, F2. It waits for Phase 4 unit 1, which merges after the telemetry baseline gate (first eligible day 2026-10-24).
+    - **Unclassified:** F22, F23, F24, and the §5 low-severity list. Each needs an owner decision before it is built.
+    - **Phase 6 (major):** F5, F17, F20, F45, F47. A fresh functional audit comes first (owner, 2026-10-22).
+    - **Deferred:** F41 (new capability, P5); TF9 (needs `SEC_OPEN_DATA_API_KEY` as a cloud environment secret).
+    - **After the Phase 4 exit:** OPS-TEL-3.
+    - **Left open by 2.25.5 (not yet triaged):** Python has no 8-K iXBRL tier; empty text-path metrics say `NOT_DECISION_GRADE` in Python and `NOT_DISCLOSED` in the Worker.
