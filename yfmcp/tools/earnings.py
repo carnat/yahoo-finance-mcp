@@ -6,6 +6,7 @@ time instead of pulling more code into this refactor.
 """
 
 import asyncio
+import functools
 import datetime
 import hashlib
 import json
@@ -36,12 +37,14 @@ from yfmcp.util import (
     _compact_excerpt,
 )
 from yfmcp.clients.edgar import (
+    _edgar_fetch_page_detail,
     _edgar_build_filing_urls,
     _edgar_cik_from_accession,
     _edgar_get_html,
     _edgar_list_exhibits_from_index,
     _edgar_read_exhibit_index,
     _get_submissions_for_ticker,
+    _resolve_ex991_url,
 )
 from yfmcp.clients.market_providers import fetch_alpha_vantage_json
 from yfmcp import extraction_rules as _er
@@ -179,39 +182,6 @@ def _first_sentence_for_topic(text: str, topic: str) -> str | None:
             # the cut (2.25.4 audit, F36).
             if topic_l in excerpt.lower():
                 return excerpt
-    return None
-
-
-async def _resolve_ex991_url(accession_number: str, cik: int | None) -> str | None:
-    """Resolve the EX-99.1 exhibit URL from an 8-K filing index.
-
-    Returns the full SEC URL for the EX-99.1 document, or None if not found.
-    """
-    if not accession_number or cik is None:
-        return None
-    index_url, _ = _edgar_build_filing_urls(cik, accession_number, None)
-    exhibits = await _edgar_list_exhibits_from_index(index_url)
-    for ex in exhibits:
-        # One rule in both runtimes (2.14.0): the type names exhibit 99.1
-        # (EX-99.1, EX-99.01 or the bare 99.1 alias), or an EX-99 type carries
-        # release wording. A file name alone is not accepted.
-        doc_type = _re.sub(r"\s+", "", str(ex.get("type") or "").upper())
-        description = str(ex.get("description") or "").upper()
-        matched = bool(_re.match(r"^EX-99\.0?1$", doc_type) or _re.match(r"^99\.0?1$", doc_type)) or (
-            doc_type.startswith("EX-99")
-            and bool(_re.search(r"PRESS RELEASE|EARNINGS RELEASE|RESULTS RELEASE", description))
-        )
-        if matched:
-            doc_name = ex.get("document")
-            if doc_name:
-                accession_nodash = accession_number.replace("-", "")
-                return f"https://www.sec.gov/Archives/edgar/data/{cik}/{accession_nodash}/{doc_name}"
-    html = await _edgar_get_html(index_url, 100_000)
-    if not html:
-        return None
-    m = _re.search(r'EX-99\.0?1\b[^<]{0,300}<[^>]+href="(/Archives/edgar/data/[^"]+\.(?:htm|html))"', html, _re.IGNORECASE)
-    if m:
-        return f"https://www.sec.gov{m.group(1)}"
     return None
 
 
@@ -1309,7 +1279,10 @@ async def parse_public_transcript(url: str = "", topics: list[str] | None = None
         except Exception as exc:
             return None, f"Fetch error: {type(exc).__name__}: {exc}", None
 
-    html, error_detail, http_status = await loop.run_in_executor(None, _url_policy.in_context(_fetch_page))
+    # An SEC page goes through the EDGAR client, with SEC's required User-Agent and the same read (2.26.0, D9).
+    fetch = (functools.partial(_edgar_fetch_page_detail, url, 5_000_000, 30)
+             if _url_policy.allowed_host_kind(url) == "sec" else _fetch_page)
+    html, error_detail, http_status = await loop.run_in_executor(None, _url_policy.in_context(fetch))
     if not html:
         diagnostics: dict = {"url": url}
         if http_status is not None:

@@ -3,7 +3,8 @@
  * Moved out of news.ts in 2.15.1 (pure restructure); providers never import news.ts.
  */
 
-import { edgarGetHtml, edgarTickerMapLoaded, getSubmissionsForTicker, stripHtmlTags, _str } from "../../yahoo-finance.js";
+import { edgarGetHtml, edgarTickerMapLoaded, getSubmissionsForTicker } from "../../clients/edgar.js";
+import { stripHtmlTags, _str } from "../../yahoo-finance.js";
 import {
   parseHtmlTable,
   sourceDecisionUse,

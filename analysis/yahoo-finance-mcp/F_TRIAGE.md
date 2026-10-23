@@ -152,3 +152,16 @@ Approved by the owner on 2026-10-19, after "continue with the next triage while 
     - **Deferred:** F41 (new capability, P5); TF9 (needs `SEC_OPEN_DATA_API_KEY` as a cloud environment secret).
     - **After the Phase 4 exit:** OPS-TEL-3.
     - **Left open by 2.25.5 (not yet triaged):** Python has no 8-K iXBRL tier; empty text-path metrics say `NOT_DECISION_GRADE` in Python and `NOT_DISCLOSED` in the Worker.
+
+## 6. The Python EDGAR routing release (2.26.0)
+
+**Scope:** F7, F1, F2 and D9, built on Phase 4 unit 1 per `PHASE4_SPEC.md` §3.6 and the planner rules fixed under D2b/D2c (full CIK resolution, a 15-minute submissions TTL, existing messages kept where the status is unchanged, an uncapped status-keeping document read with today's timeout and decoding). No new field, status, warning code or enum value. Runtime guidance: "Python EDGAR Routing (2.26.0)".
+
+- **Python:** `list_sec_filings` and the document reads of the four filing tools go through `yfmcp/clients/edgar.py` (`_resolve_cik_for_ticker`, `_edgar_read_submissions`, the new `_edgar_get_document`). `server.py` no longer builds a raw SEC request.
+  - The submissions cache is 15 minutes for every caller (`_EDGAR_SUBS_TTL`).
+  - Failed submissions and document reads keep urllib's message (the `EdgarError`'s cause, or the raised `HTTPError`).
+- **F7:** a failed ticker-index load is not cached, and a failed refresh returns no map, as the Worker's `getEdgarTickerCikMap`.
+- **F1:** `get_sec_filing_outline` without `document_url` uses the index outline (`_sec_index_outline_payload`, the Worker's `secIndexOutlinePayload`).
+- **F2:** outline titles turn inner tags into a space.
+- **D9:** SEC pages in `parse_public_transcript` are fetched by the EDGAR client in both runtimes (`_edgar_fetch_page_detail`, `edgarFetchPublicHtml`). The User-Agent is the only change.
+- **F48 (new, unclassified):** `get_sec_filing_index` with a pinned accession whose form differs from `filing_type` labels `filingType` with the requested form in Python and the filing's own form in the Worker. Both answer the same filing; the F1 outline inherits the label. Pinned as `f48.index.pinned_accession_of_another_form_filing_type_label`. Proposed: REPAIR → Worker (the label names the filing read, P1). Needs the owner's call.

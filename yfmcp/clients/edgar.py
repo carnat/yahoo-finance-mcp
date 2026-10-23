@@ -68,15 +68,21 @@ _EDGAR_TTL = 24 * 3600  # 24h
 # In-process cache for EDGAR company facts (keyed by zero-padded CIK).
 _EDGAR_FACTS_CACHE: dict[str, tuple[dict, float]] = {}
 
-# In-process cache for EDGAR submissions JSON (keyed by zero-padded CIK).
+# In-process cache for EDGAR submissions JSON (keyed by zero-padded CIK). Submissions list recent filings, so they
+# expire after 15 minutes, as the Worker's FILING_SUBMISSIONS_TTL_MS, for new filings to show up (2.26.0).
 _EDGAR_SUBS_CACHE: dict[str, tuple[dict, float]] = {}
+_EDGAR_SUBS_TTL = 15 * 60
 
 
 async def _load_edgar_tickers() -> dict[str, int]:
-    """Return ticker→CIK mapping from SEC EDGAR, refreshed every 24 h."""
+    """Return ticker→CIK mapping from SEC EDGAR, refreshed every 24 h.
+
+    Mirrors the Worker's getEdgarTickerCikMap: only a successful load is cached. A failed load returns an empty map
+    and the next call retries; it is never served from cache for the rest of the day (2.26.0, F7).
+    """
     global _EDGAR_TICKERS, _EDGAR_TICKERS_LOADED_AT
     now = time.monotonic()
-    if _EDGAR_TICKERS is not None and (now - _EDGAR_TICKERS_LOADED_AT) < _EDGAR_TTL:
+    if _EDGAR_TICKERS and _EDGAR_TICKERS_LOADED_AT > 0.0 and (now - _EDGAR_TICKERS_LOADED_AT) < _EDGAR_TTL:
         return _EDGAR_TICKERS
     loop = asyncio.get_event_loop()
 
@@ -90,12 +96,12 @@ async def _load_edgar_tickers() -> dict[str, int]:
         return {v["ticker"].upper(): int(v["cik_str"]) for v in data.values()}
 
     try:
-        _EDGAR_TICKERS = await loop.run_in_executor(None, _url_policy.in_context(_fetch))
-        _EDGAR_TICKERS_LOADED_AT = now
+        loaded = await loop.run_in_executor(None, _url_policy.in_context(_fetch))
     except Exception:
-        if _EDGAR_TICKERS is None:
-            _EDGAR_TICKERS = {}
-    return _EDGAR_TICKERS  # type: ignore[return-value]
+        return {}
+    _EDGAR_TICKERS = loaded
+    _EDGAR_TICKERS_LOADED_AT = now
+    return loaded
 
 
 def _edgar_ticker_map_loaded() -> bool:
@@ -148,19 +154,27 @@ async def _edgar_get_company_facts(cik_padded: str) -> dict | None:
     return data
 
 
-async def _edgar_get_submissions(cik_padded: str) -> dict | None:
-    """Fetch the EDGAR submissions JSON for a CIK, with 24 h in-process caching."""
+async def _edgar_read_submissions(cik_padded: str) -> dict:
+    """The EDGAR submissions JSON for a CIK, cached for 15 minutes; a failed read raises EdgarError.
+
+    The urllib error that caused it is the EdgarError's __cause__, so a caller can keep its own message text.
+    """
     now = time.monotonic()
     cached_entry = _EDGAR_SUBS_CACHE.get(cik_padded)
-    if cached_entry is not None and (now - cached_entry[1]) < _EDGAR_TTL:
+    if cached_entry is not None and (now - cached_entry[1]) < _EDGAR_SUBS_TTL:
         return cached_entry[0]
-    try:
-        data = await _edgar_get(f"https://data.sec.gov/submissions/CIK{cik_padded}.json")
-    except EdgarError:
-        return None
+    data = await _edgar_get(f"https://data.sec.gov/submissions/CIK{cik_padded}.json")
     if data is not None:
         _bounded_set(_EDGAR_SUBS_CACHE, cik_padded, (data, now), _EDGAR_SUBS_CACHE_MAX)
     return data
+
+
+async def _edgar_get_submissions(cik_padded: str) -> dict | None:
+    """Fetch the EDGAR submissions JSON for a CIK, with 15-minute in-process caching; None when the read fails."""
+    try:
+        return await _edgar_read_submissions(cik_padded)
+    except EdgarError:
+        return None
 
 
 def _edgar_build_filing_urls(cik: int, accession_number: str, primary_doc: str | None) -> tuple[str, str | None]:
@@ -305,21 +319,75 @@ def _store_edgar_html(key: tuple[str, int], future: concurrent.futures.Future) -
             _EDGAR_HTML_CACHE_CHARS -= len(_EDGAR_HTML_CACHE.pop(oldest)[0])
 
 
-async def _edgar_get_html(url: str, max_bytes: int = 5_000_000) -> str | None:
-    """Fetch an HTML document from EDGAR, reading at most max_bytes uncompressed bytes."""
-    if not url.startswith(_EDGAR_ARCHIVE_PREFIX):
-        return await asyncio.get_running_loop().run_in_executor(None, _url_policy.in_context(_fetch_edgar_html, url, max_bytes))
-    key = (url, max_bytes)
+async def _cached_archive_read(key: tuple[str, int], fetch, *args):
+    """One archive read per key: a cached body, a shared in-flight request, or a new fetch whose result is cached.
+
+    A fetch that raises propagates its exception to every caller sharing it, and nothing is cached.
+    """
     with _EDGAR_HTML_LOCK:
         hit = _EDGAR_HTML_CACHE.get(key)
         if hit is not None and time.monotonic() - hit[1] < _EDGAR_HTML_TTL:
             return hit[0]
         future = _EDGAR_HTML_INFLIGHT.get(key)
         if future is None:
-            future = _EDGAR_HTML_EXECUTOR.submit(_url_policy.in_context(_fetch_edgar_html, url, max_bytes))
+            future = _EDGAR_HTML_EXECUTOR.submit(_url_policy.in_context(fetch, *args))
             _EDGAR_HTML_INFLIGHT[key] = future
             future.add_done_callback(lambda done, key=key: _store_edgar_html(key, done))
     return await asyncio.wrap_future(future)
+
+
+async def _edgar_get_html(url: str, max_bytes: int = 5_000_000) -> str | None:
+    """Fetch an HTML document from EDGAR, reading at most max_bytes uncompressed bytes."""
+    if not url.startswith(_EDGAR_ARCHIVE_PREFIX):
+        return await asyncio.get_running_loop().run_in_executor(None, _url_policy.in_context(_fetch_edgar_html, url, max_bytes))
+    return await _cached_archive_read((url, max_bytes), _fetch_edgar_html, url, max_bytes)
+
+
+# Whole-document reads for the filing tools (outline, section, tables, table), as the Worker's fetchSecDocument:
+# the whole body (no size cap), the HTTP status kept, a 15 s timeout and invalid UTF-8 replaced, which is how those
+# tools read documents before they went through this client (2.26.0, PHASE4_SPEC §3.6 D2c). Cached under max_bytes 0,
+# a key no capped read uses, because the body and its decoding differ from _edgar_get_html's.
+_EDGAR_DOCUMENT_TIMEOUT_S = 15
+_EDGAR_DOCUMENT_KEY = 0
+
+
+def _fetch_edgar_document(url: str) -> str:
+    req = _urlreq.Request(url, headers={"User-Agent": _SEC_REQUIRED_UA})
+    with _url_policy.urlopen(req, timeout=_EDGAR_DOCUMENT_TIMEOUT_S) as resp:  # noqa: S310
+        return resp.read().decode("utf-8", errors="replace")
+
+
+async def _edgar_get_document(url: str) -> str:
+    """Read a whole SEC filing document; a failed read raises the urllib error (an HTTPError carries its status)."""
+    if not url.startswith(_EDGAR_ARCHIVE_PREFIX):
+        return await asyncio.get_running_loop().run_in_executor(None, _url_policy.in_context(_fetch_edgar_document, url))
+    return await _cached_archive_read((url, _EDGAR_DOCUMENT_KEY), _fetch_edgar_document, url)
+
+
+def _edgar_fetch_page_detail(url: str, max_bytes: int = 5_000_000, timeout: int = 30) -> tuple[str | None, str | None, int | None]:
+    """A caller-supplied SEC page (parse_public_transcript): (html, error_detail, http_status) with the SEC User-Agent.
+
+    The read, decoding and failure details are those of the tool's generic page fetch; only the User-Agent differs, so
+    SEC pages are never requested with a browser User-Agent (2.26.0, D9). Not cached: the caller may name any page.
+    """
+    req = _urlreq.Request(url, headers={"User-Agent": _SEC_REQUIRED_UA})
+    try:
+        with _url_policy.urlopen(req, timeout=timeout) as resp:  # noqa: S310
+            status_code = resp.getcode()
+            raw = resp.read(max_bytes)
+        try:
+            html = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            html = raw.decode("latin-1", errors="replace")
+        return html, None, status_code
+    except _urlerr.HTTPError as e:
+        return None, f"HTTP {e.code}: {e.reason}", e.code
+    except _urlerr.URLError as e:
+        return None, f"URL error: {e.reason}", None
+    except TimeoutError:
+        return None, f"Connection timed out after {timeout}s", None
+    except Exception as exc:
+        return None, f"Fetch error: {type(exc).__name__}: {exc}", None
 
 
 # ---------------------------------------------------------------------------
@@ -401,8 +469,71 @@ async def _resolve_cik_for_ticker(ticker: str) -> str | None:
 
 async def _get_submissions_for_ticker(ticker: str) -> tuple[str | None, dict | None]:
     # Both lookups are cached: CIKs indefinitely (they do not change) and
-    # submissions for 24 h, so newly filed documents appear within a day.
+    # submissions for 15 minutes, so newly filed documents appear quickly.
     cik_padded = await _resolve_cik_for_ticker(ticker)
     if not cik_padded:
         return None, None
     return cik_padded, await _edgar_get_submissions(cik_padded)
+
+
+async def _edgar_read_json(url: str) -> dict:
+    """The Worker's edgarReadJson (2.5.17): an EDGAR JSON read that tells absence from failure.
+
+    A 404 is SEC saying the resource does not exist ({"ok": True, "json": None}); any other non-OK status is
+    {"ok": False, "httpStatus": <code>}; a network error or an unreadable body is {"ok": False, "httpStatus": None}.
+    """
+    try:
+        return {"ok": True, "json": await _edgar_get(url)}
+    except EdgarError as e:
+        if e.status_code == 404:
+            return {"ok": True, "json": None}
+        return {"ok": False, "httpStatus": e.status_code}
+    except Exception:
+        return {"ok": False, "httpStatus": None}
+
+
+async def _warm_sec_submissions(ticker: str) -> None:
+    """Load the cached SEC submissions once before concurrent filing reads.
+
+    Composite extractors fan out to several tools that each look up the
+    same submissions document; warming it first keeps a cold call from
+    sending one duplicate SEC request per branch. Failures are left to the
+    individual tools, which report them in their own responses.
+    """
+    try:
+        await _get_submissions_for_ticker(ticker)
+    except Exception:
+        pass
+
+
+async def _resolve_ex991_url(accession_number: str, cik: int | None) -> str | None:
+    """Resolve the EX-99.1 exhibit URL from an 8-K filing index.
+
+    Returns the full SEC URL for the EX-99.1 document, or None if not found.
+    """
+    if not accession_number or cik is None:
+        return None
+    index_url, _ = _edgar_build_filing_urls(cik, accession_number, None)
+    exhibits = await _edgar_list_exhibits_from_index(index_url)
+    for ex in exhibits:
+        # One rule in both runtimes (2.14.0): the type names exhibit 99.1
+        # (EX-99.1, EX-99.01 or the bare 99.1 alias), or an EX-99 type carries
+        # release wording. A file name alone is not accepted.
+        doc_type = _re.sub(r"\s+", "", str(ex.get("type") or "").upper())
+        description = str(ex.get("description") or "").upper()
+        matched = bool(_re.match(r"^EX-99\.0?1$", doc_type) or _re.match(r"^99\.0?1$", doc_type)) or (
+            doc_type.startswith("EX-99")
+            and bool(_re.search(r"PRESS RELEASE|EARNINGS RELEASE|RESULTS RELEASE", description))
+        )
+        if matched:
+            doc_name = ex.get("document")
+            if doc_name:
+                accession_nodash = accession_number.replace("-", "")
+                return f"https://www.sec.gov/Archives/edgar/data/{cik}/{accession_nodash}/{doc_name}"
+    html = await _edgar_get_html(index_url, 100_000)
+    if not html:
+        return None
+    m = _re.search(r'EX-99\.0?1\b[^<]{0,300}<[^>]+href="(/Archives/edgar/data/[^"]+\.(?:htm|html))"', html, _re.IGNORECASE)
+    if m:
+        return f"https://www.sec.gov{m.group(1)}"
+    return None
