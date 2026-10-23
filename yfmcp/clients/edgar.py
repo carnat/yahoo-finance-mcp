@@ -406,3 +406,66 @@ async def _get_submissions_for_ticker(ticker: str) -> tuple[str | None, dict | N
     if not cik_padded:
         return None, None
     return cik_padded, await _edgar_get_submissions(cik_padded)
+
+
+async def _edgar_read_json(url: str) -> dict:
+    """The Worker's edgarReadJson (2.5.17): an EDGAR JSON read that tells absence from failure.
+
+    A 404 is SEC saying the resource does not exist ({"ok": True, "json": None}); any other non-OK status is
+    {"ok": False, "httpStatus": <code>}; a network error or an unreadable body is {"ok": False, "httpStatus": None}.
+    """
+    try:
+        return {"ok": True, "json": await _edgar_get(url)}
+    except EdgarError as e:
+        if e.status_code == 404:
+            return {"ok": True, "json": None}
+        return {"ok": False, "httpStatus": e.status_code}
+    except Exception:
+        return {"ok": False, "httpStatus": None}
+
+
+async def _warm_sec_submissions(ticker: str) -> None:
+    """Load the cached SEC submissions once before concurrent filing reads.
+
+    Composite extractors fan out to several tools that each look up the
+    same submissions document; warming it first keeps a cold call from
+    sending one duplicate SEC request per branch. Failures are left to the
+    individual tools, which report them in their own responses.
+    """
+    try:
+        await _get_submissions_for_ticker(ticker)
+    except Exception:
+        pass
+
+
+async def _resolve_ex991_url(accession_number: str, cik: int | None) -> str | None:
+    """Resolve the EX-99.1 exhibit URL from an 8-K filing index.
+
+    Returns the full SEC URL for the EX-99.1 document, or None if not found.
+    """
+    if not accession_number or cik is None:
+        return None
+    index_url, _ = _edgar_build_filing_urls(cik, accession_number, None)
+    exhibits = await _edgar_list_exhibits_from_index(index_url)
+    for ex in exhibits:
+        # One rule in both runtimes (2.14.0): the type names exhibit 99.1
+        # (EX-99.1, EX-99.01 or the bare 99.1 alias), or an EX-99 type carries
+        # release wording. A file name alone is not accepted.
+        doc_type = _re.sub(r"\s+", "", str(ex.get("type") or "").upper())
+        description = str(ex.get("description") or "").upper()
+        matched = bool(_re.match(r"^EX-99\.0?1$", doc_type) or _re.match(r"^99\.0?1$", doc_type)) or (
+            doc_type.startswith("EX-99")
+            and bool(_re.search(r"PRESS RELEASE|EARNINGS RELEASE|RESULTS RELEASE", description))
+        )
+        if matched:
+            doc_name = ex.get("document")
+            if doc_name:
+                accession_nodash = accession_number.replace("-", "")
+                return f"https://www.sec.gov/Archives/edgar/data/{cik}/{accession_nodash}/{doc_name}"
+    html = await _edgar_get_html(index_url, 100_000)
+    if not html:
+        return None
+    m = _re.search(r'EX-99\.0?1\b[^<]{0,300}<[^>]+href="(/Archives/edgar/data/[^"]+\.(?:htm|html))"', html, _re.IGNORECASE)
+    if m:
+        return f"https://www.sec.gov{m.group(1)}"
+    return None

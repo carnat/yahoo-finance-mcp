@@ -243,8 +243,8 @@ class TestAccessionNotFound(unittest.TestCase):
 @unittest.skipIf(_node() is None, "node and worker/node_modules (npm ci) are required")
 class TestTickerCikFixtures(unittest.TestCase):
     def test_smoke_table_is_gone_from_worker_source(self):
-        for path in (WORKER / "src").glob("*.ts"):
-            with self.subTest(path=path.name):
+        for path in (WORKER / "src").rglob("*.ts"):
+            with self.subTest(path=path.relative_to(WORKER / "src").as_posix()):
                 self.assertNotIn("SMOKE_TICKER_CIK", path.read_text(encoding="utf-8"))
         # Every Worker runtime module (scripts/source_text.py): no module may carry a fixture entry.
         source = worker_runtime_source()

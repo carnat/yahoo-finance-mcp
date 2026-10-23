@@ -1,328 +1,328 @@
 {
- "server.py": [
-  {
-   "name": "_is_likely_xbrl_document_url",
-   "line": 277,
-   "nloc": 4,
-   "region": "extractors",
-   "dest": "yfmcp/clients/edgar.py"
-  },
-  {
-   "name": "_edgar_read_json",
-   "line": 2069,
-   "nloc": 13,
-   "region": "shared",
-   "dest": "yfmcp/clients/edgar.py"
-  },
-  {
-   "name": "_accession_not_found_error",
-   "line": 2096,
-   "nloc": 8,
-   "region": "shared",
-   "dest": "yfmcp/clients/edgar.py"
-  },
-  {
-   "name": "_is_accession_not_found",
-   "line": 2106,
-   "nloc": 2,
-   "region": "shared",
-   "dest": "yfmcp/clients/edgar.py"
-  },
-  {
-   "name": "_accession_not_found_envelope",
-   "line": 2110,
-   "nloc": 3,
-   "region": "shared",
-   "dest": "yfmcp/clients/edgar.py"
-  },
-  {
-   "name": "_legacy_accession_miss_payload",
-   "line": 2115,
-   "nloc": 7,
-   "region": "extractors",
-   "dest": "yfmcp/clients/edgar.py"
-  },
-  {
-   "name": "_resolve_sec_filing",
-   "line": 2124,
-   "nloc": 65,
-   "region": "shared",
-   "dest": "yfmcp/clients/edgar.py"
-  },
-  {
-   "name": "_filing_not_found",
-   "line": 6945,
-   "nloc": 13,
-   "region": "extractors",
-   "dest": "yfmcp/clients/edgar.py"
-  },
-  {
-   "name": "_warm_sec_submissions",
-   "line": 7997,
-   "nloc": 11,
-   "region": "shared",
-   "dest": "yfmcp/clients/edgar.py"
-  }
- ],
- "worker/src/yahoo-finance.ts": [
-  {
-   "name": "setTickerCikFixturesForTests",
-   "line": 421,
-   "nloc": 9,
-   "region": "providers",
-   "dest": "worker/src/clients/edgar.ts"
-  },
-  {
-   "name": "edgarUserAgent",
-   "line": 4920,
-   "nloc": 3,
-   "region": "sec",
-   "dest": "worker/src/clients/edgar.ts"
-  },
-  {
-   "name": "edgarFetch",
-   "line": 4924,
-   "nloc": 20,
-   "region": "sec",
-   "dest": "worker/src/clients/edgar.ts"
-  },
-  {
-   "name": "countSecDocumentCache",
-   "line": 4946,
-   "nloc": 4,
-   "region": "shared",
-   "dest": "worker/src/clients/edgar.ts"
-  },
-  {
-   "name": "secDocumentCacheStats",
-   "line": 4951,
-   "nloc": 9,
-   "region": "sec",
-   "dest": "worker/src/clients/edgar.ts"
-  },
-  {
-   "name": "secDocumentEdgeRequest",
-   "line": 4961,
-   "nloc": 3,
-   "region": "shared",
-   "dest": "worker/src/clients/edgar.ts"
-  },
-  {
-   "name": "readSecDocumentEdge",
-   "line": 4965,
-   "nloc": 16,
-   "region": "shared",
-   "dest": "worker/src/clients/edgar.ts"
-  },
-  {
-   "name": "writeSecDocumentEdge",
-   "line": 4982,
-   "nloc": 20,
-   "region": "shared",
-   "dest": "worker/src/clients/edgar.ts"
-  },
-  {
-   "name": "loadSecDocument",
-   "line": 5003,
-   "nloc": 18,
-   "region": "shared",
-   "dest": "worker/src/clients/edgar.ts"
-  },
-  {
-   "name": "fetchSecDocument",
-   "line": 5022,
-   "nloc": 45,
-   "region": "shared",
-   "dest": "worker/src/clients/edgar.ts"
-  },
-  {
-   "name": "edgarGetJson",
-   "line": 5073,
-   "nloc": 14,
-   "region": "shared",
-   "dest": "worker/src/clients/edgar.ts"
-  },
-  {
-   "name": "edgarReadJson",
-   "line": 5089,
-   "nloc": 12,
-   "region": "sec",
-   "dest": "worker/src/clients/edgar.ts"
-  },
-  {
-   "name": "edgarGetHtml",
-   "line": 5102,
-   "nloc": 16,
-   "region": "shared",
-   "dest": "worker/src/clients/edgar.ts"
-  },
-  {
-   "name": "edgarStreamHtml",
-   "line": 5119,
-   "nloc": 34,
-   "region": "sec",
-   "dest": "worker/src/clients/edgar.ts"
-  },
-  {
-   "name": "edgarBuildFilingUrls",
-   "line": 5154,
-   "nloc": 12,
-   "region": "shared",
-   "dest": "worker/src/clients/edgar.ts"
-  },
-  {
-   "name": "normalizeEdgarDocumentRef",
-   "line": 5167,
-   "nloc": 14,
-   "region": "sec",
-   "dest": "worker/src/clients/edgar.ts"
-  },
-  {
-   "name": "edgarDocumentFileName",
-   "line": 5182,
-   "nloc": 4,
-   "region": "sec",
-   "dest": "worker/src/clients/edgar.ts"
-  },
-  {
-   "name": "edgarDocumentUrlFromRef",
-   "line": 5187,
-   "nloc": 9,
-   "region": "sec",
-   "dest": "worker/src/clients/edgar.ts"
-  },
-  {
-   "name": "edgarDocumentUrlFromIndexUrl",
-   "line": 5197,
-   "nloc": 9,
-   "region": "sec",
-   "dest": "worker/src/clients/edgar.ts"
-  },
-  {
-   "name": "edgarListExhibitsFromIndex",
-   "line": 5207,
-   "nloc": 7,
-   "region": "shared",
-   "dest": "worker/src/clients/edgar.ts"
-  },
-  {
-   "name": "edgarReadExhibitIndex",
-   "line": 5215,
-   "nloc": 4,
-   "region": "sec",
-   "dest": "worker/src/clients/edgar.ts"
-  },
-  {
-   "name": "parseExhibitIndexHtml",
-   "line": 5220,
-   "nloc": 30,
-   "region": "sec",
-   "dest": "worker/src/clients/edgar.ts"
-  },
-  {
-   "name": "edgarCikFromAccession",
-   "line": 5251,
-   "nloc": 19,
-   "region": "shared",
-   "dest": "worker/src/clients/edgar.ts"
-  },
-  {
-   "name": "getEdgarTickerCikMap",
-   "line": 5272,
-   "nloc": 25,
-   "region": "shared",
-   "dest": "worker/src/clients/edgar.ts"
-  },
-  {
-   "name": "edgarTickerMapLoaded",
-   "line": 5298,
-   "nloc": 4,
-   "region": "sec",
-   "dest": "worker/src/clients/edgar.ts"
-  },
-  {
-   "name": "edgarResolveCik",
-   "line": 5303,
-   "nloc": 4,
-   "region": "shared",
-   "dest": "worker/src/clients/edgar.ts"
-  },
-  {
-   "name": "resolveCikForTicker",
-   "line": 5308,
-   "nloc": 63,
-   "region": "shared",
-   "dest": "worker/src/clients/edgar.ts"
-  },
-  {
-   "name": "getSubmissionsForTicker",
-   "line": 5389,
-   "nloc": 30,
-   "region": "shared",
-   "dest": "worker/src/clients/edgar.ts"
-  },
-  {
-   "name": "uniqueRecentForms",
-   "line": 5421,
-   "nloc": 9,
-   "region": "shared",
-   "dest": "worker/src/clients/edgar.ts"
-  },
-  {
-   "name": "filingNotFoundPayload",
-   "line": 5431,
-   "nloc": 23,
-   "region": "shared",
-   "dest": "worker/src/clients/edgar.ts"
-  },
-  {
-   "name": "accessionNotFoundError",
-   "line": 5455,
-   "nloc": 9,
-   "region": "sec",
-   "dest": "worker/src/clients/edgar.ts"
-  },
-  {
-   "name": "isAccessionNotFound",
-   "line": 5465,
-   "nloc": 4,
-   "region": "shared",
-   "dest": "worker/src/clients/edgar.ts"
-  },
-  {
-   "name": "accessionNotFoundEnvelope",
-   "line": 5470,
-   "nloc": 7,
-   "region": "shared",
-   "dest": "worker/src/clients/edgar.ts"
-  },
-  {
-   "name": "legacyAccessionMissPayload",
-   "line": 5478,
-   "nloc": 5,
-   "region": "shared",
-   "dest": "worker/src/clients/edgar.ts"
-  },
-  {
-   "name": "isLikelyXbrlDocumentUrl",
-   "line": 5484,
-   "nloc": 4,
-   "region": "sec",
-   "dest": "worker/src/clients/edgar.ts"
-  },
-  {
-   "name": "resolveSecFiling",
-   "line": 5489,
-   "nloc": 101,
-   "region": "shared",
-   "dest": "worker/src/clients/edgar.ts"
-  },
-  {
-   "name": "resolveEx991Url",
-   "line": 13657,
-   "nloc": 23,
-   "region": "earnings",
-   "dest": "worker/src/clients/edgar.ts"
-  }
- ]
+  "server.py": [
+    {
+      "name": "_is_likely_xbrl_document_url",
+      "line": 277,
+      "nloc": 4,
+      "region": "extractors",
+      "dest": "deferred to Phase 5 #sec per D11"
+    },
+    {
+      "name": "_edgar_read_json",
+      "line": 2069,
+      "nloc": 13,
+      "region": "shared",
+      "dest": "yfmcp/clients/edgar.py"
+    },
+    {
+      "name": "_accession_not_found_error",
+      "line": 2096,
+      "nloc": 8,
+      "region": "shared",
+      "dest": "deferred to Phase 5 #sec per D11"
+    },
+    {
+      "name": "_is_accession_not_found",
+      "line": 2106,
+      "nloc": 2,
+      "region": "shared",
+      "dest": "deferred to Phase 5 #sec per D11"
+    },
+    {
+      "name": "_accession_not_found_envelope",
+      "line": 2110,
+      "nloc": 3,
+      "region": "shared",
+      "dest": "deferred to Phase 5 #sec per D11"
+    },
+    {
+      "name": "_legacy_accession_miss_payload",
+      "line": 2115,
+      "nloc": 7,
+      "region": "extractors",
+      "dest": "deferred to Phase 5 #sec per D11"
+    },
+    {
+      "name": "_resolve_sec_filing",
+      "line": 2124,
+      "nloc": 65,
+      "region": "shared",
+      "dest": "deferred to Phase 5 #sec per D11"
+    },
+    {
+      "name": "_filing_not_found",
+      "line": 6945,
+      "nloc": 13,
+      "region": "extractors",
+      "dest": "deferred to Phase 5 #sec per D11"
+    },
+    {
+      "name": "_warm_sec_submissions",
+      "line": 7997,
+      "nloc": 11,
+      "region": "shared",
+      "dest": "yfmcp/clients/edgar.py"
+    }
+  ],
+  "worker/src/yahoo-finance.ts": [
+    {
+      "name": "setTickerCikFixturesForTests",
+      "line": 421,
+      "nloc": 9,
+      "region": "providers",
+      "dest": "worker/src/clients/edgar.ts"
+    },
+    {
+      "name": "edgarUserAgent",
+      "line": 4920,
+      "nloc": 3,
+      "region": "sec",
+      "dest": "worker/src/clients/edgar.ts"
+    },
+    {
+      "name": "edgarFetch",
+      "line": 4924,
+      "nloc": 20,
+      "region": "sec",
+      "dest": "worker/src/clients/edgar.ts"
+    },
+    {
+      "name": "countSecDocumentCache",
+      "line": 4946,
+      "nloc": 4,
+      "region": "shared",
+      "dest": "worker/src/clients/edgar.ts"
+    },
+    {
+      "name": "secDocumentCacheStats",
+      "line": 4951,
+      "nloc": 9,
+      "region": "sec",
+      "dest": "worker/src/clients/edgar.ts"
+    },
+    {
+      "name": "secDocumentEdgeRequest",
+      "line": 4961,
+      "nloc": 3,
+      "region": "shared",
+      "dest": "worker/src/clients/edgar.ts"
+    },
+    {
+      "name": "readSecDocumentEdge",
+      "line": 4965,
+      "nloc": 16,
+      "region": "shared",
+      "dest": "worker/src/clients/edgar.ts"
+    },
+    {
+      "name": "writeSecDocumentEdge",
+      "line": 4982,
+      "nloc": 20,
+      "region": "shared",
+      "dest": "worker/src/clients/edgar.ts"
+    },
+    {
+      "name": "loadSecDocument",
+      "line": 5003,
+      "nloc": 18,
+      "region": "shared",
+      "dest": "worker/src/clients/edgar.ts"
+    },
+    {
+      "name": "fetchSecDocument",
+      "line": 5022,
+      "nloc": 45,
+      "region": "shared",
+      "dest": "worker/src/clients/edgar.ts"
+    },
+    {
+      "name": "edgarGetJson",
+      "line": 5073,
+      "nloc": 14,
+      "region": "shared",
+      "dest": "worker/src/clients/edgar.ts"
+    },
+    {
+      "name": "edgarReadJson",
+      "line": 5089,
+      "nloc": 12,
+      "region": "sec",
+      "dest": "worker/src/clients/edgar.ts"
+    },
+    {
+      "name": "edgarGetHtml",
+      "line": 5102,
+      "nloc": 16,
+      "region": "shared",
+      "dest": "worker/src/clients/edgar.ts"
+    },
+    {
+      "name": "edgarStreamHtml",
+      "line": 5119,
+      "nloc": 34,
+      "region": "sec",
+      "dest": "worker/src/clients/edgar.ts"
+    },
+    {
+      "name": "edgarBuildFilingUrls",
+      "line": 5154,
+      "nloc": 12,
+      "region": "shared",
+      "dest": "worker/src/clients/edgar.ts"
+    },
+    {
+      "name": "normalizeEdgarDocumentRef",
+      "line": 5167,
+      "nloc": 14,
+      "region": "sec",
+      "dest": "worker/src/clients/edgar.ts"
+    },
+    {
+      "name": "edgarDocumentFileName",
+      "line": 5182,
+      "nloc": 4,
+      "region": "sec",
+      "dest": "worker/src/clients/edgar.ts"
+    },
+    {
+      "name": "edgarDocumentUrlFromRef",
+      "line": 5187,
+      "nloc": 9,
+      "region": "sec",
+      "dest": "worker/src/clients/edgar.ts"
+    },
+    {
+      "name": "edgarDocumentUrlFromIndexUrl",
+      "line": 5197,
+      "nloc": 9,
+      "region": "sec",
+      "dest": "worker/src/clients/edgar.ts"
+    },
+    {
+      "name": "edgarListExhibitsFromIndex",
+      "line": 5207,
+      "nloc": 7,
+      "region": "shared",
+      "dest": "worker/src/clients/edgar.ts"
+    },
+    {
+      "name": "edgarReadExhibitIndex",
+      "line": 5215,
+      "nloc": 4,
+      "region": "sec",
+      "dest": "worker/src/clients/edgar.ts"
+    },
+    {
+      "name": "parseExhibitIndexHtml",
+      "line": 5220,
+      "nloc": 30,
+      "region": "sec",
+      "dest": "worker/src/clients/edgar.ts"
+    },
+    {
+      "name": "edgarCikFromAccession",
+      "line": 5251,
+      "nloc": 19,
+      "region": "shared",
+      "dest": "worker/src/clients/edgar.ts"
+    },
+    {
+      "name": "getEdgarTickerCikMap",
+      "line": 5272,
+      "nloc": 25,
+      "region": "shared",
+      "dest": "worker/src/clients/edgar.ts"
+    },
+    {
+      "name": "edgarTickerMapLoaded",
+      "line": 5298,
+      "nloc": 4,
+      "region": "sec",
+      "dest": "worker/src/clients/edgar.ts"
+    },
+    {
+      "name": "edgarResolveCik",
+      "line": 5303,
+      "nloc": 4,
+      "region": "shared",
+      "dest": "worker/src/clients/edgar.ts"
+    },
+    {
+      "name": "resolveCikForTicker",
+      "line": 5308,
+      "nloc": 63,
+      "region": "shared",
+      "dest": "worker/src/clients/edgar.ts"
+    },
+    {
+      "name": "getSubmissionsForTicker",
+      "line": 5389,
+      "nloc": 30,
+      "region": "shared",
+      "dest": "worker/src/clients/edgar.ts"
+    },
+    {
+      "name": "uniqueRecentForms",
+      "line": 5421,
+      "nloc": 9,
+      "region": "shared",
+      "dest": "deferred to Phase 5 #sec per D11"
+    },
+    {
+      "name": "filingNotFoundPayload",
+      "line": 5431,
+      "nloc": 23,
+      "region": "shared",
+      "dest": "deferred to Phase 5 #sec per D11"
+    },
+    {
+      "name": "accessionNotFoundError",
+      "line": 5455,
+      "nloc": 9,
+      "region": "sec",
+      "dest": "deferred to Phase 5 #sec per D11"
+    },
+    {
+      "name": "isAccessionNotFound",
+      "line": 5465,
+      "nloc": 4,
+      "region": "shared",
+      "dest": "deferred to Phase 5 #sec per D11"
+    },
+    {
+      "name": "accessionNotFoundEnvelope",
+      "line": 5470,
+      "nloc": 7,
+      "region": "shared",
+      "dest": "deferred to Phase 5 #sec per D11"
+    },
+    {
+      "name": "legacyAccessionMissPayload",
+      "line": 5478,
+      "nloc": 5,
+      "region": "shared",
+      "dest": "deferred to Phase 5 #sec per D11"
+    },
+    {
+      "name": "isLikelyXbrlDocumentUrl",
+      "line": 5484,
+      "nloc": 4,
+      "region": "sec",
+      "dest": "deferred to Phase 5 #sec per D11"
+    },
+    {
+      "name": "resolveSecFiling",
+      "line": 5489,
+      "nloc": 101,
+      "region": "shared",
+      "dest": "deferred to Phase 5 #sec per D11"
+    },
+    {
+      "name": "resolveEx991Url",
+      "line": 13657,
+      "nloc": 23,
+      "region": "earnings",
+      "dest": "worker/src/clients/edgar.ts"
+    }
+  ]
 }

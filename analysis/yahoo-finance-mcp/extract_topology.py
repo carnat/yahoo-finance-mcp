@@ -118,6 +118,12 @@ FILE_DOMAIN = {
     "worker/src/news.ts": "news", "worker/src/deprecations.ts": "envelope", "yfmcp/deprecations.py": "envelope",
     "worker/src/evidence-pack.ts": "evidence",
     "worker/src/sec-thailand.ts": "thai",
+    "worker/src/clients/edgar.ts": "sec",
+    "worker/src/news/shared.ts": "news", "worker/src/news/providers/types.ts": "news",
+    "worker/src/news/providers/company-ir.ts": "news", "worker/src/news/providers/company-ir-page.ts": "news",
+    "worker/src/news/providers/finnhub.ts": "news", "worker/src/news/providers/globenewswire.ts": "news",
+    "worker/src/news/providers/marketaux.ts": "news", "worker/src/news/providers/sec.ts": "news",
+    "worker/src/news/providers/yahoo.ts": "news",
     # Ops scripts that run in production workflows (tests are excluded)
     "scripts/stamp_worker_build.py": "ops", "scripts/worker_version_promotion.py": "ops",
     "scripts/discover_ir_page_candidates.py": "ops", "scripts/audit_arsenal_news.py": "ops",
@@ -205,7 +211,8 @@ for g in catalog:
 # ------------------------------------------------------------- source scan
 py_files = sorted([ROOT / "server.py", ROOT / "tool_groups.py", *ROOT.glob("yfmcp/**/*.py")])
 py_files += [ROOT / p for p in FILE_DOMAIN if p.startswith("scripts/")]
-ts_files = sorted(p for p in (ROOT / "worker/src").glob("*.ts") if not p.name.endswith(".d.ts"))
+# Recursive: worker/src/news/** and worker/src/clients/** (Phase 4) are domain modules too.
+ts_files = sorted(p for p in (ROOT / "worker/src").rglob("*.ts") if not p.name.endswith(".d.ts"))
 
 
 # -- function-level model of a file: name -> (start, body)
