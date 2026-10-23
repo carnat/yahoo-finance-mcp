@@ -238,6 +238,9 @@ jobs:
       - name: EDGAR client cache tests
         run: python scripts/test_edgar_client_cache.py -v
 
+      - name: Python EDGAR routing tests (2.26.0)
+        run: python scripts/test_python_edgar_routing.py -v
+
       # ── 4. Infrastructure: cache layer ────────────────────────────────────
       - name: Cache layer tests
         run: python scripts/test_cache_layer.py

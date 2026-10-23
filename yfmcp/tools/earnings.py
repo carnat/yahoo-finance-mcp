@@ -6,6 +6,7 @@ time instead of pulling more code into this refactor.
 """
 
 import asyncio
+import functools
 import datetime
 import hashlib
 import json
@@ -36,6 +37,7 @@ from yfmcp.util import (
     _compact_excerpt,
 )
 from yfmcp.clients.edgar import (
+    _edgar_fetch_page_detail,
     _edgar_build_filing_urls,
     _edgar_cik_from_accession,
     _edgar_get_html,
@@ -1277,7 +1279,10 @@ async def parse_public_transcript(url: str = "", topics: list[str] | None = None
         except Exception as exc:
             return None, f"Fetch error: {type(exc).__name__}: {exc}", None
 
-    html, error_detail, http_status = await loop.run_in_executor(None, _url_policy.in_context(_fetch_page))
+    # An SEC page goes through the EDGAR client, with SEC's required User-Agent and the same read (2.26.0, D9).
+    fetch = (functools.partial(_edgar_fetch_page_detail, url, 5_000_000, 30)
+             if _url_policy.allowed_host_kind(url) == "sec" else _fetch_page)
+    html, error_detail, http_status = await loop.run_in_executor(None, _url_policy.in_context(fetch))
     if not html:
         diagnostics: dict = {"url": url}
         if http_status is not None:

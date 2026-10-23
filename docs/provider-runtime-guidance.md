@@ -3190,6 +3190,23 @@ F-024, F-026, F-029). Both runtimes change alike.
 - **Tests:** 21 new parity cases in `scripts/parity/cases_audit_2251.py`.
 - **Rollback:** redeploy 2.25.0.
 
+## Python EDGAR Routing (2.26.0)
+
+- **Why:** the Python EDGAR routing release planned in `analysis/yahoo-finance-mcp/PHASE4_SPEC.md` section 3.6 (decisions D2b, D2c and D9), with findings F7, F1 and F2 from `analysis/yahoo-finance-mcp/F_TRIAGE.md`. It follows Phase 4 unit 1 (the EDGAR client move). No new field, status, warning code or enum value.
+- **Python SEC filing tools go through `yfmcp/clients/edgar.py`:** `list_sec_filings` (used when `get_sec_filing_section` and `get_sec_filing_table` have no `document_url`) and the document reads of `get_sec_filing_outline`, `get_sec_filing_section`, `list_sec_filing_tables` and `get_sec_filing_table` with a `document_url`.
+  - **User-Agent:** `yahoo-finance-mcp/1.0 admin@example.com` becomes the client's `yahoo-finance-mcp <EDGAR_CONTACT_EMAIL>` (`contact@example.com` when unset), the contact the Worker sends.
+  - **CIK resolution:** the Worker's full resolution (Yahoo, SEC's ticker index, test fixtures, the EDGAR ticker lookup) instead of an exact match in the ticker index only. A ticker the index lacks can now resolve. A miss is still `TICKER_NOT_FOUND` "Could not find EDGAR CIK for ticker '<t>'". A failed ticker-index read is no longer a `PROVIDER_ERROR` on its own; the other sources are tried first.
+  - **Caching:** the ticker index for 24 hours (a failed load is not cached), submissions for 15 minutes, and filing documents for 30 minutes in the process archive cache, with one shared request for concurrent reads. Before, every call fetched both JSON files and the document.
+  - **Submissions TTL:** 15 minutes for every Python caller (it was 24 hours), as the Worker's `FILING_SUBMISSIONS_TTL_MS`, so a new filing shows up within 15 minutes.
+  - **Document reads:** the whole body (no size cap), a 15 s timeout and invalid UTF-8 replaced, as before. A failed read keeps its HTTP status: the outline still says `PROVIDER_ERROR` "HTTP 404", and the section and table tools keep urllib's message (for example "HTTP Error 404: Not Found"). A failed submissions read keeps urllib's message too.
+- **F7, ticker index:** a failed load of SEC's `company_tickers.json` is not cached. Before, an empty map was served for up to 24 hours. Like the Worker, a failed refresh after expiry returns no map rather than the expired one.
+- **F1, `get_sec_filing_outline` without `document_url`:** Python outlines the filing index, as the Worker does (`secIndexOutlinePayload`). The payload adds `filingType`, `filingDate` and each entry's `sectionId`, the Worker's existing fields. A pinned `accession_number` is honoured; before, Python read the latest primary document and ignored it.
+- **F2, outline titles:** inner tags in a heading become a space in Python, as in the Worker. "<b>Item</b><b>1A.</b>" reads "Item 1A.", not "Item1A.".
+- **D9, `parse_public_transcript` with an SEC page:** both runtimes fetch it through the EDGAR client with SEC's User-Agent instead of a browser User-Agent. The read is otherwise unchanged: the cap (5 MB), the timeout (30 s in Python, none in the Worker), the decoding and the failure codes. It is not cached.
+- **Noticed, not fixed (F48, unclassified):** for a pinned accession whose form differs from `filing_type`, `get_sec_filing_index` (and so the outline) labels `filingType` with the requested form in Python and with the filing's own form in the Worker. Both answer the same filing. Pinned as a parity case.
+- **Tests:** `scripts/test_python_edgar_routing.py` (16 tests) and 7 parity cases in `scripts/parity/cases_routing_2260.py`.
+- **Rollback:** redeploy 2.25.7.
+
 ## Thai Fund Audit Repairs, Part 2 (2.25.7)
 
 - **Why:** the two remaining code findings from the Thai fund audit (TF3, TF7), which the owner asked to fix on 2026-10-21. Both runtimes change alike. No new fields, statuses or warning codes; `MIXED` is an existing scope value.

@@ -35,7 +35,7 @@ class TestSubmissionsExpiry(unittest.TestCase):
         edgar._FILING_CIK_CACHE.clear()
         edgar._FILING_CIK_CACHE["AAPL"] = "0000320193"
 
-    def test_submissions_are_cached_then_refetched_after_24h(self) -> None:
+    def test_submissions_are_cached_then_refetched_after_15_minutes(self) -> None:
         with patch.object(edgar, "_edgar_get", new_callable=AsyncMock) as fetch:
             fetch.side_effect = [{"filings": {"version": 1}}, {"filings": {"version": 2}}]
             cik, first = asyncio.run(edgar._get_submissions_for_ticker("aapl"))
@@ -45,7 +45,9 @@ class TestSubmissionsExpiry(unittest.TestCase):
             self.assertIs(first, again)
 
             data, stored_at = edgar._EDGAR_SUBS_CACHE["0000320193"]
-            edgar._EDGAR_SUBS_CACHE["0000320193"] = (data, stored_at - edgar._EDGAR_TTL - 1)
+            # 2.26.0: 15 minutes, as the Worker's FILING_SUBMISSIONS_TTL_MS, not 24 h.
+            self.assertEqual(edgar._EDGAR_SUBS_TTL, 15 * 60)
+            edgar._EDGAR_SUBS_CACHE["0000320193"] = (data, stored_at - edgar._EDGAR_SUBS_TTL - 1)
             _, refreshed = asyncio.run(edgar._get_submissions_for_ticker("AAPL"))
         self.assertEqual(fetch.await_count, 2)
         self.assertEqual(refreshed, {"filings": {"version": 2}})

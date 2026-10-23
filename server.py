@@ -81,6 +81,7 @@ from yfmcp.clients.edgar import (
     _edgar_build_filing_urls, _edgar_cik_from_accession,
     _edgar_list_exhibits_from_index, _edgar_get_html,
     _edgar_read_json, _warm_sec_submissions,
+    _edgar_read_submissions, _edgar_get_document,
 )
 from yfmcp.parsing.html import (
     _strip_html_tags, _strip_html_blocks, _parse_html_table, _parse_numeric_cell, _detect_unit_multiplier, _UNIT_SCALE_ASSUMED_WARNING,
@@ -827,29 +828,18 @@ async def list_sec_filings(ticker: str, form_type: str = "10-K", max_filings: in
         return _mcp_failure("list_sec_filings", ErrorCode.INPUT_VALIDATION_ERROR, err)
     max_filings = min(max(1, max_filings), 20)
 
-    import urllib.request
-    ticker_upper = ticker.upper()
+    # Through the EDGAR client (2.26.0, PHASE4_SPEC §3.6): the Worker's full CIK resolution and the 15-minute
+    # submissions cache. A miss keeps its TICKER_NOT_FOUND message and a failed submissions read keeps urllib's text.
     try:
-        tickers_url = "https://www.sec.gov/files/company_tickers.json"
-        req = urllib.request.Request(tickers_url, headers={"User-Agent": "yahoo-finance-mcp/1.0 admin@example.com"})
-        with _url_policy.urlopen(req, timeout=10) as resp:
-            tickers_data = json.loads(resp.read())
-
-        cik = None
-        for _entry in tickers_data.values():
-            if _entry.get("ticker", "").upper() == ticker_upper:
-                cik = int(_entry["cik_str"])
-                break
-
-        if cik is None:
+        cik_padded = await _resolve_cik_for_ticker(ticker)
+        if not cik_padded:
             return _mcp_failure("list_sec_filings", ErrorCode.TICKER_NOT_FOUND,
                                 f"Could not find EDGAR CIK for ticker '{ticker}'")
-
-        cik_padded = str(cik).zfill(10)
-        sub_url = f"https://data.sec.gov/submissions/CIK{cik_padded}.json"
-        req2 = urllib.request.Request(sub_url, headers={"User-Agent": "yahoo-finance-mcp/1.0 admin@example.com"})
-        with _url_policy.urlopen(req2, timeout=10) as resp2:
-            sub_data = json.loads(resp2.read())
+        cik = int(cik_padded)
+        try:
+            sub_data = await _edgar_read_submissions(cik_padded)
+        except EdgarError as sub_err:
+            return _mcp_failure("list_sec_filings", ErrorCode.PROVIDER_ERROR, str(sub_err.__cause__ or sub_err))
 
         filings_data = sub_data.get("filings", {}).get("recent", {})
         forms = filings_data.get("form", [])
@@ -899,7 +889,6 @@ async def get_filing_outline(ticker: str, accession_number: str | None = None, d
             return _mcp_failure("get_filing_outline", ErrorCode.INPUT_VALIDATION_ERROR, acc_err)
 
     try:
-        import urllib.request
         resolved_accession = accession_number or None
         if not document_url and accession_number:
             # An explicit accession without document_url: the outline of that filing's primary document, found by the
@@ -917,10 +906,8 @@ async def get_filing_outline(ticker: str, accession_number: str | None = None, d
             return _mcp_failure("get_filing_outline", ErrorCode.INPUT_VALIDATION_ERROR,
                                 "Either accession_number or document_url is required")
 
-        req = urllib.request.Request(document_url, headers={"User-Agent": "yahoo-finance-mcp/1.0 admin@example.com"})
         try:
-            with _url_policy.urlopen(req, timeout=15) as resp:
-                html = resp.read().decode("utf-8", errors="replace")
+            html = await _edgar_get_document(document_url)
         except _urlerror.HTTPError as http_err:
             return _outline_read_failure(f"HTTP {http_err.code}")
 
@@ -930,8 +917,8 @@ async def get_filing_outline(ticker: str, accession_number: str | None = None, d
         item_re = _re.compile(r'(Part\s+[IVX]+|Item\s+\d+[A-Z]?|Note\s+\d+)', _re.IGNORECASE)
         for m in heading_re.finditer(html):
             level = int(m.group(1))
-            text = _re.sub(r'<[^>]+>', '', m.group(2)).strip()
-            text = ' '.join(text.split())
+            # Inner tags become a space, as in the Worker: "Item<b>1</b>" reads "Item 1" (2.26.0, F2).
+            text = ' '.join(_re.sub(r'<[^>]+>', ' ', m.group(2)).split())
             if text and (item_re.search(text) or len(text) < 100):
                 outline.append({"level": level, "title": text})
 
@@ -965,10 +952,7 @@ async def get_filing_section(ticker: str, section_name: str, document_url: str, 
         return _mcp_failure("get_filing_section", ErrorCode.INPUT_VALIDATION_ERROR, url_err)
 
     try:
-        import urllib.request
-        req = urllib.request.Request(document_url, headers={"User-Agent": "yahoo-finance-mcp/1.0 admin@example.com"})
-        with _url_policy.urlopen(req, timeout=15) as resp:
-            html = resp.read().decode("utf-8", errors="replace")
+        html = await _edgar_get_document(document_url)
 
         html = _sanitize_sec_html(html)
         start_idx, end_idx, found_heading, toc_skipped, err_code = _find_section_bounds(html, section_name, context_chars)
@@ -1082,10 +1066,7 @@ async def list_filing_tables(
         return _mcp_failure("list_filing_tables", ErrorCode.INPUT_VALIDATION_ERROR, url_err)
 
     try:
-        import urllib.request
-        req = urllib.request.Request(document_url, headers={"User-Agent": "yahoo-finance-mcp/1.0 admin@example.com"})
-        with _url_policy.urlopen(req, timeout=15) as resp:
-            html = resp.read().decode("utf-8", errors="replace")
+        html = await _edgar_get_document(document_url)
 
         html = _sanitize_sec_html(html)
         tables = []
@@ -1134,10 +1115,7 @@ async def get_filing_table(ticker: str, document_url: str, table_index: int, max
         return _mcp_failure("get_filing_table", ErrorCode.INPUT_VALIDATION_ERROR, url_err)
 
     try:
-        import urllib.request
-        req = urllib.request.Request(document_url, headers={"User-Agent": "yahoo-finance-mcp/1.0 admin@example.com"})
-        with _url_policy.urlopen(req, timeout=15) as resp:
-            html = resp.read().decode("utf-8", errors="replace")
+        html = await _edgar_get_document(document_url)
 
         html = _sanitize_sec_html(html)
         table_re = _re.compile(r'<table[^>]*>(.*?)</table>', _re.DOTALL | _re.IGNORECASE)
@@ -5257,8 +5235,43 @@ async def _resolve_latest_sec_doc_url(ticker: str, filing_type: str = "10-K") ->
 
 @yfinance_server.tool(name="get_sec_filing_outline", description="Canonical alias for get_filing_outline.")
 async def get_sec_filing_outline(ticker: str, filing_type: str = "10-K", period: str = "latest", accession_number: str | None = None, document_url: str | None = None) -> str:
-    resolved_doc_url = document_url or (await _resolve_latest_sec_doc_url(ticker, filing_type) if period == "latest" else None)
-    return await get_filing_outline(ticker, accession_number, resolved_doc_url)
+    # Without a document URL the Worker outlines the filing index (secIndexOutlinePayload), which honours a pinned
+    # accession; Python read the latest primary document and dropped the accession (2.26.0, F1).
+    if document_url is None:
+        return _sec_index_outline_payload(await get_sec_filing_index(ticker, filing_type, period, accession_number))
+    return await get_filing_outline(ticker, accession_number, document_url)
+
+
+def _sec_index_outline_payload(index_result: str) -> str:
+    """The Worker's secIndexOutlinePayload: the filing index's sections in the get_sec_filing_outline shape."""
+    payload = json.loads(index_result)
+    if not isinstance(payload, dict) or payload.get("ok") is False or payload.get("error"):
+        return index_result
+    index = payload.get("index") if isinstance(payload.get("index"), dict) else {}
+    sections = index.get("sections") if isinstance(index.get("sections"), list) else []
+    tables = index.get("tables") if isinstance(index.get("tables"), list) else []
+    outline = []
+    for section in sections:
+        title = section.get("heading") if section.get("heading") is not None else section.get("normalizedHeading")
+        title = title if title is not None else ""
+        if not str(title).strip():
+            continue
+        outline.append({"level": section.get("level"), "title": title, "sectionId": section.get("sectionId")})
+    return json.dumps({
+        "ticker": payload.get("ticker"),
+        "filingType": payload.get("filingType"),
+        "filingDate": payload.get("filingDate"),
+        "accessionNumber": payload.get("accessionNumber"),
+        "documentUrl": payload.get("documentUrl"),
+        "outline": outline,
+        "status": "OK" if outline else ("OUTLINE_NOT_PARSED" if tables else "EMPTY"),
+        "tableCount": len(tables),
+        "warnings": [{
+            "code": "TABLES_FOUND_OUTLINE_EMPTY",
+            "message": "Filing tables were detected but no section outline headings were parsed.",
+            "severity": "warning",
+        }] if not outline and tables else [],
+    })
 
 
 @yfinance_server.tool(name="get_sec_filing_section", description="Get structurally resolved SEC filing section text; Item requests fail closed when structure is unresolved.")

@@ -49,6 +49,7 @@ import {
   edgarCikFromAccession,
   edgarDocumentFileName,
   edgarDocumentUrlFromRef,
+  edgarFetchPublicHtml,
   edgarGetHtml,
   edgarGetJson,
   edgarListExhibitsFromIndex,
@@ -9606,7 +9607,10 @@ export async function parsePublicTranscript(
     // transcripts come from the same structured Yahoo/Quartr source that
     // get_earnings_call_transcript uses.
     const yahooText = await yahooTranscriptTextForUrl(url);
-    const html = yahooText == null ? await fetchPublicHtml(url, 5_000_000) : null;
+    // An SEC page goes through the EDGAR client, with SEC's required User-Agent and the same read (2.26.0, D9).
+    const check = checkFetchUrl(url);
+    const secPage = check.ok && allowedHostKind(check.url) === "sec";
+    const html = yahooText == null ? await (secPage ? edgarFetchPublicHtml : fetchPublicHtml)(url, 5_000_000) : null;
     if (yahooText == null && !html) {
       return JSON.stringify({ ok: false, error: { code: "FETCH_ERROR", message: `Could not fetch URL: ${url}` } });
     }
