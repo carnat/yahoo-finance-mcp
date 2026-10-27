@@ -5631,6 +5631,21 @@ def _build_filing_index_from_html(html: str) -> dict:
             "endChar": h_match.end(),
         })
 
+    # A filing that marks Part and Item headings in bold text instead of <h1>-<h6> (most 10-Ks and 10-Qs) is indexed
+    # by those headings, as in the Worker's _buildFilingIndexFromHtml (2.26.1).
+    if not sections:
+        for heading in _fs.filing_item_headings(sanitized)[:50]:
+            normalized = heading.title.lower()
+            sections.append({
+                "sectionId": _re.sub(r'[^a-z0-9]+', '_', normalized)[:60],
+                "heading": heading.title,
+                "normalizedHeading": normalized,
+                "level": heading.level,
+                "keywords": [kw for kw in _INDEX_KEYWORDS if kw in normalized],
+                "startChar": heading.start,
+                "endChar": heading.end,
+            })
+
     # Table extraction
     tables: list[dict] = []
     raw_table_count = 0
