@@ -622,14 +622,12 @@ CASES += [
                 _f21_expect(None, status="INPUT_VALIDATION_ERROR", warnings=["INPUT_VALIDATION_ERROR"])),
     _f21_case("segment_revenue_pinned", "segment_revenue", GEOX_OLD_10K, {},
                 _f21_expect(None, status="NOT_DISCLOSED", segments=0)),  # a pinned 10-K: no POSSIBLE_20F_FILER
-    # PLANNER (open, not F21): the Worker's query adds the extractor's warnings to the answer (POSSIBLE_20F_FILER for an
-    # unpinned 10-K that finds no segments, as GEOX files a 20-F); Python's query_sec_filing_index drops them. Pinned to
-    # each runtime's value; the pinned case above is equal because a pinned 10-K raises no such warning.
-    Case(name="f21.query.segment_revenue_no_accession_unchanged", ids=["F21"], py=_q("GEOX", "segment_revenue", None, {}),
-         ts=_q_ts("GEOX", "segment_revenue", None, {}), routes=GEOX_ROUTES, select=f21_view, mode="pinned",
-         decision="F21-SEGMENT-QUERY-WARNINGS",
-         expect_py=_f21_expect(None, status="NOT_DISCLOSED", segments=0),
-         expect_ts=_f21_expect(None, status="NOT_DISCLOSED", segments=0, warnings=["POSSIBLE_20F_FILER"])),
+    # Both runtimes' queries add the extractor's warnings to the answer (POSSIBLE_20F_FILER for an unpinned 10-K that
+    # finds no segments, as GEOX files a 20-F); Python dropped them until 2.26.4 (F23, was pinned as
+    # F21-SEGMENT-QUERY-WARNINGS). The pinned case above raises no such warning.
+    Case(name="f21.query.segment_revenue_no_accession_unchanged", ids=["F21", "F23"], py=_q("GEOX", "segment_revenue", None, {}),
+         ts=_q_ts("GEOX", "segment_revenue", None, {}), routes=GEOX_ROUTES, select=f21_view,
+         expect=_f21_expect(None, status="NOT_DISCLOSED", segments=0, warnings=["POSSIBLE_20F_FILER"])),
     Case(name="f21.query.china_risk_block_reads_the_pinned_filing", ids=["F21"], py=_q("GEOX", "china_exposure", GEOX_OLD_10K, {}),
          ts=_q_ts("GEOX", "china_exposure", GEOX_OLD_10K, {}), routes=GEOX_ROUTES, select=f21_china_risk_view,
          expect={"status": "FOUND", "mentionAccessions": [GEOX_OLD_10K]}),

@@ -184,6 +184,37 @@ _STOCK_INFO_FIELD_GROUPS: dict[str, tuple[str, ...]] = {
 }
 
 
+def _dividend_yield_ratio(info: dict) -> float | None:
+    """info["dividendYield"] as a decimal ratio, the Worker's summaryDetail.dividendYield (2.26.4, F53).
+
+    yfinance overlays Yahoo's v7 quote on summaryDetail, and the quote states the yield as a percent (AAPL 0.31 for
+    0.0031). When the quote call fails the ratio stays. The scale is the one closer to dividendRate / price, or to
+    trailingAnnualDividendYield; with neither, the percent of the quote is assumed.
+    """
+    dy = info.get("dividendYield")
+    if isinstance(dy, bool) or not isinstance(dy, (int, float)):
+        return dy
+    as_ratio = float(dy) / 100
+    rate = info.get("dividendRate")
+    price = next((info.get(k) for k in ("currentPrice", "regularMarketPrice", "previousClose")
+                  if isinstance(info.get(k), (int, float)) and info.get(k) > 0), None)
+    reference = None
+    if isinstance(rate, (int, float)) and not isinstance(rate, bool) and price:
+        reference = float(rate) / float(price)
+    elif isinstance(info.get("trailingAnnualDividendYield"), (int, float)) and not isinstance(info.get("trailingAnnualDividendYield"), bool):
+        reference = float(info["trailingAnnualDividendYield"])
+    if reference is not None and abs(float(dy) - reference) < abs(as_ratio - reference):
+        return dy
+    return round(as_ratio, 8)
+
+
+def _info_ratio_units(info: dict) -> dict:
+    """yfinance info with dividendYield as a decimal ratio (2.26.4, F53)."""
+    if "dividendYield" not in info:
+        return info
+    return {**info, "dividendYield": _dividend_yield_ratio(info)}
+
+
 async def get_stock_info(
     ticker: str | list[str],
     fields: list[str] | None = None,
@@ -201,7 +232,7 @@ async def get_stock_info(
     except Exception as e:
         print(f"Error: getting stock information for {ticker}: {e}", file=sys.stderr)
         return f"Error: getting stock information for {ticker}: {e}"
-    info = company.info
+    info = _info_ratio_units(company.info)
     # Strip ETF/crypto/fund fields from equity responses to reduce payload size
     if info.get("quoteType") == "EQUITY":
         info = {k: v for k, v in info.items() if k not in _EQUITY_EXCLUDED_FIELDS}
@@ -1529,7 +1560,7 @@ async def get_financial_ratios(
 
     company = yf.Ticker(ticker)
     try:
-        info = company.info
+        info = _info_ratio_units(company.info)
     except Exception as e:
         print(f"Error: getting financial ratios for {ticker}: {e}", file=sys.stderr)
         return f"Error: getting financial ratios for {ticker}: {e}"
@@ -9087,6 +9118,9 @@ async def query_sec_filing_index(
     # The table fallback's rows carry their own confidence (MEDIUM, or LOW when the scale was assumed), as the Worker reads it.
     segment_confidence = str(segments[0].get("confidence") or "LOW") if segments else None
     confidence = (segment_confidence or "LOW") if status == "ANSWERED" else ("NOT_DISCLOSED" if status == "NOT_DISCLOSED" else "LOW")
+    # The extractor's warnings (POSSIBLE_20F_FILER, ...) go with the answer, as in the Worker (2.26.4, F23).
+    if isinstance(seg.get("warnings"), list):
+        warnings.extend(w for w in seg["warnings"] if isinstance(w, dict))
     return _result(
         status,
         {"segment": segment_name or None, "segments": segments},

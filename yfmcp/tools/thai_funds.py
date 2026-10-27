@@ -765,7 +765,10 @@ async def get_thai_fund_nav(
     except SecThailandProviderError as error:
         return _provider_failure("get_thai_fund_nav", error)
 
-    rows = [row for row in payload["items"] if isinstance(row, dict) and _safe_date(row.get("nav_date"))]
+    rows = _nav_rows_for_class(
+        [row for row in payload["items"] if isinstance(row, dict) and _safe_date(row.get("nav_date"))],
+        identity.fund_class_name,
+    )
     base = _nav_result(
         identity,
         rows,
@@ -775,6 +778,15 @@ async def get_thai_fund_nav(
         lookback_days=lookback_days,
     )
     return _mcp_success("get_thai_fund_nav", base, source=_SOURCE, data_date=base["dataDate"] if isinstance(base["dataDate"], str) else None)
+
+
+def _nav_rows_for_class(rows: list[dict], fund_class_name: str) -> list[dict]:
+    """The Worker's navRowsForClass (2.26.4, F52): a page with more than one class keeps the resolved class only, as
+    the explicit proj_id path does; a page of one class is kept as it is."""
+    classes = {str(row.get("fund_class_name") or "") for row in rows} - {""}
+    if len(classes) <= 1:
+        return rows
+    return [row for row in rows if str(row.get("fund_class_name") or "") == fund_class_name]
 
 
 def _normalize_nav_batch_funds(value: object) -> list[dict[str, str]]:

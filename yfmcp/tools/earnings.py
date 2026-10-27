@@ -447,6 +447,28 @@ def _select_quarter_fact(facts: list, min_filed: str | None, derive: bool) -> di
             "form": cum["form"], "method": "YTD_DIFFERENCE"}
 
 
+def _xbrl_quarter_in_window(period_end: str | None, release_filing_date: str | None, max_age_s: float, now: datetime.datetime | None = None) -> bool:
+    """The Worker's xbrlQuarterInWindow (2.26.4, F51): the quarter ended on or before the release filing date and less
+    than max_age_s before it; with no release date, less than max_age_s before now."""
+    if not period_end:
+        return False
+    try:
+        end_dt = datetime.datetime.fromisoformat(str(period_end)[:10]).replace(tzinfo=datetime.timezone.utc)
+    except ValueError:
+        return False
+    release_dt = None
+    if release_filing_date:
+        try:
+            release_dt = datetime.datetime.fromisoformat(str(release_filing_date)[:10]).replace(tzinfo=datetime.timezone.utc)
+        except ValueError:
+            release_dt = None
+    if release_dt is not None:
+        lag = (release_dt - end_dt).total_seconds()
+        return 0 <= lag < max_age_s
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    return (now - end_dt).total_seconds() < max_age_s
+
+
 async def _xbrl_quarter_metrics(ticker: str, cik_padded: str, release_filing_date: str, retrieved_at: str) -> list[tuple[str, dict]]:
     """The Worker's tier 1: confirmed 10-Q/10-K XBRL quarter facts at HIGH, in the Worker's metric order (2.25.5, F29)."""
     from yfmcp.sec_facts import REVENUE_CONCEPTS
@@ -483,12 +505,10 @@ async def _xbrl_quarter_metrics(ticker: str, cik_padded: str, release_filing_dat
         return fact if fact and (quarter_end is None or fact["end"] == quarter_end) else None
 
     x_eps, x_gp, x_oi, x_capex, x_ocf = _same(x_eps), _same(x_gp), _same(x_oi), _same(x_capex), _same(x_ocf)
-    # Only a period that ended within 120 days (the 10-Q lag window) applies.
+    # Only the quarter the release reports applies: a period that ended within 120 days (the 10-Q lag window) before
+    # the release was filed; from today only when the release date is unknown (2.26.4, F51).
     period_end = (x_rev or {}).get("end") or (x_eps or {}).get("end")
-    if not period_end:
-        return []
-    end_dt = datetime.datetime.fromisoformat(period_end).replace(tzinfo=datetime.timezone.utc)
-    if (datetime.datetime.now(datetime.timezone.utc) - end_dt).total_seconds() >= 120 * _DAY_S:
+    if not _xbrl_quarter_in_window(period_end, release_filing_date, 120 * _DAY_S):
         return []
 
     def _ev(fact: dict) -> dict:
@@ -929,7 +949,8 @@ async def compare_earnings_actual_vs_estimate(ticker: str, period: str = "latest
                 "period": source_period,
                 "decisionGrade": bool((((metrics.get("metrics") or {}).get("revenue") or {}).get("decisionGrade")) if isinstance((metrics.get("metrics") or {}).get("revenue"), dict) else False),
             },
-            "eps": {"value": actual_eps, "unit": "USD/share", "source": "yahoo", "period": estimate_period or reported_date, "decisionGrade": False},
+            # A Yahoo actual is rated by its source, LOW, as the estimates are (2.26.4, F22).
+            "eps": {"value": actual_eps, "unit": "USD/share", "source": "yahoo", "period": estimate_period or reported_date, "decisionGrade": False, "confidence": "LOW"},
         },
         "estimate": {
             "revenue": {"value": revenue_est, "unit": "USD", "source": "yahoo", "period": estimate_period or reported_date, "decisionGrade": False, "confidence": "LOW"},
