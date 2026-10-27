@@ -5239,7 +5239,7 @@ async def get_sec_filing_outline(ticker: str, filing_type: str = "10-K", period:
     # Without a document URL the Worker outlines the filing index (secIndexOutlinePayload), which honours a pinned
     # accession; Python read the latest primary document and dropped the accession (2.26.0, F1).
     if document_url is None:
-        return _sec_index_outline_payload(await get_sec_filing_index(ticker, filing_type, period, accession_number))
+        return _sec_index_outline_payload(await _sec_filing_index_full(ticker, filing_type, period, accession_number))
     return await get_filing_outline(ticker, accession_number, document_url)
 
 
@@ -5746,74 +5746,54 @@ async def _get_sec_filing_index_impl(
     filing_type: str = "10-K",
     accession_number: str | None = None,
 ) -> str:
-    """Build or retrieve the cached index for get_sec_filing_index."""
-    cik_padded, subs = await _get_submissions_for_ticker(ticker)
-    if not cik_padded or not subs:
-        return _mcp_failure("get_sec_filing_index", ErrorCode.TICKER_NOT_FOUND,
-                            f"Could not resolve EDGAR submissions for ticker '{ticker}'")
+    """Build or retrieve the cached index for get_sec_filing_index (the Worker's getSecFilingIndex)."""
+    try:
+        return await _build_sec_filing_index(ticker, filing_type, accession_number)
+    except Exception as exc:
+        return json.dumps({"ok": False, "error": {"code": "PROVIDER_ERROR", "message": str(exc)}})
 
-    cik_int = int(cik_padded)
-    recent = subs.get("filings", {}).get("recent", {})
-    forms: list[str] = recent.get("form", [])
-    accessions: list[str] = recent.get("accessionNumber", [])
-    primary_docs: list[str] = recent.get("primaryDocument", [])
-    filing_dates: list[str] = recent.get("filingDate", [])
-    accepted_dts: list[str] = recent.get("acceptanceDateTime", [])
 
-    target_idx: int | None = None
-    if accession_number:
-        for i, acc in enumerate(accessions):
-            if acc == accession_number:
-                target_idx = i
-                break
-    else:
-        for i, form in enumerate(forms):
-            if str(form).upper() == filing_type.upper():
-                target_idx = i
-                accession_number = accessions[i] if i < len(accessions) else None
-                break
+async def _build_sec_filing_index(ticker: str, filing_type: str, accession_number: str | None) -> str:
+    """The Worker's _getSecFilingIndexImpl: the filing resolver, then the filing's index (2.26.3, F50).
 
-    if target_idx is None and accession_number:
-        # An explicit accession missing from recent filings fails closed, never the latest filing (2.13.0, R4 Q3a).
-        return _accession_not_found_envelope(_accession_not_found_error(ticker, accession_number))
-    if target_idx is None or not accession_number:
-        return _mcp_failure("get_sec_filing_index", ErrorCode.NO_FILING_DATA,
-                            f"No {filing_type} filing found for '{ticker}'")
+    The filing comes from _resolve_sec_filing, as in the Worker: a 10-K that is not filed falls to the latest 20-F,
+    and its failures are the Worker's payloads (FILING_NOT_FOUND_TRY_OTHER_TYPE with the available forms, the
+    accession envelope for a pinned accession that is not found).
+    """
+    filing, error = await _resolve_sec_filing(ticker, filing_type, accession_number)
+    if error is not None:
+        if error.get("code") == "ACCESSION_NOT_FOUND":
+            return _accession_not_found_envelope(error)
+        return json.dumps({"ok": False, "error": error, **error})
 
-    filing_date = filing_dates[target_idx] if target_idx < len(filing_dates) else ""
-    accepted_at = accepted_dts[target_idx] if target_idx < len(accepted_dts) else None
-    primary_doc = primary_docs[target_idx] if target_idx < len(primary_docs) else None
-    # The filing's own form, not the requested one: a pinned accession may be another form (2.26.2, F48).
-    filing_form = str(forms[target_idx]) if target_idx < len(forms) and forms[target_idx] else filing_type
-
-    _, document_url = _edgar_build_filing_urls(cik_int, accession_number, primary_doc)
-    if not document_url:
-        return _mcp_failure("get_sec_filing_index", ErrorCode.NO_FILING_DATA,
-                            f"primaryDocument missing for {accession_number}")
-
-    # Check cache
-    cache_key = f"secidx:{ticker.upper()}:{accession_number}:{filing_form}"
+    accession_number = filing["accessionNumber"]
+    cache_key = f"secidx:{ticker.upper()}:{accession_number}:{filing['filingType']}"
     cached = _tool_cache.get(cache_key)
     if cached is not None:
         return cached[0]
 
-    # Fetch filing HTML
-    html = await _edgar_get_html(document_url, max_bytes=5_000_000)
-    if not html:
-        return _mcp_failure("get_sec_filing_index", ErrorCode.PROVIDER_ERROR,
-                            f"Failed to fetch filing document: {document_url}")
+    # Through the SEC document cache, so the outline, section and table tools reuse the same read.
+    try:
+        html = await _edgar_get_document(filing["documentUrl"])
+    except _urlerror.HTTPError as http_err:
+        return json.dumps({"ok": False, "error": {"code": "PROVIDER_ERROR",
+                                                  "message": f"Failed to fetch filing: HTTP {http_err.code}"}})
+    # The read is bounded in UTF-16 code units, as the Worker's string length.
+    if _utf16_length(html) > _SEC_DOCUMENT_READ_MAX_CHARS:
+        html = html.encode("utf-16-le", "surrogatepass")[: 2 * _SEC_DOCUMENT_READ_MAX_CHARS].decode("utf-16-le", "ignore")
 
     index = _build_filing_index_from_html(html)
     indexed_at = datetime.datetime.now(tz=datetime.timezone.utc).isoformat()
 
     result = json.dumps({
         "ticker": ticker,
-        "cik": cik_padded,
-        "filingType": filing_form,
-        "filingDate": filing_date,
-        "acceptedAt": accepted_at,
+        "cik": filing["cikPadded"],
+        "requestedFilingType": filing["requestedFilingType"],
+        "filingType": filing["filingType"],
+        "filingDate": filing["filingDate"],
+        "acceptedAt": filing["acceptedAt"],
         "accessionNumber": accession_number,
-        "documentUrl": document_url,
+        "documentUrl": filing["documentUrl"],
         "index": index,
         "meta": {
             "indexedAt": indexed_at,
@@ -5821,6 +5801,7 @@ async def _get_sec_filing_index_impl(
             "cacheKey": f"{ticker.upper()}:{accession_number}",
             "cacheTtlHours": 24,
         },
+        "warnings": filing["warnings"],
     })
 
     _tool_cache.set(cache_key, result, TTL_EDGAR)
@@ -5847,6 +5828,49 @@ async def get_sec_filing_index(
     period: str = "latest",
     accession_number: str | None = None,
 ) -> str:
+    err = _validate_ticker(ticker)
+    if err:
+        return _mcp_failure("get_sec_filing_index", ErrorCode.INPUT_VALIDATION_ERROR, err)
+    if accession_number:
+        acc_err = _validate_accession(accession_number)
+        if acc_err:
+            return _mcp_failure("get_sec_filing_index", ErrorCode.INPUT_VALIDATION_ERROR, acc_err)
+    return _compact_filing_index_payload(await _get_sec_filing_index_impl(ticker, filing_type, accession_number))
+
+
+# The public filing index lists each table's first 8 row labels and its label count; the full labels stay in the
+# cached index the extractors read. A 10-K index otherwise runs to tens of thousands of characters. The Worker's
+# compactFilingIndexPayload (2.26.3, F50).
+_INDEX_ROW_LABELS_SHOWN = 8
+
+
+def _compact_filing_index_payload(raw: str) -> str:
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        return raw
+    index = parsed.get("index") if isinstance(parsed, dict) else None
+    if not isinstance(index, dict) or not isinstance(index.get("tables"), list):
+        return raw
+    compacted = []
+    for table in index["tables"]:
+        labels = table.get("rowLabels") if isinstance(table, dict) and isinstance(table.get("rowLabels"), list) else []
+        if len(labels) <= _INDEX_ROW_LABELS_SHOWN:
+            compacted.append(table)
+        else:
+            compacted.append({**table, "rowLabels": labels[:_INDEX_ROW_LABELS_SHOWN], "rowLabelCount": len(labels)})
+    index["tables"] = compacted
+    return json.dumps(parsed)
+
+
+async def _sec_filing_index_full(
+    ticker: str,
+    filing_type: str = "10-K",
+    period: str = "latest",
+    accession_number: str | None = None,
+) -> str:
+    """get_sec_filing_index with every table's row labels, for the tools built on the index (as the Worker's
+    internal getSecFilingIndex callers)."""
     err = _validate_ticker(ticker)
     if err:
         return _mcp_failure("get_sec_filing_index", ErrorCode.INPUT_VALIDATION_ERROR, err)
@@ -6472,7 +6496,7 @@ async def extract_geographic_revenue(
     ))
     detail = str(detailLevel).lower()
     # The filing index is read for detailLevel raw only, as the Worker does (compact evidence comes from the payload).
-    idx_payload = _safe_json_loads(await get_sec_filing_index(ticker, filing_type, period, accession_number)) if detail == "raw" else {}
+    idx_payload = _safe_json_loads(await _sec_filing_index_full(ticker, filing_type, period, accession_number)) if detail == "raw" else {}
     warnings = list(payload["warnings"]) if isinstance(payload.get("warnings"), list) else []
     payload_status = str(_nn(payload.get("status"), _nn(payload.get("code"), _nn(payload.get("confidence"), "")))).strip()
     if payload.get("value") is not None and payload.get("denominator") is None and not any(isinstance(w, dict) and w.get("code") == "DENOMINATOR_NOT_FOUND" for w in warnings):
@@ -6537,7 +6561,7 @@ async def extract_geographic_revenue(
                 ticker=ticker, fact_type=FilingFactType.geographic_revenue, region=region, filing_type="20-F", period=period,
                 accession_number=accession_number if pinned else None,
             ))
-            fallback_idx = _safe_json_loads(await get_sec_filing_index(ticker, "20-F", period, accession_number))
+            fallback_idx = _safe_json_loads(await _sec_filing_index_full(ticker, "20-F", period, accession_number))
             if fallback_payload.get("value") is not None:
                 # 20-F extraction succeeded — replace the output with the fallback data
                 fallback_denominator = fallback_payload.get("denominator") is not None
@@ -8302,12 +8326,12 @@ async def extract_china_exposure(
         return json.dumps(resolve_error)
 
     idx_raw, revenue_raw, risk_raw = await asyncio.gather(
-        get_sec_filing_index(
+        _sec_filing_index_full(
             ticker=ticker,
             filing_type=resolved_filing["filingType"],
             period=period,
             accession_number=resolved_filing["accessionNumber"],
-        ) if resolved_filing else (_no_index() if resolve_error else get_sec_filing_index(
+        ) if resolved_filing else (_no_index() if resolve_error else _sec_filing_index_full(
             ticker=ticker, filing_type=filing_type, period=period, accession_number=accession_number)),
         _extract_revenue_exposure(ticker=ticker, exposure_query="China", filing_type=filing_type, period=period, accession_number=accession_number),
         _extract_risk_factor_mentions(ticker=ticker, terms=risk_terms, filing_type=filing_type, period=period, accession_number=accession_number),
@@ -8517,7 +8541,7 @@ async def extract_exposure(
     # cache once, then run them together; each keeps its own error handling.
     await _warm_sec_submissions(ticker)
     idx_raw, geo_raw, ops_raw, ent_raw, risk_raw = await asyncio.gather(
-        get_sec_filing_index(ticker=ticker, filing_type=filing_type, period=period),
+        _sec_filing_index_full(ticker=ticker, filing_type=filing_type, period=period),
         extract_geographic_revenue(ticker=ticker, region=region_label, filing_type=filing_type, period=period, detailLevel="compact"),
         search_sec_filing_text(ticker=ticker, search_terms=[topic_lower], filing_type=filing_type, context_chars=600, return_tables=False),
         search_sec_filing_text(ticker=ticker, search_terms=CHINA_NAMED_ENTITIES[:3], filing_type=filing_type, context_chars=400, return_tables=False)

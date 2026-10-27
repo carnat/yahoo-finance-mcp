@@ -377,7 +377,7 @@ class TestExposureFanOut(unittest.TestCase):
         from unittest.mock import AsyncMock, patch
 
         with patch("yfmcp.clients.edgar._get_submissions_for_ticker", new_callable=AsyncMock) as warm, \
-             patch("server.get_sec_filing_index", side_effect=self._slow({"filingDate": "2026-02-01"})), \
+             patch("server._sec_filing_index_full", side_effect=self._slow({"filingDate": "2026-02-01"})), \
              patch("server.extract_geographic_revenue", side_effect=self._slow(error=RuntimeError("geo parser failed"))), \
              patch("server.search_sec_filing_text", side_effect=self._slow({"matches": []})) as search, \
              patch("server.extract_risk_factor_mentions", side_effect=self._slow({"matches": []})):
@@ -397,7 +397,7 @@ class TestExposureFanOut(unittest.TestCase):
         from unittest.mock import AsyncMock, patch
 
         with patch("yfmcp.clients.edgar._get_submissions_for_ticker", new_callable=AsyncMock), \
-             patch("server.get_sec_filing_index", side_effect=self._slow(error=RuntimeError("index down"))), \
+             patch("server._sec_filing_index_full", side_effect=self._slow(error=RuntimeError("index down"))), \
              patch("server.extract_geographic_revenue", side_effect=self._slow()), \
              patch("server.search_sec_filing_text", side_effect=self._slow()), \
              patch("server.extract_risk_factor_mentions", side_effect=self._slow()):
@@ -409,7 +409,7 @@ class TestExposureFanOut(unittest.TestCase):
         from unittest.mock import AsyncMock, patch
 
         with patch("yfmcp.clients.edgar._get_submissions_for_ticker", new_callable=AsyncMock), \
-             patch("server.get_sec_filing_index", side_effect=self._slow({"index": {}})), \
+             patch("server._sec_filing_index_full", side_effect=self._slow({"index": {}})), \
              patch("server._extract_revenue_exposure", side_effect=self._slow({"status": "NOT_DISCLOSED"})), \
              patch("server.search_sec_filing_text", side_effect=self._slow({"matches": []})), \
              patch("server._extract_risk_factor_mentions", side_effect=self._slow({"matches": []})):

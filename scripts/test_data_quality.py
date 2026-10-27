@@ -1125,18 +1125,18 @@ class TestPr2DataQuality(unittest.TestCase):
         async def fake_risk(**kwargs):
             return json.dumps({"status": "NOT_FOUND", "matches": []})
 
-        old_index = srv.get_sec_filing_index
+        old_index = srv._sec_filing_index_full
         old_geo = srv.extract_geographic_revenue
         old_search = srv.search_sec_filing_text
         old_risk = srv.extract_risk_factor_mentions
         try:
-            srv.get_sec_filing_index = fake_index
+            srv._sec_filing_index_full = fake_index
             srv.extract_geographic_revenue = fake_geo
             srv.search_sec_filing_text = fake_search
             srv.extract_risk_factor_mentions = fake_risk
             data = json.loads(_run(srv.extract_exposure("AAOI", "china")))
         finally:
-            srv.get_sec_filing_index = old_index
+            srv._sec_filing_index_full = old_index
             srv.extract_geographic_revenue = old_geo
             srv.search_sec_filing_text = old_search
             srv.extract_risk_factor_mentions = old_risk
@@ -1257,7 +1257,7 @@ class TestPr2DataQuality(unittest.TestCase):
         async def fake_search(**kwargs):
             return json.dumps({"matches": []})
 
-        old_index = srv.get_sec_filing_index
+        old_index = srv._sec_filing_index_full
         old_revenue = srv._extract_revenue_exposure
         old_risk = srv.extract_risk_factor_mentions
         old_resolve = srv._resolve_sec_filing
@@ -1265,12 +1265,12 @@ class TestPr2DataQuality(unittest.TestCase):
         try:
             srv._resolve_sec_filing = fake_resolve
             srv.search_sec_filing_text = fake_search
-            srv.get_sec_filing_index = fake_index
+            srv._sec_filing_index_full = fake_index
             srv._extract_revenue_exposure = fake_revenue
             srv.extract_risk_factor_mentions = fake_risk
             data = json.loads(_run(srv.extract_china_exposure("MRVL")))
         finally:
-            srv.get_sec_filing_index = old_index
+            srv._sec_filing_index_full = old_index
             srv._extract_revenue_exposure = old_revenue
             srv.extract_risk_factor_mentions = old_risk
             srv._resolve_sec_filing = old_resolve

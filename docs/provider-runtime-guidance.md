@@ -3190,6 +3190,20 @@ F-024, F-026, F-029). Both runtimes change alike.
 - **Tests:** 21 new parity cases in `scripts/parity/cases_audit_2251.py`.
 - **Rollback:** redeploy 2.25.0.
 
+## Python Filing Index Payload (2.26.3)
+
+- **Why:** finding F50 (`analysis/yahoo-finance-mcp/F_TRIAGE.md` §6), found while fixing F48 and classified by the owner on 2026-10-27 as a repair toward the Worker. Python only. The fields, codes and warnings are the Worker's existing ones; Python callers see the changes below.
+- **Python `get_sec_filing_index` goes through `_resolve_sec_filing`,** its port of the Worker's `resolveSecFiling`, as the Worker's `getSecFilingIndex` does:
+  - **Payload:** adds `requestedFilingType` (the form asked for, upper-cased) and `warnings`, the Worker's fields.
+  - **10-K → 20-F:** a 10-K request for an issuer that files 20-Fs indexes the latest 20-F, with `filingType` `20-F` and the `AUTO_20F_FALLBACK` info warning. Before, Python failed with `NO_FILING_DATA`.
+  - **A form that is not filed:** `FILING_NOT_FOUND_TRY_OTHER_TYPE` with `availableFilingTypes`, instead of `NO_FILING_DATA` "No <form> filing found". A ticker without submissions stays `TICKER_NOT_FOUND`, and a pinned accession that is not found stays `ACCESSION_NOT_FOUND`. A primary document that is missing or is XBRL is `FILING_TEXT_NOT_AVAILABLE`.
+  - **Failure payloads:** the Worker's shape, `{"ok": false, "error": {...}}` with the error's fields also at the top level, instead of `{"ok": false, "data": null, "error": {"code", "message"}}`.
+  - **Document read:** through the EDGAR client's archive cache, bounded at 12,000,000 UTF-16 code units as in the Worker. It was a separate 5 MB read. A failed read is `PROVIDER_ERROR` "Failed to fetch filing: HTTP <status>"; an unexpected error is `PROVIDER_ERROR` with its message.
+- **The public tool lists 8 row labels:** a table with more lists its first 8 and `rowLabelCount`, the Worker's `compactFilingIndexPayload`. The tools built on the index (`get_sec_filing_outline`, `list_sec_filing_tables`, `query_sec_filing_index`, `get_sec_filing_intelligence`, the exposure extractors) read every label through `_sec_filing_index_full`, as the Worker's internal callers do.
+- **Through the index:** `get_sec_filing_outline` without `document_url` and `list_sec_filing_tables` without `document_url` pass these failures and the 20-F fallback on.
+- **Tests:** 16 parity cases in `scripts/parity/cases_index_payload_2263.py`.
+- **Rollback:** redeploy 2.26.2.
+
 ## Python Filing Index Labels and Table Titles (2.26.2)
 
 - **Why:** findings F48 and F49 (`analysis/yahoo-finance-mcp/F_TRIAGE.md` §6), which the owner classified on 2026-10-27 as repairs toward the Worker. Python only; no new field, status, warning code or enum value.
