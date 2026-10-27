@@ -3190,12 +3190,21 @@ F-024, F-026, F-029). Both runtimes change alike.
 - **Tests:** 21 new parity cases in `scripts/parity/cases_audit_2251.py`.
 - **Rollback:** redeploy 2.25.0.
 
+## Python Filing Index Labels and Table Titles (2.26.2)
+
+- **Why:** findings F48 and F49 (`analysis/yahoo-finance-mcp/F_TRIAGE.md` §6), which the owner classified on 2026-10-27 as repairs toward the Worker. Python only; no new field, status, warning code or enum value.
+- **F48, `get_sec_filing_index` `filingType`:** the filing's own form, as in the Worker. With a pinned `accession_number` of another form than `filing_type` (a 10-K accession asked for as a 10-Q), Python said `10-Q`; it now says `10-K`. `get_sec_filing_outline` without `document_url` inherits the label. The index cache is keyed by that form too.
+- **F49, index table `title`:** the last line of the 500 characters before the table, read one line per block element (`_strip_html_blocks`, the Worker's `_stripHtmlTagsIdx`), cleaned of leftover tags, XBRL attributes and names, and URLs (`_clean_filing_display_text`, the Worker's `cleanFilingDisplayText`). A line of 10 characters or fewer, of 200 or more, or still reading as markup (`_looks_like_filing_markup_text`) gives way to the section heading, as before. Python read those characters as one line, so a table's title was all of them, or the heading when they ran over 200. The `keywordMap`, which matches keywords in titles, follows.
+- **Noticed, not fixed (F50, unclassified):** the rest of Python's index payload (`requestedFilingType`, `warnings`, the 10-K → 20-F fallback, the missing-form error code and envelope, the `rowLabels` compaction) still differs from the Worker's.
+- **Tests:** parity cases in `scripts/parity/cases_routing_2260.py` (F48, index and outline) and `scripts/parity/cases_index_bold_2261.py` (F49: titles, tables and keyword map, markup or short titles).
+- **Rollback:** redeploy 2.26.1.
+
 ## Python Filing Index Bold Headings (2.26.1)
 
 - **Why:** found while checking 2.26.0 live. Since F1, Python's `get_sec_filing_outline` without `document_url` outlines the filing index. Python's index took sections from `<h1>`–`<h6>` headings only, so a filing that marks Part and Item headings in bold text, as most 10-Ks and 10-Qs do (AAPL's latest 10-K and 10-Q), returned an empty outline (`OUTLINE_NOT_PARSED`) in Python and 27 entries in the Worker. No new field, status, warning code or enum value.
 - **Python `get_sec_filing_index`:** when a document has no `<h1>`–`<h6>` heading, its sections are the bold Part and Item headings outside the table of contents (`filing_item_headings`, the Worker's `filingItemHeadings`), up to 50. Each has the same fields as before: `sectionId`, `heading`, `normalizedHeading`, `level` (1 for a Part, 2 for an Item), `keywords`, `startChar` and `endChar`. Tables take the nearest such section before them, and the keyword map includes them. This matches the Worker's `_buildFilingIndexFromHtml`.
 - **Python `get_sec_filing_outline` without `document_url`:** lists those sections, as the Worker does.
-- **Noticed, not fixed (F49, unclassified):** an index table's `title` differs between runtimes (Python strips the preceding text without line breaks and has no heading fallback), and so does the `keywordMap` built from it. Pinned as a parity case.
+- **Noticed, not fixed (F49, unclassified):** an index table's `title` differs between runtimes (Python strips the preceding text without line breaks), and so does the `keywordMap` built from it. Pinned as a parity case; fixed in 2.26.2.
 - **Tests:** 5 parity cases in `scripts/parity/cases_index_bold_2261.py`, including the F49 pin.
 - **Rollback:** redeploy 2.26.0.
 

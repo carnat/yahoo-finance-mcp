@@ -50,21 +50,43 @@ CASES.append(Case(
     expect=[None, "item_1a_risk_factors"],
 ))
 
-# ── Noticed, not fixed in 2.26.1 (F49, unclassified): an index table's title ─────────────────────────────────────
-# The Worker takes the last line of the text before the table (block tags break lines; markup-like text is
-# dropped; the section heading when nothing fits). Python strips the same text without line breaks, so its title is
-# all of it, and it has no heading fallback. The keyword map, built from titles, differs with it. Pinned until the
-# owner classifies F49.
+# ── F49 (2.26.2, owner 2026-10-27: match the Worker): an index table's title ────────────────────────────────────
+# Both runtimes take the last line of the text before the table (block tags break lines; markup-like text is
+# dropped), and the section heading when nothing fits. Python stripped that text without line breaks, so its title
+# was all of it. The keyword map, built from titles, follows.
 CASES.append(Case(
     name="f49.index.table_title_from_preceding_text", ids=["F49"], routes=BOLD_ROUTES,
-    mode="pinned", decision="F49 (unclassified; F_TRIAGE.md §6)",
     py=lambda: [t["title"] for t in
                 json.loads(_py(server.get_sec_filing_index, "AAPL", "10-K", "latest", TEN_K_ACC)())["index"]["tables"]],
     ts={"js": "return JSON.parse(await m.yahooFinance.getSecFilingIndex(...args)).index.tables.map((t) => t.title);",
         "args": ["AAPL", "10-K", "latest", TEN_K_ACC], "isolate": True},
-    expect_py=["", "Item 1. Business 1 Item 1A. Risk Factors 5 PART I Item 1. Business Annual revenue grew in fiscal"
-                   " 2024. Item 1A. Risk Factors Supply risk."],
-    expect_ts=["", "Supply risk."],
+    expect=["", "Supply risk."],
+))
+CASES.append(Case(
+    name="f49.index.tables_and_keyword_map", ids=["F49"], routes=BOLD_ROUTES,
+    py=lambda: {k: v for k, v in json.loads(_py(server.get_sec_filing_index, "AAPL", "10-K", "latest", TEN_K_ACC)())
+                ["index"].items() if k != "sections"},
+    ts={"js": "const { sections, ...rest } = JSON.parse(await m.yahooFinance.getSecFilingIndex(...args)).index;"
+              " return rest;",
+        "args": ["AAPL", "10-K", "latest", TEN_K_ACC], "isolate": True},
+))
+# A title that still reads as markup, or a short one, gives way to the section heading.
+MARKUP_TITLE_HTML = (
+    "<html><body><h2>Item 7. Management's Discussion</h2>"
+    "<p>contextRef=\"c-1\" us-gaap:Revenues</p>"
+    "<table><tr><td>Net sales</td><td>2024</td></tr><tr><td>Products</td><td>294,866</td></tr></table>"
+    "<h2>Item 8. Financial Statements</h2><p>Short</p>"
+    "<table><tr><td>Total assets</td><td>2024</td></tr><tr><td>Cash</td><td>29,943</td></tr></table>"
+    "</body></html>"
+)
+CASES.append(Case(
+    name="f49.index.markup_or_short_title_uses_the_heading", ids=["F49"],
+    routes={**ROUTES, TEN_K_DOC: {"body": MARKUP_TITLE_HTML}},
+    py=lambda: [t["title"] for t in
+                json.loads(_py(server.get_sec_filing_index, "AAPL", "10-K", "latest", TEN_K_ACC)())["index"]["tables"]],
+    ts={"js": "return JSON.parse(await m.yahooFinance.getSecFilingIndex(...args)).index.tables.map((t) => t.title);",
+        "args": ["AAPL", "10-K", "latest", TEN_K_ACC], "isolate": True},
+    expect=["Item 7. Management's Discussion", "Item 8. Financial Statements"],
 ))
 
 CASES.append(Case(
