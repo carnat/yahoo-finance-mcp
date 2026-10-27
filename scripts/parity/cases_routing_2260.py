@@ -107,15 +107,21 @@ CASES.append(Case(
     expect={"userAgents": [SEC_UA], "source": "public_url"},
 ))
 
-# ── Noticed, not fixed in 2.26.0 (F48, unclassified): a pinned accession of another form than filing_type ───────────
-# get_sec_filing_index labels filingType with the form the caller asked for in Python ("10-Q") and with the pinned
-# filing's own form in the Worker ("10-K"). Both answer the same filing (the case above). The outline inherits the
-# label because it is built from the index. Pinned until the owner classifies F48.
+# ── F48 (2.26.2, owner 2026-10-27: match the Worker): a pinned accession of another form than filing_type ────────
+# get_sec_filing_index labels filingType with the pinned filing's own form in both runtimes. Python used the form
+# the caller asked for. The outline inherits the label because it is built from the index.
 CASES.append(Case(
     name="f48.index.pinned_accession_of_another_form_filing_type_label", ids=["F48"], routes=ROUTES,
-    mode="pinned", decision="F48 (unclassified; F_TRIAGE.md §6)",
     py=lambda: json.loads(_py(server.get_sec_filing_index, "AAPL", "10-Q", "latest", TEN_K_ACC)()).get("filingType"),
     ts={"js": "return JSON.parse(await m.yahooFinance.getSecFilingIndex(...args)).filingType;",
         "args": ["AAPL", "10-Q", "latest", TEN_K_ACC], "isolate": True},
-    expect_py="10-Q", expect_ts="10-K",
+    expect="10-K",
+))
+CASES.append(Case(
+    name="f48.outline.pinned_accession_of_another_form_filing_type_label", ids=["F48"], routes=ROUTES,
+    py=lambda: json.loads(_py(server.get_sec_filing_outline, "AAPL", "10-Q", "latest", TEN_K_ACC, None)()).get("filingType"),
+    ts={"js": "const r = JSON.parse(await m.tools.callTool(args[0], args[1])); return (r.data ?? r).filingType;",
+        "args": ["get_sec_filing_outline", {"ticker": "AAPL", "filing_type": "10-Q", "accession_number": TEN_K_ACC}],
+        "isolate": True},
+    expect="10-K",
 ))

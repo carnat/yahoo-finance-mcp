@@ -49,6 +49,29 @@ def _strip_html_blocks(html_str: str) -> str:
     return "\n".join(line for line in lines if line)
 
 
+_DISPLAY_ATTR_RE = _re.compile(r"\b(?:contextRef|unitRef|decimals|id|name|class|style|href)=(\"[^\"]*\"|'[^']*'|[^\s]+)", _re.IGNORECASE)
+_DISPLAY_XBRL_NAME_RE = _re.compile(r"\b(?:xbrli|ix|dei|us-gaap|srt|country):[A-Za-z0-9_.:-]+\b")
+_DISPLAY_URL_RE = _re.compile(r"https?://\S+", _re.IGNORECASE)
+_MARKUP_TEXT_RE = _re.compile(
+    r"[<>]=?|(?:^|\s)(?:contextRef|unitRef|decimals|style|class|id|name)=|(?:xbrli|ix|dei|us-gaap|srt|country):|https?://",
+    _re.IGNORECASE,
+)
+
+
+def _clean_filing_display_text(text: str) -> str:
+    """Filing text without leftover tags, XBRL attributes and names, or URLs (the Worker's cleanFilingDisplayText)."""
+    text = _re.sub(r"<[^>]+>", " ", text)
+    text = _DISPLAY_ATTR_RE.sub(" ", text)
+    text = _DISPLAY_XBRL_NAME_RE.sub(" ", text)
+    text = _DISPLAY_URL_RE.sub(" ", text)
+    return _re.sub(r"\s+", " ", text).strip()
+
+
+def _looks_like_filing_markup_text(text: str) -> bool:
+    """Text that still reads as markup (the Worker's looksLikeFilingMarkupText)."""
+    return _MARKUP_TEXT_RE.search(text) is not None
+
+
 def _parse_html_table(table_html: str) -> list[list[str]]:
     """Parse an HTML table into a list of rows, each a list of plain-text cell strings."""
     rows: list[list[str]] = []

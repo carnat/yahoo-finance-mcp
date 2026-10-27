@@ -84,7 +84,8 @@ from yfmcp.clients.edgar import (
     _edgar_read_submissions, _edgar_get_document,
 )
 from yfmcp.parsing.html import (
-    _strip_html_tags, _strip_html_blocks, _parse_html_table, _parse_numeric_cell, _detect_unit_multiplier, _UNIT_SCALE_ASSUMED_WARNING,
+    _strip_html_tags, _strip_html_blocks, _clean_filing_display_text, _looks_like_filing_markup_text,
+    _parse_html_table, _parse_numeric_cell, _detect_unit_multiplier, _UNIT_SCALE_ASSUMED_WARNING,
     _MD_MAX_CELL_CHARS, _html_table_to_markdown, _html_to_markdown_fallback, _table_unit_scale,
 )
 from yfmcp.parsing.extractors import (
@@ -5695,14 +5696,12 @@ def _build_filing_index_from_html(html: str) -> dict:
         else:
             confidence = "LOW"
 
-        # Infer title from preceding text
-        pre_text = _strip_html_tags(sanitized[max(0, table_start - 500):table_start])
-        lines = [ln.strip() for ln in pre_text.split('\n') if ln.strip()]
-        title = ""
-        if lines:
-            candidate = lines[-1]
-            if 10 < len(candidate) < 200:
-                title = candidate
+        # The last line of the text before the table, one line per block element; the section heading when none
+        # fits (below), as the Worker's _buildFilingIndexFromHtml (2.26.2, F49).
+        pre_text = _strip_html_blocks(sanitized[max(0, table_start - 500):table_start])
+        lines = [ln for ln in (_clean_filing_display_text(raw.strip()) for raw in pre_text.split('\n')) if ln]
+        candidate = lines[-1] if lines else ""
+        title = candidate if 10 < len(candidate) < 200 and not _looks_like_filing_markup_text(candidate) else ""
 
         tables.append({
             "tableId": table_idx,
@@ -5784,6 +5783,8 @@ async def _get_sec_filing_index_impl(
     filing_date = filing_dates[target_idx] if target_idx < len(filing_dates) else ""
     accepted_at = accepted_dts[target_idx] if target_idx < len(accepted_dts) else None
     primary_doc = primary_docs[target_idx] if target_idx < len(primary_docs) else None
+    # The filing's own form, not the requested one: a pinned accession may be another form (2.26.2, F48).
+    filing_form = str(forms[target_idx]) if target_idx < len(forms) and forms[target_idx] else filing_type
 
     _, document_url = _edgar_build_filing_urls(cik_int, accession_number, primary_doc)
     if not document_url:
@@ -5791,7 +5792,7 @@ async def _get_sec_filing_index_impl(
                             f"primaryDocument missing for {accession_number}")
 
     # Check cache
-    cache_key = f"secidx:{ticker.upper()}:{accession_number}:{filing_type}"
+    cache_key = f"secidx:{ticker.upper()}:{accession_number}:{filing_form}"
     cached = _tool_cache.get(cache_key)
     if cached is not None:
         return cached[0]
@@ -5808,7 +5809,7 @@ async def _get_sec_filing_index_impl(
     result = json.dumps({
         "ticker": ticker,
         "cik": cik_padded,
-        "filingType": filing_type,
+        "filingType": filing_form,
         "filingDate": filing_date,
         "acceptedAt": accepted_at,
         "accessionNumber": accession_number,
