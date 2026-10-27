@@ -216,9 +216,11 @@ class TestExtractEarningsMetrics(unittest.TestCase):
             "Revenue was $18.8 million for the fourth quarter of fiscal 2026. "
             "The company expects revenue of $130 million for fiscal 2027."
         )
+        # The release text is under test, so the SEC XBRL tier (live AEHR facts, read since 2.26.4 F51 while this
+        # release is the latest) is stubbed out.
         with patch("yfmcp.tools.earnings._resolve_latest_earnings_release", new_callable=AsyncMock) as mocked_release, patch(
             "yfmcp.tools.earnings._edgar_get_html", new_callable=AsyncMock
-        ) as mocked_html:
+        ) as mocked_html, patch("yfmcp.tools.earnings._xbrl_quarter_metrics", new_callable=AsyncMock, return_value=[]):
             mocked_release.return_value = {
                 "ticker": "AEHR",
                 "period": "latest",

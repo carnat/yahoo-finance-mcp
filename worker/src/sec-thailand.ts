@@ -605,9 +605,21 @@ export async function getThaiFundNav(
   } catch (error) {
     return errorResult(tool, error as ProviderError);
   }
-  const rows = response.items.filter((row) => isIsoDate(row.nav_date));
+  const rows = navRowsForClass(response.items.filter((row) => isIsoDate(row.nav_date)), identity.fundClassName);
   const payload = navPayload(identity, rows, optionalString(response.next_cursor), startDate, asOfDate, lookbackDays);
   return mcpSuccess(tool, JSON.stringify(payload), { source: SOURCE, dataDate: payload.dataDate as string | null });
+}
+
+/**
+ * The resolved class's NAV rows (2.26.4, F52). The provider can return every
+ * class of the project despite the fund_class_name filter; a page with more
+ * than one class keeps only the resolved class, as the explicit proj_id path
+ * does. A page of one class is kept as it is.
+ */
+function navRowsForClass(rows: RecordValue[], fundClassName: string): RecordValue[] {
+  const classes = new Set(rows.map((row) => String(row.fund_class_name ?? "")).filter(Boolean));
+  if (classes.size <= 1) return rows;
+  return rows.filter((row) => String(row.fund_class_name ?? "") === fundClassName);
 }
 
 interface NavBatchFund {

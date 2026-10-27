@@ -91,9 +91,9 @@ Approved by the owner on 2026-10-19, after "continue with the next triage while 
   - F21 is widened: the risk-factor block of a pinned `china_exposure` read also names the latest 10-K.
 - **Remaining:** F7, F1 and F2 (2.24.0 routing release, after the 2026-10-24 gate); F16 and F19 (R5 releases); F21 (unclassified); F5, F17 and F20 (Phase 6); OPS-TEL-3 (after the Phase 4 exit).
 - **2026-10-20 (owner: "ok yes"):** F21 is classified REPAIR and ships as 2.24.0 (`F21_SPEC.md`). F19 and F16 ship as 2.25.0 (`R5_F19_F16_SPEC.md`). The Python EDGAR routing release becomes 2.26.0.
-- **F22 (new):** in `compare_earnings_actual_vs_estimate`, `actual.eps` is a Yahoo row and inherits the comparison's confidence. It is an actual, not a consensus estimate, so rating it needs its own decision. Unclassified.
-- **F23 (new):** `query_sec_filing_index` `segment_revenue` without an accession: the Worker passes the extractor's warnings through and Python drops them. Pinned as `F21-SEGMENT-QUERY-WARNINGS`. Unclassified.
-- **F24 (new, from the 2.25.0 port):** after the envelope runs, the `compare_earnings_actual_vs_estimate` `estimate.*` rows have 9 keys in Python and 6 in the Worker. It looks like envelope enrichment that only Python applies. It is pre-existing, and parity cases compare values only. Unclassified.
+- **F22 (new):** in `compare_earnings_actual_vs_estimate`, `actual.eps` is a Yahoo row and inherits the comparison's confidence. It is an actual, not a consensus estimate, so rating it needs its own decision. **Owner, 2026-10-27: REPAIR (both), rated LOW by its source as F16 did; fixed in 2.26.4** (§7).
+- **F23 (new):** `query_sec_filing_index` `segment_revenue` without an accession: the Worker passes the extractor's warnings through and Python drops them. Pinned as `F21-SEGMENT-QUERY-WARNINGS`. **Owner, 2026-10-27: REPAIR → Worker; fixed in 2.26.4, the case is now equal** (§7).
+- **F24 (new, from the 2.25.0 port):** after the envelope runs, the `compare_earnings_actual_vs_estimate` `estimate.*` rows have 9 keys in Python and 6 in the Worker. It looks like envelope enrichment that only Python applies. It is pre-existing, and parity cases compare values only. **Closed 2026-10-27:** on 2.26.3 the Worker's rows have the same 9 keys (audit 2026-10-27).
 - **F21: released as 2.24.0 (#302) and live-verified 2026-10-20 08:39Z** (`F21_SPEC.md` §5).
 
 ## 5. Findings from the 2.25.0 functional audit (F25–F47)
@@ -171,3 +171,14 @@ Approved by the owner on 2026-10-19, after "continue with the next triage while 
 **2.26.2 (F48, F49):** both aligned to the Worker on the owner's call (2026-10-27). Runtime guidance: "Python Filing Index Labels and Table Titles (2.26.2)".
 - **F48:** Python's `get_sec_filing_index` labels `filingType` with the filing's own form; a pinned accession of another form no longer carries the requested one.
 - **F49:** an index table's `title` (and the `keywordMap` built from it) differed. The Worker takes the last line of the text before the table, with block tags breaking lines and markup-like text dropped, then the section heading. Python stripped that text without line breaks, so its title was the whole 500 characters, or the heading when that ran over 200. **Owner, 2026-10-27: REPAIR → Worker, fixed in 2.26.2.**
+
+## 7. Findings from the 2026-10-27 functional audit (F51–F62)
+
+The pre-Phase 6 audit of build 2.26.3+git.9a549f2 (`/mnt/project-files/audits/mcp-audit-2026-10-27.md`). The owner approved the 2.26.4 patch on 2026-10-27 ("Yes" to F51–F53 plus F22/F23 as recommended). F24 and TF9 are closed: both work on 2.26.3.
+
+- **F51 (High, both): fixed in 2.26.4.** `extract_earnings_metrics` dropped the SEC XBRL quarter 120 days after the quarter ended, so AAPL's metrics went blank before its next release. Planner call (evidence threshold): the 120 days are counted from the period end to the release filing date (0 ≤ lag < 120); from today only when the release date is unknown. The release-date floor on the fact's filing date is unchanged.
+- **F52 (High, both): fixed in 2.26.4.** `get_thai_fund_nav` without `proj_id` took the newest row of any class on the provider's page (SCBDV 10.7558 for 8.3603). Planner call (paging): a page with more than one class keeps only the resolved class; no cursor is followed, and a page without the class is the existing `NAV_NOT_FOUND_IN_WINDOW`. A one-class page is unchanged.
+- **F53 (High, Python): fixed in 2.26.4.** Python's `dividendYield` was the v7 quote's percent that yfinance overlays on `summaryDetail`. It is now the decimal ratio, as in the Worker and in `unitSemantics.decimalRatios`. The audit found no other ratio field that differs.
+- **F22, F23: fixed in 2.26.4** (§4 entries).
+- **F54–F62 (Medium) and the 14 low items:** open, not classified. Phase 6 gaps from the audit (deprecation notices for F5/F45, F20, F47) stay on the Phase 6 entry list.
+

@@ -3190,6 +3190,17 @@ F-024, F-026, F-029). Both runtimes change alike.
 - **Tests:** 21 new parity cases in `scripts/parity/cases_audit_2251.py`.
 - **Rollback:** redeploy 2.25.0.
 
+## Audit Repairs F51, F52, F53, F22, F23 (2.26.4)
+
+- **Why:** the 2026-10-27 functional audit (`analysis/yahoo-finance-mcp/F_TRIAGE.md` §7). The owner approved these as recommended on 2026-10-27. No new field, status, warning code or enum value.
+- **F51, both runtimes: the earnings XBRL tier is measured from the release.** `extract_earnings_metrics` reads the SEC XBRL quarter (tier 1) when that quarter ended less than 120 days before the release's filing date, and not after it (`xbrlQuarterInWindow`, Python `_xbrl_quarter_in_window`). Before, the 120 days were counted to today, so an issuer's latest quarter dropped to the release text about 120 days after it ended, usually just before the next release (AAPL on 2026-10-27). The age from today still applies when the release has no filing date. The fact must still be filed on or after the release.
+- **F52, both runtimes: Thai NAV keeps the resolved share class.** `get_thai_fund_nav` without `proj_id` asks the SEC for the resolved class, but the provider can return every class of the project. When the page holds more than one class, only the resolved class's rows are read, as the explicit `proj_id` path already did. A page without that class is `NAV_NOT_FOUND_IN_WINDOW`; a page of one class is read as before. No further page is fetched.
+- **F53, Python: `dividendYield` is a decimal ratio.** yfinance overlays Yahoo's v7 quote on `summaryDetail`, and the quote states the yield as a percent (AAPL 0.31 for 0.0031). `get_company_profile` / `get_stock_info` and `analyze_financial_ratios` now return the ratio, as the Worker does and as `unitSemantics.decimalRatios` says. The scale is the one closer to `dividendRate / price` (or `trailingAnnualDividendYield`), so a ratio left by a failed quote call is kept. Python callers that multiplied by 0.01 should stop.
+- **F22, both runtimes: the Yahoo actual EPS is LOW.** In `compare_earnings_actual_vs_estimate`, `actual.eps` (`source: yahoo`) carries `confidence: "LOW"`, as the Yahoo estimate rows do since 2.25.0 (F16). It inherited the comparison's confidence before. The comparison's own `confidence` is unchanged.
+- **F23, Python: segment warnings in the query answer.** `query_sec_filing_index` `segment_revenue` adds the extractor's warnings (for example `POSSIBLE_20F_FILER`) to its `warnings`, as the Worker does. The pinned case `F21-SEGMENT-QUERY-WARNINGS` is now equal.
+- **Tests:** 20 parity cases in `scripts/parity/cases_audit_2264.py`, and the flipped case in `scripts/parity/cases_accession.py`.
+- **Rollback:** redeploy 2.26.3.
+
 ## Python Filing Index Payload (2.26.3)
 
 - **Why:** finding F50 (`analysis/yahoo-finance-mcp/F_TRIAGE.md` §6), found while fixing F48 and classified by the owner on 2026-10-27 as a repair toward the Worker. Python only. The fields, codes and warnings are the Worker's existing ones; Python callers see the changes below.

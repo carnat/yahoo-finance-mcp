@@ -13653,6 +13653,33 @@ export function selectQuarterFact(
   };
 }
 
+/** The quarter end tier 1 reads: revenue's, else EPS's. */
+function xbrlPeriodEndOf(rev: { end: string } | null, eps: { end: string } | null): string | null {
+  return rev?.end ?? eps?.end ?? null;
+}
+
+/**
+ * Whether an XBRL quarter is the one an earnings release reports (2.26.4, F51):
+ * it ended on or before the release filing date and less than maxAgeMs before
+ * it. With no release date, the age is measured from now.
+ */
+export function xbrlQuarterInWindow(
+  periodEnd: string | null,
+  releaseFilingDate: string | null | undefined,
+  maxAgeMs: number,
+  nowMs: number = Date.now(),
+): boolean {
+  if (!periodEnd) return false;
+  const endMs = new Date(String(periodEnd).slice(0, 10)).getTime();
+  if (!Number.isFinite(endMs)) return false;
+  const releaseMs = releaseFilingDate ? new Date(String(releaseFilingDate).slice(0, 10)).getTime() : NaN;
+  if (Number.isFinite(releaseMs)) {
+    const lag = releaseMs - endMs;
+    return lag >= 0 && lag < maxAgeMs;
+  }
+  return nowMs - endMs < maxAgeMs;
+}
+
 export async function extractEarningsMetrics(
   ticker: string,
   period = "latest",
@@ -13746,12 +13773,14 @@ export async function extractEarningsMetrics(
     const xCapex = sameQuarter(xCapexRaw);
     const xOcf = sameQuarter(xOcfRaw);
 
-    // Only apply Tier 1 if the most recent period is within 4 months (10-Q lag window)
+    // Tier 1 applies only to the quarter the release reports: a period that
+    // ended within 120 days (the 10-Q lag window) before the release was filed
+    // (2.26.4, F51). The window is measured from today only when the release
+    // date is unknown, so a quarter does not go stale while its release is
+    // still the latest.
     const XBRL_MAX_AGE_MS = 120 * 24 * 60 * 60 * 1000;
-    const xbrlPeriodEnd = xRev?.end ?? xEps?.end ?? null;
-    const xbrlIsRecent = xbrlPeriodEnd
-      ? Date.now() - new Date(xbrlPeriodEnd).getTime() < XBRL_MAX_AGE_MS
-      : false;
+    const xbrlPeriodEnd = xbrlPeriodEndOf(xRev, xEps);
+    const xbrlIsRecent = xbrlQuarterInWindow(xbrlPeriodEnd, releaseFilingDate, XBRL_MAX_AGE_MS);
 
     if (xbrlIsRecent) {
       const xbrlEv = (fact: QuarterFact & { concept: string }): Record<string, unknown> => ({
@@ -14184,7 +14213,8 @@ export async function compareEarningsActualVsEstimate(ticker: string, period = "
     periodAlignmentStatus,
     actual: {
       revenue: { ...revenueMetric, value: actualRevenue, unit: "USD", period: sourcePeriod ?? metricPeriodEnd, decisionGrade: revenueMetric.decisionGrade === true },
-      eps: { value: actualEps, unit: "USD/share", source: "yahoo", period: estimatePeriod ?? estimateQuarterEnd, decisionGrade: false },
+      // A Yahoo actual is rated by its source, LOW, as the estimates are (2.26.4, F22).
+      eps: { value: actualEps, unit: "USD/share", source: "yahoo", period: estimatePeriod ?? estimateQuarterEnd, decisionGrade: false, confidence: "LOW" },
     },
     estimate: {
       // Yahoo consensus estimates are LOW, as in get_earnings_analysis; the comparison keeps its own confidence (2.25.0, F16).
