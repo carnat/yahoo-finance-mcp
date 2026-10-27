@@ -7,7 +7,7 @@
  */
 
 import { BoundedTtlCache } from "../cache.js";
-import { awaitNotingBudget, consumeSubrequest, countCacheEvent, emptyCacheUsage, type CacheEvent, type CacheUsage } from "../request-context.js";
+import { awaitNotingBudget, consumeSubrequest, countCacheEvent, emptyCacheUsage, providerFetch, type CacheEvent, type CacheUsage } from "../request-context.js";
 import { getWorkerVar } from "../response.js";
 import { countersSince, edgeCache, enc, fetchProviderWithTimeout, stripHtmlTags, yGet } from "../yahoo-finance.js";
 
@@ -33,6 +33,36 @@ function edgarUserAgent(): string {
 
 function edgarFetch(url: string): Promise<Response> {
   return fetchProviderWithTimeout(url, { headers: { "User-Agent": edgarUserAgent() } }, EDGAR_FETCH_TIMEOUT_MS);
+}
+
+/**
+ * A caller-supplied SEC page (parse_public_transcript): the generic public-page read (fetchPublicHtml in
+ * yahoo-finance.ts: no timeout, whole chunks until maxBytes, UTF-8), sent with SEC's required User-Agent instead of
+ * the browser one (2.26.0, D9). Null when the page cannot be read. Not cached: the caller may name any page.
+ */
+export async function edgarFetchPublicHtml(url: string, maxBytes = 3_000_000): Promise<string | null> {
+  try {
+    const resp = await providerFetch(url, { headers: { "User-Agent": edgarUserAgent() } });
+    if (!resp.ok) return null;
+    const reader = resp.body?.getReader();
+    if (!reader) return await resp.text();
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+      chunks.push(value);
+      total += value.byteLength;
+      if (total >= maxBytes) { await reader.cancel(); break; }
+    }
+    const merged = new Uint8Array(total);
+    let off = 0;
+    for (const c of chunks) { merged.set(c, off); off += c.byteLength; }
+    return new TextDecoder().decode(merged);
+  } catch {
+    return null;
+  }
 }
 
 // SEC archive documents (https://www.sec.gov/Archives/...) never change once

@@ -135,7 +135,11 @@ class TestLocalDataAccuracy(unittest.TestCase):
             def read(self):
                 return html.encode()
 
-        with patch("yfmcp.url_policy.urlopen", return_value=_Resp()):
+        from yfmcp.clients import edgar as _edgar_client
+
+        # 2.26.0: filing documents are read through the EDGAR client's archive cache; start it empty for this URL.
+        with patch.dict(_edgar_client._EDGAR_HTML_CACHE, {}, clear=True), \
+                patch("yfmcp.url_policy.urlopen", return_value=_Resp()):
             raw = _run(srv.get_filing_section("AAPL", "Item 1A", "https://www.sec.gov/Archives/edgar/data/320193/x/a.htm"))
         text = _data(raw)["text"]
         self.assertIn("The Company’s business", text)
