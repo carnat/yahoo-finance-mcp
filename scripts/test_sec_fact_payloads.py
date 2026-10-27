@@ -519,7 +519,9 @@ def _python(name: str) -> dict:
             patch("server._load_edgar_tickers", new=tickers), \
             patch("server._edgar_get", new=edgar_get), \
             patch("server._edgar_get_html", new=edgar_html), \
-            patch("server._get_submissions_for_ticker", new=submissions):
+            patch("yfmcp.clients.edgar._edgar_get", new=edgar_get), \
+            patch("server._get_submissions_for_ticker", new=submissions), \
+            patch("yfmcp.clients.edgar._get_submissions_for_ticker", new=submissions):
         call = case.get("call", "total_revenue")
         period = case.get("period", "latest")
         if call == "dispatch":
