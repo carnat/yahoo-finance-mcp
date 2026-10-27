@@ -3190,6 +3190,15 @@ F-024, F-026, F-029). Both runtimes change alike.
 - **Tests:** 21 new parity cases in `scripts/parity/cases_audit_2251.py`.
 - **Rollback:** redeploy 2.25.0.
 
+## Python Filing Index Bold Headings (2.26.1)
+
+- **Why:** found while checking 2.26.0 live. Since F1, Python's `get_sec_filing_outline` without `document_url` outlines the filing index. Python's index took sections from `<h1>`–`<h6>` headings only, so a filing that marks Part and Item headings in bold text, as most 10-Ks and 10-Qs do (AAPL's latest 10-K and 10-Q), returned an empty outline (`OUTLINE_NOT_PARSED`) in Python and 27 entries in the Worker. No new field, status, warning code or enum value.
+- **Python `get_sec_filing_index`:** when a document has no `<h1>`–`<h6>` heading, its sections are the bold Part and Item headings outside the table of contents (`filing_item_headings`, the Worker's `filingItemHeadings`), up to 50. Each has the same fields as before: `sectionId`, `heading`, `normalizedHeading`, `level` (1 for a Part, 2 for an Item), `keywords`, `startChar` and `endChar`. Tables take the nearest such section before them, and the keyword map includes them. This matches the Worker's `_buildFilingIndexFromHtml`.
+- **Python `get_sec_filing_outline` without `document_url`:** lists those sections, as the Worker does.
+- **Noticed, not fixed (F49, unclassified):** an index table's `title` differs between runtimes (Python strips the preceding text without line breaks and has no heading fallback), and so does the `keywordMap` built from it. Pinned as a parity case.
+- **Tests:** 5 parity cases in `scripts/parity/cases_index_bold_2261.py`, including the F49 pin.
+- **Rollback:** redeploy 2.26.0.
+
 ## Python EDGAR Routing (2.26.0)
 
 - **Why:** the Python EDGAR routing release planned in `analysis/yahoo-finance-mcp/PHASE4_SPEC.md` section 3.6 (decisions D2b, D2c and D9), with findings F7, F1 and F2 from `analysis/yahoo-finance-mcp/F_TRIAGE.md`. It follows Phase 4 unit 1 (the EDGAR client move). No new field, status, warning code or enum value.

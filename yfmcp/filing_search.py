@@ -95,6 +95,7 @@ class HeadingAnchor:
     start: int
     level: int
     title: str
+    end: int
 
 
 @dataclass
@@ -341,7 +342,7 @@ def filing_item_headings(html: str) -> list[HeadingAnchor]:
             if not token or token in seen:
                 continue
             seen.add(token)
-            headings.append(HeadingAnchor(m.start(), level, title))
+            headings.append(HeadingAnchor(m.start(), level, title, m.end()))
 
     def part_token(text: str) -> str | None:
         m = re.match(r"part\s+([ivx]+)\b", text, re.IGNORECASE)
@@ -363,7 +364,7 @@ def search_headings(html: str) -> list[HeadingAnchor]:
         level = 1 if re.match(r"part\s+[ivx]+\b", title, re.IGNORECASE) else 2 if re.match(r"item\s+[0-9]+[a-z]?\b", title, re.IGNORECASE) else 0
         if level == 0 or re.search(r"\s[0-9]{1,3}$", title) or is_toc_match(html, m.start(), m.end()):
             continue
-        out.append(HeadingAnchor(m.start(), level, title[:200]))
+        out.append(HeadingAnchor(m.start(), level, title[:200], m.end()))
     return out
 
 
