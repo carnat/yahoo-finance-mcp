@@ -59,8 +59,9 @@ def _exposure_view(v: dict) -> dict:
 
 
 for _name, _doc, _expect in [
+    # 2.26.5 (F62): the parsed table has no India row, so no TABLE_NOT_PARSED warning either.
     ("audit2254.extract_exposure.region_only_in_text_is_not_found", _geo_doc(),
-     {"revenueStatus": "NOT_FOUND", "revenueCode": None, "code": None, "warningCodes": ["TABLE_NOT_PARSED"]}),
+     {"revenueStatus": "NOT_FOUND", "revenueCode": None, "code": None, "warningCodes": []}),
     ("audit2254.extract_exposure.region_in_an_unparsed_table_stays_extraction_failed", _geo_doc(UNPARSED_INDIA),
      {"revenueStatus": "EXTRACTION_FAILED", "revenueCode": "EXTRACTION_FAILED", "code": "EXTRACTION_FAILED",
       "warningCodes": ["TABLE_NOT_PARSED"]}),

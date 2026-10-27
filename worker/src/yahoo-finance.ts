@@ -40,7 +40,7 @@ import { customerConcentration, guidanceRanges, releaseTextMetric, type Concentr
 import { adsRatio, majorPrice, marketInputsFromQuoteSummary, peerValuations, valuationSnapshot, type MarketInputs } from "./valuation.js";
 import { coverReadsNeeded, coverShareCounts, foreignFiler, historicalValuation, latestShareCount, peerMedians, reportingCurrencies, taxonomyOf, valuationDates, type Bar, type PeriodicFiling, type Split } from "./valuation-history.js";
 import { annualFilingsFromSubmissions, latestAnnualCoverageWarning, latestAnnualFiling } from "./companyfacts-coverage.js";
-import { DEFAULT_TOLERANCE_PCT, METRICS as RECONCILE_METRICS, metricReconciliation, resolvePeriod } from "./metric-reconciliation.js";
+import { DEFAULT_TOLERANCE_PCT, METRICS as RECONCILE_METRICS, RECONCILE_PERIOD_HELP, isReconcilePeriod, metricReconciliation, resolvePeriod } from "./metric-reconciliation.js";
 import { AUTHORITY_BOUNDARY, EPS_BASIS } from "./evidence.js";
 import { meetsMinimum, reliabilityClassFor } from "./deprecations.js";
 import { documentFiscalYearFocus, filingFiscalYearLabel, fiscalYearNaming, type FiscalYearNaming } from "./fiscal-calendar.js";
@@ -6277,7 +6277,12 @@ async function getFilingDataUnchecked(
           const annual = /^(?:10-K|20-F|40-F)/i.test(String(filing.filingType ?? ""));
           // The fiscal year the filing states for itself wins over the period-end rule (DG's year ending January 2026 is its FY2025) (2.5.13).
           const focus = annual ? documentFiscalYearFocus(htmlText) : null;
-          const fiscalYear = !annual ? (geo.sourceColumns[0] ?? "") : (filingFiscalYearLabel(focus, filing.reportDate ?? null) ?? "");
+          // A column header with no year ("Three Months Ended" alone, the date in a row below) names no period, so
+          // the label is null rather than the header (2.26.5, F60).
+          const quarterColumn = geo.sourceColumns[0] ?? "";
+          const fiscalYear = !annual
+            ? (/\b\d{4}\b/.test(quarterColumn) ? quarterColumn : "")
+            : (filingFiscalYearLabel(focus, filing.reportDate ?? null) ?? "");
           const warnings: Array<Record<string, unknown>> = geo.denominator == null && geo.usd != null
             ? [{
                 code: "DENOMINATOR_NOT_FOUND",
@@ -7765,6 +7770,20 @@ export async function getVolumeGate(ticker: string, foreignExchange: boolean, mi
 
 // ── get_market_snapshot ───────────────────────────────────────────────────────
 
+const SNAPSHOT_TICKER_NOT_FOUND = "TICKER_NOT_FOUND";
+const SNAPSHOT_NOT_FOUND_MESSAGE = "No provider data was found for the requested ticker.";
+
+/** A component failure's message without provider URLs, as a caller can read it (2.26.5, F56). */
+export function snapshotComponentMessage(message: string): string {
+  const cleaned = message.slice(0, 300).replace(/https?:\/\/\S+/gi, " ").replace(/\s+/g, " ").trim().replace(/[\s:]+$/, "");
+  return cleaned || "error in response";
+}
+
+/** Whether a market-snapshot quote failure says the ticker does not exist (2.26.5, F56). */
+export function snapshotTickerNotFound(message: string): boolean {
+  return /not found|no data found|no price data found|api error 404|ticker_not_found/i.test(message);
+}
+
 export async function getMarketSnapshot(
   ticker: string | string[],
   mode: "compact" | "full",
@@ -7777,7 +7796,12 @@ export async function getMarketSnapshot(
       try {
         return JSON.parse(await getMarketSnapshot(t, mode, foreignExchange, minAdvUsd)) as unknown;
       } catch (e) {
-        return { error: true, message: e instanceof Error ? e.message : String(e) };
+        const message = e instanceof Error ? e.message : String(e);
+        // An unknown ticker is TICKER_NOT_FOUND, not retried, as in get_market_quote (2.26.5, F56).
+        if (message.startsWith(SNAPSHOT_TICKER_NOT_FOUND)) {
+          return { error: true, code: "TICKER_NOT_FOUND", message: SNAPSHOT_NOT_FOUND_MESSAGE, retryable: false };
+        }
+        return { error: true, message };
       }
     });
     const results: Record<string, unknown> = Object.fromEntries(ticker.map((t, i) => [t, snapshots[i]]));
@@ -7788,13 +7812,25 @@ export async function getMarketSnapshot(
 
   const [quoteResult, priceStatsResult, maResult, volumeRatioResult, volumeGateResult, techResult] =
     await Promise.allSettled([
-      getFastInfo(ticker).then((r) => JSON.parse(r) as Record<string, unknown>),
-      getPriceStats(ticker).then((r) => JSON.parse(r) as Record<string, unknown>),
-      getMaPosition(ticker).then((r) => JSON.parse(r) as Record<string, unknown>),
-      getVolumeRatio(ticker, 10).then((r) => JSON.parse(r) as Record<string, unknown>),
-      getVolumeGate(ticker, foreignExchange, minAdvUsd).then((r) => JSON.parse(r) as Record<string, unknown>),
-      getTechnicalIndicators(ticker, INDICATOR_MIN_LOOKBACK).then((r) => JSON.parse(r) as Record<string, unknown>),
+      // The quote's own error text is kept (a JSON syntax error would hide it), so an unknown ticker is seen (F56).
+      getFastInfo(ticker).then((r) => chainedJson<Record<string, unknown>>(r)),
+      getPriceStats(ticker).then((r) => chainedJson<Record<string, unknown>>(r)),
+      getMaPosition(ticker).then((r) => chainedJson<Record<string, unknown>>(r)),
+      getVolumeRatio(ticker, 10).then((r) => chainedJson<Record<string, unknown>>(r)),
+      getVolumeGate(ticker, foreignExchange, minAdvUsd).then((r) => chainedJson<Record<string, unknown>>(r)),
+      getTechnicalIndicators(ticker, INDICATOR_MIN_LOOKBACK).then((r) => chainedJson<Record<string, unknown>>(r)),
     ]);
+
+  // An unknown ticker fails as get_market_quote does, TICKER_NOT_FOUND and not retried, instead of a PARTIAL
+  // snapshot that says RETRY (2.26.5, F56). The tool layer turns the thrown code into the failure envelope.
+  const quoteFailure = quoteResult.status === "rejected"
+    ? String(quoteResult.reason instanceof Error ? quoteResult.reason.message : quoteResult.reason)
+    : quoteResult.value?.error
+      ? String((quoteResult.value as Record<string, unknown>).message ?? "")
+      : null;
+  if (quoteFailure != null && snapshotTickerNotFound(quoteFailure)) {
+    throw new Error(`${SNAPSHOT_TICKER_NOT_FOUND}: no data found for ticker ${ticker}`);
+  }
 
   const componentStatus: Record<string, string> = {};
   const failedComponents: string[] = [];
@@ -7824,9 +7860,9 @@ export async function getMarketSnapshot(
     failedComponents.push(name);
     const msg =
       result.status === "rejected"
-        ? String(result.reason)
+        ? String(result.reason instanceof Error ? result.reason.message : result.reason)
         : String((result.value as Record<string, unknown>)?.message ?? "error in response");
-    warnings.push({ code: "COMPONENT_FAILED", component: name, message: msg });
+    warnings.push({ code: "COMPONENT_FAILED", component: name, message: snapshotComponentMessage(msg) });
     return null;
   };
 
@@ -12169,6 +12205,10 @@ export async function reconcileMetricSources(ticker: string, metric: string, per
   if (!(metric in RECONCILE_METRICS)) {
     return JSON.stringify({ error: true, code: "INPUT_VALIDATION_ERROR", message: `metric must be one of: ${Object.keys(RECONCILE_METRICS).join(", ")}` });
   }
+  // A period it cannot read is an input error before any fetch, not ok:true with INVALID_PERIOD (2.26.5, F60).
+  if (!isReconcilePeriod(period)) {
+    return JSON.stringify({ error: true, code: "INPUT_VALIDATION_ERROR", message: RECONCILE_PERIOD_HELP });
+  }
   const tolerance = Number.isFinite(tolerancePct) ? Math.min(10, Math.max(0, tolerancePct)) : DEFAULT_TOLERANCE_PCT;
   const { cikPadded, submissions } = await getSubmissionsForTicker(ticker);
   if (!cikPadded) {
@@ -12456,6 +12496,17 @@ export async function getValuationSnapshot(
 
 const PEER_VALUATION_MAX_TICKERS = 10;
 
+/**
+ * A peer that failed, with an existing error code and no provider URL (2.26.5, F57): an unknown ticker (HTTP 404, or
+ * no quote summary) is TICKER_NOT_FOUND, anything else PROVIDER_ERROR.
+ */
+export function peerValuationError(ticker: string, message: string): { ticker: string; code: string; message: string } {
+  if (/api error 404|no yahoo quote summary|not found/i.test(message)) {
+    return { ticker, code: "TICKER_NOT_FOUND", message: "No provider data was found for the requested ticker." };
+  }
+  return { ticker, code: "PROVIDER_ERROR", message: snapshotComponentMessage(message) };
+}
+
 export async function comparePeerValuations(tickers: string[], subject: string | null = null): Promise<string> {
   const list: string[] = [];
   for (const t of [subject, ...tickers]) {
@@ -12467,10 +12518,10 @@ export async function comparePeerValuations(tickers: string[], subject: string |
   }
   const results = await Promise.all(list.map((t) => valuationMarketInputs(t).then(
     (m) => ({ ok: true as const, m }),
-    (e) => ({ ok: false as const, error: { ticker: t, message: e instanceof Error ? e.message : String(e) } }),
+    (e) => ({ ok: false as const, error: peerValuationError(t, e instanceof Error ? e.message : String(e)) }),
   )));
   const markets = results.filter((r): r is { ok: true; m: MarketInputs } => r.ok).map((r) => r.m);
-  const errors = results.filter((r): r is { ok: false; error: { ticker: string; message: string } } => !r.ok).map((r) => r.error);
+  const errors = results.filter((r): r is { ok: false; error: { ticker: string; code: string; message: string } } => !r.ok).map((r) => r.error);
   if (markets.length === 0) {
     return JSON.stringify({ error: true, message: `Yahoo quote summary failed for every ticker: ${errors.map((e) => e.message).join("; ")}` });
   }
@@ -12677,7 +12728,8 @@ const EXPOSURE_SYNONYMS: Record<string, string[]> = {
 const CHINA_NAMED_ENTITIES = ["foxconn", "tsmc", "luxshare", "catl", "byd", "tongmei", "catcher", "pegatron"];
 
 // Operational terms for geographic exposure scanning
-const OPERATIONAL_TERMS = ["manufacturing", "assembly", "supply chain", "factory", "production facility"];
+// The F39 manufacturing phrases apply to every region, not only the China preset (2.26.5, F62).
+const OPERATIONAL_TERMS = ["manufacturing", "assembly", "supply chain", "factory", "production facility", "manufactured", "outsourcing partner", "contract manufacturer"];
 
 /** Whether any table in a get_sec_filing_index payload names the region (title, headers or row labels); null when
  * the index has no tables to read. */
@@ -12745,7 +12797,7 @@ export async function extractExposure(
 
   // --- Process revenue ---
   const revenueRaw = revenueResult.status === "fulfilled" ? parseObjectJson(revenueResult.value) : {};
-  const revenueWarnings = Array.isArray(revenueRaw.warnings) ? revenueRaw.warnings : [];
+  let revenueWarnings: unknown[] = Array.isArray(revenueRaw.warnings) ? revenueRaw.warnings : [];
   const revenueMatches: Record<string, unknown>[] = Array.isArray(revenueRaw.matches)
     ? (revenueRaw.matches as Record<string, unknown>[]).filter((m) => m && typeof m === "object")
     : [];
@@ -12765,6 +12817,8 @@ export async function extractExposure(
       && hasWarningCode(revenueWarnings, "TABLE_NOT_PARSED") && !hasWarningCode(revenueWarnings, "FILING_READ_TRUNCATED")
       && indexTablesNameRegion(idx, topicLower) === false) {
     explicitRevenueStatus = null;
+    // The parsed tables simply have no row for the region, so no table failed to parse (2.26.5, F62).
+    revenueWarnings = revenueWarnings.filter((w) => !(w && typeof w === "object" && (w as Record<string, unknown>).code === "TABLE_NOT_PARSED"));
   }
   let revStatus: string;
   if (geoValue != null) {
@@ -13322,9 +13376,35 @@ function managementCommentaryTerms(topic: string): string[] {
   return Array.from(new Set([topicLower, ...aliases].filter(Boolean)));
 }
 
+/**
+ * A commentary term's singular form (2.26.5, F55): "tariffs" -> "tariff", "supplies" -> "supply", "taxes" -> "tax".
+ * Short words and words ending in -ss, -is or -us are kept ("news", "gas", "business", "analysis", "status").
+ */
+export function commentarySingular(word: string): string {
+  const w = word.toLowerCase();
+  if (!/^[a-z]+$/.test(w) || w.length < 5) return w;
+  if (w.endsWith("ies")) return `${w.slice(0, -3)}y`;
+  if (/(?:ss|sh|ch|x|z)es$/.test(w)) return w.slice(0, -2);
+  if (w.endsWith("s") && !/[siu]s$/.test(w)) return w.slice(0, -1);
+  return w;
+}
+
+/** The regex source for a commentary term: its last word in singular or plural form (2.26.5, F55). */
+function commentaryTermPattern(term: string): string {
+  const esc = (v: string) => v.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const words = term.trim().split(/\s+/).filter(Boolean);
+  const last = words.pop() ?? "";
+  const singular = commentarySingular(last);
+  const lastPattern = !/^[a-z]+$/i.test(last) || last.length < 3
+    ? esc(last)
+    : /[^aeiou]y$/.test(singular)
+      ? `${esc(singular.slice(0, -1))}(?:y|ies)`
+      : `${esc(singular)}(?:e?s)?`;
+  return [...words.map(esc), lastPattern].join("\\s+");
+}
+
 function commentaryTermMatches(text: string, term: string): boolean {
-  const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\s+/g, "\\s+");
-  return new RegExp(`\\b${escaped}\\b`, "i").test(text);
+  return new RegExp(`\\b${commentaryTermPattern(term)}\\b`, "i").test(text);
 }
 
 function isManagementCommentaryBoilerplate(sentence: string): boolean {

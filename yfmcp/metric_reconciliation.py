@@ -124,6 +124,14 @@ LABEL_BASIS = ("FY<yyyy> is the issuer's fiscal year (SEC fy/fp) when companyfac
                "Q<n> <yyyy> is the calendar quarter of the period end (fiscalQuarter gives the issuer's)")
 
 
+RECONCILE_PERIOD_HELP = "period must be latest_quarter, latest_annual, FY<yyyy> or Q<n> <yyyy>."
+
+
+def is_reconcile_period(spec: Any) -> bool:
+    """The Worker's isReconcilePeriod (2.26.5, F60): a period reconcile_metric_sources can read."""
+    return re.fullmatch(r"(?:latest_quarter|latest_annual|FY\s?\d{4}|Q[1-4]\s?\d{4})", str(spec if spec is not None else "").strip(), re.I) is not None
+
+
 def resolve_period(companyfacts: Any, metric: str, spec: str) -> dict:
     """The period a spec names.
 

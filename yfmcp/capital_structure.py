@@ -2929,6 +2929,12 @@ def capital_structure(ticker: str, source: IxSource, funding_matches: list[TextM
         "ladderedAmountBasis": None if not laddered_bases else laddered_bases[0] if len(laddered_bases) == 1 else "MIXED",
         "notLaddered": unplaced,
     }
+    # No instrument carries its own maturity but the filing tags the principal ladder: the ladder is what is placed,
+    # and coverage at carrying amounts cannot be measured, so it is null, not 0 (2.26.5, F54: AAPL's 10-K).
+    if not laddered_any and ladder:
+        ladder_coverage["ladderedAmount"] = sum(r["amount"] for r in ladder)
+        ladder_coverage["ladderedAmountBasis"] = "TAGGED"
+        ladder_coverage["coveragePct"] = None
     # When an outstanding instrument has no maturity and the filing tags no maturity ladder of its own.
     if unplaced and not ladder:
         listed = ", ".join(f"{u['instrument']} ({_js_number(u['amount'])})" for u in unplaced)

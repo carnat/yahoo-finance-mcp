@@ -173,16 +173,87 @@ def _scale_number_from_text(raw: str) -> float | None:
     return n
 
 
+_MANAGEMENT_COMMENTARY_TOPIC_ALIASES: dict[str, list[str]] = {
+    "guidance": ["guidance", "outlook", "expects", "expect", "forecast", "sees", "project", "projects", "reaffirm", "full year", "next quarter"],
+    "capacity": ["capacity", "production", "manufacturing", "facility", "facilities", "utilization", "ramp", "expansion", "supply"],
+    "revenue": ["revenue", "sales", "net sales", "top line", "revenue growth", "sales growth", "net sales growth"],
+    "margin": ["margin", "gross margin", "operating margin", "profitability"],
+    "ai": ["ai", "artificial intelligence"],
+}
+_COMMENTARY_BOILERPLATE_RE = _re.compile(
+    r"emerging growth company|smaller reporting company|accelerated filer|shell company|check mark|exchange act|securities act", _re.I)
+
+
+def _management_commentary_terms(topic: str) -> list[str]:
+    """The Worker's managementCommentaryTerms: the topic and its aliases, lower-cased, without duplicates."""
+    topic_l = topic.lower().strip()
+    out: list[str] = []
+    for term in [topic_l, *_MANAGEMENT_COMMENTARY_TOPIC_ALIASES.get(topic_l, [])]:
+        if term and term not in out:
+            out.append(term)
+    return out
+
+
+def _commentary_singular(word: str) -> str:
+    """The Worker's commentarySingular (2.26.5, F55): "tariffs" -> "tariff", "supplies" -> "supply", "taxes" -> "tax";
+    short words and words ending in -ss, -is or -us are kept."""
+    w = word.lower()
+    if not _re.fullmatch(r"[a-z]+", w) or len(w) < 5:
+        return w
+    if w.endswith("ies"):
+        return w[:-3] + "y"
+    if _re.search(r"(?:ss|sh|ch|x|z)es$", w):
+        return w[:-2]
+    if w.endswith("s") and not _re.search(r"[siu]s$", w):
+        return w[:-1]
+    return w
+
+
+def _commentary_term_pattern(term: str) -> str:
+    """The Worker's commentaryTermPattern: the term's last word in singular or plural form (2.26.5, F55)."""
+    words = [w for w in term.strip().split() if w]
+    last = words.pop() if words else ""
+    singular = _commentary_singular(last)
+    if not _re.fullmatch(r"[A-Za-z]+", last) or len(last) < 3:
+        last_pattern = _re.escape(last)
+    elif _re.search(r"[^aeiou]y$", singular):
+        last_pattern = _re.escape(singular[:-1]) + "(?:y|ies)"
+    else:
+        last_pattern = _re.escape(singular) + "(?:e?s)?"
+    return r"\s+".join([*(_re.escape(w) for w in words), last_pattern])
+
+
+def _commentary_term_matches(text: str, term: str) -> bool:
+    return _re.search(rf"\b{_commentary_term_pattern(term)}\b", text, _re.I | _re.ASCII) is not None
+
+
+def _sentence_for_topic(text: str, topic: str) -> dict | None:
+    """The Worker's sentenceForTopic (2.26.5, F55): the best-scoring sentence for the topic or its aliases, with the
+    terms it matched; the excerpt (its first 240 characters) must show a matched term (2.25.4 audit, F36)."""
+    terms = _management_commentary_terms(topic)
+    sentences = [s.strip() for s in _re.split(r"(?<=[.!?])\s+", _re.sub(r"\s+", " ", text or "")) if s.strip()]
+    best: dict | None = None
+    for i, sentence in enumerate(sentences):
+        if _COMMENTARY_BOILERPLATE_RE.search(sentence):
+            continue
+        matched = [t for t in terms if _commentary_term_matches(sentence, t)]
+        if not matched:
+            continue
+        exact = _commentary_term_matches(sentence, topic)
+        score = (100 if exact else 0) + len(matched) * 10 - min(len(sentence) / 200, 3)
+        context = f"{sentence} {sentences[i + 1]}" if len(sentence) < 90 and i + 1 < len(sentences) else sentence
+        excerpt = _compact_excerpt(context, max_len=320)
+        if not any(_commentary_term_matches(excerpt[:240], t) for t in matched):
+            continue
+        if best is None or score > best["score"]:
+            best = {"score": score, "excerpt": excerpt, "matchedTerms": matched}
+    return {"excerpt": best["excerpt"], "matchedTerms": best["matchedTerms"]} if best else None
+
+
 def _first_sentence_for_topic(text: str, topic: str) -> str | None:
-    topic_l = topic.lower()
-    for sent in _re.split(r"(?<=[.!?])\s+", text):
-        if topic_l in sent.lower():
-            excerpt = _compact_excerpt(sent, max_len=220)
-            # The excerpt must show the topic: a long unpunctuated run (an income-statement header) matched it past
-            # the cut (2.25.4 audit, F36).
-            if topic_l in excerpt.lower():
-                return excerpt
-    return None
+    """The excerpt of _sentence_for_topic, or None."""
+    hit = _sentence_for_topic(text, topic)
+    return hit["excerpt"] if hit else None
 
 
 async def _resolve_latest_earnings_sec_source(ticker: str) -> dict | None:
@@ -801,20 +872,25 @@ async def extract_management_commentary(ticker: str, period: str = "latest", top
         text = _strip_html_blocks(_sanitize_sec_html(_fetch_public_html(src_url) or ""))
     out_topics: list[dict] = []
     for topic in topic_list:
-        excerpt = _first_sentence_for_topic(text, topic) if text else None
-        if excerpt:
+        hit = _sentence_for_topic(text, topic) if text else None
+        if hit:
+            excerpt = hit["excerpt"]
+            source_type = str(src.get("sourceType") or "company_ir")
             out_topics.append({
                 "topic": topic,
                 "status": "FOUND",
                 "summary": excerpt,
+                "matchedTerms": hit["matchedTerms"],
                 "evidence": [{
-                    "sourceType": src.get("sourceType", "company_ir"),
+                    "sourceType": source_type,
                     "url": src_url,
                     "publishedAt": _to_iso_utc(src.get("filingDate") or src.get("publishedAt")),
                     "retrievedAt": _utc_now_iso(),
                     "excerpt": excerpt[:240],
+                    "matchedTerms": hit["matchedTerms"],
                 }],
-                "confidence": "MEDIUM" if src.get("sourceType") != "sec_8k" else "HIGH",
+                # An SEC 8-K source, the filing or its EX-99.1 exhibit, is HIGH, as in the Worker (2.26.5, F55).
+                "confidence": "HIGH" if source_type.startswith("sec_8k") else "MEDIUM",
             })
         else:
             out_topics.append({

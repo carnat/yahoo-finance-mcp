@@ -2676,6 +2676,13 @@ export function capitalStructure(input: CapitalStructureInput): Record<string, u
     ladderedAmountBasis: ladderedBases.size === 0 ? null : ladderedBases.size === 1 ? [...ladderedBases][0] : "MIXED",
     notLaddered: unplaced,
   };
+  // No instrument carries its own maturity but the filing tags the principal ladder: the ladder is what is placed,
+  // and coverage at carrying amounts cannot be measured, so it is null, not 0 (2.26.5, F54: AAPL's 10-K).
+  if (ladderedAny === 0 && ladder.length > 0) {
+    ladderCoverage.ladderedAmount = ladder.reduce((sum, r) => sum + r.amount, 0);
+    ladderCoverage.ladderedAmountBasis = "TAGGED";
+    ladderCoverage.coveragePct = null;
+  }
   // When an outstanding instrument has no maturity and the filing tags no maturity ladder of its own.
   if (unplaced.length > 0 && ladder.length === 0) {
     warnings.push({

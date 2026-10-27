@@ -180,5 +180,10 @@ The pre-Phase 6 audit of build 2.26.3+git.9a549f2 (`/mnt/project-files/audits/mc
 - **F52 (High, both): fixed in 2.26.4.** `get_thai_fund_nav` without `proj_id` took the newest row of any class on the provider's page (SCBDV 10.7558 for 8.3603). Planner call (paging): a page with more than one class keeps only the resolved class; no cursor is followed, and a page without the class is the existing `NAV_NOT_FOUND_IN_WINDOW`. A one-class page is unchanged.
 - **F53 (High, Python): fixed in 2.26.4.** Python's `dividendYield` was the v7 quote's percent that yfinance overlays on `summaryDetail`. It is now the decimal ratio, as in the Worker and in `unitSemantics.decimalRatios`. The audit found no other ratio field that differs.
 - **F22, F23: fixed in 2.26.4** (§4 entries).
-- **F54–F62 (Medium) and the 14 low items:** open, not classified. Phase 6 gaps from the audit (deprecation notices for F5/F45, F20, F47) stay on the Phase 6 entry list.
+- **F54–F62 (Medium):** classified in `/mnt/project-files/audits/f54-f62-recommendations-2026-10-27.md`; the owner approved every recommendation as written on 2026-10-27 ("yes").
+  - **F54, F55, F56, F57, F60 parts 1–2, F62: fixed in 2.26.5** (docs section "Audit Repairs F54–F57, F60, F62 (2.26.5)"). Planner calls settled by the approval: F54 `coveragePct` null with the tagged ladder; F55 simple singular/plural matching, no stemming; F57 `code` in each `errors` entry; F60 part 2 null period for a header without a year; F62 the F39 phrases for every region.
+  - **F58 (ops): no change.** No deploy or canary script calls an Alpha Vantage-backed tool, so they did not spend the quota; it is shared with every caller of the deployed key. A separate verification key stays the owner's option.
+  - **F61, with the F59 and F60 part 3 notices: 2.27.0**, a notice-only minor (no behaviour change).
+  - **F59 envelope shape and F60 part 3 period vocabulary: Phase 6.**
+- **The 14 low items:** open, not classified. Phase 6 gaps from the audit (deprecation notices for F5/F45, F20, F47) are the 2.27.0 notices above.
 

@@ -118,6 +118,13 @@ const LABEL_BASIS = "FY<yyyy> is the issuer's fiscal year (SEC fy/fp) when compa
  * <year> (the quarter ending in that calendar quarter). Instants take the end
  * of the matching revenue period.
  */
+/** A period reconcile_metric_sources can read; any other is an input error before any fetch (2.26.5, F60, as F28). */
+export function isReconcilePeriod(spec: unknown): boolean {
+  return /^(?:latest_quarter|latest_annual|FY\s?\d{4}|Q[1-4]\s?\d{4})$/i.test(String(spec ?? "").trim());
+}
+
+export const RECONCILE_PERIOD_HELP = "period must be latest_quarter, latest_annual, FY<yyyy> or Q<n> <yyyy>.";
+
 export function resolvePeriod(companyfacts: unknown, metric: string, spec: string): Rec {
   // The company's reporting periods come from its revenue (ASTS stopped tagging undimensioned EPS in 2022,
   // so its own latest EPS quarter is not the latest quarter); without revenue, the metric's own or net income's.

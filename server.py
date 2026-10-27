@@ -2834,7 +2834,10 @@ async def _get_filing_data_unchecked(
                         fiscal_year = filing_fiscal_year_label(document_fiscal_year_focus(html_text), filing.get("reportDate")) or ""
                     else:
                         headers = geo_evidence.get("sourceColumns")
-                        fiscal_year = headers[0] if headers else ""
+                        # A column header with no year ("Three Months Ended" alone, the date in a row below) names no
+                        # period, so the label is null rather than the header (2.26.5, F60).
+                        quarter_column = str(headers[0]) if headers else ""
+                        fiscal_year = quarter_column if _re.search(r"\b\d{4}\b", quarter_column) else ""
                     raw_value = geo_evidence.get("rawValue") if geo_evidence.get("rawValue") is not None else _format_raw_number(geo_usd)
                     raw_den = geo_evidence.get("rawDenominator") if geo_evidence.get("rawDenominator") is not None else _format_raw_number(geo_denominator)
                     source_cols = geo_evidence.get("sourceColumns") or [fiscal_year]
@@ -7920,6 +7923,9 @@ async def reconcile_metric_sources(ticker: str, metric: str, period: str = "late
     upper = ticker.upper()
     if metric not in _mr.METRICS:
         return json.dumps({"error": True, "code": "INPUT_VALIDATION_ERROR", "message": f"metric must be one of: {', '.join(_mr.METRICS)}"})
+    # A period it cannot read is an input error before any fetch, not ok:true with INVALID_PERIOD (2.26.5, F60).
+    if not _mr.is_reconcile_period(period):
+        return json.dumps({"error": True, "code": "INPUT_VALIDATION_ERROR", "message": _mr.RECONCILE_PERIOD_HELP})
     try:
         tolerance = min(10.0, max(0.0, float(tolerance_pct)))
         if not math.isfinite(tolerance):
@@ -8220,7 +8226,9 @@ async def _valuation_market_inputs(ticker: str) -> dict:
     def fetch() -> dict:
         company = yf.Ticker(ticker)
         info = company.info or {}
-        if not info:
+        # yfinance answers an unknown symbol with a near-empty info dict; with no quote type and no name there is no
+        # quote summary, as the Worker's empty result says (2.26.5, F57).
+        if not info or not any(info.get(k) for k in ("quoteType", "shortName", "longName")):
             raise ValueError(f"No Yahoo quote summary for {ticker.upper()}")
         return _vl.market_inputs_from_yfinance(ticker, info, _estimate_rows(company, "revenue_estimate"), _estimate_rows(company, "earnings_estimate"))
 
@@ -8279,6 +8287,15 @@ async def get_valuation_snapshot(
 _PEER_VALUATION_MAX_TICKERS = 10
 
 
+def _peer_valuation_error(ticker: str, message: str) -> dict:
+    """The Worker's peerValuationError (2.26.5, F57): an unknown ticker is TICKER_NOT_FOUND, anything else
+    PROVIDER_ERROR, with no provider URL in the message."""
+    if _re.search(r"api error 404|no yahoo quote summary|not found", message, _re.I):
+        return {"ticker": ticker, "code": "TICKER_NOT_FOUND", "message": "No provider data was found for the requested ticker."}
+    from yfmcp.tools.pricing import _snapshot_component_message
+    return {"ticker": ticker, "code": "PROVIDER_ERROR", "message": _snapshot_component_message(message)}
+
+
 @yfinance_server.tool(
     name="compare_peer_valuations",
     description="The same multiples for a peer set on one Yahoo basis: price x shares outstanding + total debt - total cash, over trailing results and current and next fiscal-year consensus (EV/Revenue, EV/EBITDA, P/E, revenue growth, gross margin). Returns peer medians, min and max excluding the subject, and the subject's premium or discount to each median. Context, not a signal.",
@@ -8293,7 +8310,7 @@ async def compare_peer_valuations(tickers: list[str], subject: str | None = None
         return json.dumps({"error": True, "code": "INPUT_VALIDATION_ERROR", "message": f"tickers must name 2 to {_PEER_VALUATION_MAX_TICKERS} distinct symbols, including the subject."})
     results = await asyncio.gather(*(_valuation_market_inputs(t) for t in names), return_exceptions=True)
     markets = [r for r in results if isinstance(r, dict)]
-    errors = [{"ticker": t, "message": str(r)} for t, r in zip(names, results) if not isinstance(r, dict)]
+    errors = [_peer_valuation_error(t, str(r)) for t, r in zip(names, results) if not isinstance(r, dict)]
     if not markets:
         return json.dumps({"error": True, "message": "Yahoo quote summary failed for every ticker: " + "; ".join(e["message"] for e in errors)})
     return json.dumps(_vl.peer_valuations(subject, markets, errors))
@@ -8557,7 +8574,8 @@ async def extract_exposure(
         "rest of asia": ["restofasia", "asiapacific", "asiaxjapan"],
     }
     CHINA_NAMED_ENTITIES = ["foxconn", "tsmc", "luxshare", "catl", "byd", "tongmei", "catcher", "pegatron"]
-    OPERATIONAL_TERMS = ["manufacturing", "assembly", "supply chain", "factory", "production facility"]
+    # The F39 manufacturing phrases apply to every region, not only the China preset (2.26.5, F62).
+    OPERATIONAL_TERMS = ["manufacturing", "assembly", "supply chain", "factory", "production facility", "manufactured", "outsourcing partner", "contract manufacturer"]
 
     is_china = topic_lower in ("china", "greater china")
     synonym_entry = EXPOSURE_SYNONYMS.get(topic_lower)
@@ -8620,6 +8638,8 @@ async def extract_exposure(
     if (explicit_revenue_status in ("EXTRACTION_FAILED", "TABLE_NOT_PARSED") and "TABLE_NOT_PARSED" in geo_warning_codes
             and "FILING_READ_TRUNCATED" not in geo_warning_codes and _index_tables_name_region(idx, topic_lower) is False):
         explicit_revenue_status = None
+        # The parsed tables simply have no row for the region, so no table failed to parse (2.26.5, F62).
+        geo_warnings = [w for w in geo_warnings if w.get("code") != "TABLE_NOT_PARSED"]
 
     if geo_value is not None:
         rev_status = "FOUND"
