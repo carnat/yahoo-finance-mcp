@@ -50,6 +50,7 @@ import sys
 import tempfile
 import types
 import unittest
+import urllib.error
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -501,6 +502,17 @@ def _python(name: str) -> dict:
         body = None if case.get("faults", {}).get(url) is not None else case["routes"].get(url)
         return body if isinstance(body, str) else None
 
+    async def edgar_document(url: str) -> str:
+        """A whole filing document (the filing index's read since 2.26.3): its route's string body, or the urllib
+        error a fault or a 404 raises, as the Worker's fetchSecDocument answers its status."""
+        fault = case.get("faults", {}).get(url)
+        if fault == "network":
+            raise urllib.error.URLError("fetch failed")
+        body = case["routes"].get(url)
+        if fault is not None or not isinstance(body, str):
+            raise urllib.error.HTTPError(url, fault if isinstance(fault, int) else 404, "fault", None, None)
+        return body
+
     async def submissions(_ticker: str) -> tuple[str | None, dict | None]:
         cik = CIK if ticker == TICKER else None
         return cik, (case["routes"].get(SUBMISSIONS) if cik else None)
@@ -519,6 +531,7 @@ def _python(name: str) -> dict:
             patch("server._load_edgar_tickers", new=tickers), \
             patch("server._edgar_get", new=edgar_get), \
             patch("server._edgar_get_html", new=edgar_html), \
+            patch("server._edgar_get_document", new=edgar_document), \
             patch("yfmcp.clients.edgar._edgar_get", new=edgar_get), \
             patch("server._get_submissions_for_ticker", new=submissions), \
             patch("yfmcp.clients.edgar._get_submissions_for_ticker", new=submissions):
