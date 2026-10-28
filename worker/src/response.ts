@@ -75,8 +75,6 @@ export interface ToolMeta {
   cacheSource?: string | null;
   warnings: unknown[];
   capabilityStatus?: string;
-  decisionGrade?: boolean;
-  doctrineUse?: string;
   reliabilityClass?: string;
   failureMode?: string | null;
   evidenceRequired?: boolean;

@@ -9515,7 +9515,7 @@ def _not_applicable(source_tool: str, code: str, message: str, retrieved_at: str
 
 @yfinance_server.tool(
     name="build_valuation_evidence_pack",
-    description="One evidence cut for valuation work: quote, evidence quality, consensus curve, EPS revisions, current capital structure, dilution bridge at the current price, latest guidance and material filings, each with its source tool, status, warnings and failure, plus a provenance receipt hashing every component. decisionUse is EVIDENCE_ONLY; selectedMethod, selectedMultiple, scenarioWeights, priceTarget, g2, opportunity and action are always null. Stored immutably under a content-addressed evidenceCutId when storage is available; the full payload is returned either way.",
+    description="One evidence cut for valuation work: quote, evidence quality, consensus curve, EPS revisions, current capital structure, dilution bridge at the current price, latest guidance and material filings, each with its source tool, status, warnings and failure, plus a provenance receipt hashing every component. decisionUse is EVIDENCE_ONLY. Stored immutably under a content-addressed evidenceCutId when storage is available; the full payload is returned either way.",
 )
 async def build_valuation_evidence_pack(ticker: str, horizon_years: int = 5, persist: bool = True) -> str:
     policy = _consensus_policy(horizon_years, _ev.DEFAULT_CONSENSUS_POLICY["minAnalystCount"], _ev.DEFAULT_CONSENSUS_POLICY["conflictTolerancePct"])

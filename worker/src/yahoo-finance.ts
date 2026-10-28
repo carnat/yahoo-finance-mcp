@@ -42,7 +42,7 @@ import { coverReadsNeeded, coverShareCounts, foreignFiler, historicalValuation, 
 import { annualFilingsFromSubmissions, latestAnnualCoverageWarning, latestAnnualFiling } from "./companyfacts-coverage.js";
 import { DEFAULT_TOLERANCE_PCT, METRICS as RECONCILE_METRICS, RECONCILE_PERIOD_HELP, isReconcilePeriod, metricReconciliation, resolvePeriod } from "./metric-reconciliation.js";
 import { AUTHORITY_BOUNDARY, EPS_BASIS } from "./evidence.js";
-import { meetsMinimum, reliabilityClassFor } from "./deprecations.js";
+import { meetsMinimum } from "./deprecations.js";
 import { documentFiscalYearFocus, filingFiscalYearLabel, fiscalYearNaming, type FiscalYearNaming } from "./fiscal-calendar.js";
 import {
   edgarBuildFilingUrls,
@@ -4860,11 +4860,8 @@ export async function getAnalystUpgradeRadar(ticker: string | string[], daysBack
         windowDays: daysBack,
         netSentiment: 0,
         upgrades: 0,
-        upgrades30d: daysBack === 30 ? 0 : null,
         downgrades: 0,
-        downgrades30d: daysBack === 30 ? 0 : null,
         initiations: 0,
-        initiations30d: daysBack === 30 ? 0 : null,
         changes: [],
         summary: "NO CHANGES",
         dataDate: getLastTradingDate(),
@@ -4935,11 +4932,8 @@ export async function getAnalystUpgradeRadar(ticker: string | string[], daysBack
       windowDays: daysBack,
       netSentiment,
       upgrades: upgradeCount,
-      upgrades30d: daysBack === 30 ? upgradeCount : null,
       downgrades: downgradeCount,
-      downgrades30d: daysBack === 30 ? downgradeCount : null,
       initiations: initiationCount,
-      initiations30d: daysBack === 30 ? initiationCount : null,
       changes,
       summary,
       dataDate: getLastTradingDate(),
@@ -7280,7 +7274,7 @@ export async function getOptionsFlowScan(ticker: string, windowLabel: string): P
     let putVolTrend = "STABLE";
     const cmpCurr = putVolVs10d ?? pcRatio;
     const cmpPrev = prevData
-      ? ((prevData.putVolVs10dAvg as number | null) ?? (prevData.pcRatio as number | null))
+      ? ((prevData.putVolPer1PctStockAdv as number | null) ?? (prevData.putVolVs10dAvg as number | null) ?? (prevData.pcRatio as number | null))
       : null;
     if (cmpCurr != null && cmpPrev != null && cmpPrev > 0) {
       const ratioChange = cmpCurr / cmpPrev;
@@ -7309,14 +7303,9 @@ export async function getOptionsFlowScan(ticker: string, windowLabel: string): P
     const resultData: Record<string, unknown> = {
       ticker, windowLabel, dataDate,
       pcRatio,
-      // Named for what they measure (2.4.4); the old names remain one release as aliases.
+      // Named for what they measure (2.4.4); the old aliases were removed in 3.0.0.
       ivVsRealizedRangePct: ivPctile,
       putVolPer1PctStockAdv: putVolVs10d,
-      ivPctile, putVolVs10dAvg: putVolVs10d,
-      fieldNotes: {
-        ivPctile: "Deprecated alias of ivVsRealizedRangePct: current ATM IV placed in the min-max range of rolling 30-day realized volatility over the past year, not a percentile of historical implied volatility.",
-        putVolVs10dAvg: "Deprecated alias of putVolPer1PctStockAdv: put contracts traded today divided by 1% of the stock's 10-day average share volume, not put volume against its own 10-day average.",
-      },
       putVolTrend,
       expiry: scanExpiry ?? null,
       expirySelection: "NEXT_AFTER_TODAY",
@@ -7362,16 +7351,6 @@ export async function getPriceTargetBracket(ticker: string, ioPt: number): Promi
     const referenceTargetPct = +(currentPrice / ioPt * 100).toFixed(1);
     const distanceToTargetPct = +((ioPt - currentPrice) / currentPrice * 100).toFixed(1);
 
-    const bracket =
-      referenceTargetPct <= 75 ? "STRONG_BUY" :
-      referenceTargetPct <= 90 ? "ACCEPTABLE" :
-      referenceTargetPct <= 100 ? "CAUTION" : "AVOID";
-
-    const inferredTag =
-      referenceTargetPct < 40 ? "SPECULATIVE" :
-      referenceTargetPct < 80 ? "LONG" :
-      referenceTargetPct < 100 ? "NEAR" : "INVERTED";
-
     return JSON.stringify({
       ticker,
       currentPrice: +currentPrice.toFixed(4),
@@ -7387,10 +7366,6 @@ export async function getPriceTargetBracket(ticker: string, ioPt: number): Promi
       distanceConvention: "(referenceTargetPrice-currentPrice)/currentPrice*100",
       ioPt,
       eqfPct: referenceTargetPct,
-      bracket,
-      inferredTag,
-      tag: inferredTag,
-      tagNote: "Deprecated: tag is inferred from currentPrice/referenceTargetPrice distance. Use priceAtOrAboveTarget.",
       invertedFlag: referenceTargetPct >= 100,
       // From the raw prices, not the rounded referenceTargetPct (2.8.0).
       priceAtOrAboveTarget: currentPrice > 0 && ioPt > 0 ? currentPrice >= ioPt : null,
@@ -7431,9 +7406,9 @@ export async function getPositionScoreInputs(ticker: string | string[]): Promise
 
     const t1 = {
       analystNetSentiment: upgrade.netSentiment ?? null,
-      upgrades30d: upgrade.upgrades30d ?? upgrade.upgrades ?? null,
-      downgrades30d: upgrade.downgrades30d ?? upgrade.downgrades ?? null,
-      initiations30d: upgrade.initiations30d ?? upgrade.initiations ?? null,
+      upgrades30d: upgrade.upgrades ?? null,
+      downgrades30d: upgrade.downgrades ?? null,
+      initiations30d: upgrade.initiations ?? null,
       dominantRating: consensus.dominantRating ?? null,
       analystCount: consensus.numberOfAnalysts ?? null,
     };
@@ -7482,11 +7457,6 @@ export async function getPositionScoreInputs(ticker: string | string[]): Promise
       completedBarDataDate: (tech.dataDate as string | null) ?? null,
       componentStatus,
       limitedComponents,
-      t1_inputs: t1,
-      t2_inputs: t2,
-      t4_inputs: t4,
-      t5_inputs: t5,
-      // Plain-named twins of the t*_inputs groups (2.8.0), same contents.
       analystInputs: t1,
       pricePositionInputs: t2,
       earningsInputs: t4,
@@ -7534,9 +7504,6 @@ function classifyQuoteFreshness(
 }
 
 // ── get_volume_gate ───────────────────────────────────────────────────────────
-
-/** A listing passes the liquidity gate when it trades at least this much a day on average (USD). */
-export const LIQUIDITY_GATE_MIN_ADV_USD = 10_000_000;
 
 // Listings quoted in a currency's minor unit: [ISO currency, minor units per unit].
 const MINOR_UNIT_CURRENCIES: Record<string, [string, number]> = {
@@ -7643,7 +7610,6 @@ export async function getVolumeGate(ticker: string, foreignExchange: boolean, mi
         fxRate: null,
         fxPriceTimestamp: null,
         notionalUsd: null,
-        gatePass: null,
         meetsMinimum: null,
         minAdvUsd,
         observationType: "COMPLETED_DAILY_VOLUME_NOTIONAL",
@@ -7676,7 +7642,6 @@ export async function getVolumeGate(ticker: string, foreignExchange: boolean, mi
         fxRate: null,
         fxPriceTimestamp: null,
         notionalUsd: null,
-        gatePass: null,
         meetsMinimum: null,
         minAdvUsd,
         observationType: "COMPLETED_DAILY_VOLUME_NOTIONAL",
@@ -7704,7 +7669,6 @@ export async function getVolumeGate(ticker: string, foreignExchange: boolean, mi
     const adv20d = average(20);
     const adv90d = average(90);
 
-    let gatePass: boolean | null = null;
     let ratio20d: number | null = null;
     let notionalUsd: number | null = null;
     let adv20dTradedValueUsd: number | null = null;
@@ -7722,8 +7686,9 @@ export async function getVolumeGate(ticker: string, foreignExchange: boolean, mi
     } else {
       adv20dTradedValueUsd = +(adv20dTradedValue / fx.localPerUsd).toFixed(2);
       notionalUsd = +((lastVolume * lastPrice) / fx.localPerUsd).toFixed(2);
-      gatePass = adv20dTradedValueUsd >= LIQUIDITY_GATE_MIN_ADV_USD;
-      note = `Volume gate ${gatePass ? "PASS" : "FAIL"} — 20d average traded value ${usdCompact(adv20dTradedValueUsd)} (${gatePass ? "≥" : "<"} $10M)`
+      const meets = meetsMinimum(adv20dTradedValueUsd, minAdvUsd);
+      note = `20d average traded value ${usdCompact(adv20dTradedValueUsd)}`
+        + (meets != null && minAdvUsd != null ? ` (${meets ? "≥" : "<"} min_adv_usd ${usdCompact(minAdvUsd)})` : "")
         + (ratio20d != null ? `; latest session ${ratio20d.toFixed(2)}x 20d ADV` : "")
         + fx.note;
     }
@@ -7748,8 +7713,6 @@ export async function getVolumeGate(ticker: string, foreignExchange: boolean, mi
       notionalUsd,
       adv20dTradedValueUsd,
       gateBasis: "ADV20_TRADED_VALUE_USD",
-      gateThresholdUsd: LIQUIDITY_GATE_MIN_ADV_USD,
-      gatePass,
       meetsMinimum: meetsMinimum(adv20dTradedValueUsd, minAdvUsd),
       minAdvUsd,
       observationType: "COMPLETED_DAILY_VOLUME_NOTIONAL",
@@ -7940,7 +7903,6 @@ export async function getMarketSnapshot(
       ratio20d: (volumeGate?.ratio20d as number | null) ?? null,
       ratio90d: (volumeRatio?.ratio90d as number | null) ?? null,
       volumeFlag: (volumeRatio?.volumeFlag as string | null) ?? null,
-      liquidityGatePass: (volumeGate?.gatePass as boolean | null) ?? null,
       meetsMinimum: meetsMinimum(volumeGate?.adv20dTradedValueUsd as number | null | undefined, minAdvUsd),
       minAdvUsd,
     },
@@ -9437,8 +9399,7 @@ export async function getSecFilingSectionMarkdown(
     status: "SECTION_MARKDOWN_UNVERIFIED",
     confidence: "NOT_DECISION_GRADE",
     decisionGrade: false,
-    doctrineUse: "BLOCKED",
-    reliabilityClass: reliabilityClassFor("BLOCKED"),
+    reliabilityClass: "UNRELIABLE",
     warnings,
     source: "html_parser_fallback",
     truncated,

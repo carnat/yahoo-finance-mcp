@@ -11,7 +11,6 @@
 import { withBudgetWatch } from "./request-context.js";
 import { tickerCap } from "./tool-catalog.js";
 import { rankEvidence, stemWord } from "./extraction-rules.js";
-import { reliabilityClassFor } from "./deprecations.js";
 import {
   yGet,
   enc,
@@ -1232,8 +1231,7 @@ export async function getCompanyPressReleases(
     decisionGrade: payloadDecisionGrade,
     decisionGradeBasis,
     capabilityStatus: "ACTIVE",
-    doctrineUse: "ALLOWED",
-    reliabilityClass: reliabilityClassFor("ALLOWED"),
+    reliabilityClass: "RELIABLE",
     failureMode: payloadDecisionGrade ? null : (secOutageMode ?? coverageStatus),
   };
   if (sec8kEvidence.length > 0) payload.secEvidence = sec8kEvidence.slice(0, 10);

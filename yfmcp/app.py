@@ -346,7 +346,7 @@ This server provides financial market data from Yahoo Finance and SEC EDGAR via 
 - get_eps_revisions: FY0/FY+1 EPS mean now and 7/30/60/90 days ago, up/down revision counts per provider; evidence only.
 
 ### Evidence cuts
-- build_valuation_evidence_pack: Quote, evidence quality, consensus curve, EPS revisions, capital structure, dilution at the current price, guidance and material filings in one content-addressed evidence cut with a provenance receipt. decisionUse EVIDENCE_ONLY; method, multiple, weights, price target, G2, opportunity and action are always null.
+- build_valuation_evidence_pack: Quote, evidence quality, consensus curve, EPS revisions, capital structure, dilution at the current price, guidance and material filings in one content-addressed evidence cut with a provenance receipt. decisionUse EVIDENCE_ONLY.
 - get_evidence_quality: Preflight status, freshness and blockers per evidence family.
 - get_evidence_cut: Retrieve a stored evidence cut and verify its SHA-256 integrity.
 - list_evidence_cuts: Stored evidence cuts for a ticker, newest first.
