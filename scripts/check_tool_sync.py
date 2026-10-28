@@ -170,9 +170,11 @@ def get_worker_tools() -> set:
 
 
 def parse_alias_pairs(source: str) -> dict[str, str]:
+    # An alias maps a tool name to a tool name (lower snake case), so a pair such as
+    # "get_company_press_releases": "RELIABLE" (TOOL_RELIABILITY_CLASS) is not one.
     return {
         m.group(1): m.group(2)
-        for m in re.finditer(r'"([^"]+)"\s*:\s*"([^"]+)"', source)
+        for m in re.finditer(r'"([^"]+)"\s*:\s*"([a-z][a-z0-9_]*)"', source)
     }
 
 

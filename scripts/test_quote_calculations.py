@@ -247,8 +247,8 @@ def _local() -> dict:
     return out
 
 
-GATE_FIELDS = ("status", "gatePass", "meetsMinimum", "minAdvUsd", "adv20dTradedValueUsd", "notionalUsd", "ratio20d", "fxRate", "fxCurrency",
-               "gateBasis", "gateThresholdUsd", "adv20d", "recommendedNextAction")
+GATE_FIELDS = ("status", "meetsMinimum", "minAdvUsd", "adv20dTradedValueUsd", "notionalUsd", "ratio20d", "fxRate", "fxCurrency",
+               "gateBasis", "adv20d", "recommendedNextAction", "note")
 
 
 class TestQuoteCalculations(unittest.TestCase):
@@ -294,14 +294,19 @@ class TestQuoteCalculations(unittest.TestCase):
             with self.subTest(runtime=name):
                 pence, thin = out["gates"]["LSEX.L"], out["gates"]["THIN"]
                 # 20M shares x 250p = £50M a day = $62.5M at 0.8 GBP per USD.
-                self.assertEqual((pence["gatePass"], pence["adv20dTradedValueUsd"], pence["fxCurrency"], pence["fxRate"]),
-                                 (True, 62_500_000, "GBP", 0.8))
-                # $0.5M a day fails, although the latest session is 1.0x its own average.
-                self.assertEqual((thin["gatePass"], thin["adv20dTradedValueUsd"], thin["ratio20d"]), (False, 500_000, 1.0))
-                self.assertEqual((thin["gateBasis"], thin["gateThresholdUsd"]), ("ADV20_TRADED_VALUE_USD", 10_000_000))
-                # Billions read as billions, not "$14000.0M" (2.3.0).
-                self.assertTrue(out["gates"]["MEGA"]["note"].startswith("Volume gate PASS \u2014 20d average traded value $14.00B (\u2265 $10M)"), out["gates"]["MEGA"]["note"])
-                self.assertIn("$0.5M (< $10M)", thin["note"])
+                self.assertEqual((pence["adv20dTradedValueUsd"], pence["fxCurrency"], pence["fxRate"]), (62_500_000, "GBP", 0.8))
+                # $0.5M a day, although the latest session is 1.0x its own average.
+                self.assertEqual((thin["adv20dTradedValueUsd"], thin["ratio20d"]), (500_000, 1.0))
+                self.assertEqual(thin["gateBasis"], "ADV20_TRADED_VALUE_USD")
+                # 3.0.0: no fixed $10M gate. gatePass and gateThresholdUsd are gone.
+                for gate in out["gates"].values():
+                    self.assertNotIn("gatePass", gate)
+                    self.assertNotIn("gateThresholdUsd", gate)
+                # Billions read as billions, not "$14000.0M" (2.3.0); no threshold clause without min_adv_usd.
+                self.assertTrue(out["gates"]["MEGA"]["note"].startswith("20d average traded value $14.00B; latest session"), out["gates"]["MEGA"]["note"])
+                self.assertEqual(thin["note"], "20d average traded value $0.5M; latest session 1.00x 20d ADV")
+                self.assertEqual(out["gatesMin"]["THIN"]["note"], "20d average traded value $0.5M (< min_adv_usd $20.0M); latest session 1.00x 20d ADV")
+                self.assertTrue(out["gatesMin"]["MEGA"]["note"].startswith("20d average traded value $14.00B (\u2265 min_adv_usd $20.0M); latest session"), out["gatesMin"]["MEGA"]["note"])
         for symbol in GATE_LISTINGS:
             with self.subTest(parity=symbol):
                 worker = {k: self.worker["gates"][symbol].get(k) for k in GATE_FIELDS}
@@ -309,7 +314,7 @@ class TestQuoteCalculations(unittest.TestCase):
                 self.assertEqual(worker, local)
 
     def test_meets_minimum_compares_average_traded_value_with_the_callers_minimum(self) -> None:
-        """2.8.0: min_adv_usd replaces the fixed $10M gate; the old gatePass and gateThresholdUsd keep their values."""
+        """3.0.0: min_adv_usd is the only threshold; gatePass and gateThresholdUsd are removed."""
         for name, out in self.both():
             with self.subTest(runtime=name):
                 for symbol, gate in out["gates"].items():
@@ -320,8 +325,8 @@ class TestQuoteCalculations(unittest.TestCase):
                 for symbol, gate in out["gatesMin"].items():
                     self.assertIs(gate["meetsMinimum"], expected[symbol], symbol)
                     self.assertEqual(gate["minAdvUsd"], 20_000_000, symbol)
-                    self.assertEqual(gate["gatePass"], out["gates"][symbol]["gatePass"], symbol)
-                    self.assertEqual(gate["gateThresholdUsd"], 10_000_000, symbol)
+                    self.assertNotIn("gatePass", gate)
+                    self.assertNotIn("gateThresholdUsd", gate)
 
     def test_same_day_option_expiry_is_skipped(self) -> None:
         for name, out in self.both():

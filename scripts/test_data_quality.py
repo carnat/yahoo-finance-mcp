@@ -458,8 +458,9 @@ class TestPr2DataQuality(unittest.TestCase):
         self.assertEqual(data["adv20d"], 2_000_000)
         self.assertEqual(data["ratio20d"], 0.5)
         self.assertEqual(data["adv20dTradedValueUsd"], 50_000_000)
-        self.assertTrue(data["gatePass"])
-        # 2.8.0: meetsMinimum is null until the caller supplies min_adv_usd.
+        # 3.0.0: no fixed gate; meetsMinimum is null until the caller supplies min_adv_usd.
+        self.assertNotIn("gatePass", data)
+        self.assertNotIn("gateThresholdUsd", data)
         self.assertIsNone(data["meetsMinimum"])
         self.assertIsNone(data["minAdvUsd"])
         self.assertTrue(data["excludedIncompleteBar"])
@@ -783,7 +784,7 @@ class TestPr2DataQuality(unittest.TestCase):
         self.assertIn("initialLatestRow?.volume == null", gate_section)
         self.assertIn("initialLatestRow?.rawClose == null", gate_section)
         self.assertIn('status: "PARTIAL"', gate_section)
-        self.assertIn('gatePass: null', gate_section)
+        self.assertNotIn('gatePass', gate_section)
         self.assertIn("completedTimestamps.has(t) && hasUsableClose", worker_source)
         self.assertIn(
             "completedRows[completedRows.length - 1].adjustedClose == null",
@@ -961,9 +962,9 @@ class TestPr2DataQuality(unittest.TestCase):
 
         srv.yf.Ticker = lambda ticker: FakeTicker()  # type: ignore[assignment]
         radar = json.loads(_run(srv.get_analyst_upgrade_radar("TST", days_back=30)))
-        self.assertEqual(radar["upgrades30d"], 1)
-        self.assertEqual(radar["downgrades30d"], 1)
-        self.assertEqual(radar["initiations30d"], 1)
+        self.assertEqual((radar["upgrades"], radar["downgrades"], radar["initiations"]), (1, 1, 1))
+        for removed in ("upgrades30d", "downgrades30d", "initiations30d"):
+            self.assertNotIn(removed, radar)
 
         async def fake_radar(ticker, days_back=30):
             return json.dumps(radar)
@@ -1008,13 +1009,14 @@ class TestPr2DataQuality(unittest.TestCase):
                 srv.get_technical_indicators,
                 srv.get_ma_position,
             ) = originals
-        self.assertEqual(position["t1_inputs"]["upgrades30d"], 1)
-        self.assertEqual(position["t1_inputs"]["initiations30d"], 1)
-        # 2.8.0: plain-named twins hold the same contents as the deprecated groups.
-        self.assertEqual(position["analystInputs"], position["t1_inputs"])
-        self.assertEqual(position["pricePositionInputs"], position["t2_inputs"])
-        self.assertEqual(position["earningsInputs"], position["t4_inputs"])
-        self.assertEqual(position["technicalInputs"], position["t5_inputs"])
+        self.assertEqual(position["analystInputs"]["upgrades30d"], 1)
+        self.assertEqual(position["analystInputs"]["downgrades30d"], 1)
+        self.assertEqual(position["analystInputs"]["initiations30d"], 1)
+        # 3.0.0: the tier-numbered groups are gone; the plain-named groups remain.
+        for removed in ("t1_inputs", "t2_inputs", "t4_inputs", "t5_inputs"):
+            self.assertNotIn(removed, position)
+        for kept in ("pricePositionInputs", "earningsInputs", "technicalInputs"):
+            self.assertIn(kept, position)
 
     def test_recent_revision_signal_beats_negative_90d_context(self):
         class FakeTicker:
@@ -1042,7 +1044,7 @@ class TestPr2DataQuality(unittest.TestCase):
         self.assertNotEqual(data["compositeMomentumSignal"], "NEGATIVE")
         self.assertIn("90d only as fallback/context", data["compositeMethodNote"])
 
-    def test_price_target_distance_exposes_inferred_tag_and_deprecated_tag(self):
+    def test_price_target_distance_has_no_strategy_labels(self):
         class FakeTicker:
             fast_info = {"lastPrice": 100.0}
 
@@ -1051,11 +1053,10 @@ class TestPr2DataQuality(unittest.TestCase):
 
         srv.yf.Ticker = lambda ticker: FakeTicker()  # type: ignore[assignment]
         data = json.loads(_run(srv.calculate_price_target_distance("ASTS", reference_target_price=120.0)))
-        self.assertEqual(data["inferredTag"], "NEAR")
-        self.assertEqual(data["bracket"], "ACCEPTABLE")
+        # 3.0.0: bracket, inferredTag, tag and tagNote are removed; priceAtOrAboveTarget gives the direction.
+        for removed in ("bracket", "inferredTag", "tag", "tagNote"):
+            self.assertNotIn(removed, data)
         self.assertIs(data["priceAtOrAboveTarget"], False)
-        self.assertEqual(data["tag"], "NEAR")
-        self.assertIn("Deprecated", data["tagNote"])
         self.assertEqual(data["currentToTargetRatioPct"], 83.3)
         self.assertEqual(data["distanceToTargetPct"], 20.0)
         self.assertEqual(data["distanceConvention"], "(referenceTargetPrice-currentPrice)/currentPrice*100")

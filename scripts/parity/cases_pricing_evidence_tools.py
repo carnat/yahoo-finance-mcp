@@ -271,7 +271,7 @@ CASES += [
 
 GATE_DAYS = _weekdays("2026-10-09", 30)
 GATE_NOW = _epoch("2026-10-09", "22:00", "UTC")
-GATE_FIELDS = ("status", "gatePass", "meetsMinimum", "minAdvUsd", "adv20dTradedValueUsd", "notionalUsd", "fxRate", "fxCurrency", "gateBasis",
+GATE_FIELDS = ("status", "meetsMinimum", "minAdvUsd", "adv20dTradedValueUsd", "notionalUsd", "fxRate", "fxCurrency", "gateBasis",
                "recommendedNextAction", "note")
 
 
@@ -390,61 +390,61 @@ CASES += [
     # 500,000,000 GBp / 79 = $6.33M, gate FAIL.
     _gate_case("prc.currency.gbp_pence_listing_card_example", ["BR-PRC-003"], symbol="CARD.L", currency="GBp",
                close=250.0, volume=2_000_000, fx=("GBP=X", 0.79),
-               expect={"status": "OK", "gatePass": False, "meetsMinimum": None, "minAdvUsd": None, "adv20dTradedValueUsd": 6329113.92,
+               expect={"status": "OK", "meetsMinimum": None, "minAdvUsd": None, "adv20dTradedValueUsd": 6329113.92,
                        "notionalUsd": 6329113.92, "fxRate": 0.79, "fxCurrency": "GBP",
                        "gateBasis": "ADV20_TRADED_VALUE_USD", "recommendedNextAction": "NONE",
-                       "note": "Volume gate FAIL — 20d average traded value $6.3M (< $10M); latest session 1.00x 20d ADV"
+                       "note": "20d average traded value $6.3M; latest session 1.00x 20d ADV"
                                " [GBp→USD at 0.7900 GBP/USD, 100 GBp per GBP]"}),
     _gate_case("prc.currency.gbx_alias_behaves_like_gbp_pence", ["BR-PRC-003"], symbol="CARX.L", currency="GBX",
                close=250.0, volume=2_000_000, fx=("GBP=X", 0.79),
-               expect={"status": "OK", "gatePass": False, "meetsMinimum": None, "minAdvUsd": None, "adv20dTradedValueUsd": 6329113.92,
+               expect={"status": "OK", "meetsMinimum": None, "minAdvUsd": None, "adv20dTradedValueUsd": 6329113.92,
                        "notionalUsd": 6329113.92, "fxRate": 0.79, "fxCurrency": "GBP",
                        "gateBasis": "ADV20_TRADED_VALUE_USD", "recommendedNextAction": "NONE",
-                       "note": "Volume gate FAIL — 20d average traded value $6.3M (< $10M); latest session 1.00x 20d ADV"
+                       "note": "20d average traded value $6.3M; latest session 1.00x 20d ADV"
                                " [GBX→USD at 0.7900 GBP/USD, 100 GBX per GBP]"}),
     _gate_case("prc.currency.south_african_cents_zac", ["BR-PRC-003"], symbol="ZAC.JO", currency="ZAc",
                close=5000.0, volume=1_000_000, fx=("ZAR=X", 18.0),
                # 5,000 ZAc x 1,000,000 = 5e9 ZAc; 18 ZAR/USD x 100 = 1,800 ZAc per USD -> $2,777,777.78.
-               expect={"status": "OK", "gatePass": False, "meetsMinimum": None, "minAdvUsd": None, "adv20dTradedValueUsd": 2777777.78,
+               expect={"status": "OK", "meetsMinimum": None, "minAdvUsd": None, "adv20dTradedValueUsd": 2777777.78,
                        "notionalUsd": 2777777.78, "fxRate": 18, "fxCurrency": "ZAR",
                        "gateBasis": "ADV20_TRADED_VALUE_USD", "recommendedNextAction": "NONE",
-                       "note": "Volume gate FAIL — 20d average traded value $2.8M (< $10M); latest session 1.00x 20d ADV"
+                       "note": "20d average traded value $2.8M; latest session 1.00x 20d ADV"
                                " [ZAc→USD at 18.0000 ZAR/USD, 100 ZAc per ZAR]"}),
     _gate_case("prc.currency.israeli_agorot_ila", ["BR-PRC-003"], symbol="ILA.TA", currency="ILA",
                close=10000.0, volume=1_000_000, fx=("ILS=X", 4.0),
                # 1e10 ILA / (4 x 100) = $25,000,000 -> PASS.
-               expect={"status": "OK", "gatePass": True, "meetsMinimum": None, "minAdvUsd": None, "adv20dTradedValueUsd": 25000000,
+               expect={"status": "OK", "meetsMinimum": None, "minAdvUsd": None, "adv20dTradedValueUsd": 25000000,
                        "notionalUsd": 25000000, "fxRate": 4, "fxCurrency": "ILS",
                        "gateBasis": "ADV20_TRADED_VALUE_USD", "recommendedNextAction": "NONE",
-                       "note": "Volume gate PASS — 20d average traded value $25.0M (≥ $10M); latest session 1.00x 20d ADV"
+                       "note": "20d average traded value $25.0M; latest session 1.00x 20d ADV"
                                " [ILA→USD at 4.0000 ILS/USD, 100 ILA per ILS]"}),
     _gate_case("prc.currency.major_unit_currency_uses_rate_without_scaling", ["BR-PRC-003"], symbol="EURX.PA",
                currency="EUR", close=100.0, volume=1_000_000, fx=("EUR=X", 0.5),
                # 1e8 EUR / 0.5 EUR per USD = $200,000,000.
-               expect={"status": "OK", "gatePass": True, "meetsMinimum": None, "minAdvUsd": None, "adv20dTradedValueUsd": 200000000,
+               expect={"status": "OK", "meetsMinimum": None, "minAdvUsd": None, "adv20dTradedValueUsd": 200000000,
                        "notionalUsd": 200000000, "fxRate": 0.5, "fxCurrency": "EUR",
                        "gateBasis": "ADV20_TRADED_VALUE_USD", "recommendedNextAction": "NONE",
-                       "note": "Volume gate PASS — 20d average traded value $200.0M (≥ $10M); latest session 1.00x 20d ADV"
+                       "note": "20d average traded value $200.0M; latest session 1.00x 20d ADV"
                                " [EUR→USD at 0.5000 EUR/USD]"}),
     _gate_case("prc.currency.usd_listing_needs_no_rate", ["BR-PRC-003"], symbol="USDX", currency="USD",
                close=5.0, volume=100_000, fx=None,
-               expect={"status": "OK", "gatePass": False, "meetsMinimum": None, "minAdvUsd": None, "adv20dTradedValueUsd": 500000, "notionalUsd": 500000,
+               expect={"status": "OK", "meetsMinimum": None, "minAdvUsd": None, "adv20dTradedValueUsd": 500000, "notionalUsd": 500000,
                        "fxRate": 1, "fxCurrency": "USD", "gateBasis": "ADV20_TRADED_VALUE_USD",
                        "recommendedNextAction": "NONE",
-                       "note": "Volume gate FAIL — 20d average traded value $0.5M (< $10M); latest session 1.00x 20d ADV"}),
+                       "note": "20d average traded value $0.5M; latest session 1.00x 20d ADV"}),
     _gate_case("prc.currency.missing_rate_makes_the_gate_unknown", ["BR-PRC-003"], symbol="NORATE.L", currency="GBp",
                close=250.0, volume=2_000_000, fx=("GBP=X", None),
-               expect={"status": "OK", "gatePass": None, "meetsMinimum": None, "minAdvUsd": None, "adv20dTradedValueUsd": None, "notionalUsd": None,
+               expect={"status": "OK", "meetsMinimum": None, "minAdvUsd": None, "adv20dTradedValueUsd": None, "notionalUsd": None,
                        "fxRate": None, "fxCurrency": None, "gateBasis": "ADV20_TRADED_VALUE_USD",
                        "recommendedNextAction": "RETRY", "note": "Volume gate UNKNOWN — GBP=X rate unavailable"}),
     _gate_case("prc.currency.zero_rate_makes_the_gate_unknown", ["BR-PRC-003"], symbol="ZERORATE.L", currency="GBp",
                close=250.0, volume=2_000_000, fx=("GBP=X", 0.0),
-               expect={"status": "OK", "gatePass": None, "meetsMinimum": None, "minAdvUsd": None, "adv20dTradedValueUsd": None, "notionalUsd": None,
+               expect={"status": "OK", "meetsMinimum": None, "minAdvUsd": None, "adv20dTradedValueUsd": None, "notionalUsd": None,
                        "fxRate": None, "fxCurrency": None, "gateBasis": "ADV20_TRADED_VALUE_USD",
                        "recommendedNextAction": "RETRY", "note": "Volume gate UNKNOWN — GBP=X rate unavailable"}),
     _gate_case("prc.currency.negative_rate_makes_the_gate_unknown", ["BR-PRC-003"], symbol="NEGRATE.L", currency="GBp",
                close=250.0, volume=2_000_000, fx=("GBP=X", -0.79),
-               expect={"status": "OK", "gatePass": None, "meetsMinimum": None, "minAdvUsd": None, "adv20dTradedValueUsd": None, "notionalUsd": None,
+               expect={"status": "OK", "meetsMinimum": None, "minAdvUsd": None, "adv20dTradedValueUsd": None, "notionalUsd": None,
                        "fxRate": None, "fxCurrency": None, "gateBasis": "ADV20_TRADED_VALUE_USD",
                        "recommendedNextAction": "RETRY", "note": "Volume gate UNKNOWN — GBP=X rate unavailable"}),
 ]
@@ -1461,7 +1461,7 @@ CASES += [
 # ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 BRACKET_NOW = _epoch("2026-10-09", "12:00", "UTC")
-BRACKET_KEYS = ("referenceTargetPct", "bracket", "inferredTag", "distanceToTargetPct", "invertedFlag", "priceAtOrAboveTarget",
+BRACKET_KEYS = ("referenceTargetPct", "distanceToTargetPct", "invertedFlag", "priceAtOrAboveTarget",
                 "dataDate", "error", "message")
 
 
@@ -1502,19 +1502,16 @@ def _bracket_case(name: str, ids: list[str], price: float | None, target: float,
 
 QUOTE_TIME = _epoch("2026-10-08", "20:00", "UTC")
 CASES += [
-    # Card: price $70, reference target $100 -> 70.0, STRONG_BUY, LONG, distance 42.9.
-    _bracket_case("prc.bracket.card_example_strong_buy_long", ["BR-PRC-022"], 70.0, 100.0, market_time=QUOTE_TIME,
-                  expect={"referenceTargetPct": 70.0, "bracket": "STRONG_BUY", "inferredTag": "LONG", "distanceToTargetPct": 42.9,
+    # Card: price $70, reference target $100 -> 70.0, distance 42.9. 3.0.0: no bracket or tag labels.
+    _bracket_case("prc.bracket.card_example_ratio_and_distance", ["BR-PRC-022"], 70.0, 100.0, market_time=QUOTE_TIME,
+                  expect={"referenceTargetPct": 70.0, "distanceToTargetPct": 42.9,
                           "invertedFlag": False, "priceAtOrAboveTarget": False, "dataDate": "2026-10-08", "error": None, "message": None}),
-    _bracket_case("prc.bracket.eighty_five_pct_is_acceptable_long_boundary", ["BR-PRC-022"], 85.0, 100.0, market_time=QUOTE_TIME,
-                  keys=("referenceTargetPct", "bracket", "inferredTag"),
-                  expect={"referenceTargetPct": 85.0, "bracket": "ACCEPTABLE", "inferredTag": "NEAR"}),
-    _bracket_case("prc.bracket.exactly_75_is_strong_buy", ["BR-PRC-022"], 75.0, 100.0, market_time=QUOTE_TIME,
-                  keys=("referenceTargetPct", "bracket", "inferredTag"),
-                  expect={"referenceTargetPct": 75.0, "bracket": "STRONG_BUY", "inferredTag": "LONG"}),
-    _bracket_case("prc.bracket.exactly_100_is_caution_and_inverted", ["BR-PRC-022"], 100.0, 100.0, market_time=QUOTE_TIME,
-                  keys=("referenceTargetPct", "bracket", "inferredTag", "invertedFlag"),
-                  expect={"referenceTargetPct": 100.0, "bracket": "CAUTION", "inferredTag": "INVERTED", "invertedFlag": True}),
+    _bracket_case("prc.bracket.eighty_five_pct_ratio", ["BR-PRC-022"], 85.0, 100.0, market_time=QUOTE_TIME,
+                  keys=("referenceTargetPct",), expect={"referenceTargetPct": 85.0}),
+    _bracket_case("prc.bracket.exactly_75_ratio", ["BR-PRC-022"], 75.0, 100.0, market_time=QUOTE_TIME,
+                  keys=("referenceTargetPct",), expect={"referenceTargetPct": 75.0}),
+    _bracket_case("prc.bracket.exactly_100_is_inverted", ["BR-PRC-022"], 100.0, 100.0, market_time=QUOTE_TIME,
+                  keys=("referenceTargetPct", "invertedFlag"), expect={"referenceTargetPct": 100.0, "invertedFlag": True}),
     # 2.8.0 (Q14-N3): priceAtOrAboveTarget = currentPrice >= referenceTargetPrice on the raw prices.
     _bracket_case("prc.bracket.price_at_or_above_target_false_below_the_target", ["BR-PRC-022", "Q14-N3"], 99.0, 100.0,
                   market_time=QUOTE_TIME, keys=("referenceTargetPct", "priceAtOrAboveTarget"),
@@ -1540,12 +1537,15 @@ CASES += [
     _bracket_case("prc.bracket.price_at_or_above_target_missing_price_is_an_error_without_the_flag", ["BR-PRC-022", "Q14-N3"], None, 100.0,
                   market_time=QUOTE_TIME, keys=("error", "message", "priceAtOrAboveTarget"),
                   expect={"error": True, "message": "No price data for TST", "priceAtOrAboveTarget": None}),
-    _bracket_case("prc.bracket.above_target_is_avoid", ["BR-PRC-022"], 120.0, 100.0, market_time=QUOTE_TIME,
-                  keys=("referenceTargetPct", "bracket", "inferredTag", "distanceToTargetPct"),
-                  expect={"referenceTargetPct": 120.0, "bracket": "AVOID", "inferredTag": "INVERTED", "distanceToTargetPct": -16.7}),
-    _bracket_case("prc.bracket.below_forty_pct_is_speculative", ["BR-PRC-022"], 39.9, 100.0, market_time=QUOTE_TIME,
-                  keys=("referenceTargetPct", "bracket", "inferredTag"),
-                  expect={"referenceTargetPct": 39.9, "bracket": "STRONG_BUY", "inferredTag": "SPECULATIVE"}),
+    _bracket_case("prc.bracket.above_target_distance", ["BR-PRC-022"], 120.0, 100.0, market_time=QUOTE_TIME,
+                  keys=("referenceTargetPct", "distanceToTargetPct"),
+                  expect={"referenceTargetPct": 120.0, "distanceToTargetPct": -16.7}),
+    _bracket_case("prc.bracket.below_forty_pct_ratio", ["BR-PRC-022"], 39.9, 100.0, market_time=QUOTE_TIME,
+                  keys=("referenceTargetPct",), expect={"referenceTargetPct": 39.9}),
+    # 3.0.0: bracket, inferredTag, tag and tagNote are gone from both runtimes, at every ratio.
+    *[_bracket_case(f"prc.bracket.no_strategy_label_keys_at_{int(p)}_pct", ["BR-PRC-022", "Q14-N3"], p, 100.0, market_time=QUOTE_TIME,
+                    select=lambda v: sorted(k for k in ("bracket", "inferredTag", "tag", "tagNote") if k in v), expect=[])
+      for p in (39.9, 70.0, 100.0, 120.0)],
     # 2.25.2 (F42): a non-positive target is the caller's input error, not a provider error.
     _bracket_case("prc.bracket.non_positive_target_is_rejected", ["BR-PRC-022", "F42"], 70.0, 0.0, market_time=QUOTE_TIME,
                   keys=("ok", "error"),
@@ -1553,23 +1553,21 @@ CASES += [
     _bracket_case("prc.bracket.negative_target_is_an_input_error_through_the_envelope", ["BR-PRC-022", "F42"], 70.0, -10.0,
                   market_time=QUOTE_TIME, via="envelope", keys=("ok", "error"),
                   expect={"ok": False, "error": {"code": "INPUT_VALIDATION_ERROR", "message": "reference_target_price (or io_pt alias) must be a positive number"}}),
-    # Q3d: thresholds compare the value rounded to 1 dp: 75.04 reads as 75.0 and is STRONG_BUY.
-    _bracket_case("prc.bracket.q3d_threshold_uses_the_rounded_percentage", ["BR-PRC-022"], 75.04, 100.0, market_time=QUOTE_TIME,
-                  keys=("referenceTargetPct", "bracket"), mode="pinned", decision="Q3d",
-                  expect={"referenceTargetPct": 75.0, "bracket": "STRONG_BUY"}),
+    # Q3d: the ratio is rounded to 1 dp: 75.04 reads as 75.0 (the bracket thresholds that used it were removed in 3.0.0).
+    _bracket_case("prc.bracket.q3d_ratio_is_rounded_to_one_decimal", ["BR-PRC-022"], 75.04, 100.0, market_time=QUOTE_TIME,
+                  keys=("referenceTargetPct",), expect={"referenceTargetPct": 75.0}),
     # Q3d: Python round() is half-even, JS toFixed(1) rounds an exact tie up: 301/400 x 100 = 75.25 exactly.
     _bracket_case("prc.bracket.q3d_rounding_differs_python_round_vs_ts_tofixed", ["BR-PRC-022"], 301.0, 400.0, market_time=QUOTE_TIME,
-                  keys=("referenceTargetPct", "bracket"), mode="pinned", decision="Q3d",
-                  expect_py={"referenceTargetPct": 75.2, "bracket": "ACCEPTABLE"},
-                  expect_ts={"referenceTargetPct": 75.3, "bracket": "ACCEPTABLE"}),
+                  keys=("referenceTargetPct",), mode="pinned", decision="Q3d",
+                  expect_py={"referenceTargetPct": 75.2},
+                  expect_ts={"referenceTargetPct": 75.3}),
     # Q3d: with no quote time the Worker reports today as dataDate; Python reports null.
     _bracket_case("prc.bracket.q3d_missing_quote_time_python_null_worker_today", ["BR-PRC-022"], 70.0, 100.0,
-                  keys=("dataDate", "bracket"), mode="pinned", decision="Q3d",
+                  keys=("dataDate",), mode="pinned", decision="Q3d",
                   # `new Date()` ignores the Date.now override, so the Worker's date is the real current date: only its
                   # presence (a YYYY-MM-DD string) is pinned.
-                  post=lambda v: {"dataDate": None if v["dataDate"] is None else ("<today YYYY-MM-DD>" if re.fullmatch(r"\d{4}-\d{2}-\d{2}", v["dataDate"]) else v["dataDate"]),
-                                  "bracket": v["bracket"]},
-                  expect_py={"dataDate": None, "bracket": "STRONG_BUY"}, expect_ts={"dataDate": "<today YYYY-MM-DD>", "bracket": "STRONG_BUY"}),
+                  post=lambda v: {"dataDate": None if v["dataDate"] is None else ("<today YYYY-MM-DD>" if re.fullmatch(r"\d{4}-\d{2}-\d{2}", v["dataDate"]) else v["dataDate"])},
+                  expect_py={"dataDate": None}, expect_ts={"dataDate": "<today YYYY-MM-DD>"}),
 ]
 
 

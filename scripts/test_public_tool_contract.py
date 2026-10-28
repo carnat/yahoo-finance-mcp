@@ -45,9 +45,9 @@ def _valid_live_tools() -> list[dict]:
 
 
 class TestPublicToolContract(unittest.TestCase):
-    def test_volume_gate_contract_keeps_the_deprecated_fields_and_adds_their_replacements(self) -> None:
+    def test_volume_gate_contract_drops_the_removed_fields_and_requires_their_replacements(self) -> None:
         fields = DIRECT_OUTPUT_SCHEMA_FIELDS["check_volume_liquidity_threshold"]
-        self.assertTrue({"gatePass", "gateThresholdUsd"} <= set(fields), "deprecated fields stay required until removal")
+        self.assertFalse({"gatePass", "gateThresholdUsd"} & set(fields), "removed in 3.0.0")
         self.assertTrue({"meetsMinimum", "minAdvUsd"} <= set(fields))
 
     def test_shared_live_contract_accepts_semantic_alternatives_and_envelope(self) -> None:

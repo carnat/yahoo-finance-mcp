@@ -55,6 +55,7 @@ from yfmcp.util import (
     _PLACEHOLDER_IV_THRESHOLD, _compute_data_quality, _sort_by_relevance,
     _utc_now_iso, _to_iso_utc, _parse_rss_date,
     _filter_paragraphs_by_topics, _safe_json_loads, _compact_excerpt,
+    fetch_quote_summary_module, unwrap_yahoo_values, yahoo_iso, yahoo_raw,
 )
 from yfmcp.clients.yahoo import _safe_parse
 from yfmcp.clients.market_providers import _PROVIDER_USER_AGENT
@@ -462,6 +463,17 @@ async def get_financial_statement(
     return result
 
 
+# holder_type -> quoteSummary module (the Worker's HOLDER_MOD).
+_HOLDER_MOD = {
+    "major_holders": "majorHoldersBreakdown",
+    "institutional_holders": "institutionOwnership",
+    "mutualfund_holders": "fundOwnership",
+    "insider_transactions": "insiderTransactions",
+    "insider_purchases": "netSharePurchaseActivity",
+    "insider_roster_holders": "insiderHolders",
+}
+
+
 async def get_holder_info(ticker: str, holder_type: str) -> str:
     """Get holder information for a given ticker symbol"""
 
@@ -474,20 +486,19 @@ async def get_holder_info(ticker: str, holder_type: str) -> str:
         print(f"Error: getting holder info for {ticker}: {e}", file=sys.stderr)
         return f"Error: getting holder info for {ticker}: {e}"
 
-    if holder_type == HolderType.major_holders:
-        return company.major_holders.reset_index(names="metric").to_json(orient="records")
-    elif holder_type == HolderType.institutional_holders:
-        return company.institutional_holders.to_json(orient="records")
-    elif holder_type == HolderType.mutualfund_holders:
-        return company.mutualfund_holders.to_json(orient="records", date_format="iso")
-    elif holder_type == HolderType.insider_transactions:
-        return company.insider_transactions.to_json(orient="records", date_format="iso")
-    elif holder_type == HolderType.insider_purchases:
-        return company.insider_purchases.to_json(orient="records", date_format="iso")
-    elif holder_type == HolderType.insider_roster_holders:
-        return company.insider_roster_holders.to_json(orient="records", date_format="iso")
-    else:
+    module = _HOLDER_MOD.get(holder_type)
+    if module is None:
         return f"Error: invalid holder type {holder_type}. Please use one of the following: {HolderType.major_holders}, {HolderType.institutional_holders}, {HolderType.mutualfund_holders}, {HolderType.insider_transactions}, {HolderType.insider_purchases}, {HolderType.insider_roster_holders}."
+
+    # The Worker's getHolderInfo: the quoteSummary module, with Yahoo's {raw, fmt} wrappers unwrapped (F17, 3.0.0).
+    try:
+        result = await asyncio.to_thread(fetch_quote_summary_module, ticker, module)
+    except Exception as e:
+        print(f"Error: getting holder info for {ticker}: {e}", file=sys.stderr)
+        return f"Error: getting holder info for {ticker}: {e}"
+    if result is None:
+        return f"Error: no data found for ticker {ticker}"
+    return json.dumps(unwrap_yahoo_values(result.get(module)))
 
 
 @yfinance_server.tool(
@@ -1807,35 +1818,24 @@ async def get_calendar(ticker: str, mode: Literal["upcoming", "history"] = "upco
             "recommendedNextAction": "NONE",
         })
 
+    # The Worker's getCalendar: quoteSummary calendarEvents, with the Worker's calendar keys (F47, 3.0.0).
     try:
-        cal = company.calendar
+        quote_result = await asyncio.to_thread(fetch_quote_summary_module, ticker, "calendarEvents")
     except Exception as e:
         print(f"Error: getting calendar for {ticker}: {e}", file=sys.stderr)
         return f"Error: getting calendar for {ticker}: {e}"
+    if quote_result is None:
+        return f"Error: no data found for ticker {ticker}"
 
-    if not cal:
-        return json.dumps({
-            "ticker": ticker, "mode": mode, "calendar": None, "source": "yahoo_finance",
-            "sourceType": "provider_calendar", "evidenceClass": "CONTEXTUAL_MARKET_DATA",
-            "confirmationStatus": "UNVERIFIED", "decisionGrade": False,
-            "recommendedNextAction": "CHECK_OFFICIAL_RELEASES",
-        })
-
-    # calendar values may be datetime.date objects — convert to strings
-    def _serialize(v):
-        if hasattr(v, "isoformat"):
-            return v.isoformat()
-        if isinstance(v, list):
-            return [_serialize(i) for i in v]
-        return v
-
-    ed_raw = cal.get("Earnings Date")
-    if isinstance(ed_raw, list):
-        ed_dates = ed_raw
-    elif ed_raw is not None:
-        ed_dates = [ed_raw]
-    else:
-        ed_dates = []
+    cal = quote_result.get("calendarEvents") or {}
+    earnings = cal.get("earnings") or {}
+    earnings_dates = [
+        yahoo_iso(d["raw"]) if isinstance(d, dict) and d.get("raw") is not None else None
+        for d in (earnings.get("earningsDate") or [])
+    ]
+    ed_dates = [d for d in earnings_dates if d]
+    ex_div = cal.get("exDividendDate")
+    div_date = cal.get("dividendDate")
 
     output = {
         "ticker": ticker,
@@ -1848,7 +1848,19 @@ async def get_calendar(ticker: str, mode: Literal["upcoming", "history"] = "upco
         "evidenceClass": "CONTEXTUAL_MARKET_DATA",
         "decisionGrade": False,
         "recommendedNextAction": "CHECK_OFFICIAL_RELEASES" if ed_dates else "NONE",
-        "calendar": {k: _serialize(v) for k, v in cal.items()},
+        "calendar": {
+            "earnings": {
+                "earningsDate": earnings_dates,
+                "earningsAverage": yahoo_raw(earnings.get("earningsAverage")),
+                "earningsLow": yahoo_raw(earnings.get("earningsLow")),
+                "earningsHigh": yahoo_raw(earnings.get("earningsHigh")),
+                "revenueAverage": yahoo_raw(earnings.get("revenueAverage")),
+                "revenueLow": yahoo_raw(earnings.get("revenueLow")),
+                "revenueHigh": yahoo_raw(earnings.get("revenueHigh")),
+            },
+            "exDividendDate": yahoo_iso(ex_div["raw"]) if isinstance(ex_div, dict) and ex_div.get("raw") is not None else None,
+            "dividendDate": yahoo_iso(div_date["raw"]) if isinstance(div_date, dict) and div_date.get("raw") is not None else None,
+        },
     }
     result = json.dumps(output)
     _tool_cache.set(cache_key, result, _PRICE_TTL)
@@ -4312,11 +4324,8 @@ async def get_analyst_upgrade_radar(ticker: str | list[str], days_back: int = 30
             "windowDays": days_back,
             "netSentiment": 0,
             "upgrades": 0,
-            "upgrades30d": 0 if days_back == 30 else None,
             "downgrades": 0,
-            "downgrades30d": 0 if days_back == 30 else None,
             "initiations": 0,
-            "initiations30d": 0 if days_back == 30 else None,
             "changes": [],
             "summary": "NO CHANGES",
             "dataDate": get_last_trading_date(),
@@ -4400,11 +4409,8 @@ async def get_analyst_upgrade_radar(ticker: str | list[str], days_back: int = 30
         "windowDays": days_back,
         "netSentiment": net_sentiment,
         "upgrades": upgrade_count,
-        "upgrades30d": upgrade_count if days_back == 30 else None,
         "downgrades": downgrade_count,
-        "downgrades30d": downgrade_count if days_back == 30 else None,
         "initiations": initiation_count,
-        "initiations30d": initiation_count if days_back == 30 else None,
         "changes": changes,
         "summary": summary,
         "dataDate": get_last_trading_date(),
@@ -4762,7 +4768,9 @@ async def get_options_flow_scan(ticker: str, window_label: str) -> str:
     _cmp_prev: float | None = None
     if prev_data:
         _cmp_prev = (
-            prev_data.get("putVolVs10dAvg")
+            prev_data.get("putVolPer1PctStockAdv")
+            if prev_data.get("putVolPer1PctStockAdv") is not None
+            else prev_data.get("putVolVs10dAvg")
             if prev_data.get("putVolVs10dAvg") is not None
             else prev_data.get("pcRatio")
         )
@@ -4806,15 +4814,9 @@ async def get_options_flow_scan(ticker: str, window_label: str) -> str:
         "windowLabel": window_label,
         "dataDate": data_date,
         "pcRatio": pc_ratio,
-        # Named for what they measure (2.4.4); the old names remain one release as aliases.
+        # Named for what they measure (2.4.4); the old aliases were removed in 3.0.0.
         "ivVsRealizedRangePct": iv_pctile,
         "putVolPer1PctStockAdv": put_vol_vs_10d,
-        "ivPctile": iv_pctile,
-        "putVolVs10dAvg": put_vol_vs_10d,
-        "fieldNotes": {
-            "ivPctile": "Deprecated alias of ivVsRealizedRangePct: current ATM IV placed in the min-max range of rolling 30-day realized volatility over the past year, not a percentile of historical implied volatility.",
-            "putVolVs10dAvg": "Deprecated alias of putVolPer1PctStockAdv: put contracts traded today divided by 1% of the stock's 10-day average share volume, not put volume against its own 10-day average.",
-        },
         "putVolTrend": put_vol_trend,
         "expiry": exp,
         "expirySelection": "NEXT_AFTER_TODAY",
@@ -4868,24 +4870,6 @@ async def get_price_target_bracket(
     reference_target_pct = round(current_price / target_price * 100, 1)
     distance_to_target_pct = round((target_price - current_price) / current_price * 100, 1)
 
-    if reference_target_pct <= 75:
-        bracket = "STRONG_BUY"
-    elif reference_target_pct <= 90:
-        bracket = "ACCEPTABLE"
-    elif reference_target_pct <= 100:
-        bracket = "CAUTION"
-    else:
-        bracket = "AVOID"
-
-    if reference_target_pct < 40:
-        inferred_tag = "SPECULATIVE"
-    elif reference_target_pct < 80:
-        inferred_tag = "LONG"
-    elif reference_target_pct < 100:
-        inferred_tag = "NEAR"
-    else:
-        inferred_tag = "INVERTED"
-
     inverted_flag = reference_target_pct >= 100
 
     data_date: str | None = None
@@ -4922,10 +4906,6 @@ async def get_price_target_bracket(
         "distanceConvention": "(referenceTargetPrice-currentPrice)/currentPrice*100",
         "ioPt": target_price,
         "eqfPct": reference_target_pct,
-        "bracket": bracket,
-        "inferredTag": inferred_tag,
-        "tag": inferred_tag,
-        "tagNote": "Deprecated: tag is inferred from currentPrice/referenceTargetPrice distance. Use priceAtOrAboveTarget.",
         "invertedFlag": inverted_flag,
         # From the raw prices, not the rounded referenceTargetPct (2.8.0).
         "priceAtOrAboveTarget": current_price >= target_price if current_price > 0 and target_price > 0 else None,
@@ -4988,9 +4968,9 @@ async def get_position_score_inputs(ticker: str) -> str:
     # T1: analyst sentiment
     t1: dict = {
         "analystNetSentiment": upgrade.get("netSentiment"),
-        "upgrades30d": upgrade.get("upgrades30d") if upgrade.get("upgrades30d") is not None else upgrade.get("upgrades"),
-        "downgrades30d": upgrade.get("downgrades30d") if upgrade.get("downgrades30d") is not None else upgrade.get("downgrades"),
-        "initiations30d": upgrade.get("initiations30d") if upgrade.get("initiations30d") is not None else upgrade.get("initiations"),
+        "upgrades30d": upgrade.get("upgrades"),
+        "downgrades30d": upgrade.get("downgrades"),
+        "initiations30d": upgrade.get("initiations"),
         "dominantRating": consensus.get("dominantRating"),
         "analystCount": consensus.get("totalAnalysts"),
     }
@@ -5038,11 +5018,6 @@ async def get_position_score_inputs(ticker: str) -> str:
         ),
         "quoteTimestamp": price.get("priceTimestamp"),
         "completedBarDataDate": tech.get("dataDate"),
-        "t1_inputs": t1,
-        "t2_inputs": t2,
-        "t4_inputs": t4,
-        "t5_inputs": t5,
-        # Plain-named twins of the t*_inputs groups (2.8.0), same contents.
         "analystInputs": t1,
         "pricePositionInputs": t2,
         "earningsInputs": t4,

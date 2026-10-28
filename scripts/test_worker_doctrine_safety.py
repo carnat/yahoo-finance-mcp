@@ -109,14 +109,14 @@ class TestWorkerDoctrineSafety(unittest.TestCase):
             });
             const out = JSON.parse(mcpSuccess("get_market_quote", raw, {
               warnings: [{ code: "DEPRECATED_ALIAS", message: "Use canonical tool instead." }],
-              metaExtra: { doctrineUse: "DIAGNOSTICS_ONLY" },
+              metaExtra: { reliabilityClass: "DIAGNOSTIC" },
             }));
 
             assert.equal(out.ok, false);
             assert.equal(out.error.code, "PROVIDER_BLOCKED");
             assert.equal(out.meta.tool, "get_market_quote");
             assert.equal(out.meta.providerStatus, "PROVIDER_BLOCKED");
-            assert.equal(out.meta.doctrineUse, "DIAGNOSTICS_ONLY");
+            assert.equal(out.meta.reliabilityClass, "DIAGNOSTIC");
             assert.equal(out.meta.warnings[0].code, "DEPRECATED_ALIAS");
             assert.equal(out.diagnostics.dataSource, "INDICATIVE_ONLY");
             console.log(JSON.stringify(out));
@@ -245,7 +245,8 @@ class TestWorkerDoctrineSafety(unittest.TestCase):
         self.assertIn("irPageEvidence", worker)
         tools = _tools_source()
         self.assertIn('capabilityStatus: "ACTIVE"', tools)
-        self.assertIn('doctrineUse: "ALLOWED"', tools)
+        self.assertIn('reliabilityClass: "RELIABLE"', tools)
+        self.assertNotIn("doctrineUse", tools)
         self.assertIn("coverageStatus=SEC_EX99_RESOLVED", tools)
         self.assertIn("APPROVED_IR_PAGE_RESOLVED", tools)
         self.assertNotIn('failureMode: "SEC_EX99_LINKAGE_INCOMPLETE"', tools)
@@ -263,7 +264,8 @@ class TestWorkerDoctrineSafety(unittest.TestCase):
         self.assertIn("LIVE_SECTION_EXTRACTION_UNRELIABLE", worker)
         self.assertIn('confidence: "NOT_DECISION_GRADE"', worker)
         self.assertIn("decisionGrade: false", worker)
-        self.assertIn('doctrineUse: "BLOCKED"', worker)
+        self.assertIn('reliabilityClass: "UNRELIABLE"', worker)
+        self.assertNotIn("doctrineUse", worker)
 
     def test_sec_filing_fact_preserves_xbrl_context_metadata(self) -> None:
         worker = _yahoo_worker_source()
@@ -279,7 +281,8 @@ class TestWorkerDoctrineSafety(unittest.TestCase):
         self.assertIn("const sourceEvidence = xbrlSourceEvidence(parsed)", tools)
         self.assertIn('String(b.end ?? "").localeCompare(String(a.end ?? ""))', worker)
         self.assertIn('capabilityStatus: "ACTIVE"', tools)
-        self.assertIn('doctrineUse: "ALLOWED"', tools)
+        self.assertIn('reliabilityClass: "RELIABLE"', tools)
+        self.assertNotIn("doctrineUse", tools)
         self.assertIn('successCriteria: ["value", "xbrlContext", "sourceEvidence"]', tools)
         self.assertIn('"SEC_FACT_NOT_AVAILABLE"', tools)
         self.assertIn('"NO_COMPANYCONCEPT_FACT_FOR_FORM"', tools)
@@ -317,42 +320,36 @@ class TestWorkerDoctrineSafety(unittest.TestCase):
         self.assertIn("unverified Markdown from a degraded Worker HTML fallback", tools)
         self.assertIn("Gate use is payload-level", tools)
 
-    def test_reliability_class_replaces_doctrine_use_with_the_same_mapping_in_both_runtimes(self) -> None:
-        """2.8.0: doctrineUse stays (Worker only) and reliabilityClass sits beside it; the mapping is shared."""
-        from yfmcp.deprecations import RELIABILITY_CLASS_BY_DOCTRINE_USE, TOOL_RELIABILITY_CLASS
+    def test_reliability_class_is_the_same_in_both_runtimes_and_doctrine_use_is_gone(self) -> None:
+        """3.0.0: doctrineUse and meta.decisionGrade are removed; reliabilityClass is a plain value in both runtimes."""
+        from yfmcp.deprecations import TOOL_RELIABILITY_CLASS
 
-        deprecations = (ROOT / "worker" / "src" / "deprecations.ts").read_text(encoding="utf-8")
-        block = deprecations.split("RELIABILITY_CLASS_BY_DOCTRINE_USE = {", 1)[1].split("} as const", 1)[0]
-        self.assertEqual(dict(re.findall(r'(\w+): "(\w+)"', block)), RELIABILITY_CLASS_BY_DOCTRINE_USE)
         self.assertEqual(
-            RELIABILITY_CLASS_BY_DOCTRINE_USE,
-            {"ALLOWED": "RELIABLE", "VERIFY_ONLY": "VERIFY_BEFORE_USE", "DIAGNOSTICS_ONLY": "DIAGNOSTIC", "BLOCKED": "UNRELIABLE"},
+            TOOL_RELIABILITY_CLASS,
+            {"get_sec_filing_section_markdown": "UNRELIABLE", "get_company_press_releases": "RELIABLE", "extract_sec_filing_fact": "RELIABLE"},
         )
-        # The three tools of the Worker's status table, with the class their doctrineUse maps to.
+        # The three tools of the Worker's status table, with their reliabilityClass.
         tools = _tools_source()
-        table = find_definition("worker", "TOOL_DOCTRINE_STATUS").text
-        worker_status = {
-            name: RELIABILITY_CLASS_BY_DOCTRINE_USE[use]
-            for name, use in re.findall(r'(\w+): \{[^{}]*?doctrineUse: "(\w+)"', table)
-        }
+        table = find_definition("worker", "TOOL_RELIABILITY_STATUS").text
+        worker_status = dict(re.findall(r'(\w+): \{[^{}]*?reliabilityClass: "(\w+)"', table))
         self.assertEqual(worker_status, TOOL_RELIABILITY_CLASS)
+        self.assertNotRegex(table, re.compile(r"^\s+decisionGrade:", re.M))
         worker = _yahoo_worker_source()
-        self.assertIn('doctrineUse: "ALLOWED",\n    reliabilityClass: reliabilityClassFor("ALLOWED")', worker)
-        self.assertIn('doctrineUse: "BLOCKED",\n    reliabilityClass: reliabilityClassFor("BLOCKED")', worker)
-        self.assertIn("reliabilityClass: reliabilityClassFor(doctrineUse)", tools)
+        self.assertIn('reliabilityClass: "RELIABLE",\n    failureMode: payloadDecisionGrade', worker)
+        self.assertIn('reliabilityClass: "UNRELIABLE",\n    warnings,', worker)
+        self.assertNotIn("reliabilityClassFor", worker)
+        self.assertNotIn("RELIABILITY_CLASS_BY_DOCTRINE_USE", worker)
+        self.assertIn("metaExtra: { ...status }", tools)
         # Every Python runtime module, wherever get_company_press_releases and the section tool live.
         python = python_runtime_source()
         self.assertIn('"reliabilityClass": _TOOL_RELIABILITY_CLASS["get_company_press_releases"]', python)
         self.assertIn('"reliabilityClass": _TOOL_RELIABILITY_CLASS["get_sec_filing_section_markdown"]', python)
-        # Python never emitted doctrineUse and still does not. No Python runtime module carries it in code
-        # (string literal or identifier); only yfmcp/deprecations.py may name it, in comments and docstrings
-        # that document the N1 mapping. Every other module must not mention it at all (the pre-helper check
-        # covered server.py and yfmcp/tools/news.py only).
-        for path, text in module_sources("python").items():
-            rel = path.relative_to(_SRC_ROOT).as_posix()
-            self.assertEqual(_code_mentions(text, "doctrineUse"), [], rel)
-            if rel != "yfmcp/deprecations.py":
-                self.assertNotIn("doctrineUse", text, rel)
+        self.assertNotIn("reliability_class_for", python)
+        self.assertNotIn("RELIABILITY_CLASS_BY_DOCTRINE_USE", python)
+        # Neither runtime names doctrineUse anywhere, in code or comments.
+        for runtime in ("python", "worker"):
+            for path, text in module_sources(runtime).items():
+                self.assertNotIn("doctrineUse", text, path.relative_to(_SRC_ROOT).as_posix())
 
     def test_deprecated_field_notices_stay_out_of_data_and_the_legacy_envelope(self) -> None:
         payload = _node_json(
@@ -360,8 +357,8 @@ class TestWorkerDoctrineSafety(unittest.TestCase):
             import assert from "node:assert/strict";
             import { mcpSuccess, setWorkerEnv } from "./worker/src/response.ts";
 
-            const notice = { code: "DEPRECATED_FIELD", message: "m", severity: "info", fields: ["gatePass"], replacement: "meetsMinimum" };
-            const data = { gatePass: true };
+            const notice = { code: "DEPRECATED_FIELD", message: "m", severity: "info", fields: ["confidence"], replacement: "status" };
+            const data = { confidence: "EXTRACTION_FAILED" };
             setWorkerEnv({ MCP_ENVELOPE_V2: "true" });
             const v2 = JSON.parse(mcpSuccess("check_volume_liquidity_threshold", JSON.stringify(data), { successWarnings: () => [notice] }));
             const failure = JSON.parse(mcpSuccess("check_volume_liquidity_threshold", JSON.stringify({ ok: false, data: null, error: { code: "X", message: "x" } }), { successWarnings: () => [notice] }));
@@ -370,10 +367,10 @@ class TestWorkerDoctrineSafety(unittest.TestCase):
             console.log(JSON.stringify({ v2, failure, legacy }));
             """
         )
-        self.assertEqual(payload["v2"]["data"], {"gatePass": True})
+        self.assertEqual(payload["v2"]["data"], {"confidence": "EXTRACTION_FAILED"})
         self.assertEqual(payload["v2"]["meta"]["warnings"][0]["code"], "DEPRECATED_FIELD")
         self.assertEqual(payload["failure"]["meta"]["warnings"], [])
-        self.assertEqual(json.loads(payload["legacy"]), {"gatePass": True})
+        self.assertEqual(json.loads(payload["legacy"]), {"confidence": "EXTRACTION_FAILED"})
 
 
 if __name__ == "__main__":

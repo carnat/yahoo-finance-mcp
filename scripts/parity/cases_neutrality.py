@@ -1,9 +1,10 @@
-"""Parity cases: RN (2.8.0) neutrality deprecation, Q14-N1 / Q14-N2 / Q14-N3.
+"""Parity cases: neutrality, Q14-N1 / Q14-N2 / Q14-N3 (the 2.8.0 deprecations, removed in 3.0.0).
 
-Every deprecated field keeps its value and gains a neutral replacement; a DEPRECATED_FIELD notice in the envelope's
-meta.warnings names the replacement. Both runtimes must produce the same payloads, so these cases compare the
-envelope each runtime returns from its tool-boundary entry point (Worker `callToolResult` / `callVisibleToolResult`,
-Python `_envelope_tool_result` / the grouped router).
+3.0.0 removed the deprecated fields (doctrineUse, the always-null authority fields, the price-target labels, the fixed
+$10M gate, the tier-numbered input groups) and with them their DEPRECATED_FIELD notices. The neutral replacements stay.
+Both runtimes must produce the same payloads, so these cases compare the envelope each runtime returns from its
+tool-boundary entry point (Worker `callToolResult` / `callVisibleToolResult`, Python `_envelope_tool_result` / the
+grouped router).
 
 Conventions follow cases_pricing_evidence_tools.py: `equal` cases carry `expect`; `pinned` cases record a known
 Python/Worker difference ("FINDING ..." decisions) that RN does not change.
@@ -27,7 +28,7 @@ from scripts.parity.cases_pricing_evidence_tools import (
 )
 from scripts.parity.cases_accession import _python_sec_state
 from scripts.parity.harness import Case
-from scripts.parity.cases_notices_2270 import CONFIDENCE_NOTICE, META_GRADE_NOTICE
+from scripts.parity.cases_notices_2270 import CONFIDENCE_NOTICE
 
 import server  # noqa: F401,E402
 from yfmcp.envelope import _envelope_tool_result  # noqa: E402
@@ -43,26 +44,6 @@ def _notice(fields: list[str], replacement: str, message: str) -> dict:
     return {"code": "DEPRECATED_FIELD", "message": message, "severity": "info", "fields": fields, "replacement": replacement}
 
 
-N1_NOTICE = _notice(["doctrineUse"], "reliabilityClass", f"doctrineUse is deprecated and {REMOVAL}; use reliabilityClass.")
-N2_NOTICE = _notice(
-    ["g2", "opportunity", "action", "priceTarget", "scenarioWeights", "selectedMethod", "selectedMultiple"], "decisionUse",
-    f"g2, opportunity, action, priceTarget, scenarioWeights, selectedMethod, selectedMultiple are always null and {REMOVAL}; "
-    "decisionUse=EVIDENCE_ONLY marks the evidence boundary.")
-PRICE_TARGET_NOTICE = _notice(
-    ["bracket", "inferredTag", "tag", "tagNote"], "priceAtOrAboveTarget",
-    f"bracket, inferredTag, tag, tagNote are deprecated and {REMOVAL}; "
-    "use priceAtOrAboveTarget (direction); referenceTargetPct gives the price/target ratio.")
-VOLUME_GATE_NOTICE = _notice(
-    ["gatePass", "gateThresholdUsd"], "meetsMinimum",
-    f"gatePass, gateThresholdUsd are deprecated and {REMOVAL}; use meetsMinimum and pass min_adv_usd for a caller-chosen threshold.")
-SNAPSHOT_GATE_NOTICE = _notice(
-    ["volume.liquidityGatePass"], "volume.meetsMinimum",
-    f"volume.liquidityGatePass is deprecated and {REMOVAL}; use volume.meetsMinimum and pass min_adv_usd for a caller-chosen threshold.")
-POSITION_NOTICE = _notice(
-    ["t1_inputs", "t2_inputs", "t4_inputs", "t5_inputs"], "analystInputs, pricePositionInputs, earningsInputs, technicalInputs",
-    f"t1_inputs, t2_inputs, t4_inputs, t5_inputs are deprecated and {REMOVAL}; "
-    "use analystInputs, pricePositionInputs, earningsInputs, technicalInputs.")
-NOTICE_KEY_ORDER = ["code", "message", "severity", "fields", "replacement"]
 
 MIN_ADV_ERROR = "min_adv_usd must be a positive number when supplied."
 
@@ -92,19 +73,19 @@ NORATE = dict(symbol="NORATE.L", currency="GBp", close=250.0, volume=2_000_000, 
 
 
 def _gate_fields(v: dict) -> dict:
-    keys = ("status", "gatePass", "gateThresholdUsd", "meetsMinimum", "minAdvUsd", "adv20dTradedValueUsd", "gateBasis")
+    keys = ("status", "meetsMinimum", "minAdvUsd", "adv20dTradedValueUsd", "gateBasis")
     return {k: v.get(k) for k in keys}
 
 
-EURX_BASE = {"status": "OK", "gatePass": True, "gateThresholdUsd": 10000000, "adv20dTradedValueUsd": 200000000,
+EURX_BASE = {"status": "OK", "adv20dTradedValueUsd": 200000000,
              "gateBasis": "ADV20_TRADED_VALUE_USD"}
-USDX_BASE = {"status": "OK", "gatePass": False, "gateThresholdUsd": 10000000, "adv20dTradedValueUsd": 500000,
+USDX_BASE = {"status": "OK", "adv20dTradedValueUsd": 500000,
              "gateBasis": "ADV20_TRADED_VALUE_USD"}
-NORATE_BASE = {"status": "OK", "gatePass": None, "gateThresholdUsd": 10000000, "adv20dTradedValueUsd": None,
+NORATE_BASE = {"status": "OK", "adv20dTradedValueUsd": None,
                "gateBasis": "ADV20_TRADED_VALUE_USD"}
 
 CASES += [
-    # Direct (the gate function in each runtime). Old fields keep their values whatever min_adv_usd says.
+    # Direct (the gate function in each runtime). 3.0.0: gatePass and gateThresholdUsd are gone from the select.
     _gate_case("neutral.n3b.meets_minimum_true_when_adv_above_the_minimum", ["BR-PRC-003", "Q14-N3"], **EURX,
                min_adv=150_000_000, select=_gate_fields,
                expect={**EURX_BASE, "meetsMinimum": True, "minAdvUsd": 150000000}),
@@ -133,20 +114,20 @@ def _gate_envelope_view(v: dict) -> dict:
 
 
 CASES += [
-    # Through the V2 envelope: the same values, and the one notice naming the deprecated gate fields.
-    _gate_case("neutral.n3b.envelope_carries_meets_minimum_and_the_gate_notice", ["BR-PRC-003", "Q14-N3"], **EURX,
+    # Through the V2 envelope: the same values, and no notice (the gate fields were removed in 3.0.0).
+    _gate_case("neutral.n3b.envelope_carries_meets_minimum_and_no_notice", ["BR-PRC-003", "Q14-N3"], **EURX,
                min_adv=150_000_000, via="envelope", select=_gate_envelope_view,
-               expect={"ok": True, **EURX_BASE, "meetsMinimum": True, "minAdvUsd": 150000000, "warnings": [VOLUME_GATE_NOTICE]}),
-    _gate_case("neutral.n3b.envelope_notice_without_min_adv_usd", ["BR-PRC-003", "Q14-N3"], **USDX,
+               expect={"ok": True, **EURX_BASE, "meetsMinimum": True, "minAdvUsd": 150000000, "warnings": []}),
+    _gate_case("neutral.n3b.envelope_without_min_adv_usd_has_no_notice", ["BR-PRC-003", "Q14-N3"], **USDX,
                via="envelope", select=_gate_envelope_view,
-               expect={"ok": True, **USDX_BASE, "meetsMinimum": None, "minAdvUsd": None, "warnings": [VOLUME_GATE_NOTICE]}),
+               expect={"ok": True, **USDX_BASE, "meetsMinimum": None, "minAdvUsd": None, "warnings": []}),
     # Grouped mode: the same call as an action of stock_pricing.
-    _gate_case("neutral.n3b.grouped_carries_meets_minimum_and_the_gate_notice", ["BR-PRC-003", "Q14-N3"], **EURX,
+    _gate_case("neutral.n3b.grouped_carries_meets_minimum_and_no_notice", ["BR-PRC-003", "Q14-N3"], **EURX,
                min_adv=250_000_000, via="grouped", select=_gate_envelope_view,
-               expect={"ok": True, **EURX_BASE, "meetsMinimum": False, "minAdvUsd": 250000000, "warnings": [VOLUME_GATE_NOTICE]}),
-    _gate_case("neutral.n3b.grouped_without_min_adv_usd", ["BR-PRC-003", "Q14-N3"], **USDX,
+               expect={"ok": True, **EURX_BASE, "meetsMinimum": False, "minAdvUsd": 250000000, "warnings": []}),
+    _gate_case("neutral.n3b.grouped_without_min_adv_usd_has_no_notice", ["BR-PRC-003", "Q14-N3"], **USDX,
                via="grouped", select=_gate_envelope_view,
-               expect={"ok": True, **USDX_BASE, "meetsMinimum": None, "minAdvUsd": None, "warnings": [VOLUME_GATE_NOTICE]}),
+               expect={"ok": True, **USDX_BASE, "meetsMinimum": None, "minAdvUsd": None, "warnings": []}),
 ]
 
 
@@ -201,7 +182,7 @@ for _label, _bad, _msg in (("string", "abc", _GROUPED_TYPE_ERROR), ("numeric_str
 
 def _snapshot_volume(v: dict) -> dict:
     volume = v["volume"]
-    return {k: volume.get(k) for k in ("liquidityGatePass", "meetsMinimum", "minAdvUsd", "avgVolume20d", "ratio20d")}
+    return {k: volume.get(k) for k in ("meetsMinimum", "minAdvUsd", "avgVolume20d", "ratio20d")}
 
 
 def _snapshot_envelope_view(v: dict) -> dict:
@@ -211,23 +192,23 @@ def _snapshot_envelope_view(v: dict) -> dict:
 CASES += [
     _gate_case("neutral.n3b.snapshot_meets_minimum_true_above_the_minimum", ["BR-PRC-003", "Q14-N3"], **EURX,
                min_adv=150_000_000, via="snapshot", select=_snapshot_volume,
-               expect={"liquidityGatePass": True, "meetsMinimum": True, "minAdvUsd": 150000000, "avgVolume20d": 1000000, "ratio20d": 1}),
+               expect={"meetsMinimum": True, "minAdvUsd": 150000000, "avgVolume20d": 1000000, "ratio20d": 1}),
     _gate_case("neutral.n3b.snapshot_meets_minimum_false_below_the_minimum", ["BR-PRC-003", "Q14-N3"], **EURX,
                min_adv=250_000_000, via="snapshot", select=_snapshot_volume,
-               expect={"liquidityGatePass": True, "meetsMinimum": False, "minAdvUsd": 250000000, "avgVolume20d": 1000000, "ratio20d": 1}),
+               expect={"meetsMinimum": False, "minAdvUsd": 250000000, "avgVolume20d": 1000000, "ratio20d": 1}),
     _gate_case("neutral.n3b.snapshot_meets_minimum_true_when_equal", ["BR-PRC-003", "Q14-N3"], **USDX,
                min_adv=500_000, via="snapshot", select=_snapshot_volume,
-               expect={"liquidityGatePass": False, "meetsMinimum": True, "minAdvUsd": 500000, "avgVolume20d": 100000, "ratio20d": 1}),
+               expect={"meetsMinimum": True, "minAdvUsd": 500000, "avgVolume20d": 100000, "ratio20d": 1}),
     _gate_case("neutral.n3b.snapshot_meets_minimum_null_when_adv_is_unknown", ["BR-PRC-003", "Q14-N3"], **NORATE,
                min_adv=1_000_000, via="snapshot", select=_snapshot_volume,
-               expect={"liquidityGatePass": None, "meetsMinimum": None, "minAdvUsd": 1000000, "avgVolume20d": 2000000, "ratio20d": 1}),
+               expect={"meetsMinimum": None, "minAdvUsd": 1000000, "avgVolume20d": 2000000, "ratio20d": 1}),
     _gate_case("neutral.n3b.snapshot_meets_minimum_null_without_min_adv_usd", ["BR-PRC-003", "Q14-N3"], **USDX,
                via="snapshot", select=_snapshot_volume,
-               expect={"liquidityGatePass": False, "meetsMinimum": None, "minAdvUsd": None, "avgVolume20d": 100000, "ratio20d": 1}),
-    _gate_case("neutral.n3b.snapshot_envelope_carries_volume_meets_minimum_and_the_snapshot_notice", ["BR-PRC-003", "Q14-N3"],
+               expect={"meetsMinimum": None, "minAdvUsd": None, "avgVolume20d": 100000, "ratio20d": 1}),
+    _gate_case("neutral.n3b.snapshot_envelope_carries_volume_meets_minimum_and_no_notice", ["BR-PRC-003", "Q14-N3"],
                **EURX, min_adv=150_000_000, via="snapshot_envelope", select=_snapshot_envelope_view,
-               expect={"ok": True, "liquidityGatePass": True, "meetsMinimum": True, "minAdvUsd": 150000000,
-                       "avgVolume20d": 1000000, "ratio20d": 1, "warnings": [SNAPSHOT_GATE_NOTICE]}),
+               expect={"ok": True, "meetsMinimum": True, "minAdvUsd": 150000000,
+                       "avgVolume20d": 1000000, "ratio20d": 1, "warnings": []}),
 ]
 
 
@@ -237,25 +218,20 @@ CASES += [
 
 def _bracket_envelope_view(v: dict) -> dict:
     data = v.get("data") or {}
-    return {"ok": v.get("ok"), "priceAtOrAboveTarget": data.get("priceAtOrAboveTarget"), "bracket": data.get("bracket"),
-            "inferredTag": data.get("inferredTag"), "tag": data.get("tag"), "warnings": v["meta"]["warnings"]}
+    return {"ok": v.get("ok"), "priceAtOrAboveTarget": data.get("priceAtOrAboveTarget"),
+            "labelKeys": sorted(k for k in ("bracket", "inferredTag", "tag", "tagNote") if k in data), "warnings": v["meta"]["warnings"]}
 
 
-_N3A_LONG = {"ok": True, "priceAtOrAboveTarget": False, "bracket": "STRONG_BUY", "inferredTag": "LONG", "tag": "LONG"}
-_N3A_AT_TARGET = {"ok": True, "priceAtOrAboveTarget": True, "bracket": "CAUTION", "inferredTag": "INVERTED", "tag": "INVERTED"}
-_TAG_NOTE = "Deprecated: tag is inferred from currentPrice/referenceTargetPrice distance. Use priceAtOrAboveTarget."
+_N3A_LONG = {"ok": True, "priceAtOrAboveTarget": False, "labelKeys": []}
+_N3A_AT_TARGET = {"ok": True, "priceAtOrAboveTarget": True, "labelKeys": []}
 
 CASES += [
-    _bracket_case("neutral.n3a.envelope_keeps_the_labels_and_adds_the_flag_and_the_notice", ["BR-PRC-022", "Q14-N3"], 70.0, 100.0,
+    _bracket_case("neutral.n3a.envelope_has_the_flag_no_labels_and_no_notice", ["BR-PRC-022", "Q14-N3"], 70.0, 100.0,
                   market_time=QUOTE_TIME, via="envelope", select=_bracket_envelope_view,
-                  expect={**_N3A_LONG, "warnings": [PRICE_TARGET_NOTICE]}),
+                  expect={**_N3A_LONG, "warnings": []}),
     _bracket_case("neutral.n3a.envelope_flag_true_at_the_target", ["BR-PRC-022", "Q14-N3"], 100.0, 100.0,
                   market_time=QUOTE_TIME, via="envelope", select=_bracket_envelope_view,
-                  expect={**_N3A_AT_TARGET, "warnings": [PRICE_TARGET_NOTICE]}),
-    # The tagNote text points at the neutral replacement (2.14.0, R4B1_SPEC section 7).
-    _bracket_case("neutral.n3a.tag_note_points_to_price_at_or_above_target", ["BR-PRC-022", "Q14-N3"], 70.0, 100.0,
-                  market_time=QUOTE_TIME, keys=("tagNote",),
-                  expect={"tagNote": _TAG_NOTE}),
+                  expect={**_N3A_AT_TARGET, "warnings": []}),
     # A failure carries no data and no notice.
     _bracket_case("neutral.n3a.envelope_failure_carries_no_notice", ["BR-PRC-022", "Q14-N3"], None, 100.0,
                   market_time=QUOTE_TIME, via="envelope",
@@ -278,8 +254,7 @@ CASES += [
 
 EVIDENCE_DATA = {
     "ticker": "AAPL", "storageStatus": "UNAVAILABLE", "cuts": [],
-    "decisionUse": "EVIDENCE_ONLY", "selectedMethod": None, "selectedMultiple": None, "scenarioWeights": None,
-    "priceTarget": None, "g2": None, "opportunity": None, "action": None,
+    "decisionUse": "EVIDENCE_ONLY",
 }
 
 
@@ -300,18 +275,12 @@ def _ts_evidence(legacy: bool = False) -> dict:
 
 
 CASES += [
-    Case(name="neutral.n2.evidence_action_data_is_unchanged_and_the_notice_is_in_meta", ids=["Q14-N2"],
+    Case(name="neutral.n2.evidence_action_data_has_only_decision_use_and_no_notice", ids=["Q14-N2"],
          py=_py_evidence(), ts=_ts_evidence(),
          select=lambda v: {"ok": v["ok"], "data": v["data"], "warnings": v["meta"]["warnings"]},
-         expect={"ok": True, "data": EVIDENCE_DATA, "warnings": [N2_NOTICE]}),
-    # The harness compares objects without key order, so the notice's key order is read as a list in each runtime.
-    Case(name="neutral.n2.notice_key_order_is_code_message_severity_fields_replacement", ids=["Q14-N2"],
-         py=lambda: list(json.loads(_py_evidence()())["meta"]["warnings"][0]),
-         ts={"js": _worker('const r = await m.tools.callToolResult("list_evidence_cuts", {ticker: "AAPL"}); '
-                           'return Object.keys(r.value.meta.warnings[0]);'), "isolate": True},
-         expect=NOTICE_KEY_ORDER),
+         expect={"ok": True, "data": EVIDENCE_DATA, "warnings": []}),
     # The legacy envelope (MCP_ENVELOPE_V2=false) emits no notice and no meta at all; the payload is the same.
-    Case(name="neutral.n2.legacy_envelope_emits_no_notice_and_keeps_the_payload", ids=["Q14-N2"],
+    Case(name="neutral.n2.legacy_envelope_has_no_meta_and_the_same_payload", ids=["Q14-N2"],
          py=_py_evidence(legacy=True), ts=_ts_evidence(legacy=True),
          select=lambda v: {"hasMeta": "meta" in v, "data": v}, expect={"hasMeta": False, "data": EVIDENCE_DATA}),
 ]
@@ -360,8 +329,8 @@ def _reliability_view(v: dict) -> dict:
 
 def _doctrine_view(v: dict) -> dict:
     data = v.get("data") if isinstance(v.get("data"), dict) else {}
-    return {"metaDoctrineUse": v["meta"].get("doctrineUse"), "dataDoctrineUse": data.get("doctrineUse"),
-            "warnings": v["meta"]["warnings"]}
+    return {"metaHasDoctrineUse": "doctrineUse" in v["meta"], "dataHasDoctrineUse": "doctrineUse" in data,
+            "metaHasDecisionGrade": "decisionGrade" in v["meta"], "warnings": v["meta"]["warnings"]}
 
 
 PRESS = ("get_company_press_releases", {"ticker": "AAPL"}, lambda: server.get_company_press_releases("AAPL"))
@@ -377,22 +346,17 @@ CASES += [
     _tool_case("neutral.n1.section_markdown_reliability_class_in_meta_and_data", SECTION[0], SECTION[1], SECTION[2], _reliability_view,
                routes=SECTION_ROUTES, ids=("Q14-N1",),
                expect={"ok": True, "metaReliabilityClass": "UNRELIABLE", "dataReliabilityClass": "UNRELIABLE", "dataHasReliabilityClass": True}),
-    # FINDING: the Worker also emits doctrineUse (meta and, for these two tools, data) and the N1 notice; Python never did.
-    # 2.27.0: the Worker's meta.decisionGrade gets its notice too (F5/F45), and a status string in confidence gets the
-    # F20 notice in both runtimes where the payload says confidence NOT_DECISION_GRADE (the fact and section fixtures).
-    _tool_case("neutral.n1.finding_doctrine_use_and_its_notice_are_worker_only_press_releases", PRESS[0], PRESS[1], PRESS[2],
-               _doctrine_view, mode="pinned", decision="FINDING Q14-N1: Python never emitted doctrineUse, so it has no doctrineUse notice (spec section 1)",
-               expect_py={"metaDoctrineUse": None, "dataDoctrineUse": None, "warnings": []},
-               expect_ts={"metaDoctrineUse": "ALLOWED", "dataDoctrineUse": "ALLOWED", "warnings": [N1_NOTICE, META_GRADE_NOTICE]}),
-    _tool_case("neutral.n1.finding_doctrine_use_and_its_notice_are_worker_only_extract_sec_filing_fact", FACT[0], FACT[1], FACT[2],
-               _doctrine_view, mode="pinned", decision="FINDING Q14-N1: Python never emitted doctrineUse, so it has no doctrineUse notice (spec section 1)",
-               expect_py={"metaDoctrineUse": None, "dataDoctrineUse": None, "warnings": [CONFIDENCE_NOTICE]},
-               expect_ts={"metaDoctrineUse": "ALLOWED", "dataDoctrineUse": None, "warnings": [N1_NOTICE, META_GRADE_NOTICE, CONFIDENCE_NOTICE]}),
-    _tool_case("neutral.n1.finding_doctrine_use_and_its_notice_are_worker_only_section_markdown", SECTION[0], SECTION[1], SECTION[2],
-               _doctrine_view, routes=SECTION_ROUTES, mode="pinned",
-               decision="FINDING Q14-N1: Python never emitted doctrineUse, so it has no doctrineUse notice (spec section 1)",
-               expect_py={"metaDoctrineUse": None, "dataDoctrineUse": None, "warnings": [CONFIDENCE_NOTICE]},
-               expect_ts={"metaDoctrineUse": "BLOCKED", "dataDoctrineUse": "BLOCKED", "warnings": [N1_NOTICE, META_GRADE_NOTICE, CONFIDENCE_NOTICE]}),
+    # 3.0.0: neither runtime emits doctrineUse or the status table's meta.decisionGrade, and neither gives their notices.
+    # A status string in confidence still gets the F20 notice in both runtimes (the fact and section fixtures).
+    _tool_case("neutral.n1.doctrine_use_and_meta_decision_grade_are_gone_press_releases", PRESS[0], PRESS[1], PRESS[2],
+               _doctrine_view, expect={"metaHasDoctrineUse": False, "dataHasDoctrineUse": False, "metaHasDecisionGrade": False, "warnings": []}),
+    _tool_case("neutral.n1.doctrine_use_and_meta_decision_grade_are_gone_extract_sec_filing_fact", FACT[0], FACT[1], FACT[2],
+               _doctrine_view, expect={"metaHasDoctrineUse": False, "dataHasDoctrineUse": False, "metaHasDecisionGrade": False,
+                                       "warnings": [CONFIDENCE_NOTICE]}),
+    _tool_case("neutral.n1.doctrine_use_and_meta_decision_grade_are_gone_section_markdown", SECTION[0], SECTION[1], SECTION[2],
+               _doctrine_view, routes=SECTION_ROUTES,
+               expect={"metaHasDoctrineUse": False, "dataHasDoctrineUse": False, "metaHasDecisionGrade": False,
+                       "warnings": [CONFIDENCE_NOTICE]}),
 ]
 
 
@@ -403,7 +367,7 @@ def _section_view(v: dict) -> dict:
             "hasWarnings": "warnings" in data, "source": data.get("source"), "section": data.get("matchedHeading")}
 
 
-# 2.14.0 (R4B1_SPEC section 3): Python marks section markdown as the Worker does; only doctrineUse stays Worker-only (pinned above).
+# 2.14.0 (R4B1_SPEC section 3): Python marks section markdown as the Worker does; doctrineUse was removed from the Worker in 3.0.0.
 CASES.append(_tool_case(
     "neutral.n1.finding_section_markdown_status_decision_grade_and_warning_differ", SECTION[0], SECTION[1], SECTION[2],
     _section_view, routes=SECTION_ROUTES,
@@ -413,8 +377,8 @@ CASES.append(_tool_case(
 
 
 # ═══════════════════════════════════════════════════════════════════════════════════════════════
-# Q14-N3c: analyze_position_signals gains analystInputs / pricePositionInputs / earningsInputs / technicalInputs,
-# each holding the same object as its t1/t2/t4/t5_inputs source group. The runtime asymmetries of the source groups
+# Q14-N3c: analyze_position_signals carries analystInputs / pricePositionInputs / earningsInputs / technicalInputs;
+# the tier-numbered t1/t2/t4/t5_inputs groups were removed in 3.0.0. The runtime asymmetries of the groups
 # stay as they are today and are pinned below as FINDING cases.
 # Python: the six component tools are stubbed. Worker: one canned Yahoo quoteSummary and chart per ticker.
 # ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -452,7 +416,7 @@ POSITION_ROUTES = {
 
 # What the stubbed Python components return: the same market as the canned Worker responses above.
 PY_COMPONENTS = {
-    "get_analyst_upgrade_radar": {"netSentiment": 0, "upgrades30d": 0, "downgrades30d": 0, "initiations30d": 0},
+    "get_analyst_upgrade_radar": {"netSentiment": 0, "upgrades": 0, "downgrades": 0, "initiations": 0},
     "get_analyst_consensus": {"dominantRating": "buy", "totalAnalysts": 7, "numberOfAnalysts": 7},
     "get_price_stats": {"lastPrice": 129.9, "yearHigh": 129.9, "yearLow": 100, "pctFromYearHigh": 0, "pctFromYearLow": 29.9,
                         "priceTimestamp": "2026-10-09T20:00:00Z"},
@@ -482,21 +446,20 @@ def _position_case(name: str, select, *, ticker="TST", ids=("Q14-N3",), via: str
                 routes=POSITION_ROUTES, select=select, **kw)
 
 
-TWINS = (("analystInputs", "t1_inputs"), ("pricePositionInputs", "t2_inputs"), ("earningsInputs", "t4_inputs"),
-         ("technicalInputs", "t5_inputs"))
+REMOVED_GROUPS = ("t1_inputs", "t2_inputs", "t4_inputs", "t5_inputs")
+GROUPS = ("analystInputs", "pricePositionInputs", "earningsInputs", "technicalInputs")
 
 
-def _twin_view(v: dict) -> dict:
+def _groups_view(v: dict) -> dict:
     data = v["data"]
-    return {"ok": v["ok"], **{f"{new}EqualsT": new in data and data[new] == data[old] for new, old in TWINS},
-            "warnings": v["meta"]["warnings"]}
+    return {"ok": v["ok"], "removedGroups": sorted(k for k in REMOVED_GROUPS if k in data),
+            "groups": sorted(k for k in GROUPS if k in data), "warnings": v["meta"]["warnings"]}
 
 
 CASES += [
-    _position_case("neutral.n3c.new_groups_equal_their_t_inputs_twins_and_the_notice_lists_the_four_old_groups", _twin_view,
-                   expect={"ok": True, "analystInputsEqualsT": True, "pricePositionInputsEqualsT": True,
-                           "earningsInputsEqualsT": True, "technicalInputsEqualsT": True, "warnings": [POSITION_NOTICE]}),
-    # The twins are the same object contents, including today's asymmetries (technicalInputs has macd in Python only).
+    _position_case("neutral.n3c.tier_numbered_groups_are_gone_and_there_is_no_notice", _groups_view,
+                   expect={"ok": True, "removedGroups": [], "groups": sorted(GROUPS), "warnings": []}),
+    # 3.0.0: analystInputs takes its 30-day counts from the radar's plain upgrades/downgrades/initiations.
     _position_case("neutral.n3c.twins_carry_the_source_group_key_sets_t1", lambda v: sorted(v["data"]["analystInputs"]),
                    expect=["analystCount", "analystNetSentiment", "dominantRating", "downgrades30d", "initiations30d", "upgrades30d"]),
     _position_case("neutral.n3c.twins_carry_the_source_group_key_sets_t2", lambda v: sorted(v["data"]["pricePositionInputs"]),
@@ -510,12 +473,10 @@ _POS_DECISION = "FINDING Q14-N3c: analyze_position_signals runtime asymmetry tha
 
 CASES += [
     _position_case("neutral.n3c.finding_t5_macd_is_python_only",
-                   lambda v: {"t5": sorted(v["data"]["t5_inputs"]), "technicalInputs": sorted(v["data"]["technicalInputs"])},
+                   lambda v: {"technicalInputs": sorted(v["data"]["technicalInputs"])},
                    mode="pinned", decision=_POS_DECISION,
-                   expect_py={"t5": ["lastClose", "maPosition", "macd", "macdHistogram", "pctFrom200dma", "pctFrom50dma", "rsi14"],
-                              "technicalInputs": ["lastClose", "maPosition", "macd", "macdHistogram", "pctFrom200dma", "pctFrom50dma", "rsi14"]},
-                   expect_ts={"t5": ["lastClose", "maPosition", "macdHistogram", "pctFrom200dma", "pctFrom50dma", "rsi14"],
-                              "technicalInputs": ["lastClose", "maPosition", "macdHistogram", "pctFrom200dma", "pctFrom50dma", "rsi14"]}),
+                   expect_py={"technicalInputs": ["lastClose", "maPosition", "macd", "macdHistogram", "pctFrom200dma", "pctFrom50dma", "rsi14"]},
+                   expect_ts={"technicalInputs": ["lastClose", "maPosition", "macdHistogram", "pctFrom200dma", "pctFrom50dma", "rsi14"]}),
     _position_case("neutral.n3c.finding_component_status_keys_and_failed_components_differ",
                    lambda v: {"componentStatusKeys": sorted(v["data"]["componentStatus"]),
                               "hasFailedComponents": "failedComponents" in v["data"]},
@@ -541,8 +502,7 @@ CASES += [
                            "tickerIsList": isinstance(v["data"].get("ticker"), list)},
          mode="pinned", decision=_POS_DECISION,
          expect_py={"ok": True, "tickerIsList": True, "dataKeys": sorted([
-             "ticker", "status", "dataDate", "quoteDataDate", "quoteTimestamp", "completedBarDataDate", "t1_inputs", "t2_inputs",
-             "t4_inputs", "t5_inputs", "analystInputs", "pricePositionInputs", "earningsInputs", "technicalInputs",
+             "ticker", "status", "dataDate", "quoteDataDate", "quoteTimestamp", "completedBarDataDate", "analystInputs", "pricePositionInputs", "earningsInputs", "technicalInputs",
              "componentStatus", "failedComponents", "limitedComponents", "recommendedNextAction"])},
          expect_ts={"ok": True, "tickerIsList": False, "dataKeys": ["AAA", "BBB"]}),
 ]
@@ -585,50 +545,46 @@ CASES.append(Case(
     expect_ts={"ratingCount": 7, "numberOfAnalysts": 7, "totalAnalysts": None, "targetContributors": 3}))
 
 
-# ═══════════════════════════════════════════════════════════════════════════════════════════════
-# Notice selection (Q14-N1..N3): which payload shapes call for a notice. A notice fires when any listed field is present
-# (a key, whatever its value), at the top level or one level down for a batch result (or under `tickers` for the
-# snapshot), and always names the fixed set of fields.
-# ═══════════════════════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════════════
+# Notice selection (Q14-N1..N3): 3.0.0 removed every notice except F20, so a payload that still carries one of the
+# removed keys (or any other shape) gets no DEPRECATED_FIELD notice in either runtime.
+# ══════════════════════════════════════════════════════════════════════════════════════
 
 from yfmcp.deprecations import deprecation_warnings_for  # noqa: E402
 
 _VOLUME = "check_volume_liquidity_threshold"
 _NOTICE_SHAPES = [
-    # (label, tool, evidence_only, data, replacements that must be named)
-    ("price_target_key_present_with_null_value", "calculate_price_target_distance", False, {"bracket": None}, ["priceAtOrAboveTarget"]),
-    ("price_target_only_tag_note", "calculate_price_target_distance", False, {"tagNote": "x"}, ["priceAtOrAboveTarget"]),
-    ("price_target_none_of_the_fields", "calculate_price_target_distance", False, {"priceAtOrAboveTarget": True}, []),
+    # (label, tool, evidence_only, data)
+    ("price_target_key_present_with_null_value", "calculate_price_target_distance", False, {"bracket": None}),
+    ("price_target_only_tag_note", "calculate_price_target_distance", False, {"tagNote": "x"}),
+    ("price_target_none_of_the_fields", "calculate_price_target_distance", False, {"priceAtOrAboveTarget": True}),
     ("price_target_batch_keyed_by_ticker", "calculate_price_target_distance", False,
-     {"AAA": {"error": True}, "BBB": {"inferredTag": "LONG"}}, ["priceAtOrAboveTarget"]),
-    ("volume_gate_stale_payload_still_has_gate_pass", _VOLUME, False, {"status": "STALE_BAR", "gatePass": None}, ["meetsMinimum"]),
-    ("volume_gate_only_the_new_fields", _VOLUME, False, {"meetsMinimum": True, "minAdvUsd": 5}, []),
-    ("volume_gate_batch_keyed_by_ticker", _VOLUME, False, {"AAA": {"gateThresholdUsd": 1}}, ["meetsMinimum"]),
-    ("snapshot_dotted_path_present", "get_market_snapshot", False, {"volume": {"liquidityGatePass": None}}, ["volume.meetsMinimum"]),
-    ("snapshot_volume_without_the_deprecated_key", "get_market_snapshot", False, {"volume": {"meetsMinimum": True}}, []),
+     {"AAA": {"error": True}, "BBB": {"inferredTag": "LONG"}}),
+    ("volume_gate_stale_payload_still_has_gate_pass", _VOLUME, False, {"status": "STALE_BAR", "gatePass": None}),
+    ("volume_gate_only_the_new_fields", _VOLUME, False, {"meetsMinimum": True, "minAdvUsd": 5}),
+    ("volume_gate_batch_keyed_by_ticker", _VOLUME, False, {"AAA": {"gateThresholdUsd": 1}}),
+    ("snapshot_dotted_path_present", "get_market_snapshot", False, {"volume": {"liquidityGatePass": None}}),
+    ("snapshot_volume_without_the_removed_key", "get_market_snapshot", False, {"volume": {"meetsMinimum": True}}),
     ("snapshot_batch_under_tickers", "get_market_snapshot", False,
-     {"tickers": {"AAA": {"volume": {"liquidityGatePass": True}}}, "truncated": False}, ["volume.meetsMinimum"]),
-    ("snapshot_batch_entry_without_volume", "get_market_snapshot", False, {"tickers": {"AAA": {"error": True}}}, []),
-    ("position_one_group_is_enough", "analyze_position_signals", False, {"t5_inputs": {}},
-     ["analystInputs, pricePositionInputs, earningsInputs, technicalInputs"]),
-    ("position_batch_keyed_by_ticker", "analyze_position_signals", False, {"AAA": {"t1_inputs": {}}},
-     ["analystInputs, pricePositionInputs, earningsInputs, technicalInputs"]),
-    ("position_new_groups_only", "analyze_position_signals", False, {"analystInputs": {}}, []),
-    ("evidence_only_null_field_present", "get_evidence_quality", True, {"g2": None}, ["decisionUse"]),
-    ("evidence_only_action_not_flagged", "get_evidence_quality", False, {"g2": None}, []),
-    ("evidence_only_without_the_fields", "get_evidence_quality", True, {"decisionUse": "EVIDENCE_ONLY"}, []),
-    ("evidence_only_list_payload", "get_evidence_quality", True, [{"g2": None}], []),
-    ("unrelated_tool_with_a_gate_pass_key", "get_market_quote", False, {"gatePass": True, "bracket": 1}, []),
+     {"tickers": {"AAA": {"volume": {"liquidityGatePass": True}}}, "truncated": False}),
+    ("snapshot_batch_entry_without_volume", "get_market_snapshot", False, {"tickers": {"AAA": {"error": True}}}),
+    ("position_one_group_is_enough", "analyze_position_signals", False, {"t5_inputs": {}}),
+    ("position_batch_keyed_by_ticker", "analyze_position_signals", False, {"AAA": {"t1_inputs": {}}}),
+    ("position_new_groups_only", "analyze_position_signals", False, {"analystInputs": {}}),
+    ("evidence_only_null_field_present", "get_evidence_quality", True, {"g2": None}),
+    ("evidence_only_action_not_flagged", "get_evidence_quality", False, {"g2": None}),
+    ("evidence_only_without_the_fields", "get_evidence_quality", True, {"decisionUse": "EVIDENCE_ONLY"}),
+    ("evidence_only_list_payload", "get_evidence_quality", True, [{"g2": None}]),
+    ("unrelated_tool_with_a_gate_pass_key", "get_market_quote", False, {"gatePass": True, "bracket": 1}),
 ]
 
 
-def _notice_case(label: str, tool: str, evidence_only: bool, data, replacements: list[str]) -> Case:
+def _notice_case(label: str, tool: str, evidence_only: bool, data) -> Case:
     return Case(
         name=f"neutral.notice_selection.{label}", ids=["Q14-N2", "Q14-N3"],
         py=lambda: deprecation_warnings_for(tool, data, evidence_only=evidence_only),
-        ts={"js": "return m.deprecations.deprecationWarningsFor(args[0], args[1], {evidenceOnly: args[2], metaFields: []});",
-            "args": [tool, data, evidence_only]},
-        select=lambda v: [w["replacement"] for w in v], expect=replacements)
+        ts={"js": "return m.deprecations.deprecationWarningsFor(args[0], args[1]);", "args": [tool, data]},
+        select=lambda v: [w["replacement"] for w in v], expect=[])
 
 
 CASES += [_notice_case(*shape) for shape in _NOTICE_SHAPES]

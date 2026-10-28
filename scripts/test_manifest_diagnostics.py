@@ -355,24 +355,25 @@ class TestMarketSnapshotSchema(unittest.TestCase):
         self.assertIsNotNone(trend["rsi14"])
         self.assertIsNotNone(trend["macdHistogram"])
 
-    def test_volume_liquidity_gate(self):
+    def test_volume_has_no_fixed_liquidity_gate(self):
+        """3.0.0: volume.liquidityGatePass is removed; volume.meetsMinimum follows the caller's min_adv_usd."""
         self._mock_all_components(self.srv)
         result = json.loads(_run(self.srv.get_market_snapshot("ASTS")))
-        self.assertIsNotNone(result["volume"]["liquidityGatePass"])
-        self.assertIsInstance(result["volume"]["liquidityGatePass"], bool)
+        self.assertNotIn("liquidityGatePass", result["volume"])
+        self.assertIn("meetsMinimum", result["volume"])
 
     def test_volume_meets_minimum_follows_min_adv_usd(self):
-        """2.8.0: volume.meetsMinimum compares the 20d traded value with the caller's min_adv_usd; liquidityGatePass stays."""
+        """2.8.0: volume.meetsMinimum compares the 20d traded value with the caller's min_adv_usd; no liquidityGatePass."""
         self._mock_all_components(self.srv)
         plain = json.loads(_run(self.srv.get_market_snapshot("ASTS")))["volume"]
         self.assertIsNone(plain["meetsMinimum"])
         self.assertIsNone(plain["minAdvUsd"])
-        self.assertIs(plain["liquidityGatePass"], True)
+        self.assertNotIn("liquidityGatePass", plain)
         above = json.loads(_run(self.srv.get_market_snapshot("ASTS", min_adv_usd=20_000_000)))["volume"]
         below = json.loads(_run(self.srv.get_market_snapshot("ASTS", min_adv_usd=30_000_000)))["volume"]
         self.assertEqual((above["meetsMinimum"], above["minAdvUsd"]), (True, 20_000_000))
         self.assertEqual((below["meetsMinimum"], below["minAdvUsd"]), (False, 30_000_000))
-        self.assertIs(below["liquidityGatePass"], True)
+        self.assertNotIn("liquidityGatePass", below)
         batch = json.loads(_run(self.srv.get_market_snapshot(["ASTS"], min_adv_usd=30_000_000)))
         self.assertIs(batch["tickers"]["ASTS"]["volume"]["meetsMinimum"], False)
         for bad in ("abc", 0, -1, True):

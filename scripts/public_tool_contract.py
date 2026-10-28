@@ -29,7 +29,7 @@ DESCRIPTION_CONCEPTS: dict[str, tuple[tuple[str, ...], ...]] = {
     "get_market_calendar": (("market-wide",), ("earnings", "economic")),
     "calculate_price_target_distance": (("reference price target", "user-supplied"),),
     "analyze_position_signals": (("does not access holdings",),),
-    "check_volume_liquidity_threshold": (("liquidity thresholds",),),
+    "check_volume_liquidity_threshold": (("completed-session traded value",), ("min_adv_usd",)),
     "analyze_volume_ratio": (("completed-session volume",), ("partial", "retry")),
 }
 
@@ -68,12 +68,11 @@ DIRECT_OUTPUT_SCHEMA_FIELDS: dict[str, tuple[str, ...]] = {
         "ticker", "status", "barStatus", "freshnessStatus",
         "retryAttempted", "recommendedNextAction", "dataDate",
     ),
-    # gatePass and gateThresholdUsd are deprecated (2.8.0) and stay required until they are removed;
-    # meetsMinimum and minAdvUsd are their replacements.
+    # 3.0.0: gatePass and gateThresholdUsd are removed; meetsMinimum and minAdvUsd are the threshold fields.
     "check_volume_liquidity_threshold": (
         "ticker", "status", "barStatus", "freshnessStatus",
         "retryAttempted", "recommendedNextAction", "dataDate",
-        "gatePass", "gateThresholdUsd", "meetsMinimum", "minAdvUsd",
+        "meetsMinimum", "minAdvUsd",
     ),
 }
 

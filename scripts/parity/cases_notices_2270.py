@@ -1,14 +1,13 @@
-"""Parity cases for the 2.27.0 notice-only release (F61; analysis/yahoo-finance-mcp/F_TRIAGE.md §7).
+"""Parity cases for the DEPRECATED_FIELD notices after 3.0.0 (originally the 2.27.0 notice-only release, F61).
 
 Each case gives the same payload to the DEPRECATED_FIELD builder of both runtimes (Python
 ``deprecation_warnings_for``, Worker ``deprecationWarningsFor``). Nothing in ``data`` changes.
 
-- F20: a ``confidence`` holding a status string, at any depth, gets one notice in both runtimes.
-- F61 aliases: analyze_options_flow_window ``ivPctile`` / ``putVolVs10dAvg``; get_analyst_rating_changes'
-  ``*30d`` copies (null for any window other than 30 days).
-- F5/F45: ``meta.decisionGrade`` is in the Worker's meta only, so only the Worker gives its notice (pinned).
-- F17 / F47: Python's yfinance holder columns and calendar keys are in Python's payload only, so only Python gives
-  those notices (pinned).
+- F20: a ``confidence`` holding a status string, at any depth, gets one notice in both runtimes. It is the only
+  notice left in 3.0.0.
+- The 2.27.0 notices were removed with their fields: the options-flow aliases and rating-change ``*30d`` copies (F61),
+  ``meta.decisionGrade`` (F5/F45), Python's yfinance holder columns (F17) and calendar keys (F47). A payload that still
+  names them gets no notice in either runtime.
 """
 
 from __future__ import annotations
@@ -31,24 +30,14 @@ CONFIDENCE_NOTICE = _notice(
     ["confidence"], "status",
     "confidence values other than HIGH, MEDIUM and LOW (status strings such as EXTRACTION_FAILED or NOT_DISCLOSED) are deprecated "
     f"and {REMOVAL}; confidence will hold only HIGH, MEDIUM or LOW, and a status field names the limitation.")
-OPTIONS_NOTICE = _notice(
-    ["ivPctile", "putVolVs10dAvg"], "ivVsRealizedRangePct, putVolPer1PctStockAdv",
-    f"ivPctile, putVolVs10dAvg are deprecated and {REMOVAL}; use ivVsRealizedRangePct, putVolPer1PctStockAdv.")
-RATING_NOTICE = _notice(
-    ["upgrades30d", "downgrades30d", "initiations30d"], "upgrades, downgrades, initiations",
-    f"upgrades30d, downgrades30d, initiations30d are deprecated and {REMOVAL}; use upgrades, downgrades, initiations, "
-    "which count the windowDays window.")
-META_GRADE_NOTICE = _notice(
-    ["meta.decisionGrade"], "decisionGrade",
-    f"meta.decisionGrade is deprecated and {REMOVAL}; use the payload's decisionGrade, which is set per call.")
 
 
-def _case(name: str, ids: list[str], tool: str, data, expect=None, *, meta_fields=(), evidence_only=False, **kw) -> Case:
+def _case(name: str, ids: list[str], tool: str, data, expect=None, *, evidence_only=False, **kw) -> Case:
     return Case(
         name=name, ids=ids,
         py=lambda: deprecation_warnings_for(tool, json.loads(json.dumps(data)), evidence_only=evidence_only),
-        ts={"js": "return m.deprecations.deprecationWarningsFor(args[0], args[1], {evidenceOnly: args[2], metaFields: args[3]});",
-            "args": [tool, data, evidence_only, list(meta_fields)]},
+        ts={"js": "return m.deprecations.deprecationWarningsFor(args[0], args[1]);",
+            "args": [tool, data]},
         **({"expect": expect} if expect is not None else {}), **kw)
 
 
@@ -66,35 +55,26 @@ CASES += [
     _case("notices2270.confidence.levels_only_no_notice", ["F20", "F61"], "extract_geographic_revenue",
           {"value": 1, "confidence": "HIGH", "evidence": [{"confidence": "MEDIUM"}, {"confidence": "LOW"}]}, []),
     _case("notices2270.confidence.non_string_ignored", ["F20", "F61"], "get_market_quote", {"confidence": None, "x": {"confidence": 0.9}}, []),
-    # F61 aliases.
-    _case("notices2270.options_flow.aliases", ["F61"], "analyze_options_flow_window",
-          {"ticker": "AAPL", "ivVsRealizedRangePct": 40, "putVolPer1PctStockAdv": 0.5, "ivPctile": 40, "putVolVs10dAvg": 0.5}, [OPTIONS_NOTICE]),
+    # 3.0.0: the F61 aliases and *30d copies are removed with their notices; a payload that still names them gets none.
+    _case("notices2270.options_flow.removed_aliases_get_no_notice", ["F61"], "analyze_options_flow_window",
+          {"ticker": "AAPL", "ivVsRealizedRangePct": 40, "putVolPer1PctStockAdv": 0.5, "ivPctile": 40, "putVolVs10dAvg": 0.5}, []),
     _case("notices2270.options_flow.other_tool_keeps_its_ivpctile", ["F61"], "get_put_hedge_candidates",
           {"candidates": [{"ivPctile": 40}], "ivPctile": 40}, []),
-    _case("notices2270.rating_changes.window_copies", ["F61"], "get_analyst_rating_changes", _RATING, [RATING_NOTICE]),
-    _case("notices2270.rating_changes.batch", ["F61"], "get_analyst_rating_changes", {"AAPL": _RATING, "MSFT": _RATING}, [RATING_NOTICE]),
-    # Both a tool notice and the confidence notice, in that order.
-    _case("notices2270.order.tool_notice_then_confidence", ["F20", "F61"], "analyze_options_flow_window",
-          {"ivPctile": 1, "quality": {"confidence": "NOT_DECISION_GRADE"}}, [OPTIONS_NOTICE, CONFIDENCE_NOTICE]),
-    # F5/F45: the Worker's meta carries the status table's decisionGrade; Python's meta has none (pinned).
-    _case("notices2270.meta_decision_grade.worker_meta_only", ["F5", "F45", "F61"], "extract_sec_filing_fact", {"value": 1, "decisionGrade": True},
-          meta_fields=["capabilityStatus", "decisionGrade"], mode="pinned", decision="F5-WORKER-META-ONLY",
-          expect_py=[], expect_ts=[META_GRADE_NOTICE]),
-    # F17 / F47: Python's yfinance-shaped payloads (pinned; the Worker never returns these keys).
-    _case("notices2270.holders.python_yfinance_columns", ["F17", "F61"], "get_ownership_holders",
-          [{"Date Reported": "2026-06-30", "Holder": "Vanguard", "pctHeld": 0.09, "Shares": 1, "Value": 2}],
-          mode="pinned", decision="F17-PYTHON-SHAPE-ONLY", expect_ts=[], expect_py=[_notice(
-              ["Date Reported", "Holder", "Shares", "Value"], "the Worker's quoteSummary rows (camelCase keys)",
-              f"Date Reported, Holder, Shares, Value are deprecated and {REMOVAL}; rows take the Worker's quoteSummary rows (camelCase keys).")]),
+    _case("notices2270.rating_changes.window_copies_get_no_notice", ["F61"], "get_analyst_rating_changes", _RATING, []),
+    _case("notices2270.rating_changes.batch_gets_no_notice", ["F61"], "get_analyst_rating_changes", {"AAPL": _RATING, "MSFT": _RATING}, []),
+    # The confidence notice alone, whatever else the payload names.
+    _case("notices2270.order.only_the_confidence_notice_remains", ["F20", "F61"], "analyze_options_flow_window",
+          {"ivPctile": 1, "quality": {"confidence": "NOT_DECISION_GRADE"}}, [CONFIDENCE_NOTICE]),
+    # F5/F45: meta.decisionGrade is gone from the Worker's meta; the builder takes no meta fields any more.
+    _case("notices2270.meta_decision_grade.no_notice", ["F5", "F45", "F61"], "extract_sec_filing_fact",
+          {"value": 1, "decisionGrade": True}, []),
+    # F17 / F47: Python's yfinance-shaped payloads were replaced by the Worker's shapes; neither gets a notice.
+    _case("notices2270.holders.yfinance_columns_get_no_notice", ["F17", "F61"], "get_ownership_holders",
+          [{"Date Reported": "2026-06-30", "Holder": "Vanguard", "pctHeld": 0.09, "Shares": 1, "Value": 2}], []),
     _case("notices2270.holders.camel_case_rows_no_notice", ["F17", "F61"], "get_ownership_holders",
           {"ownershipList": [{"organization": "Vanguard", "value": 2}]}, []),
-    _case("notices2270.calendar.python_yfinance_keys", ["F47", "F61"], "get_company_events_calendar",
-          {"ticker": "AAPL", "calendar": {"Dividend Date": "2026-11-13", "Earnings Date": ["2027-01-29"], "Earnings High": 2.6}},
-          mode="pinned", decision="F47-PYTHON-SHAPE-ONLY", expect_ts=[], expect_py=[_notice(
-              ["calendar.Dividend Date", "calendar.Earnings Date", "calendar.Earnings High"],
-              "calendar.earnings.earningsDate, calendar.earnings.*, calendar.dividendDate, calendar.exDividendDate",
-              f"calendar.Dividend Date, calendar.Earnings Date, calendar.Earnings High are deprecated and {REMOVAL}; use "
-              "calendar.earnings.earningsDate, calendar.earnings.*, calendar.dividendDate, calendar.exDividendDate.")]),
+    _case("notices2270.calendar.yfinance_keys_get_no_notice", ["F47", "F61"], "get_company_events_calendar",
+          {"ticker": "AAPL", "calendar": {"Dividend Date": "2026-11-13", "Earnings Date": ["2027-01-29"], "Earnings High": 2.6}}, []),
     _case("notices2270.calendar.worker_keys_no_notice", ["F47", "F61"], "get_company_events_calendar",
           {"ticker": "AAPL", "calendar": {"earnings": {"earningsDate": ["2027-01-29"]}, "dividendDate": None, "exDividendDate": None}}, []),
 ]

@@ -1823,7 +1823,7 @@ def _radar_failure_case(name, ids, **kw) -> Case:
     js = _worker_js("""
 const realStringify = JSON.stringify;
 JSON.stringify = function (value, ...rest) {
-  if (value && typeof value === "object" && ("upgrades30d" in value || value.message === "radar boom")) throw new Error("radar boom");
+  if (value && typeof value === "object" && (("netSentiment" in value && "upgrades" in value) || value.message === "radar boom")) throw new Error("radar boom");
   return realStringify.call(JSON, value, ...rest);
 };
 let raw;
@@ -2494,26 +2494,22 @@ CASES += [
                 "failureMode": "NO_OFFICIAL_RELEASE_SOURCE", "sourceStatus": {"yahoo_finance_news": "OK"}, "sourcesUsed": ["yahoo_finance_news"],
                 "warnings": [["NO_OFFICIAL_RELEASE_SOURCE", "No company-originated or official release source found in requested window."]],
                 "next": "USE_RETURNED_CONTEXT"}),
-    # Card 267: the one payload field that still differs is doctrineUse 'ALLOWED', which the Worker emits and Python does not (call #18,
-    # rule P3: a deprecated field is not spread; it stays Worker-only and is documented until Phase 6 removes it). Since 2.19.0
+    # Card 267: since 3.0.0 neither runtime emits doctrineUse (the Worker's deprecated field was removed; Python never had it). Since 2.19.0
     # (B-G18 / call #18) secEvidence[] carries cikInt in Python too, and decisionGradeBasis uses Python's wording in both runtimes (the
     # Worker said 'SEC EX-99 press-release exhibit').
     _sec_scenario(
-        "news.press_releases.payload_has_doctrine_use_in_the_worker_only", ["BR-NWS-267"],
+        "news.press_releases.payload_has_no_doctrine_use_in_either_runtime", ["BR-NWS-267"],
         lambda: server.get_company_press_releases("ACME", 90, 20, ["sec"]),
         'm.yahooFinance.getCompanyPressReleases("ACME", 90, 20, ["sec"])',
         _PR_SEC, news=[], info=_ACME_CORP,
-        select=lambda d: {"doctrineUse": d.get("doctrineUse"), "basis": d["decisionGradeBasis"], "capabilityStatus": d["capabilityStatus"],
+        select=lambda d: {"hasDoctrineUse": "doctrineUse" in d, "reliabilityClass": d.get("reliabilityClass"),
+                          "basis": d["decisionGradeBasis"], "capabilityStatus": d["capabilityStatus"],
                           "secEvidenceKeys": sorted(d["secEvidence"][0].keys()), "cikInt": d["secEvidence"][0]["cikInt"],
                           "failureMode": d["failureMode"]},
-        mode="pinned",
-        decision="FINDING: get_company_press_releases adds the deprecated doctrineUse='ALLOWED' in the Worker only (call #18, rule P3; documented, removed in Phase 6). secEvidence[].cikInt and decisionGradeBasis agree since 2.19.0",
-        expect_py={"doctrineUse": None, "basis": "No resolved SEC EX-99 or approved IR-page evidence in this call; use for verification/context only.",
-                   "capabilityStatus": "ACTIVE", "secEvidenceKeys": ["acceptedAt", "accessionNumber", "cikInt", "documentUrl", "filingDate", "filingType"],
-                   "cikInt": "1234567", "failureMode": "SEC_8K_FOUND_EX99_NOT_FOUND"},
-        expect_ts={"doctrineUse": "ALLOWED", "basis": "No resolved SEC EX-99 or approved IR-page evidence in this call; use for verification/context only.",
-                   "capabilityStatus": "ACTIVE", "secEvidenceKeys": ["acceptedAt", "accessionNumber", "cikInt", "documentUrl", "filingDate", "filingType"],
-                   "cikInt": "1234567", "failureMode": "SEC_8K_FOUND_EX99_NOT_FOUND"}),
+        expect={"hasDoctrineUse": False, "reliabilityClass": "RELIABLE",
+                "basis": "No resolved SEC EX-99 or approved IR-page evidence in this call; use for verification/context only.",
+                "capabilityStatus": "ACTIVE", "secEvidenceKeys": ["acceptedAt", "accessionNumber", "cikInt", "documentUrl", "filingDate", "filingType"],
+                "cikInt": "1234567", "failureMode": "SEC_8K_FOUND_EX99_NOT_FOUND"}),
 ]
 
 
