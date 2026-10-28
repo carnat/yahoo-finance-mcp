@@ -15,6 +15,7 @@ This module stays import-free of the rest of yfmcp, like worker/src/deprecations
 from __future__ import annotations
 
 import math
+import re
 
 # doctrineUse -> reliabilityClass (N1).
 RELIABILITY_CLASS_BY_DOCTRINE_USE = {
@@ -92,6 +93,78 @@ POSITION_INPUT_GROUP_DEPRECATION = _deprecated_field_warning(
 )
 
 
+# F61 (2.27.0): analyze_options_flow_window's 2.4.4 aliases, until now announced only in fieldNotes.
+OPTIONS_FLOW_ALIAS_FIELDS = ["ivPctile", "putVolVs10dAvg"]
+OPTIONS_FLOW_ALIAS_DEPRECATION = _deprecated_field_warning(
+    OPTIONS_FLOW_ALIAS_FIELDS,
+    "ivVsRealizedRangePct, putVolPer1PctStockAdv",
+    f"{_field_list(OPTIONS_FLOW_ALIAS_FIELDS)} deprecated and {_REMOVAL}; use ivVsRealizedRangePct, putVolPer1PctStockAdv.",
+)
+
+# F61 (2.27.0): get_analyst_rating_changes' 30-day copies, null for any other window.
+RATING_WINDOW_FIELDS = ["upgrades30d", "downgrades30d", "initiations30d"]
+RATING_WINDOW_DEPRECATION = _deprecated_field_warning(
+    RATING_WINDOW_FIELDS,
+    "upgrades, downgrades, initiations",
+    f"{_field_list(RATING_WINDOW_FIELDS)} deprecated and {_REMOVAL}; use upgrades, downgrades, initiations, which count the windowDays window.",
+)
+
+# F20 (2.27.0): status strings carried in confidence.
+STATUS_CONFIDENCE_DEPRECATION = _deprecated_field_warning(
+    ["confidence"],
+    "status",
+    "confidence values other than HIGH, MEDIUM and LOW (status strings such as EXTRACTION_FAILED or NOT_DISCLOSED) are deprecated "
+    f"and {_REMOVAL}; confidence will hold only HIGH, MEDIUM or LOW, and a status field names the limitation.",
+)
+_CONFIDENCE_LEVELS = {"HIGH", "MEDIUM", "LOW"}
+
+# Python only (2.27.0). The Worker never emitted these keys, so it has no such notice (as N1 above, the other way round).
+# F17: get_ownership_holders rows carry yfinance's column names; the major gives them the Worker's quoteSummary shape.
+HOLDER_ROWS_REPLACEMENT = "the Worker's quoteSummary rows (camelCase keys)"
+# F47: get_company_events_calendar's calendar carries yfinance's keys; the major gives it the Worker's keys.
+CALENDAR_KEYS_REPLACEMENT = "calendar.earnings.earningsDate, calendar.earnings.*, calendar.dividendDate, calendar.exDividendDate"
+
+
+def _yfinance_keys(keys) -> list[str]:
+    """The keys that are not camelCase identifiers (yfinance column names such as "Value" or "Earnings Date")."""
+    return sorted({k for k in keys if isinstance(k, str) and not re.fullmatch(r"[a-z][A-Za-z0-9]*", k)})
+
+
+def holder_rows_deprecation(data: object) -> dict | None:
+    if not isinstance(data, list):
+        return None
+    fields = _yfinance_keys(k for row in data if isinstance(row, dict) for k in row)
+    if not fields:
+        return None
+    return _deprecated_field_warning(fields, HOLDER_ROWS_REPLACEMENT,
+                                     f"{_field_list(fields)} deprecated and {_REMOVAL}; rows take {HOLDER_ROWS_REPLACEMENT}.")
+
+
+def calendar_keys_deprecation(data: object) -> dict | None:
+    calendar = data.get("calendar") if isinstance(data, dict) else None
+    if not isinstance(calendar, dict):
+        return None
+    fields = [f"calendar.{k}" for k in _yfinance_keys(calendar)]
+    if not fields:
+        return None
+    return _deprecated_field_warning(fields, CALENDAR_KEYS_REPLACEMENT,
+                                     f"{_field_list(fields)} deprecated and {_REMOVAL}; use {CALENDAR_KEYS_REPLACEMENT}.")
+
+
+def payload_has_status_confidence(data: object, depth: int = 0) -> bool:
+    """Whether any ``confidence`` in the payload holds a string other than HIGH, MEDIUM or LOW (F20)."""
+    if depth > 8 or not isinstance(data, (dict, list)):
+        return False
+    if isinstance(data, list):
+        return any(payload_has_status_confidence(item, depth + 1) for item in data)
+    for key, value in data.items():
+        if key == "confidence" and isinstance(value, str) and value not in _CONFIDENCE_LEVELS:
+            return True
+        if isinstance(value, (dict, list)) and payload_has_status_confidence(value, depth + 1):
+            return True
+    return False
+
+
 def _has_path(rec: dict, path: str) -> bool:
     """True when ``path`` (dotted) resolves to a key of ``rec``."""
     node: object = rec
@@ -139,6 +212,22 @@ def deprecation_warnings_for(tool: str, data: object, *, evidence_only: bool) ->
     elif tool == "analyze_position_signals":
         if _payload_has_any_field(data, POSITION_INPUT_GROUPS):
             notice(POSITION_INPUT_GROUP_DEPRECATION)
+    elif tool == "analyze_options_flow_window":
+        if _payload_has_any_field(data, OPTIONS_FLOW_ALIAS_FIELDS):
+            notice(OPTIONS_FLOW_ALIAS_DEPRECATION)
+    elif tool == "get_analyst_rating_changes":
+        if _payload_has_any_field(data, RATING_WINDOW_FIELDS):
+            notice(RATING_WINDOW_DEPRECATION)
+    elif tool == "get_ownership_holders":
+        warning = holder_rows_deprecation(data)
+        if warning:
+            notice(warning)
+    elif tool == "get_company_events_calendar":
+        warning = calendar_keys_deprecation(data)
+        if warning:
+            notice(warning)
+    if payload_has_status_confidence(data):
+        notice(STATUS_CONFIDENCE_DEPRECATION)
     return out
 
 

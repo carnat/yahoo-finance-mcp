@@ -87,6 +87,39 @@ export const POSITION_INPUT_GROUP_DEPRECATION = deprecatedFieldWarning(
   `${fieldList(POSITION_INPUT_GROUPS)} deprecated and ${REMOVAL}; use ${POSITION_INPUT_REPLACEMENTS}.`,
 );
 
+/** F5/F45 (2.27.0): the status table's static decisionGrade in meta. The payload's own decisionGrade, set per call, stays. */
+export const META_DECISION_GRADE_DEPRECATION = deprecatedFieldWarning(
+  ["meta.decisionGrade"],
+  "decisionGrade",
+  `${fieldList(["meta.decisionGrade"])} deprecated and ${REMOVAL}; use the payload's decisionGrade, which is set per call.`,
+);
+
+/** F61 (2.27.0): analyze_options_flow_window's 2.4.4 aliases, until now announced only in fieldNotes. */
+const OPTIONS_FLOW_ALIAS_FIELDS = ["ivPctile", "putVolVs10dAvg"];
+export const OPTIONS_FLOW_ALIAS_DEPRECATION = deprecatedFieldWarning(
+  OPTIONS_FLOW_ALIAS_FIELDS,
+  "ivVsRealizedRangePct, putVolPer1PctStockAdv",
+  `${fieldList(OPTIONS_FLOW_ALIAS_FIELDS)} deprecated and ${REMOVAL}; use ivVsRealizedRangePct, putVolPer1PctStockAdv.`,
+);
+
+/** F61 (2.27.0): get_analyst_rating_changes' 30-day copies, null for any other window. */
+const RATING_WINDOW_FIELDS = ["upgrades30d", "downgrades30d", "initiations30d"];
+export const RATING_WINDOW_DEPRECATION = deprecatedFieldWarning(
+  RATING_WINDOW_FIELDS,
+  "upgrades, downgrades, initiations",
+  `${fieldList(RATING_WINDOW_FIELDS)} deprecated and ${REMOVAL}; use upgrades, downgrades, initiations, which count the windowDays window.`,
+);
+
+/** F20 (2.27.0): status strings carried in confidence. */
+export const STATUS_CONFIDENCE_DEPRECATION = deprecatedFieldWarning(
+  ["confidence"],
+  "status",
+  "confidence values other than HIGH, MEDIUM and LOW (status strings such as EXTRACTION_FAILED or NOT_DISCLOSED) are deprecated "
+    + `and ${REMOVAL}; confidence will hold only HIGH, MEDIUM or LOW, and a status field names the limitation.`,
+);
+
+const CONFIDENCE_LEVELS = new Set(["HIGH", "MEDIUM", "LOW"]);
+
 type Rec = Record<string, unknown>;
 
 function isRecord(value: unknown): value is Rec {
@@ -119,6 +152,17 @@ function payloadHasAnyField(data: unknown, fields: string[]): boolean {
   return Object.values(batch).some((entry) => isRecord(entry) && hasAnyField(entry, fields));
 }
 
+/** Whether any `confidence` in the payload holds a string other than HIGH, MEDIUM or LOW (F20). */
+export function payloadHasStatusConfidence(data: unknown, depth = 0): boolean {
+  if (depth > 8 || data == null || typeof data !== "object") return false;
+  if (Array.isArray(data)) return data.some((item) => payloadHasStatusConfidence(item, depth + 1));
+  for (const [key, value] of Object.entries(data as Rec)) {
+    if (key === "confidence" && typeof value === "string" && !CONFIDENCE_LEVELS.has(value)) return true;
+    if (value != null && typeof value === "object" && payloadHasStatusConfidence(value, depth + 1)) return true;
+  }
+  return false;
+}
+
 /**
  * The DEPRECATED_FIELD notices for one successful tool response. `metaFields`
  * are the deprecated keys the envelope's meta carries for this call (from the
@@ -135,6 +179,7 @@ export function deprecationWarningsFor(
   if (opts.metaFields.includes("doctrineUse") || (isRecord(data) && "doctrineUse" in data)) {
     notice(DOCTRINE_USE_DEPRECATION);
   }
+  if (opts.metaFields.includes("decisionGrade")) notice(META_DECISION_GRADE_DEPRECATION);
   if (opts.evidenceOnly && isRecord(data) && hasAnyField(data, BOUNDARY_NULL_FIELDS)) {
     notice(AUTHORITY_BOUNDARY_DEPRECATION);
   }
@@ -151,7 +196,14 @@ export function deprecationWarningsFor(
     case "analyze_position_signals":
       if (payloadHasAnyField(data, POSITION_INPUT_GROUPS)) notice(POSITION_INPUT_GROUP_DEPRECATION);
       break;
+    case "analyze_options_flow_window":
+      if (payloadHasAnyField(data, OPTIONS_FLOW_ALIAS_FIELDS)) notice(OPTIONS_FLOW_ALIAS_DEPRECATION);
+      break;
+    case "get_analyst_rating_changes":
+      if (payloadHasAnyField(data, RATING_WINDOW_FIELDS)) notice(RATING_WINDOW_DEPRECATION);
+      break;
   }
+  if (payloadHasStatusConfidence(data)) notice(STATUS_CONFIDENCE_DEPRECATION);
   return out;
 }
 
