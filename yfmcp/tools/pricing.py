@@ -1,6 +1,7 @@
 import asyncio
 import datetime
 import json
+import re
 import sys
 from typing import Annotated, Literal, get_args
 import zoneinfo
@@ -1761,6 +1762,21 @@ def _classify_quote_freshness(
         return "UNKNOWN"
 
 
+_SNAPSHOT_NOT_FOUND_MESSAGE = "No provider data was found for the requested ticker."
+
+
+def _snapshot_component_message(message: str) -> str:
+    """The Worker's snapshotComponentMessage (2.26.5, F56): the message without provider URLs."""
+    cleaned = re.sub(r"\s+", " ", re.sub(r"https?://\S+", " ", message[:300], flags=re.I)).strip()
+    cleaned = re.sub(r"[\s:]+$", "", cleaned)
+    return cleaned or "error in response"
+
+
+def _snapshot_ticker_not_found(message: str) -> bool:
+    """The Worker's snapshotTickerNotFound (2.26.5, F56): a quote failure that says the ticker does not exist."""
+    return re.search(r"not found|no data found|no price data found|api error 404|ticker_not_found", message, re.I) is not None
+
+
 @yfinance_server.tool(name="get_market_snapshot", description="Compact market-state packet with separate live-quote and completed-bar dates, component status, price/range, moving-average trend, completed-session volume/liquidity, and technical indicators. Supports compact/full modes and ticker batches. Pass min_adv_usd for a caller-chosen threshold; meetsMinimum reports adv20dTradedValueUsd >= min_adv_usd.")
 async def get_market_snapshot(
     ticker: str | list[str],
@@ -1781,9 +1797,16 @@ async def get_market_snapshot(
                 results[t] = {"error": True, "message": str(outcome)}
                 continue
             try:
-                results[t] = json.loads(outcome)
+                parsed = json.loads(outcome)
             except Exception as e:
                 results[t] = {"error": True, "message": str(e)}
+                continue
+            # An unknown ticker is TICKER_NOT_FOUND, not retried, as in the Worker (2.26.5, F56).
+            error = parsed.get("error") if isinstance(parsed, dict) and parsed.get("ok") is False else None
+            if isinstance(error, dict) and error.get("code") == ErrorCode.TICKER_NOT_FOUND:
+                results[t] = {"error": True, "code": ErrorCode.TICKER_NOT_FOUND, "message": _SNAPSHOT_NOT_FOUND_MESSAGE, "retryable": False}
+                continue
+            results[t] = parsed
         return json.dumps({"tickers": results})
 
     retrieved_at = datetime.datetime.utcnow().isoformat() + "Z"
@@ -1805,18 +1828,40 @@ async def get_market_snapshot(
 
     names = ["quote", "priceStats", "maPosition", "volumeRatio", "volumeGate", "technicalIndicators"]
 
+    # An unknown ticker fails as get_market_quote does, TICKER_NOT_FOUND and not retried, instead of a PARTIAL
+    # snapshot that says RETRY (2.26.5, F56).
+    quote_raw = component_results[0]
+    quote_failure = None
+    if isinstance(quote_raw, Exception):
+        quote_failure = str(quote_raw)
+    elif isinstance(quote_raw, str):
+        try:
+            quote_parsed = json.loads(quote_raw)
+            error = quote_parsed.get("error") if isinstance(quote_parsed, dict) else None
+            if isinstance(error, dict):
+                # get_market_quote's failure envelope: its code says whether the ticker exists.
+                quote_failure = "TICKER_NOT_FOUND" if error.get("code") == ErrorCode.TICKER_NOT_FOUND else str(error.get("message") or "")
+            elif error:
+                quote_failure = str(quote_parsed.get("message") or "")
+        except Exception:
+            quote_failure = quote_raw
+    if quote_failure is not None and _snapshot_ticker_not_found(quote_failure):
+        return _mcp_failure("get_market_snapshot", ErrorCode.TICKER_NOT_FOUND, _SNAPSHOT_NOT_FOUND_MESSAGE,
+                            meta_extra={"retryable": False})
+
     def _parse_component(raw, name: str) -> dict | None:
         if isinstance(raw, Exception):
             component_status[name] = "FAILED"
             failed_components.append(name)
-            warnings_list.append({"code": "COMPONENT_FAILED", "component": name, "message": str(raw)})
+            warnings_list.append({"code": "COMPONENT_FAILED", "component": name, "message": _snapshot_component_message(str(raw))})
             return None
         try:
             parsed = json.loads(str(raw))
             if isinstance(parsed, dict) and parsed.get("error"):
                 component_status[name] = "FAILED"
                 failed_components.append(name)
-                warnings_list.append({"code": "COMPONENT_FAILED", "component": name, "message": parsed.get("message", "error in response")})
+                warnings_list.append({"code": "COMPONENT_FAILED", "component": name,
+                                      "message": _snapshot_component_message(str(parsed.get("message", "error in response")))})
                 return None
             payload_status = parsed.get("status") if isinstance(parsed, dict) else None
             if payload_status in {"STALE_BAR", "PARTIAL"}:
@@ -1830,10 +1875,11 @@ async def get_market_snapshot(
             else:
                 component_status[name] = "OK"
             return parsed if isinstance(parsed, dict) else None
-        except Exception as e:
+        except Exception:
+            # A component's plain-text error is its message, not the JSON parser's (2.26.5, F56).
             component_status[name] = "FAILED"
             failed_components.append(name)
-            warnings_list.append({"code": "COMPONENT_FAILED", "component": name, "message": str(e)})
+            warnings_list.append({"code": "COMPONENT_FAILED", "component": name, "message": _snapshot_component_message(str(raw))})
             return None
 
     quote, price_stats, ma, volume_ratio, volume_gate, tech = (
