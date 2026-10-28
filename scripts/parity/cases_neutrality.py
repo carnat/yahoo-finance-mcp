@@ -27,6 +27,7 @@ from scripts.parity.cases_pricing_evidence_tools import (
 )
 from scripts.parity.cases_accession import _python_sec_state
 from scripts.parity.harness import Case
+from scripts.parity.cases_notices_2270 import CONFIDENCE_NOTICE, META_GRADE_NOTICE
 
 import server  # noqa: F401,E402
 from yfmcp.envelope import _envelope_tool_result  # noqa: E402
@@ -377,19 +378,21 @@ CASES += [
                routes=SECTION_ROUTES, ids=("Q14-N1",),
                expect={"ok": True, "metaReliabilityClass": "UNRELIABLE", "dataReliabilityClass": "UNRELIABLE", "dataHasReliabilityClass": True}),
     # FINDING: the Worker also emits doctrineUse (meta and, for these two tools, data) and the N1 notice; Python never did.
+    # 2.27.0: the Worker's meta.decisionGrade gets its notice too (F5/F45), and a status string in confidence gets the
+    # F20 notice in both runtimes where the payload says confidence NOT_DECISION_GRADE (the fact and section fixtures).
     _tool_case("neutral.n1.finding_doctrine_use_and_its_notice_are_worker_only_press_releases", PRESS[0], PRESS[1], PRESS[2],
                _doctrine_view, mode="pinned", decision="FINDING Q14-N1: Python never emitted doctrineUse, so it has no doctrineUse notice (spec section 1)",
                expect_py={"metaDoctrineUse": None, "dataDoctrineUse": None, "warnings": []},
-               expect_ts={"metaDoctrineUse": "ALLOWED", "dataDoctrineUse": "ALLOWED", "warnings": [N1_NOTICE]}),
+               expect_ts={"metaDoctrineUse": "ALLOWED", "dataDoctrineUse": "ALLOWED", "warnings": [N1_NOTICE, META_GRADE_NOTICE]}),
     _tool_case("neutral.n1.finding_doctrine_use_and_its_notice_are_worker_only_extract_sec_filing_fact", FACT[0], FACT[1], FACT[2],
                _doctrine_view, mode="pinned", decision="FINDING Q14-N1: Python never emitted doctrineUse, so it has no doctrineUse notice (spec section 1)",
-               expect_py={"metaDoctrineUse": None, "dataDoctrineUse": None, "warnings": []},
-               expect_ts={"metaDoctrineUse": "ALLOWED", "dataDoctrineUse": None, "warnings": [N1_NOTICE]}),
+               expect_py={"metaDoctrineUse": None, "dataDoctrineUse": None, "warnings": [CONFIDENCE_NOTICE]},
+               expect_ts={"metaDoctrineUse": "ALLOWED", "dataDoctrineUse": None, "warnings": [N1_NOTICE, META_GRADE_NOTICE, CONFIDENCE_NOTICE]}),
     _tool_case("neutral.n1.finding_doctrine_use_and_its_notice_are_worker_only_section_markdown", SECTION[0], SECTION[1], SECTION[2],
                _doctrine_view, routes=SECTION_ROUTES, mode="pinned",
                decision="FINDING Q14-N1: Python never emitted doctrineUse, so it has no doctrineUse notice (spec section 1)",
-               expect_py={"metaDoctrineUse": None, "dataDoctrineUse": None, "warnings": []},
-               expect_ts={"metaDoctrineUse": "BLOCKED", "dataDoctrineUse": "BLOCKED", "warnings": [N1_NOTICE]}),
+               expect_py={"metaDoctrineUse": None, "dataDoctrineUse": None, "warnings": [CONFIDENCE_NOTICE]},
+               expect_ts={"metaDoctrineUse": "BLOCKED", "dataDoctrineUse": "BLOCKED", "warnings": [N1_NOTICE, META_GRADE_NOTICE, CONFIDENCE_NOTICE]}),
 ]
 
 

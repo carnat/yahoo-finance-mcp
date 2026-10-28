@@ -183,7 +183,7 @@ The pre-Phase 6 audit of build 2.26.3+git.9a549f2 (`/mnt/project-files/audits/mc
 - **F54–F62 (Medium):** classified in `/mnt/project-files/audits/f54-f62-recommendations-2026-10-27.md`; the owner approved every recommendation as written on 2026-10-27 ("yes").
   - **F54, F55, F56, F57, F60 parts 1–2, F62: fixed in 2.26.5** (docs section "Audit Repairs F54–F57, F60, F62 (2.26.5)"). Planner calls settled by the approval: F54 `coveragePct` null with the tagged ladder; F55 simple singular/plural matching, no stemming; F57 `code` in each `errors` entry; F60 part 2 null period for a header without a year; F62 the F39 phrases for every region.
   - **F58 (ops): no change.** No deploy or canary script calls an Alpha Vantage-backed tool, so they did not spend the quota; it is shared with every caller of the deployed key. A separate verification key stays the owner's option.
-  - **F61, with the F59 and F60 part 3 notices: 2.27.0**, a notice-only minor (no behaviour change).
+  - **F61, with the F59 and F60 part 3 notices: 2.27.0**, a notice-only minor (no behaviour change). Docs section "Phase 6 Deprecation Notices (2.27.0)". Correction found while building: the rating-change keys that duplicate are `upgrades30d`/`downgrades30d`/`initiations30d` (null for any window but 30 days), so those carry the notice, not `upgrades`/`downgrades`/`initiations`; put to the owner on 2026-10-28.
   - **F59 envelope shape and F60 part 3 period vocabulary: Phase 6.**
 - **The 14 low items:** open, not classified. Phase 6 gaps from the audit (deprecation notices for F5/F45, F20, F47) are the 2.27.0 notices above.
 

@@ -3190,6 +3190,29 @@ F-024, F-026, F-029). Both runtimes change alike.
 - **Tests:** 21 new parity cases in `scripts/parity/cases_audit_2251.py`.
 - **Rollback:** redeploy 2.25.0.
 
+## Phase 6 Deprecation Notices (2.27.0)
+
+- **Why:** finding F61 of the 2026-10-27 audit (`analysis/yahoo-finance-mcp/F_TRIAGE.md` §7). The Phase 6 major release removes or reshapes the fields below, and each needs a notice for at least one minor version first. Release type: minor, notice only. **No value, field or status changes**; the notices are `DEPRECATED_FIELD` rows in `meta.warnings` (never in `data`), with the 2.8.0 key order and texts identical in both runtimes.
+- **Mapping:**
+
+  | Deprecated | Replacement | Runtimes | Notice |
+  | --- | --- | --- | --- |
+  | `meta.decisionGrade` on `extract_sec_filing_fact`, `get_company_press_releases`, `get_sec_filing_section_markdown` (F5, F45) | the payload's `decisionGrade`, set per call | Worker (Python's meta never had it) | every success of those tools |
+  | Status strings in `confidence` (`EXTRACTION_FAILED`, `FILING_NOT_FOUND_TRY_OTHER_TYPE`, `FILING_TEXT_NOT_AVAILABLE`, `TICKER_NOT_FOUND`, `NOT_DISCLOSED`, `NOT_DECISION_GRADE`, `NOT_FOUND`) (F20) | `confidence` holds only `HIGH`, `MEDIUM` or `LOW`; a status field names the limitation | both | any `confidence` at any depth of `data` holding another string |
+  | Python `get_ownership_holders` rows with yfinance column names (`Holder`, `Value`, `Date Reported`, ...) (F17) | the Worker's quoteSummary rows (camelCase keys) | Python | the row keys that are not camelCase are listed in `fields` |
+  | Python `get_company_events_calendar` `calendar` with yfinance keys (`Earnings Date`, `Dividend Date`, ...) (F47) | `calendar.earnings.earningsDate`, `calendar.earnings.*`, `calendar.dividendDate`, `calendar.exDividendDate` | Python | the keys present, as `calendar.<key>` |
+  | `analyze_options_flow_window` `ivPctile`, `putVolVs10dAvg` (2.4.4 aliases, until now only in `fieldNotes`) | `ivVsRealizedRangePct`, `putVolPer1PctStockAdv` | both | when the aliases are in `data` |
+  | `get_analyst_rating_changes` `upgrades30d`, `downgrades30d`, `initiations30d` | `upgrades`, `downgrades`, `initiations` with `windowDays` | both | when the keys are in `data` |
+
+- **`get_analyst_rating_changes`:** the `*30d` keys are the ones that go. They copy the plain counts when `days_back` is 30 and are null for any other window, so the plain keys plus `windowDays` carry every call.
+- **Announced for Phase 6, docs only (no field to flag):**
+  - **F59, earnings envelope shape:** Python and Worker earnings responses (`get_latest_earnings_release` and the tools built on it) will share one shape: the Worker's keys (`sources[0].sourceType` `sec_8k` for the 8-K, with `items`, `isInlineXBRL`, `cikPadded`), plus `contentUrl` for the EX-99.1 exhibit that was read. Python's top-level `errorCode` and `meta.generatedAt` go.
+  - **F60 part 3, one period vocabulary:** period inputs across tools will take one form, `latest`, `FY2026` or `FY2026 Q3`. Forms accepted today only by some tools (`latest_quarter`, `latest_annual`, `Q3 2026`) will be refused with `INPUT_VALIDATION_ERROR`.
+- **Already announced:** the 2.8.0 neutrality fields (N1–N3, "Neutral Field Names And Deprecations (2.8.0)") and the F17 docs notice (2.25.0).
+- **Window and removal:** at least one minor version, as for 2.8.0. The removal is the Phase 6 major release, which also needs the Phase 5 exit criteria. Consumers should move to the replacements now.
+- **Tests:** 15 parity cases in `scripts/parity/cases_notices_2270.py` (the Worker-only and Python-only notices are pinned).
+- **Rollback:** redeploy 2.26.5.
+
 ## Audit Repairs F54–F57, F60, F62 (2.26.5)
 
 - **Why:** the medium findings of the 2026-10-27 functional audit (`analysis/yahoo-finance-mcp/F_TRIAGE.md` §7). The owner approved the recommendations (`/mnt/project-files/audits/f54-f62-recommendations-2026-10-27.md`) as written on 2026-10-27. No new status, warning code or enum value; one new key inside existing error entries (F57).
