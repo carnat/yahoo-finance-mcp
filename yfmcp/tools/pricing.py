@@ -20,6 +20,15 @@ from yfmcp.validation import _validate_ticker
 from yfmcp.cache import _PRICE_TTL, _STMT_TTL, _tool_cache
 from yfmcp.util import _add_years, _fetch_with_retry, _round_half_away_from_zero, get_last_trading_date
 from yfmcp.clients.yahoo import _safe_parse
+from yfmcp.exchange_calendars import previous_exchange_session
+from yfmcp.pricing_notices import (
+    SESSION_CALENDAR_UNKNOWN,
+    freshness_notices,
+    insufficient_history_notice,
+    take_notices,
+    with_notices,
+    zero_volume_notice,
+)
 
 
 # Batch requests run this many tickers at once, as the Worker does
@@ -484,6 +493,7 @@ async def get_price_stats(ticker: str | list[str]) -> str:
 
     prepared = None
     selected = None
+    notices: list[dict] = []
     try:
         prepared = await _load_completed_daily_history(
             company,
@@ -520,6 +530,12 @@ async def get_price_stats(ticker: str | list[str]) -> str:
             end_date = bar_dates[-1]
             for years, label in [(1, "cagr1y"), (3, "cagr3y"), (5, "cagr5y")]:
                 cutoff_date = _add_years(end_date, -years) if end_date else None
+                # A history that starts after the window does not cover it: null with INSUFFICIENT_HISTORY instead of
+                # dividing a shorter run by the nominal years (R5-pricing-2, 3.1.0).
+                if cutoff_date is not None and not _history_covers(bar_dates[0], cutoff_date):
+                    stats[label] = None
+                    notices.append(insufficient_history_notice(ticker, years))
+                    continue
                 subset = closes[[d is not None and cutoff_date is not None and d >= cutoff_date for d in bar_dates]]
                 stats[label] = _cagr(subset, years)
             stats["historicalPriceBasis"] = historical_price_basis
@@ -568,6 +584,7 @@ async def get_price_stats(ticker: str | list[str]) -> str:
         "recommendedNextAction": "RETRY" if stats["status"] == "PARTIAL" else "NONE",
         "dataDate": data_date,
     })
+    with_notices(stats, [*freshness_notices(ticker, prepared.get("freshnessReason") if prepared is not None else None), *notices])
     result = json.dumps(stats)
     _tool_cache.set(cache_key, result, _PRICE_TTL)
     return result
@@ -766,6 +783,7 @@ async def get_technical_indicators(ticker: str | list[str], period: str = "1y") 
 
     output["lastClose"] = round(float(closes.iloc[-1]), 2)
     output["dataDate"] = data_date
+    with_notices(output, freshness_notices(ticker, prepared.get("freshnessReason")))
 
     result = json.dumps(output)
     _tool_cache.set(cache_key, result, _PRICE_TTL)
@@ -812,14 +830,6 @@ def _daily_bar_date(value, timezone_name: str) -> str | None:
         return timestamp.date().isoformat()
     except (TypeError, ValueError, zoneinfo.ZoneInfoNotFoundError):
         return None
-
-
-def _previous_weekday(iso_date: str) -> str:
-    """The weekday (Mon-Fri) before an ISO date, as an ISO date."""
-    day = datetime.date.fromisoformat(iso_date) - datetime.timedelta(days=1)
-    while day.weekday() >= 5:
-        day -= datetime.timedelta(days=1)
-    return day.isoformat()
 
 
 def _prepare_completed_daily_history(
@@ -884,9 +894,11 @@ def _prepare_completed_daily_history(
     # complete. Outside a regular session that is the session of
     # regularMarketTime. During one it is the previous session, which is only
     # named when proven: Yahoo's previousClose equals the last completed close,
-    # or (without previousClose) the last completed bar is from the weekday
-    # just before today's session, so no weekday session can be missing.
+    # or (without previousClose) the exchange's holiday calendar names it.
+    # Without a calendar it is never inferred from weekday arithmetic: the
+    # status is UNKNOWN with SESSION_CALENDAR_UNKNOWN (BR-PRC-002, 3.1.0).
     expected_date = None
+    freshness_reason = None
     if not active_session:
         regular_market_time = _daily_bar_epoch(metadata.get("regularMarketTime"))
         if regular_market_time is not None:
@@ -906,15 +918,20 @@ def _prepare_completed_daily_history(
             matches = abs(float(last_completed_raw_close) - float(previous_close)) <= tolerance
             freshness_status = "CURRENT" if matches else "STALE"
             expected_date = last_completed_date if matches else None
-        elif (
-            last_completed_date is not None
-            and session_date is not None
-            and last_completed_date == _previous_weekday(session_date)
-        ):
-            freshness_status = "CURRENT"
-            expected_date = last_completed_date
         else:
-            freshness_status = "UNKNOWN"
+            previous_session = (
+                previous_exchange_session(metadata.get("exchangeName"), session_date)
+                if session_date is not None
+                else None
+            )
+            if previous_session is None:
+                freshness_status = "UNKNOWN"
+                freshness_reason = SESSION_CALENDAR_UNKNOWN if session_date is not None else None
+            elif last_completed_date is None or last_completed_date > previous_session:
+                freshness_status = "UNKNOWN"
+            else:
+                freshness_status = "CURRENT" if last_completed_date == previous_session else "STALE"
+                expected_date = previous_session
 
     return {
         "history": hist,
@@ -924,6 +941,7 @@ def _prepare_completed_daily_history(
         "excludedIncompleteBar": excluded_incomplete,
         "expectedCompletedDate": expected_date,
         "freshnessStatus": freshness_status,
+        "freshnessReason": freshness_reason,
         "timezoneName": timezone_name,
     }
 
@@ -1043,6 +1061,20 @@ async def _load_completed_daily_history(
     prepared["metadata"] = metadata
     prepared["retryAttempted"] = retry_attempted
     return prepared
+
+
+# A CAGR window counts as covered when the history's first bar is no more than this many calendar days after the
+# window's start date: the 5y fetch starts about five years before today, not before the last completed bar, and the
+# first bar after that start can follow a weekend and a holiday (R5-pricing-2, 3.1.0).
+_HISTORY_START_TOLERANCE_DAYS = 10
+
+
+def _history_covers(first_bar_date: str | None, cutoff_date: str) -> bool:
+    """Whether a history whose first bar is on first_bar_date reaches back to a window starting on cutoff_date."""
+    if first_bar_date is None:
+        return False
+    limit = datetime.date.fromisoformat(cutoff_date) + datetime.timedelta(days=_HISTORY_START_TOLERANCE_DAYS)
+    return first_bar_date <= limit.isoformat()
 
 
 _SLOPE_DAYS_MESSAGE = "days must be a whole number of sessions"
@@ -1180,7 +1212,7 @@ async def get_price_slope(ticker: str | list[str], days: int = 5) -> str:
     data_date = str(last_idx.date()) if hasattr(last_idx, "date") else str(last_idx)
     raw_close = window.loc[last_idx, "Close"] if "Close" in window and last_idx in window.index else None
 
-    return json.dumps({
+    return json.dumps(with_notices({
         "ticker": ticker,
         "days": normalized_days,
         "status": "OK",
@@ -1202,7 +1234,7 @@ async def get_price_slope(ticker: str | list[str], days: int = 5) -> str:
         "direction": direction,
         "dataDate": data_date,
         "recommendedNextAction": "NONE",
-    })
+    }, freshness_notices(ticker, prepared.get("freshnessReason"))))
 
 
 # ---------------------------------------------------------------------------
@@ -1260,7 +1292,7 @@ async def get_volume_ratio(ticker: str | list[str], period: int = 10) -> str:
         else pd.Series(dtype=float)
     )
     if volumes.empty or pd.isna(volumes.iloc[-1]):
-        return json.dumps({
+        return json.dumps(with_notices({
             "ticker": ticker,
             "status": "PARTIAL",
             "lastVolume": None,
@@ -1278,7 +1310,7 @@ async def get_volume_ratio(ticker: str | list[str], period: int = 10) -> str:
             "retryAttempted": prepared["retryAttempted"],
             "dataDate": data_date,
             "recommendedNextAction": "RETRY",
-        })
+        }, freshness_notices(ticker, prepared.get("freshnessReason"))))
     last_vol = int(volumes.iloc[-1])
     prior_volumes = volumes.iloc[:-1]
     avg_10d = (
@@ -1307,8 +1339,10 @@ async def get_volume_ratio(ticker: str | list[str], period: int = 10) -> str:
             volume_flag = "NORMAL"
     else:
         volume_flag = None
+    # A zero-volume session has no ratio and no flag, with an explicit notice (Q3c, R5-pricing-2, 3.1.0).
+    volume_notices = [zero_volume_notice(ticker)] if last_vol == 0 else []
 
-    return json.dumps({
+    return json.dumps(with_notices({
         "ticker": ticker,
         "status": "OK",
         "lastVolume": last_vol,
@@ -1326,7 +1360,7 @@ async def get_volume_ratio(ticker: str | list[str], period: int = 10) -> str:
         "retryAttempted": prepared["retryAttempted"],
         "dataDate": data_date,
         "recommendedNextAction": "NONE",
-    })
+    }, [*volume_notices, *freshness_notices(ticker, prepared.get("freshnessReason"))]))
 
 
 # ---------------------------------------------------------------------------
@@ -1632,7 +1666,7 @@ async def get_volume_gate(ticker: str, foreign_exchange: bool = False, min_adv_u
         else None
     )
     if last_volume is None or last_price is None:
-        return json.dumps({
+        return json.dumps(with_notices({
             "ticker": ticker,
             "status": "PARTIAL",
             "currency": currency,
@@ -1658,7 +1692,7 @@ async def get_volume_gate(ticker: str, foreign_exchange: bool = False, min_adv_u
             "dataDate": data_date,
             "note": "Volume gate UNKNOWN — latest completed session lacks price or volume",
             "recommendedNextAction": "RETRY",
-        })
+        }, freshness_notices(ticker, prepared.get("freshnessReason"))))
     prior_volumes = volumes.iloc[:-1]
 
     def _prior_average(count: int) -> float | None:
@@ -1707,7 +1741,7 @@ async def get_volume_gate(ticker: str, foreign_exchange: bool = False, min_adv_u
     fx_rate = fx.get("fxRate") if fx["ok"] else None
     fx_price_timestamp = fx.get("fxPriceTimestamp") if fx["ok"] else None
 
-    return json.dumps({
+    return json.dumps(with_notices({
         "ticker": ticker,
         "status": "OK",
         "currency": currency,
@@ -1736,7 +1770,7 @@ async def get_volume_gate(ticker: str, foreign_exchange: bool = False, min_adv_u
         "dataDate": data_date,
         "note": note,
         "recommendedNextAction": recommended_next_action,
-    })
+    }, freshness_notices(ticker, prepared.get("freshnessReason"))))
 
 def _classify_quote_freshness(
     quote_timestamp: str | None,
@@ -1893,6 +1927,9 @@ async def get_market_snapshot(
                 })
             else:
                 component_status[name] = "OK"
+            # A component's notices join the snapshot's data.warnings with the component name (3.1.0).
+            for notice in take_notices(parsed):
+                warnings_list.append({"code": notice.get("code"), "component": name, "message": notice.get("message")})
             return parsed if isinstance(parsed, dict) else None
         except Exception:
             # A component's plain-text error is its message, not the JSON parser's (2.26.5, F56).

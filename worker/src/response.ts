@@ -475,6 +475,29 @@ export function mcpSuccessResult(tool: string, rawData: string, opts?: McpSucces
   return mcpSuccessFromValue(tool, parsed, rawData, opts);
 }
 
+/** The internal payload key for tool notices (3.1.0, pricing-notices.ts). Never published: the envelope lifts it. */
+export const PAYLOAD_WARNINGS_KEY = "_warnings";
+
+/**
+ * Moves every `_warnings` list in a tool's data into one list, in payload order: the data itself, each of its
+ * object values (a batch keyed by ticker) and each value of those (a batch under `tickers`).
+ */
+export function liftPayloadWarnings(data: unknown): unknown[] {
+  const lifted: unknown[] = [];
+  const visit = (value: unknown, depth: number): void => {
+    if (value == null || typeof value !== "object" || Array.isArray(value)) return;
+    const record = value as Record<string, unknown>;
+    const own = record[PAYLOAD_WARNINGS_KEY];
+    if (own !== undefined) {
+      delete record[PAYLOAD_WARNINGS_KEY];
+      if (Array.isArray(own)) lifted.push(...own);
+    }
+    if (depth < 2) for (const child of Object.values(record)) visit(child, depth + 1);
+  };
+  visit(data, 0);
+  return lifted;
+}
+
 /**
  * Wrap an already-parsed tool payload. `rawData` is the payload's source
  * text, used as the data if enrichment fails, as mcpSuccess always did.
@@ -487,6 +510,7 @@ export function mcpSuccessFromValue(
 ): ToolResult {
   if (!envelopeV2Enabled()) return { text: legacyConfidenceText(tool, rawData) };
   let data: unknown;
+  let topWarnings: unknown[] = [];
   try {
     if (
       parsed != null &&
@@ -501,6 +525,8 @@ export function mcpSuccessFromValue(
       const baseMeta = buildMeta(tool, { ...opts, dataDate: opts?.dataDate ?? payloadDataDate(inner.data) });
       const baseWarnings = Array.isArray(baseMeta.warnings) ? baseMeta.warnings : [];
       const innerWarnings = Array.isArray(innerMeta.warnings) ? innerMeta.warnings : [];
+      // Payload notices (`_warnings`, 3.1.0) move to meta.warnings and never stay in data.
+      const payloadWarnings = inner.ok === true ? liftPayloadWarnings(inner.data) : [];
       const workerVersionId = baseMeta.workerVersionId;
       const resp: McpResponse = {
         ok: inner.ok === true,
@@ -517,6 +543,7 @@ export function mcpSuccessFromValue(
           warnings: [
             ...baseWarnings,
             ...innerWarnings,
+            ...payloadWarnings,
             ...(inner.ok === true && opts?.successWarnings ? opts.successWarnings(inner.data) : []),
           ],
           ...(workerVersionId ? { workerVersionId } : {}),
@@ -557,12 +584,14 @@ export function mcpSuccessFromValue(
       }
       return toolResult(resp);
     }
+    topWarnings = liftPayloadWarnings(parsed);
     data = parsed;
     data = confidenceLevels(tool, enrichFacts(data));
   } catch {
     data = rawData;
   }
   const meta = buildMeta(tool, { ...opts, dataDate: opts?.dataDate ?? payloadDataDate(parsed) });
+  if (topWarnings.length > 0) meta.warnings = [...meta.warnings, ...topWarnings];
   if (opts?.successWarnings && data !== rawData) {
     const notices = opts.successWarnings(data);
     if (notices.length > 0) meta.warnings = [...meta.warnings, ...notices];

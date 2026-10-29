@@ -88,8 +88,12 @@ def _bars(days: list[str], tz: str, closes: dict | None = None, null_close_days:
 
 def _session_case(name: str, ids: list[str], *, days: list[str], now: tuple[str, str], session: tuple | None,
                   market_time: tuple | None, expect: dict, tz: str = NY, previous_close: float | None = None,
-                  closes: dict | None = None, null_close_days: tuple = (), **kw) -> Case:
+                  closes: dict | None = None, null_close_days: tuple = (), exchange: str | None = "NMS",
+                  **kw) -> Case:
+    # exchangeName picks the holiday calendar for the open-session fallback (BR-PRC-002, 3.1.0); NMS has the US one.
     meta: dict = {"exchangeTimezoneName": tz}
+    if exchange is not None:
+        meta["exchangeName"] = exchange
     if market_time:
         meta["regularMarketTime"] = _epoch(market_time[0], market_time[1], tz)
     if session:
@@ -231,22 +235,37 @@ CASES += [
         session=("2026-09-21", "09:30", "16:00"), market_time=("2026-09-21", "10:59"),
         expect={"expectedCompletedDate": "2026-09-18", "freshnessStatus": "CURRENT",
                 "excludedIncompleteBar": True, "latestAvailableBarDate": "2026-09-18"}),
+    # BR-PRC-002 (3.1.0): with the exchange's holiday calendar a missing session is provable, so the result is STALE
+    # with the session that should be there (Wed 2026-09-23). It was UNKNOWN under the weekday fallback.
     _session_case(
-        "prc.freshness.open_session_missing_previous_session_without_previous_close_is_unknown", ["BR-PRC-002"],
+        "prc.freshness.open_session_missing_previous_session_without_previous_close_is_stale", ["BR-PRC-002"],
         days=["2026-09-16", "2026-09-17", "2026-09-18", "2026-09-21", "2026-09-22", "2026-09-24"],
         now=("2026-09-24", "11:00"), session=US_SEP24, market_time=("2026-09-24", "10:59"),
-        expect={"expectedCompletedDate": None, "freshnessStatus": "UNKNOWN",
+        expect={"expectedCompletedDate": "2026-09-23", "freshnessStatus": "STALE",
                 "excludedIncompleteBar": True, "latestAvailableBarDate": "2026-09-22"}),
-    # Owner decision Q1 BR-PRC-002: exchange-session-aware freshness is scheduled. Today the weekday fallback
-    # ignores exchange holidays: after Labor Day (Mon 2026-09-07) the Friday bar cannot be proven the prior session
-    # without previousClose, so the result is UNKNOWN. With previousClose it is CURRENT (not pinned).
+    # Owner decision Q1 BR-PRC-002 (3.1.0): exchange-session-aware freshness. After Labor Day (Mon 2026-09-07) the US
+    # calendar names Friday 2026-09-04 as the previous session, so the Friday bar is CURRENT without previousClose. The
+    # weekday fallback gave UNKNOWN.
     _session_case(
-        "prc.freshness.open_after_monday_holiday_weekday_fallback_unknown", ["BR-PRC-002"],
+        "prc.freshness.open_after_monday_holiday_calendar_names_the_prior_session", ["BR-PRC-002"],
         days=["2026-09-01", "2026-09-02", "2026-09-03", "2026-09-04", "2026-09-08"], now=("2026-09-08", "11:00"),
         session=("2026-09-08", "09:30", "16:00"), market_time=("2026-09-08", "10:59"),
-        mode="pinned", decision="Q1 BR-PRC-002",
-        expect={"expectedCompletedDate": None, "freshnessStatus": "UNKNOWN",
+        expect={"expectedCompletedDate": "2026-09-04", "freshnessStatus": "CURRENT",
                 "excludedIncompleteBar": True, "latestAvailableBarDate": "2026-09-04"}),
+    # Without a calendar for the exchange the previous session is not inferred from weekdays: UNKNOWN (3.1.0).
+    _session_case(
+        "prc.freshness.open_session_without_a_calendar_is_unknown", ["BR-PRC-002"],
+        days=WEEK + ["2026-09-24"], now=("2026-09-24", "11:00"), session=US_SEP24, market_time=("2026-09-24", "10:59"),
+        exchange="XYZ",
+        expect={"expectedCompletedDate": None, "freshnessStatus": "UNKNOWN",
+                "excludedIncompleteBar": True, "latestAvailableBarDate": "2026-09-23"}),
+    # A date outside the calendar's covered years has no named previous session either.
+    _session_case(
+        "prc.freshness.open_session_outside_the_calendar_years_is_unknown", ["BR-PRC-002"],
+        days=["2029-01-08", "2029-01-09", "2029-01-10", "2029-01-11"], now=("2029-01-11", "11:00"),
+        session=("2029-01-11", "09:30", "16:00"), market_time=("2029-01-11", "10:59"),
+        expect={"expectedCompletedDate": None, "freshnessStatus": "UNKNOWN",
+                "excludedIncompleteBar": True, "latestAvailableBarDate": "2029-01-10"}),
     _session_case(
         "prc.freshness.open_after_monday_holiday_previous_close_proves_prior_session", ["BR-PRC-002"],
         days=["2026-09-01", "2026-09-02", "2026-09-03", "2026-09-04", "2026-09-08"], now=("2026-09-08", "11:00"),
@@ -257,7 +276,7 @@ CASES += [
     _session_case(
         "prc.freshness.exchange_timezone_decides_the_calendar_date_tokyo", ["BR-PRC-001", "BR-PRC-002"],
         days=["2026-09-18", "2026-09-21", "2026-09-22", "2026-09-24"], now=("2026-09-24", "17:00"),
-        session=("2026-09-24", "09:00", "15:30"), market_time=("2026-09-24", "15:30"), tz="Asia/Tokyo",
+        session=("2026-09-24", "09:00", "15:30"), market_time=("2026-09-24", "15:30"), tz="Asia/Tokyo", exchange="JPX",
         expect={"expectedCompletedDate": "2026-09-24", "freshnessStatus": "CURRENT",
                 "excludedIncompleteBar": False, "latestAvailableBarDate": "2026-09-24"}),
 ]
@@ -1340,13 +1359,13 @@ CASES += [
     _series_case("prc.volume_ratio.ninety_day_window_when_enough_history", ["BR-PRC-033"], "volume_ratio", ["TST", 10], [50.0] * 101,
                  volumes=[1_000_000] * 100 + [2_000_000], select=_pick("avgVolume90d", "ratio90d", "ratio10d", "volumeFlag"),
                  expect={"avgVolume90d": 1000000, "ratio90d": 2.0, "ratio10d": 2.0, "volumeFlag": "HIGH"}),
-    # Q3c: a zero-volume completed session. Python's `if last_vol and avg` gives null ratio and flag; the Worker
-    # divides and reports ratio 0 with flag LOW.
-    _series_case("prc.volume_ratio.q3c_zero_volume_session_python_null_worker_zero_low", ["BR-PRC-033"], "volume_ratio", ["TST", 10], [50.0] * 11,
-                 volumes=PRIOR10 + [0], select=_pick("status", "lastVolume", "ratio10d", "volumeFlag"),
-                 mode="pinned", decision="Q3c",
-                 expect_py={"status": "OK", "lastVolume": 0, "ratio10d": None, "volumeFlag": None},
-                 expect_ts={"status": "OK", "lastVolume": 0, "ratio10d": 0, "volumeFlag": "LOW"}),
+    # Q3c (3.1.0): a zero-volume completed session has no ratio and no flag in both runtimes, with ZERO_VOLUME_NO_RATIO.
+    # The Worker divided and reported ratio 0 with flag LOW.
+    _series_case("prc.volume_ratio.q3c_zero_volume_session_has_no_ratio_and_a_notice", ["BR-PRC-033"], "volume_ratio", ["TST", 10], [50.0] * 11,
+                 volumes=PRIOR10 + [0], select=_pick("status", "lastVolume", "ratio10d", "volumeFlag", "_warnings"),
+                 expect={"status": "OK", "lastVolume": 0, "ratio10d": None, "volumeFlag": None,
+                         "_warnings": [{"code": "ZERO_VOLUME_NO_RATIO", "ticker": "TST",
+                                        "message": "The latest completed session traded zero volume, so ratio10d, ratio90d and volumeFlag are null."}]}),
     # Q3c/Q3d (R5-pricing-1): both runtimes divide by the unrounded average (1000 / 1000.5 = 0.9995 -> 1.0) and publish
     # the average rounded half away from zero (1000.5 -> 1001). The Worker divided by the rounded average (0.999) and
     # Python's round() was half-even (1000).
@@ -1432,11 +1451,26 @@ CASES += [
                 expect={"cagr3y": 10.0}),
     _stats_case("prc.cagr.start_close_not_positive_is_null", ["BR-PRC-019", "BR-PRC-021"], "CGC", [("2023-10-11", 0.0), (STATS_END, 133.10)], ("cagr3y",),
                 expect={"cagr3y": None}),
-    # Q3i: with only ~3 years of history the whole series is the "5 year" window, but the exponent is still 1/5,
-    # so a 33.1% total gain reports as a 5.9% five-year CAGR instead of null (BR-PRC-019 / BR-PRC-021 suspected defect).
-    _stats_case("prc.cagr.q3i_short_history_five_year_cagr_uses_nominal_five_years", ["BR-PRC-019", "BR-PRC-021"], "CGD",
-                [("2023-10-11", 100.0), (STATS_END, 133.10)], ("cagr3y", "cagr5y"),
-                mode="pinned", decision="Q3i", expect={"cagr3y": 10.0, "cagr5y": 5.8853}),
+    # Q3i (R5-pricing-2, 3.1.0): with only ~3 years of history the five-year CAGR is null with INSUFFICIENT_HISTORY in
+    # both runtimes. It divided the 3-year gain by five years (5.8853).
+    _stats_case("prc.cagr.q3i_short_history_five_year_cagr_is_null_with_a_notice", ["BR-PRC-019", "BR-PRC-021"], "CGD",
+                [("2023-10-11", 100.0), (STATS_END, 133.10)], ("cagr3y", "cagr5y", "_warnings"),
+                expect={"cagr3y": 10.0, "cagr5y": None, "_warnings": [
+                    {"code": "INSUFFICIENT_HISTORY", "ticker": "CGD",
+                     "message": "Price history starts after the start of the 5-year window, so cagr5y is null."}]}),
+    # Six months of history: every horizon is null, one notice each, in horizon order.
+    _stats_case("prc.cagr.q3i_six_months_of_history_nulls_every_horizon", ["BR-PRC-019", "BR-PRC-021"], "CGF",
+                [("2026-04-09", 100.0), (STATS_END, 110.0)], ("cagr1y", "cagr3y", "cagr5y", "_warnings"),
+                expect={"cagr1y": None, "cagr3y": None, "cagr5y": None, "_warnings": [
+                    {"code": "INSUFFICIENT_HISTORY", "ticker": "CGF",
+                     "message": f"Price history starts after the start of the {n}-year window, so cagr{n}y is null."}
+                    for n in (1, 3, 5)]}),
+    # The window counts as covered when the first bar is at most 10 calendar days after its start (the 5y fetch starts
+    # about five years before today): 2025-10-09 + 10 days = 2025-10-19 is covered, 2025-10-20 is not.
+    _stats_case("prc.cagr.first_bar_ten_days_after_the_window_start_still_covers_it", ["BR-PRC-021"], "CGG",
+                [("2025-10-19", 100.0), (STATS_END, 110.0)], ("cagr1y",), expect={"cagr1y": 10.0}),
+    _stats_case("prc.cagr.first_bar_eleven_days_after_the_window_start_does_not", ["BR-PRC-021"], "CGH",
+                [("2025-10-20", 100.0), (STATS_END, 110.0)], ("cagr1y",), expect={"cagr1y": None}),
     # R5-pricing-1 (Q3i G5): the horizon starts on the same exchange-local date N years back in both runtimes
     # (2026-10-09 - 3y = 2023-10-09, bar included). The Worker used 3 x 365.25 days and dropped that bar (3.5744).
     _stats_case("prc.cagr.horizon_starts_on_the_same_calendar_date", ["BR-PRC-021"], "CGE",
