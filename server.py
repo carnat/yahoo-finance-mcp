@@ -57,7 +57,7 @@ from yfmcp.util import (
     _filter_paragraphs_by_topics, _safe_json_loads, _compact_excerpt,
     fetch_quote_summary_module, unwrap_yahoo_values, yahoo_iso, yahoo_raw,
 )
-from yfmcp.clients.yahoo import _safe_parse
+from yfmcp.clients.yahoo import _safe_parse, _valuation_market_inputs
 from yfmcp.clients.market_providers import _PROVIDER_USER_AGENT
 from yfmcp import url_policy as _url_policy
 from yfmcp import filing_search as _fs
@@ -8183,31 +8183,6 @@ async def get_uk_company_filings(
 
 # ── Valuation snapshot and peer multiples (2.4.0) ─────────────────────────
 # Mirrors the Worker; the arithmetic lives in yfmcp.valuation.
-
-
-def _estimate_rows(company: Any, attr: str) -> list[dict]:
-    try:
-        df = getattr(company, attr)
-    except Exception:
-        return []
-    if df is None or getattr(df, "empty", True):
-        return []
-    df = df.reset_index()
-    df.columns = ["period", *[str(c) for c in df.columns[1:]]]
-    return df.to_dict(orient="records")
-
-
-async def _valuation_market_inputs(ticker: str) -> dict:
-    def fetch() -> dict:
-        company = yf.Ticker(ticker)
-        info = company.info or {}
-        # yfinance answers an unknown symbol with a near-empty info dict; with no quote type and no name there is no
-        # quote summary, as the Worker's empty result says (2.26.5, F57).
-        if not info or not any(info.get(k) for k in ("quoteType", "shortName", "longName")):
-            raise ValueError(f"No Yahoo quote summary for {ticker.upper()}")
-        return _vl.market_inputs_from_yfinance(ticker, info, _estimate_rows(company, "revenue_estimate"), _estimate_rows(company, "earnings_estimate"))
-
-    return await asyncio.to_thread(fetch)
 
 
 _SEC_UNAVAILABLE_STATUSES = {"TICKER_NOT_FOUND", "FILING_NOT_FOUND_TRY_OTHER_TYPE", "FILING_TEXT_NOT_AVAILABLE"}

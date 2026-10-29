@@ -3,7 +3,8 @@
  * Moved out of news.ts in 2.15.1 (pure restructure); providers never import news.ts.
  */
 
-import { yGet, enc, _str, type NewsCompanyIdentity } from "../../yahoo-finance.js";
+import { enc, yGet } from "../../clients/yahoo.js";
+import { _str, type NewsCompanyIdentity } from "../../yahoo-finance.js";
 import {
   sourceDecisionUse,
   normalizeIso,

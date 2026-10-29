@@ -29,7 +29,8 @@ import { getBuildVersion, getServerVersion, setCacheSummaryProvider, setPaidProv
 import { TOOLS, callTool } from "./tools.js";
 import { currentCacheSummary, currentRootScope, formatCacheUsage, paidProvidersAllowed, withCacheScope, withRequestFacts } from "./request-context.js";
 import { classifyBody, classifyResult, logDispatchStart, newRequestRecord, writeRequestDataPoint, type RequestRecord, type TelemetryDataset } from "./telemetry.js";
-import { markYahooCacheActivity, secDocumentCacheStats, yahooCacheStats } from "./yahoo-finance.js";
+import { markYahooCacheActivity, yahooCacheStats } from "./clients/yahoo.js";
+import { secDocumentCacheStats } from "./clients/edgar.js";
 
 /** Durable Object class for per-person key usage (2.18.0); bound as `USAGE` from the activation release on. */
 export { KeyUsage } from "./access-keys.js";

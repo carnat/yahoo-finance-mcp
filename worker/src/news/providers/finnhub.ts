@@ -5,7 +5,8 @@
 
 import { providerFetch } from "../../request-context.js";
 import { getWorkerVar } from "../../response.js";
-import { UA, _str } from "../../yahoo-finance.js";
+import { UA } from "../../clients/provider-http.js";
+import { _str } from "../../yahoo-finance.js";
 import {
   sourceDecisionUse,
   normalizeIso,

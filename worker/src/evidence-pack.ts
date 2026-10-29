@@ -49,8 +49,8 @@ import {
   getSubmissionsForTicker,
   listSecMaterialFilings,
   secFiscalYearNaming,
-  yGet,
 } from "./yahoo-finance.js";
+import { yGet } from "./clients/yahoo.js";
 
 type Rec = Record<string, unknown>;
 

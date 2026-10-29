@@ -3190,6 +3190,22 @@ F-024, F-026, F-029). Both runtimes change alike.
 - **Tests:** 21 new parity cases in `scripts/parity/cases_audit_2251.py`.
 - **Rollback:** redeploy 2.25.0.
 
+## Yahoo Client Module Move (3.0.1)
+
+- **Why:** internal restructuring only (Phase 4 unit 2). Release type: patch. No behaviour change.
+- **What moved:**
+  - Worker: the Yahoo client (session crumb, the throttling retry on the other API host, the GET body cache and its
+    edge cache, `yGet` / `yPost`, `raw`, `fetchTimeseriesByDate`, `valuationMarketInputs`) to
+    `worker/src/clients/yahoo.ts`, and the provider transport (`UA`, the provider JSON cache, provider status mapping,
+    `fetchProviderWithTimeout`) to `worker/src/clients/provider-http.ts`.
+  - Python: `_valuation_market_inputs` and its helper `_estimate_rows` to `yfmcp/clients/yahoo.py`.
+- **Unchanged:** no tool name, input, output, schema, status, warning, ordering, cache key, edge-cache URL or
+  User-Agent changed. `YAHOO_EDGE_CACHE_VERSION` stays `v1`, so the edge cache is not invalidated by the deploy.
+- **Compatibility:** `yahoo-finance.ts` and `server.py` re-export the moved names that other modules and tests read.
+- **Verification:** the parity harness passes with no expected value changed; tool listings (expanded and grouped)
+  are byte-identical; the moved Worker text keeps its line multiset and the moved Python functions keep their
+  `ast.dump`.
+
 ## Breaking Changes (3.0.0)
 
 - **Why:** the Phase 6 major release. Every change below was announced by a `DEPRECATED_FIELD` notice or a docs notice for at least one minor version ("Neutral Field Names And Deprecations (2.8.0)", "Phase 6 Deprecation Notices (2.27.0)"). The owner chose on 2026-10-28 to ship it before the Phase 4 and Phase 5 module moves, as an exception to the brief's "Phase 5 exit" entry criterion; those moves and the non-breaking Phase 6 cleanup continue after it. Plan: `analysis/yahoo-finance-mcp/MAJOR3_SPEC.md`.

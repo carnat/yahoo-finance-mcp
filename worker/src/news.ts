@@ -11,9 +11,8 @@
 import { withBudgetWatch } from "./request-context.js";
 import { tickerCap } from "./tool-catalog.js";
 import { rankEvidence, stemWord } from "./extraction-rules.js";
+import { enc, yGet } from "./clients/yahoo.js";
 import {
-  yGet,
-  enc,
   runPartialBatch,
   _str,
   clampInt,

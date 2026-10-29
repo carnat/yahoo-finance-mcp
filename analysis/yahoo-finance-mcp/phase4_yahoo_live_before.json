@@ -1,0 +1,222 @@
+{
+  "captured_at_utc": "2026-10-29T05:02:20Z",
+  "health_check": {
+    "buildVersion": "3.0.0+git.446f86d",
+    "serverVersion": "3.0.0",
+    "buildSha": "446f86d3c338851a7b9879d7d555a2e77141b5ca",
+    "deployedAt": "2026-10-29T03:43:37Z",
+    "workerVersionId": "15995f19-fd11-46ef-8055-dd70a1d81c77",
+    "manifestHash": "bfcedb2e28a0732dabe20b4185ceeb8b53e9f2f9cc0793dbfe2bde8af29507e3",
+    "schemaHash": "2558fa146bb116492e0a4511a0922d3829fb4ced47c7ec6e0e80f47c6acfbcf0",
+    "toolCount": 12,
+    "toolMode": "grouped"
+  },
+  "capture_notes": [
+    "Phase 4 unit 2 (Yahoo client) live baseline, playbook gate 3. Keys, statuses and codes only; no item contents.",
+    "Key sets typed from the tool responses. envelope_meta_keys is the same 8-key set on every success below.",
+    "get_option_chain was called without expiration_date/option_type and recorded as the INPUT_VALIDATION_ERROR it returned (validation path only)."
+  ],
+  "envelope_meta_keys": [
+    "cacheHit",
+    "cacheSource",
+    "dataDate",
+    "serverVersion",
+    "source",
+    "tool",
+    "warnings",
+    "workerVersionId"
+  ],
+  "get_market_quote": {
+    "AAPL": {
+      "ok": true,
+      "data_keys": [
+        "currency",
+        "dayHigh",
+        "dayLow",
+        "exchange",
+        "fiftyDayAverage",
+        "lastPrice",
+        "lastTradeDate",
+        "lastVolume",
+        "marketCap",
+        "marketOpen",
+        "marketState",
+        "observationType",
+        "open",
+        "postMarketPrice",
+        "postMarketTimestamp",
+        "preMarketPrice",
+        "previousClose",
+        "priceBasis",
+        "priceTimestamp",
+        "quoteType",
+        "shares",
+        "tenDayAverageVolume",
+        "threeMonthAverageVolume",
+        "twoHundredDayAverage",
+        "yearChange",
+        "yearHigh",
+        "yearLow"
+      ],
+      "cacheSource": "upstream"
+    }
+  },
+  "get_historical_prices": {
+    "AAPL 5d 1d": {
+      "ok": true,
+      "rows": 5,
+      "row_keys": [
+        "adjClose",
+        "barStatus",
+        "close",
+        "date",
+        "high",
+        "isFinal",
+        "low",
+        "open",
+        "tradingDate",
+        "volume"
+      ],
+      "barStatus": [
+        "COMPLETE"
+      ]
+    }
+  },
+  "get_company_profile": {
+    "AAPL": {
+      "ok": true,
+      "data_key_count": 32
+    }
+  },
+  "get_valuation_snapshot": {
+    "AAPL include_sec_filings=false": {
+      "ok": true,
+      "status": "COMPUTED",
+      "data_keys": [
+        "atmCapacity",
+        "balances",
+        "basis",
+        "decisionUse",
+        "enterpriseValue",
+        "enterpriseValueFormula",
+        "equityValue",
+        "grossMarginPct",
+        "methodology",
+        "multiples",
+        "name",
+        "peerComparableBasis",
+        "price",
+        "revenueGrowth",
+        "shares",
+        "status",
+        "ticker",
+        "warnings"
+      ],
+      "multiples": 7,
+      "warning_codes": [
+        "YAHOO_BALANCES"
+      ]
+    },
+    "ZZZZQQ include_sec_filings=false": {
+      "ok": false,
+      "error_code": "PROVIDER_ERROR",
+      "message_prefix": "Yahoo quote summary failed for ZZZZQQ: Yahoo Finance API error 404"
+    }
+  },
+  "get_analyst_consensus": {
+    "AAPL": {
+      "ok": true,
+      "data_keys": [
+        "currentPrice",
+        "decisionGrade",
+        "dominantRating",
+        "evidenceClass",
+        "numberOfAnalysts",
+        "pctBelowCurrentPrice",
+        "priceTargets",
+        "ratingCount",
+        "ratingCounts",
+        "recentUpgradeCount30d",
+        "recommendationSummary",
+        "recommendedNextAction",
+        "source",
+        "targetLagSignal",
+        "ticker",
+        "warnings"
+      ]
+    }
+  },
+  "search_ticker": {
+    "Apple max 3": {
+      "ok": true,
+      "rows": 3,
+      "row_keys": [
+        "exchange",
+        "quoteType",
+        "score",
+        "shortname",
+        "symbol"
+      ]
+    }
+  },
+  "screen_stocks": {
+    "day_gainers count 2": {
+      "ok": true,
+      "data_keys": [
+        "count",
+        "results",
+        "screener"
+      ],
+      "row_keys": [
+        "exchange",
+        "marketCap",
+        "regularMarketChangePercent",
+        "regularMarketPrice",
+        "regularMarketVolume",
+        "shortName",
+        "symbol"
+      ]
+    }
+  },
+  "get_market_snapshot": {
+    "MSFT": {
+      "ok": true,
+      "status": "OK",
+      "data_keys": [
+        "componentStatus",
+        "failedComponents",
+        "freshness",
+        "limitedComponents",
+        "partialSuccess",
+        "price",
+        "range",
+        "recommendedNextAction",
+        "risk",
+        "status",
+        "ticker",
+        "trend",
+        "volume",
+        "warnings"
+      ],
+      "componentStatus": {
+        "quote": "OK",
+        "priceStats": "OK",
+        "maPosition": "OK",
+        "volumeRatio": "OK",
+        "volumeGate": "OK",
+        "technicalIndicators": "OK"
+      },
+      "cacheSource": "mixed"
+    }
+  },
+  "get_option_chain": {
+    "AAPL no expiry": {
+      "ok": false,
+      "error_code": "INPUT_VALIDATION_ERROR",
+      "missingParams": [
+        "expiration_date",
+        "option_type"
+      ]
+    }
+  }
+}
