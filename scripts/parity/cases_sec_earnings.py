@@ -750,13 +750,11 @@ CASES.append(Case(name="ptr.raw_text_with_a_url_is_not_fetched", ids=["BR-ERN-01
                   select=lambda v: {k: (v.get("data") if isinstance(v.get("data"), dict) else v).get(k) for k in ("source", "url", "text")},
                   expect={"source": "raw_text", "url": None, "text": "See https://169.254.169.254/latest/meta-data/ for the revenue figures."}))
 
-# Finding (Phase 2, for Q3i triage): an unparseable source_url ("not a url") gets a different message in each runtime:
-# Python's urlparse reports "must use https" (earnings.py:116-121), the Worker's URL constructor reports "must be a
-# valid URL" (yahoo-finance.ts:16787-16794). Both refuse it with INPUT_VALIDATION_ERROR; only the text differs.
+# 3.3.0 (Q3i, the source_url message): text with no scheme is not a URL. Python said "must use https" for it, the
+# Worker's URL constructor "must be a valid URL"; Python now gives the Worker's message.
 _py_nu, _ts_nu = _index_call("not a url")
-CASES.append(Case(name="ern.source_url.unparseable_url_message_differs", ids=["BR-ERN-017"], py=_py_nu, ts=_ts_nu, select=_err, mode="pinned",
-                  decision="FINDING: unparseable source_url message differs (Python 'must use https', Worker 'must be a valid URL')",
-                  expect_py=_VALID("source_url must use https"), expect_ts=_VALID("source_url must be a valid URL")))
+CASES.append(Case(name="ern.source_url.unparseable_url_is_not_a_valid_url", ids=["BR-ERN-017"], py=_py_nu, ts=_ts_nu, select=_err,
+                  decision="Q3i", expect=_VALID("source_url must be a valid URL")))
 
 
 # ═══ Tool level: extract_guidance (BR-ERN-004 status, BR-ERN-002/003 amounts, BR-ERN-020 not read vs not disclosed) ═══
@@ -942,11 +940,11 @@ CASES += [
     _compare_case("ern.compare.no_reported_quarter_warns_and_stops", ["BR-ERN-001"], "ZCJ", 820010, _REL_Q2, _ROW(None, 0.50), _REVEST,
                   _cmp(reportedPeriod=_LBL, reportedDate=None, estimatePeriod=None, periodAlignmentStatus="INCOMPLETE", actualEps=None, estimateEps=None,
                        estimateRevenue=None, revenueSurprisePct=None, epsSurprisePct=None, epsDelta=None, confidence="NOT_DISCLOSED", warningCodes=["NO_REPORTED_QUARTER"])),
-    # Repair Q3i (BR-ERN-031 suspected defect): an EPS estimate of exactly 0 takes the EPS_ESTIMATE_UNAVAILABLE branch, so
-    # no epsDelta is given although the near-zero rule exists to give one.
-    _compare_case("ern.compare.zero_eps_estimate_gives_no_delta", ["BR-ERN-031", "BR-ERN-018"], "ZCK", 820011, _REL_Q2, _ROW(0.10, 0.0), _REVEST,
-                  _cmp(actualEps=0.1, estimateEps=0.0, epsSurprisePct=None, epsDelta=None, confidence="NOT_DISCLOSED", warningCodes=["EPS_ESTIMATE_UNAVAILABLE"]),
-                  mode="pinned", decision="Q3i", note="repair: a zero EPS estimate should still give epsDelta"),
+    # 3.3.0 (BR-ERN-031): an EPS estimate of exactly 0 takes the near-zero rule, so epsDelta is given and the percentage
+    # omitted. Before, it took the EPS_ESTIMATE_UNAVAILABLE branch and gave no delta.
+    _compare_case("ern.compare.zero_eps_estimate_gives_delta_without_percent", ["BR-ERN-031", "BR-ERN-018"], "ZCK", 820011, _REL_Q2, _ROW(0.10, 0.0), _REVEST,
+                  _cmp(actualEps=0.1, estimateEps=0.0, epsSurprisePct=None, epsDelta=0.1, confidence="MEDIUM", warningCodes=["EPS_NEAR_ZERO_ESTIMATE_BASE"]),
+                  decision="Q3i"),
 ]
 
 
@@ -968,26 +966,23 @@ CASES += [
 ]
 
 
-# Finding (Phase 2, for Q3i triage): when Yahoo dates its earningsHistory row (production shape; yfinance gives a Timestamp, the
-# Worker gets {raw, fmt}), the runtimes disagree on estimatePeriod: Python str(Timestamp) is "2026-06-30T00:00:00"
-# (earnings.py:681-684 via get_earnings_analysis' isoformat), the Worker's is "2026-06-30" (yahoo-finance.ts:2943
-# unwrapYahooValues). A revenue-estimate row labelled with the same date then matches in the Worker (candidatePeriod ===
-# estimatePeriod, yahoo-finance.ts:17701-17706) but not in Python (earnings.py:746-756 compares against the longer text), so
-# the Worker returns estimate.revenue.value and Python null. Both report UNVERIFIED and omit the revenue surprise.
-_DATED = _compare_case("ern.compare.date_identified_row_is_unverified_runtimes_differ", ["BR-ERN-001", "BR-ERN-018"], "ZCI", 820009, _REL_Q2,
-                       _ROW(0.55, 0.50, "2026-06-30"), [{"period": "2026-06-30", "avg": 1_000_000_000}], None)
-_dated_py = _cmp(reportedDate="2026-06-30", estimatePeriod="2026-06-30T00:00:00", periodAlignmentStatus="UNVERIFIED", estimateRevenue=None, revenueSurprisePct=None,
-                 confidence="MEDIUM", warningCodes=["PERIOD_ALIGNMENT_UNVERIFIED"])
-CASES.append(Case(name=_DATED.name, ids=_DATED.ids, py=_DATED.py, ts=_DATED.ts, routes=_DATED.routes, select=_compare_view, mode="pinned",
-                  decision="FINDING: dated Yahoo row gives estimatePeriod '2026-06-30T00:00:00' in Python, '2026-06-30' in the Worker, and only the Worker finds the revenue estimate",
-                  expect_py=_dated_py, expect_ts={**_dated_py, "estimatePeriod": "2026-06-30", "estimateRevenue": 1_000_000_000}))
+# 3.3.0 (Q3i call 5): when Yahoo dates its earningsHistory row (production shape; yfinance gives a Timestamp, the Worker
+# gets {raw, fmt}), estimatePeriod is that date alone, "2026-06-30", in both runtimes (Python gave "2026-06-30T00:00:00").
+# While the row is identified only by its date, alignment is UNVERIFIED and its revenue estimate is withheld in both, as
+# the revenue surprise already was (before, only the Worker matched the dated revenue-estimate row and returned it).
+# The release states no EPS, so the EPS comparison is Yahoo's own actual against its estimate on the same row.
+_DATED = _compare_case("ern.compare.date_identified_row_is_unverified_and_withholds_revenue_estimate", ["BR-ERN-001", "BR-ERN-018"], "ZCI", 820009, _REL_Q2,
+                       _ROW(0.55, 0.50, "2026-06-30"), [{"period": "2026-06-30", "avg": 1_000_000_000}],
+                       _cmp(reportedDate="2026-06-30", estimatePeriod="2026-06-30", periodAlignmentStatus="UNVERIFIED", estimateRevenue=None,
+                            revenueSurprisePct=None, confidence="MEDIUM", warningCodes=["PERIOD_ALIGNMENT_UNVERIFIED"]), decision="Q3i")
+CASES.append(_DATED)
 
-# Repair Q3i (BR-ERN-018 suspected defect): actual EPS is Yahoo's epsActual, not the figure in the official release, even
-# though revenue comes from the release. The release below states diluted EPS of $0.60; the result still carries Yahoo's 0.55.
+# 3.3.0 (source policy R3, BR-ERN-018): actual EPS is the official release figure, as revenue is; Yahoo's epsActual is
+# only the fallback when the release states none. The release below states diluted EPS of $0.60 against Yahoo's 0.55.
 CASES.append(_compare_case(
-    "ern.compare.actual_eps_comes_from_yahoo_not_the_release", ["BR-ERN-018", "BR-ERN-031", "BR-ERN-001"], "ZCL", 820012,
-    _REL_Q2 + " Diluted net income per share was $0.60 for the quarter.", _ROW(0.55, 0.50), _REVEST, _cmp(), mode="pinned", decision="Q3i",
-    note="repair: actual EPS should be the official release figure"))
+    "ern.compare.actual_eps_is_the_release_figure", ["BR-ERN-018", "BR-ERN-031", "BR-ERN-001"], "ZCL", 820012,
+    _REL_Q2 + " Diluted net income per share was $0.60 for the quarter.", _ROW(0.55, 0.50), _REVEST,
+    _cmp(actualEps=0.6, epsSurprisePct=20.0, epsDelta=0.1), decision="Q3i"))
 
 
 # ═══ Tool level: transcript source waterfall (BR-ERN-009, repair Q3i) ════════════════════════════════════

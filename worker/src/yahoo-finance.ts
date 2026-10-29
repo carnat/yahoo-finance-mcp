@@ -13094,7 +13094,9 @@ export async function compareEarningsActualVsEstimate(ticker: string, period = "
   const reportedRows = earningsHistory.filter((row) => toNumber(row.epsActual) != null);
   const selected = reportedRows.sort((a, b) => String(rowDate(b) ?? "").localeCompare(String(rowDate(a) ?? "")))[0] ?? null;
   const sourcePeriod = _str(metrics.period) && _str(metrics.period).toLowerCase() !== "latest" ? _str(metrics.period) : null;
-  const estimatePeriod = rowPeriod(selected);
+  // A Yahoo row named by a date is named by that date alone, YYYY-MM-DD, in both runtimes (3.3.0, Q3i call 5).
+  const rowLabel = rowPeriod(selected);
+  const estimatePeriod = rowLabel != null && /^\d{4}-\d{2}-\d{2}/.test(rowLabel) ? rowLabel.slice(0, 10) : rowLabel;
   // Yahoo's earningsHistory row is dated by its fiscal quarter end; the
   // release date comes from the earnings release itself.
   const estimateQuarterEnd = rowDate(selected);
@@ -13109,7 +13111,11 @@ export async function compareEarningsActualVsEstimate(ticker: string, period = "
   const periodAlignmentStatus = sourcePeriod && estimatePeriod
     ? (sourcePeriod === estimatePeriod || periodEndsMatch ? "MATCHED" : (/^\d{4}-\d{2}-\d{2}/.test(estimatePeriod) ? "UNVERIFIED" : "MISMATCH"))
     : periodEndsMatch ? "MATCHED" : "INCOMPLETE";
-  const actualEps = toNumber(selected?.epsActual) ?? (typeof epsMetric.value === "number" ? epsMetric.value : null);
+  // Surprise actuals follow source policy R3 (3.3.0): the official release figure first, as revenue already does;
+  // Yahoo's epsActual only when the release has none, labelled yahoo and LOW.
+  const releaseEps = toNumber(epsMetric.value);
+  const epsFromRelease = releaseEps != null;
+  const actualEps = releaseEps ?? toNumber(selected?.epsActual);
   const estEps = toNumber(selected?.epsEstimate);
 
   let estRevenue: number | null = null;
@@ -13125,6 +13131,8 @@ export async function compareEarningsActualVsEstimate(ticker: string, period = "
       break;
     }
   }
+  // While the Yahoo row is identified only by its date, its revenue estimate is withheld, as the revenue surprise is (3.3.0, call 5).
+  if (periodAlignmentStatus === "UNVERIFIED") estRevenue = null;
 
   const out: Record<string, unknown> = {
     ticker: ticker.toUpperCase(),
@@ -13138,8 +13146,10 @@ export async function compareEarningsActualVsEstimate(ticker: string, period = "
     periodAlignmentStatus,
     actual: {
       revenue: { ...revenueMetric, value: actualRevenue, unit: "USD", period: sourcePeriod ?? metricPeriodEnd, decisionGrade: revenueMetric.decisionGrade === true },
-      // A Yahoo actual is rated by its source, LOW, as the estimates are (2.26.4, F22).
-      eps: { value: actualEps, unit: "USD/share", source: "yahoo", period: estimatePeriod ?? estimateQuarterEnd, decisionGrade: false, confidence: "LOW" },
+      // The release figure keeps its own source and confidence; a Yahoo fallback is rated by its source, LOW (2.26.4, F22).
+      eps: epsFromRelease
+        ? { ...epsMetric, value: releaseEps, unit: "USD/share", period: sourcePeriod ?? metricPeriodEnd, decisionGrade: epsMetric.decisionGrade === true }
+        : { value: actualEps, unit: "USD/share", source: "yahoo", period: estimatePeriod ?? estimateQuarterEnd, decisionGrade: false, confidence: "LOW" },
     },
     estimate: {
       // Yahoo consensus estimates are LOW, as in get_earnings_analysis; the comparison keeps its own confidence (2.25.0, F16).
@@ -13162,18 +13172,23 @@ export async function compareEarningsActualVsEstimate(ticker: string, period = "
     return JSON.stringify(out);
   }
 
-  if (sourcePeriod && periodAlignmentStatus !== "MATCHED") {
+  // A release EPS is compared only with the estimate of the same quarter; Yahoo's own actual and estimate share a row.
+  const epsComparable = !epsFromRelease || periodAlignmentStatus === "MATCHED";
+  if ((sourcePeriod || epsFromRelease) && periodAlignmentStatus !== "MATCHED") {
+    const omitted = epsFromRelease ? "cross-source revenue and EPS surprise are omitted" : "cross-source revenue surprise is omitted";
     (out.warnings as Record<string, unknown>[]).push({
       code: periodAlignmentStatus === "MISMATCH" ? "PERIOD_ALIGNMENT_MISMATCH" : "PERIOD_ALIGNMENT_UNVERIFIED",
       message: periodAlignmentStatus === "MISMATCH"
-        ? "The official-release period differs from the selected Yahoo estimate period; cross-source revenue surprise is omitted."
-        : "Yahoo identifies the selected estimate row by date rather than the official fiscal-period label; cross-source revenue surprise is omitted unless the periods can be matched.",
+        ? `The official-release period differs from the selected Yahoo estimate period; ${omitted}.`
+        : periodAlignmentStatus === "UNVERIFIED"
+          ? `Yahoo identifies the selected estimate row by date rather than the official fiscal-period label; ${omitted} unless the periods can be matched.`
+          : `The official-release period could not be matched to the selected Yahoo estimate row; ${omitted}.`,
     });
   }
 
   if (periodAlignmentStatus === "MATCHED" && actualRevenue != null && estRevenue != null && estRevenue !== 0) {
     (out.surprise as Record<string, unknown>).revenueSurprisePct =
-      Number((((actualRevenue - estRevenue) / Math.abs(estRevenue)) * 100).toFixed(2));
+      roundHalfAwayFromZero(((actualRevenue - estRevenue) / Math.abs(estRevenue)) * 100, 2);
   } else if (actualRevenue != null && periodAlignmentStatus === "MATCHED") {
     (out.warnings as Record<string, unknown>[]).push({
       code: "REVENUE_ESTIMATE_UNAVAILABLE",
@@ -13181,7 +13196,9 @@ export async function compareEarningsActualVsEstimate(ticker: string, period = "
     });
   }
 
-  if (actualEps == null || estEps == null || estEps === 0) {
+  if (!epsComparable) return JSON.stringify(out);
+  // An estimate of exactly 0 takes the near-zero rule below and still gives epsDelta (3.3.0, BR-ERN-031).
+  if (actualEps == null || estEps == null) {
     (out.warnings as Record<string, unknown>[]).push({
       code: "EPS_ESTIMATE_UNAVAILABLE",
       message: "No Yahoo EPS estimate was available for the selected reported quarter.",
@@ -13193,7 +13210,7 @@ export async function compareEarningsActualVsEstimate(ticker: string, period = "
   out.surprise = {
     revenueSurprisePct: (out.surprise as Record<string, unknown>).revenueSurprisePct ?? null,
     epsSurprisePct: null,
-    epsDelta: Number(epsDelta.toFixed(4)),
+    epsDelta: roundHalfAwayFromZero(epsDelta, 4),
   };
   if (Math.abs(estEps) < 0.02) {
     (out.warnings as Record<string, unknown>[]).push({
@@ -13203,7 +13220,7 @@ export async function compareEarningsActualVsEstimate(ticker: string, period = "
     out.confidence = "MEDIUM";
     return JSON.stringify(out);
   }
-  (out.surprise as Record<string, unknown>).epsSurprisePct = Number(((epsDelta / Math.abs(estEps)) * 100).toFixed(2));
+  (out.surprise as Record<string, unknown>).epsSurprisePct = roundHalfAwayFromZero((epsDelta / Math.abs(estEps)) * 100, 2);
   out.confidence = (out.surprise as Record<string, unknown>).revenueSurprisePct != null ? "HIGH" : "MEDIUM";
   return JSON.stringify(out);
 }

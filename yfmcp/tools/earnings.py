@@ -35,6 +35,7 @@ from yfmcp.util import (
     _filter_paragraphs_by_topics,
     _safe_json_loads,
     _compact_excerpt,
+    _round_half_away_from_zero,
 )
 from yfmcp.clients.edgar import (
     _edgar_fetch_page_detail,
@@ -124,6 +125,9 @@ def _classify_earnings_source_url(url: str) -> tuple[str | None, str | None]:
     if not isinstance(url, str) or not url.strip():
         return None, "source_url must be a non-empty string"
     parsed = _urlparse.urlparse(url.strip())
+    # Text with no scheme is not a URL; the Worker's URL parser refuses it with this message (3.3.0).
+    if not parsed.scheme:
+        return None, "source_url must be a valid URL"
     if parsed.scheme != "https":
         return None, "source_url must use https"
     if _is_paywalled_url(url):
@@ -1025,24 +1029,40 @@ async def compare_earnings_actual_vs_estimate(ticker: str, period: str = "latest
     source_period = str(metrics.get("period") or "").strip()
     if not source_period or source_period.lower() == "latest":
         source_period = None
-    estimate_period = _row_period(selected)
+    # A Yahoo row named by a date is named by that date alone, YYYY-MM-DD, in both runtimes (3.3.0, Q3i call 5).
+    row_label = _row_period(selected)
+    estimate_period = row_label[:10] if row_label and _re.match(r"\d{4}-\d{2}-\d{2}", row_label) else row_label
     reported_date = _row_date(selected)
+    metric_map = metrics.get("metrics") if isinstance(metrics.get("metrics"), dict) else {}
+    revenue_metric = metric_map.get("revenue") if isinstance(metric_map.get("revenue"), dict) else {}
+    eps_metric = metric_map.get("epsDiluted") if isinstance(metric_map.get("epsDiluted"), dict) else {}
+    metric_period_end = revenue_metric.get("periodEnd") if isinstance(revenue_metric.get("periodEnd"), str) else None
+    # A structured quarter matches Yahoo's quarter when their period ends are within a week of each other
+    # (52/53-week fiscal calendars end on a weekday), as in the Worker.
+    period_ends_match = False
+    if metric_period_end and reported_date:
+        try:
+            gap = abs((datetime.date.fromisoformat(metric_period_end[:10]) - datetime.date.fromisoformat(reported_date[:10])).days)
+            period_ends_match = gap <= 7
+        except ValueError:
+            period_ends_match = False
     if source_period and estimate_period:
-        if source_period == estimate_period:
+        if source_period == estimate_period or period_ends_match:
             period_alignment_status = "MATCHED"
-        elif _re.fullmatch(r"\d{4}-\d{2}-\d{2}(?:T.*)?", estimate_period):
+        elif _re.match(r"\d{4}-\d{2}-\d{2}", estimate_period):
             period_alignment_status = "UNVERIFIED"
         else:
             period_alignment_status = "MISMATCH"
     else:
-        period_alignment_status = "INCOMPLETE"
+        period_alignment_status = "MATCHED" if period_ends_match else "INCOMPLETE"
 
-    actual_rev = (((metrics.get("metrics") or {}).get("revenue") or {}).get("value")
-                  if isinstance((metrics.get("metrics") or {}).get("revenue"), dict) else None)
-    actual_eps = _num(selected.get("epsActual")) if selected else None
-    if actual_eps is None:
-        actual_eps = (((metrics.get("metrics") or {}).get("epsDiluted") or {}).get("value")
-                      if isinstance((metrics.get("metrics") or {}).get("epsDiluted"), dict) else None)
+    actual_rev = revenue_metric.get("value") if revenue_metric else None
+    # Surprise actuals follow source policy R3 (3.3.0): the official release figure first, as revenue already does;
+    # Yahoo's epsActual only when the release has none, labelled yahoo and LOW.
+    eps_value = eps_metric.get("value")
+    release_eps = float(eps_value) if isinstance(eps_value, (int, float)) and not isinstance(eps_value, bool) and math.isfinite(eps_value) else None
+    eps_from_release = release_eps is not None
+    actual_eps = release_eps if eps_from_release else (_num(selected.get("epsActual")) if selected else None)
     eps_est = _num(selected.get("epsEstimate")) if selected else None
 
     revenue_est = None
@@ -1058,6 +1078,9 @@ async def compare_earnings_actual_vs_estimate(ticker: str, period: str = "latest
         ):
             revenue_est = _num(row.get("avg"))
             break
+    # While the Yahoo row is identified only by its date, its revenue estimate is withheld, as the revenue surprise is (3.3.0, call 5).
+    if period_alignment_status == "UNVERIFIED":
+        revenue_est = None
 
     warnings: list[dict] = []
     result = {
@@ -1066,20 +1089,25 @@ async def compare_earnings_actual_vs_estimate(ticker: str, period: str = "latest
         "reportedPeriod": source_period or estimate_period,
         "reportedDate": reported_date,
         "releaseDate": str(metrics.get("reportedAt"))[:10] if metrics.get("reportedAt") else None,
-        "quarterEnd": reported_date,
+        "quarterEnd": metric_period_end or reported_date,
         "releasePublishedAt": metrics.get("reportedAt"),
         "estimatePeriod": estimate_period,
         "periodAlignmentStatus": period_alignment_status,
         "actual": {
             "revenue": {
-                **(((metrics.get("metrics") or {}).get("revenue") or {}) if isinstance((metrics.get("metrics") or {}).get("revenue"), dict) else {}),
+                **revenue_metric,
                 "value": actual_rev,
                 "unit": "USD",
-                "period": source_period,
-                "decisionGrade": bool((((metrics.get("metrics") or {}).get("revenue") or {}).get("decisionGrade")) if isinstance((metrics.get("metrics") or {}).get("revenue"), dict) else False),
+                "period": source_period or metric_period_end,
+                "decisionGrade": revenue_metric.get("decisionGrade") is True,
             },
-            # A Yahoo actual is rated by its source, LOW, as the estimates are (2.26.4, F22).
-            "eps": {"value": actual_eps, "unit": "USD/share", "source": "yahoo", "period": estimate_period or reported_date, "decisionGrade": False, "confidence": "LOW"},
+            # The release figure keeps its own source and confidence; a Yahoo fallback is rated by its source, LOW (2.26.4, F22).
+            "eps": (
+                {**eps_metric, "value": release_eps, "unit": "USD/share", "period": source_period or metric_period_end,
+                 "decisionGrade": eps_metric.get("decisionGrade") is True}
+                if eps_from_release
+                else {"value": actual_eps, "unit": "USD/share", "source": "yahoo", "period": estimate_period or reported_date, "decisionGrade": False, "confidence": "LOW"}
+            ),
         },
         "estimate": {
             "revenue": {"value": revenue_est, "unit": "USD", "source": "yahoo", "period": estimate_period or reported_date, "decisionGrade": False, "confidence": "LOW"},
@@ -1099,19 +1127,24 @@ async def compare_earnings_actual_vs_estimate(ticker: str, period: str = "latest
         })
         return _wrap_envelope_v2("compare_earnings_actual_vs_estimate", result, warnings=warnings)
 
-    if source_period and period_alignment_status != "MATCHED":
+    # A release EPS is compared only with the estimate of the same quarter; Yahoo's own actual and estimate share a row.
+    eps_comparable = not eps_from_release or period_alignment_status == "MATCHED"
+    if (source_period or eps_from_release) and period_alignment_status != "MATCHED":
+        omitted = "cross-source revenue and EPS surprise are omitted" if eps_from_release else "cross-source revenue surprise is omitted"
+        if period_alignment_status == "MISMATCH":
+            message = f"The official-release period differs from the selected Yahoo estimate period; {omitted}."
+        elif period_alignment_status == "UNVERIFIED":
+            message = f"Yahoo identifies the selected estimate row by date rather than the official fiscal-period label; {omitted} unless the periods can be matched."
+        else:
+            message = f"The official-release period could not be matched to the selected Yahoo estimate row; {omitted}."
         warnings.append({
             "code": "PERIOD_ALIGNMENT_MISMATCH" if period_alignment_status == "MISMATCH" else "PERIOD_ALIGNMENT_UNVERIFIED",
-            "message": (
-                "The official-release period differs from the selected Yahoo estimate period; cross-source revenue surprise is omitted."
-                if period_alignment_status == "MISMATCH"
-                else "Yahoo identifies the selected estimate row by date rather than the official fiscal-period label; cross-source revenue surprise is omitted unless the periods can be matched."
-            ),
+            "message": message,
         })
 
     if period_alignment_status == "MATCHED" and actual_rev is not None and revenue_est not in (None, 0):
         try:
-            result["surprise"]["revenueSurprisePct"] = round(((float(actual_rev) - float(revenue_est)) / abs(float(revenue_est))) * 100, 2)
+            result["surprise"]["revenueSurprisePct"] = _round_half_away_from_zero(((float(actual_rev) - float(revenue_est)) / abs(float(revenue_est))) * 100, 2)
         except Exception:
             result["surprise"]["revenueSurprisePct"] = None
     elif actual_rev is not None and period_alignment_status == "MATCHED":
@@ -1120,7 +1153,10 @@ async def compare_earnings_actual_vs_estimate(ticker: str, period: str = "latest
             "message": "No Yahoo revenue estimate was available for the selected reported quarter.",
         })
 
-    if actual_eps is None or eps_est in (None, 0):
+    if not eps_comparable:
+        return _wrap_envelope_v2("compare_earnings_actual_vs_estimate", result, warnings=warnings)
+    # An estimate of exactly 0 takes the near-zero rule below and still gives epsDelta (3.3.0, BR-ERN-031).
+    if actual_eps is None or eps_est is None:
         warnings.append({
             "code": "EPS_ESTIMATE_UNAVAILABLE",
             "message": "No Yahoo EPS estimate was available for the selected reported quarter.",
@@ -1128,7 +1164,7 @@ async def compare_earnings_actual_vs_estimate(ticker: str, period: str = "latest
         return _wrap_envelope_v2("compare_earnings_actual_vs_estimate", result, warnings=warnings)
 
     eps_delta = float(actual_eps) - float(eps_est)
-    result["surprise"]["epsDelta"] = round(eps_delta, 4)
+    result["surprise"]["epsDelta"] = _round_half_away_from_zero(eps_delta, 4)
     if abs(float(eps_est)) < 0.02:
         warnings.append({
             "code": "EPS_NEAR_ZERO_ESTIMATE_BASE",
@@ -1138,7 +1174,7 @@ async def compare_earnings_actual_vs_estimate(ticker: str, period: str = "latest
         return _wrap_envelope_v2("compare_earnings_actual_vs_estimate", result, warnings=warnings)
 
     try:
-        result["surprise"]["epsSurprisePct"] = round((eps_delta / abs(float(eps_est))) * 100, 2)
+        result["surprise"]["epsSurprisePct"] = _round_half_away_from_zero((eps_delta / abs(float(eps_est))) * 100, 2)
     except Exception:
         return _wrap_envelope_v2("compare_earnings_actual_vs_estimate", result, warnings=warnings)
     result["confidence"] = "HIGH" if result["surprise"]["revenueSurprisePct"] is not None else "MEDIUM"

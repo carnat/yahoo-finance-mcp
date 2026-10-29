@@ -3190,6 +3190,48 @@ F-024, F-026, F-029). Both runtimes change alike.
 - **Tests:** 21 new parity cases in `scripts/parity/cases_audit_2251.py`.
 - **Rollback:** redeploy 2.25.0.
 
+## Earnings Surprise: Release EPS, Dated Yahoo Rows, Zero Estimates, Rounding (3.3.0)
+
+- **Why:** R5-earnings part 1: source policy R3 (official release figure first), Q3i call 5, BR-ERN-031,
+  BR-ERN-018's rounding and the Q3i `source_url` message (`analysis/yahoo-finance-mcp/R5EARNINGS1_SPEC.md`).
+  Release type: minor, because `actual.eps` now carries the release metric's own fields. Both runtimes. BR-ERN-039
+  was already settled by 2.26.5 (F55: any `sec_8k*` source, the EX-99.1 exhibit included, is HIGH). The transcript
+  fallback suggestion (BR-ERN-009) waits for the owner's decision.
+- **Actual EPS (R3, BR-ERN-018/031):** `compare_earnings_actual_vs_estimate` takes actual EPS from the official
+  release (`extract_earnings_metrics` `epsDiluted`: SEC XBRL first, then the 8-K text), as revenue already did. The
+  row keeps that metric's confidence, evidence and period. Yahoo's `epsActual` is used only when the release states
+  no EPS, labelled `source: "yahoo"` and LOW (2.26.4, F22). Before, Yahoo's figure came first and the release was
+  the fallback, and a release fallback was still labelled Yahoo.
+- **Same quarter only:** a release EPS is compared only with the estimate of the same quarter. When
+  `periodAlignmentStatus` is not MATCHED, `epsSurprisePct` and `epsDelta` are withheld with the revenue surprise, and
+  the alignment warning says "cross-source revenue and EPS surprise are omitted". A release whose period is unknown
+  gets `PERIOD_ALIGNMENT_UNVERIFIED` with its own message. With a Yahoo fallback, Yahoo's actual and estimate share
+  one row, so the EPS surprise is still given.
+- **Dated Yahoo rows (call 5):** a Yahoo row named by a date gives `estimatePeriod` as that date alone,
+  `YYYY-MM-DD`, in both runtimes (Python gave "2026-06-30T00:00:00"). While such a row is UNVERIFIED,
+  `estimate.revenue.value` is withheld in both runtimes, as the revenue surprise already was. Python now also matches
+  a quarter whose period end is within a week of the Yahoo row's date (the Worker's 52/53-week rule), reports
+  `quarterEnd` from the release's period end, and labels `actual.revenue.period` with the period end when the release
+  has no fiscal label. Before, the live AAPL and MSFT comparisons were MATCHED in the Worker and would have been
+  UNVERIFIED in Python.
+- **Zero estimate (BR-ERN-031):** an EPS estimate of exactly 0 follows the near-zero rule: `epsDelta` is given, the
+  percentage is omitted with `EPS_NEAR_ZERO_ESTIMATE_BASE`, and confidence is MEDIUM. Before, it was
+  `EPS_ESTIMATE_UNAVAILABLE` with no delta.
+- **Rounding (BR-ERN-018):** `revenueSurprisePct`, `epsSurprisePct` and `epsDelta` round half away from zero in both
+  runtimes. Python's `round()` was half-even, so a 0.125% surprise was 0.12 in Python and 0.13 in the Worker; both
+  now give 0.13.
+- **`source_url` message (Q3i):** text with no URL scheme, such as "not a url", is refused with "source_url must be a
+  valid URL" in both runtimes. Python said "source_url must use https".
+- **Correction to 3.2.1:** the AGREED wording change altered the expanded-mode tool description. The grouped
+  `schemaHash` stayed the same, because the grouped `evidence` description already used that wording.
+- **Unchanged:** no field, status, warning code or enum value was added. `schemaHash` and `manifestHash` stay the
+  same.
+- **Tests:** in `scripts/parity/cases_sec_earnings.py` the zero-estimate, dated-row, release-EPS and `source_url`
+  cases now assert the same value in both runtimes. `scripts/parity/cases_r5ern1.py` covers the withheld EPS
+  surprise (MISMATCH and UNVERIFIED), half-away rounding, the actual EPS row from the release and from Yahoo, and the
+  within-a-week match against XBRL period ends.
+- **Rollback:** redeploy 3.2.1.
+
 ## Valuation Repairs: Tolerance Input, AGREED Wording, Convertible Basis, 52/53-Week Quarters (3.2.1)
 
 - **Why:** R5-valuation part 1, the valuation repairs that need no new name (decision Q3e, the binding Q3i triage
