@@ -37,7 +37,7 @@ import {
   type SplitHistory,
 } from "./evidence.js";
 import { getEvidenceStore, putOnce, sha256Hex } from "./evidence-store.js";
-import { ErrorCode, getServerVersion, getWorkerVar, mcpFailure } from "./response.js";
+import { ErrorCode, getServerVersion, getWorkerVar, mcpFailure, normalizeStatusConfidence } from "./response.js";
 import { validateTicker } from "./validate.js";
 import { withBudgetWatch } from "./request-context.js";
 import { majorPrice } from "./valuation.js";
@@ -384,6 +384,8 @@ export async function buildValuationEvidencePack(ticker: string, horizonYears = 
   // A pack whose providers all failed is still evidence of that; its components say FAILED.
   if (inputs.every((i) => i.periods.length === 0)) components.consensus.status = "LIMITED";
 
+  // Components carry confidence levels only (F20), fixed before they are hashed.
+  for (const component of Object.values(components)) normalizeStatusConfidence(component);
   const names = Object.keys(components);
   const hashes = Object.fromEntries(await Promise.all(names.map(async (n) => [n, await sha256Hex(canonicalJson(components[n]))] as const)));
   const receipt = buildReceipt({

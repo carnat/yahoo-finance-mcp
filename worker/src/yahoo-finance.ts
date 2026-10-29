@@ -12161,7 +12161,7 @@ const RELEASE_READ_MAX = 4;
 const RECONCILE_INCOME_TYPES = ["TotalRevenue", "NetIncome", "NetIncomeCommonStockholders", "OperatingIncome", "DilutedEPS"];
 
 /** Metric source reconciliation (2.5.4): one metric for one period across SEC XBRL, the issuer release and Yahoo. */
-export async function reconcileMetricSources(ticker: string, metric: string, period = "latest_quarter", tolerancePct: number = DEFAULT_TOLERANCE_PCT): Promise<string> {
+export async function reconcileMetricSources(ticker: string, metric: string, period = "latest", tolerancePct: number = DEFAULT_TOLERANCE_PCT): Promise<string> {
   const upper = ticker.toUpperCase();
   if (!(metric in RECONCILE_METRICS)) {
     return JSON.stringify({ error: true, code: "INPUT_VALIDATION_ERROR", message: `metric must be one of: ${Object.keys(RECONCILE_METRICS).join(", ")}` });
@@ -13247,8 +13247,11 @@ export function toIsoUtc(ts: unknown): string | null {
 }
 
 
-async function resolveEarningsPeriodFromSource(src: Record<string, unknown>): Promise<EarningsPeriodInfo> {
-  const content = await resolveEarningsContentSource(src);
+async function resolveEarningsPeriodFromSource(
+  src: Record<string, unknown>,
+  resolved?: { url: string; sourceType: string },
+): Promise<EarningsPeriodInfo> {
+  const content = resolved ?? await resolveEarningsContentSource(src);
   if (!content.url) return { period: null, periodStatus: "UNRESOLVED", periodEvidence: null };
   const html = content.url.startsWith("https://www.sec.gov/Archives/")
     ? await edgarGetHtml(content.url, 5_000_000)
@@ -13548,9 +13551,20 @@ export async function getLatestEarningsRelease(ticker: string, _period = "latest
   const src = Array.isArray(release.sources) && release.sources[0] && typeof release.sources[0] === "object"
     ? release.sources[0] as Record<string, unknown>
     : {};
+  const isSec = String(src.sourceType ?? "") === "sec_8k";
+  const content = isSec ? await resolveEarningsContentSource(src) : null;
+  if (isSec && content) {
+    // F59 (3.0.0): the document whose text is read, the EX-99.1 exhibit when the 8-K has one; placed after url.
+    const withContent: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(src)) {
+      withContent[key] = value;
+      if (key === "url") withContent.contentUrl = content.url || null;
+    }
+    (release.sources as unknown[])[0] = withContent;
+  }
   const periodInfo = String(src.sourceType ?? "") === "yahoo_estimate"
     ? { period: null, periodStatus: "UNRESOLVED" as const, periodEvidence: null }
-    : await resolveEarningsPeriodFromSource(src);
+    : await resolveEarningsPeriodFromSource(src, content ?? undefined);
   return JSON.stringify({
     ...release,
     period: periodInfo.period ?? release.period ?? "latest",
