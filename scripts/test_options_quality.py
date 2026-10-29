@@ -14,6 +14,7 @@ import os
 import sys
 import json
 import asyncio
+import datetime
 import unittest
 
 import pandas as pd
@@ -227,7 +228,8 @@ class TestPutHedgeCandidateSafety(unittest.TestCase):
 
         class FakeTicker:
             fast_info = FastInfo()
-            options = ("2026-08-21",)
+            # A month out: the screen skips expiries under a week away and no longer falls back to them (3.0.8).
+            options = ((datetime.date.today() + datetime.timedelta(days=30)).isoformat(),)
 
             def option_chain(self, expiry):
                 return Chain()
@@ -280,7 +282,8 @@ class TestPutHedgeCandidateSafety(unittest.TestCase):
 
         class FakeTicker:
             fast_info = {"lastPrice": 100.0, "tenDayAverageVolume": 1_000_000}
-            options = ("2026-08-21",)
+            # A month out: the screen skips expiries under a week away and no longer falls back to them (3.0.8).
+            options = ((datetime.date.today() + datetime.timedelta(days=30)).isoformat(),)
 
             def option_chain(self, expiry):
                 chain = type("Chain", (), {})()

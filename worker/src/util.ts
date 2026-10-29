@@ -68,3 +68,26 @@ export function toIsoUtc(ts: unknown): string | null {
   const d = new Date(s);
   return Number.isFinite(d.getTime()) ? d.toISOString() : null;
 }
+
+/** The same month and day `years` later (negative: earlier); 29 February becomes 28 February in a common year, as
+ * yfmcp.util._add_years does. */
+export function addIsoYears(isoDate: string, years: number): string {
+  const y = parseInt(isoDate.slice(0, 4), 10) + years;
+  const leap = y % 4 === 0 && (y % 100 !== 0 || y % 400 === 0);
+  const mmdd = isoDate.slice(5, 10) === "02-29" && !leap ? "02-28" : isoDate.slice(5, 10);
+  return `${String(y).padStart(4, "0")}-${mmdd}`;
+}
+
+/**
+ * Round half away from zero to `digits` decimals, decimal-safe (2.17.0): the number's shortest decimal form is shifted,
+ * so 1.005 rounds to 1.01 and -0.125 to -0.13, as Python's Decimal(str(x)).quantize(..., ROUND_HALF_UP) does.
+ * Moved from news/shared.ts (R5-pricing-1) so pricing uses the same display rounding.
+ */
+export function roundHalfAwayFromZero(value: number, digits: number): number {
+  // Past 2^52 at this scale a double has no fraction left to round.
+  if (!Number.isFinite(value) || Math.abs(value) * 10 ** digits >= 2 ** 52) return value;
+  const [mantissa, exponent] = Math.abs(value).toExponential().split("e");
+  const shifted = Math.round(Number(`${mantissa}e${Number(exponent) + digits}`));
+  const rounded = shifted / 10 ** digits;
+  return value < 0 && rounded !== 0 ? -rounded : rounded;
+}

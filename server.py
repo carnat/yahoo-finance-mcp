@@ -58,7 +58,7 @@ from yfmcp.util import (
     _filter_paragraphs_by_topics, _safe_json_loads, _compact_excerpt,
     fetch_quote_summary_module, unwrap_yahoo_values, yahoo_iso, yahoo_raw,
     _add_years, _clamp_int, _df_period_rows, _fy_number, _js_json_numbers, _nn, _now_iso, _plain, _unwrap_payload,
-    _utf16_length,
+    _round_half_away_from_zero, _utf16_length,
 )
 from yfmcp.clients.yahoo import _safe_parse, _valuation_market_inputs
 from yfmcp.clients.endpoints import _manual_lookup_payload, sec_archive_document_url, sec_company_concept_url, sec_company_facts_url, sec_filing_index_url
@@ -1951,8 +1951,8 @@ Args:
     max_results: int
         Maximum number of quote results to return. Default is 8.
     exchange: str | None
-        Optional exchange filter. Pass "US" to restrict results to NMS (NASDAQ) and NYQ (NYSE) only
-        — use this for small/mid-cap US equity searches that may otherwise return foreign listings or
+        Optional exchange filter. Pass "US" to restrict results to US listing venues (NMS, NGM, NCM:
+        Nasdaq; NYQ: NYSE; ASE: NYSE American; PCX: NYSE Arca) — use this for small/mid-cap US equity searches that may otherwise return foreign listings or
         crypto tokens. Pass a specific code (e.g. "NMS", "NYQ") for an exact exchange match.
         Default is None (all exchanges returned).
 """,
@@ -1978,7 +1978,9 @@ async def search_ticker(query: str, max_results: int = 8, exchange: str | None =
         if exchange:
             exch_upper = exchange.upper()
             if exch_upper == "US":
-                _us = {"NMS", "NYQ", "PCX"}  # NASDAQ, NYSE, NYSE Arca
+                # Every US listing venue, the same set in both runtimes (R5-pricing-1, Q3i call 24): Nasdaq Global Select/Global/Capital Market,
+                # NYSE, NYSE American, NYSE Arca.
+                _us = {"NMS", "NGM", "NCM", "NYQ", "ASE", "PCX"}
                 trimmed = [r for r in trimmed if r.get("exchange") in _us]
             else:
                 trimmed = [r for r in trimmed if r.get("exchange") == exch_upper]
@@ -4087,12 +4089,13 @@ async def get_put_hedge_candidates(
 
     # Filter expiries >= expiry_after. Without it, skip expiries less than a
     # week out (as the Worker does): they rarely suit a hedge and often have
-    # no quotes.
+    # no quotes. When every expiry is under a week out the screen fails closed
+    # instead of returning the contracts it says it skips (R5-pricing-1, Q3i call 23).
     if expiry_after:
         qualifying_expiries = [e for e in expirations if e >= expiry_after]
     else:
         default_after = (datetime.datetime.utcnow() + datetime.timedelta(days=7)).strftime("%Y-%m-%d")
-        qualifying_expiries = [e for e in expirations if e >= default_after] or list(expirations)
+        qualifying_expiries = [e for e in expirations if e >= default_after]
 
     # Select nearest 2
     qualifying_expiries = qualifying_expiries[:2]
@@ -4830,8 +4833,11 @@ async def get_price_target_bracket(
     except Exception as e:
         return json.dumps({"error": True, "message": str(e), "ticker": ticker})
 
-    reference_target_pct = round(current_price / target_price * 100, 1)
-    distance_to_target_pct = round((target_price - current_price) / current_price * 100, 1)
+    # Display rounding is half away from zero on the decimal value, as in the Worker (R5-pricing-1, Q3d); a zero price
+    # has no distance to the target (G1).
+    reference_target_pct = _round_half_away_from_zero(current_price / target_price * 100, 1)
+    distance_to_target_pct = (_round_half_away_from_zero((target_price - current_price) / current_price * 100, 1)
+                              if current_price != 0 else None)
 
     inverted_flag = reference_target_pct >= 100
 
@@ -4856,7 +4862,7 @@ async def get_price_target_bracket(
 
     return json.dumps({
         "ticker": ticker,
-        "currentPrice": round(current_price, 4),
+        "currentPrice": _round_half_away_from_zero(current_price, 4),
         "priceBasis": "REGULAR_MARKET_PRICE",
         "observationType": "REGULAR_MARKET_QUOTE_VS_USER_REFERENCE",
         "priceTimestamp": price_timestamp,

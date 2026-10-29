@@ -3190,6 +3190,42 @@ F-024, F-026, F-029). Both runtimes change alike.
 - **Tests:** 21 new parity cases in `scripts/parity/cases_audit_2251.py`.
 - **Rollback:** redeploy 2.25.0.
 
+## Pricing Repairs: Zero Price, Rounding, CAGR Start, Hedge Expiries, US Venues (3.0.8)
+
+- **Why:** R5-pricing-1, the pricing repairs that need no new name (owner decisions Q3b, Q3d and the Q3i triage,
+  2026-10-15; `analysis/yahoo-finance-mcp/R5PRICING1_SPEC.md`). Release type: patch. Both runtimes.
+- **Zero price (G1):** `calculate_price_target_distance` returns `distanceToTargetPct: null` when the current price
+  is 0, as the Worker already did. Before, Python failed on the division.
+- **Rounding (Q3d, BR-PRC-040):** the displayed percentages of `calculate_price_target_distance`, the price-change
+  percentage of `get_market_snapshot` and the averages and ratios of `analyze_volume_ratio` round half away from zero
+  on the decimal value (75.25 to 75.3, 100.05 to 100.1). Before, Python rounded half to even on the binary value and
+  the Worker used `toFixed`, so ties could differ by one in the last place.
+- **Volume ratio:** the ratio divides by the unrounded average; only the published averages are rounded. The Worker
+  rounded the average first.
+- **Quote date (Q3d):** `analyze_moving_average_position` and `calculate_price_target_distance` give
+  `dataDate: null` when the quote has no trade date. The Worker used today's date.
+- **CAGR start (G5, BR-PRC-021):** `get_price_stats` starts each 1, 3 and 5 year horizon at the first bar on or after
+  the same exchange-local date N years before the last completed bar (29 February becomes 28 February). The Worker
+  used N x 365.25 days and Python a calendar offset on timestamps, so the start bar could differ by a session.
+- **Hedge expiries (Q3i call 23):** `find_put_hedge_candidates` no longer falls back to expiries under a week out
+  when every listed expiry is that close. It returns no candidates instead of the contracts it says it skips.
+- **US venues (Q3i call 24):** `search_ticker` with `exchange: "US"` keeps NMS, NGM, NCM, NYQ, ASE and PCX in both
+  runtimes. Before, the Worker kept NMS and NYQ and Python NMS, NYQ and PCX. The tool and parameter descriptions say
+  so, which changes `schemaHash`.
+- **Input checks (Q3b):** `get_price_slope` refuses a `days` that is not a number or digits ("abc", "2.5", a list)
+  with `INPUT_VALIDATION_ERROR`. Before, the Worker read it as 5 and Python raised. The Worker's filing outline
+  checks the ticker and accession itself, as Python's does, so a direct caller never reads a filing for a malformed
+  input.
+- **Unchanged:** no field, status, warning code or enum was added. The zero-volume rule, short-history CAGR and the
+  session calendar need new names and wait for 3.1.0.
+- **Tests:** the pinned zero-price, tie, quote-date, volume-ratio, CAGR-horizon, slope and outline cases now assert
+  the same value in both runtimes (`scripts/parity/cases_neutrality.py`,
+  `scripts/parity/cases_pricing_evidence_tools.py`), with a new decimal-tie case. `scripts/parity/cases_r5price1.py`
+  checks `addIsoYears` and `_add_years` against a calendar oracle and the three `days` refusals through each
+  runtime's tool call.
+  The hedge fixtures in `scripts/test_options_quality.py` used a fixed expiry that is now in the past and passed
+  only through the old fallback; they now use an expiry a month out.
+
 ## Extractor Repairs: Loss Sign, China Preset As Data (3.0.7)
 
 - **Why:** R5-extractors-3, the last extractor repairs before the Phase 5 extractors move (owner decisions Q1

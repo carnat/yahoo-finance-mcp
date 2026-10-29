@@ -1,6 +1,7 @@
 import { BoundedTtlCache, setBounded } from "./cache.js";
 import { budgetRefusalCount, countCacheEvent, countProviderRetry, providerFetch } from "./request-context.js";
 import { classifyErrorMessage, ErrorCode, getWorkerVar, mcpFailure } from "./response.js";
+import { validateAccession, validateTicker } from "./validate.js";
 import { tickerCap } from "./tool-catalog.js";
 import { yahooTranscriptContentSha256 } from "./transcript-contract.js";
 import { allowedHostKind, approvedRegistryUrlAllowed, checkFetchUrl } from "./url-policy.js";
@@ -149,7 +150,7 @@ export {
   tableUnitScale,
   type UnitScaleSource,
 } from "./clients/html.js";
-import { _str, clampInt, compactExcerpt, dailyBarDate, getLastTradingDate, parseObjectJson, toIsoUtc } from "./util.js";
+import { _str, addIsoYears, clampInt, compactExcerpt, dailyBarDate, getLastTradingDate, parseObjectJson, roundHalfAwayFromZero, toIsoUtc } from "./util.js";
 import { BATCH_TICKER_CONCURRENCY, mapWithConcurrency, runPartialBatch, safeJsonParse } from "./batch.js";
 import { finnhubEligibility, resolveNewsCompanyIdentity } from "./news/identity.js";
 // Phase 4 unit 5: the generic helpers moved to util.ts, the batch runner to batch.ts and the news company identity
@@ -1892,10 +1893,16 @@ export async function getPriceStats(ticker: string | string[]): Promise<string> 
     const volatility = annualizedVolatility(closes, 30);
     if (volatility != null) stats.annualizedVolatility30d = +volatility.toFixed(4);
 
+    // The horizon starts at the first bar on or after the same exchange-local date N years before the last completed
+    // bar (29 February -> 28 February), in both runtimes (R5-pricing-1, BR-PRC-021); it was N x 365.25 days.
+    const barDates = observations.map((row) => dailyBarDate(row.timestamp, timezone));
     const cagr = (years: number): number | null => {
       const endObservation = observations[observations.length - 1];
-      const cutoffMs = endObservation.timestamp * 1000 - years * 365.25 * 86400 * 1000;
-      const startObservation = observations.find((row) => row.timestamp * 1000 >= cutoffMs);
+      const endDate = barDates[barDates.length - 1];
+      if (endDate == null) return null;
+      const cutoffDate = addIsoYears(endDate, -years);
+      const startIndex = barDates.findIndex((d) => d != null && d >= cutoffDate);
+      const startObservation = startIndex >= 0 ? observations[startIndex] : undefined;
       if (!startObservation || startObservation === endObservation || startObservation.close <= 0) {
         return null;
       }
@@ -2527,7 +2534,9 @@ export async function searchTicker(query: string, maxResults: number, exchange?:
   if (exchange) {
     const exch = exchange.toUpperCase();
     if (exch === "US") {
-      const usExchanges = new Set(["NMS", "NYQ"]);
+      // Every US listing venue, the same set in both runtimes (R5-pricing-1, Q3i call 24): Nasdaq Global Select/Global/Capital Market,
+      // NYSE, NYSE American, NYSE Arca.
+      const usExchanges = new Set(["NMS", "NGM", "NCM", "NYQ", "ASE", "PCX"]);
       trimmed = trimmed.filter((r) => usExchanges.has(r.exchange as string));
     } else {
       trimmed = trimmed.filter((r) => r.exchange === exch);
@@ -3271,18 +3280,20 @@ export async function getVolumeRatio(ticker: string | string[], _period: number)
         recommendedNextAction: "RETRY",
       });
     }
+    // The ratio uses the unrounded average; only the published averages and ratios are rounded, half away from zero,
+    // as in Python (R5-pricing-1, Q3c/Q3d).
     const average = (count: number): number | null => {
       const window = completedRows.slice(-(count + 1), -1);
       if (window.length < count || window.some((row) => row.volume == null)) return null;
-      return Math.round(
-        window.reduce((sum, row) => sum + (row.volume as number), 0) / window.length
-      );
+      return window.reduce((sum, row) => sum + (row.volume as number), 0) / window.length;
     };
     const lastVolume = lastRow.volume as number;
-    const avg10d = average(10);
-    const avg90d = average(90);
-    const ratio10d = avg10d != null && avg10d !== 0 ? +(lastVolume / avg10d).toFixed(3) : null;
-    const ratio90d = avg90d != null && avg90d !== 0 ? +(lastVolume / avg90d).toFixed(3) : null;
+    const rawAvg10d = average(10);
+    const rawAvg90d = average(90);
+    const avg10d = rawAvg10d != null ? roundHalfAwayFromZero(rawAvg10d, 0) : null;
+    const avg90d = rawAvg90d != null ? roundHalfAwayFromZero(rawAvg90d, 0) : null;
+    const ratio10d = rawAvg10d != null && rawAvg10d !== 0 ? roundHalfAwayFromZero(lastVolume / rawAvg10d, 3) : null;
+    const ratio90d = rawAvg90d != null && rawAvg90d !== 0 ? roundHalfAwayFromZero(lastVolume / rawAvg90d, 3) : null;
 
     let volumeFlag: string | null = null;
     if (ratio10d != null) {
@@ -3358,7 +3369,8 @@ export async function getMaPosition(ticker: string | string[]): Promise<string> 
       regime50,
       regime200,
       trend,
-      dataDate: (fi.lastTradeDate as string | null) ?? new Date().toISOString().slice(0, 10),
+      // The quote's own date, never today's (R5-pricing-1, Q3d).
+      dataDate: (fi.lastTradeDate as string | null) ?? null,
       recommendedNextAction: "NONE",
     });
   } catch (e) {
@@ -3895,10 +3907,11 @@ export async function getPutHedgeCandidates(
     }
 
     // Filter and select nearest 2. Without expiry_after, skip expiries less
-    // than a week out: they rarely suit a hedge and often have no quotes.
+    // than a week out: they rarely suit a hedge and often have no quotes. When
+    // every expiry is under a week out the screen fails closed instead of
+    // returning the contracts it says it skips (R5-pricing-1, Q3i call 23).
     const defaultAfter = new Date(Date.now() + HEDGE_DEFAULT_MIN_DAYS * 86_400_000).toISOString().slice(0, 10);
-    const eligible = dates.filter((d) => d >= (expiryAfter || defaultAfter));
-    const qualifying = (eligible.length || expiryAfter ? eligible : dates).slice(0, 2);
+    const qualifying = dates.filter((d) => d >= (expiryAfter || defaultAfter)).slice(0, 2);
     if (!qualifying.length) {
       return JSON.stringify({ error: true, message: "No qualifying expiry dates", ticker });
     }
@@ -6338,12 +6351,14 @@ export async function getPriceTargetBracket(ticker: string, ioPt: number): Promi
       return JSON.stringify({ error: true, message: `No price data for ${ticker}`, ticker });
     }
 
-    const referenceTargetPct = +(currentPrice / ioPt * 100).toFixed(1);
-    const distanceToTargetPct = +((ioPt - currentPrice) / currentPrice * 100).toFixed(1);
+    // Display rounding is half away from zero on the decimal value, as in Python (R5-pricing-1, Q3d); a zero price
+    // has no distance to the target (G1).
+    const referenceTargetPct = roundHalfAwayFromZero(currentPrice / ioPt * 100, 1);
+    const distanceToTargetPct = currentPrice !== 0 ? roundHalfAwayFromZero((ioPt - currentPrice) / currentPrice * 100, 1) : null;
 
     return JSON.stringify({
       ticker,
-      currentPrice: +currentPrice.toFixed(4),
+      currentPrice: roundHalfAwayFromZero(currentPrice, 4),
       priceBasis: "REGULAR_MARKET_PRICE",
       observationType: "REGULAR_MARKET_QUOTE_VS_USER_REFERENCE",
       priceTimestamp: (fi.priceTimestamp as string | null) ?? null,
@@ -6359,7 +6374,8 @@ export async function getPriceTargetBracket(ticker: string, ioPt: number): Promi
       invertedFlag: referenceTargetPct >= 100,
       // From the raw prices, not the rounded referenceTargetPct (2.8.0).
       priceAtOrAboveTarget: currentPrice > 0 && ioPt > 0 ? currentPrice >= ioPt : null,
-      dataDate: (fi.lastTradeDate as string | null) ?? new Date().toISOString().slice(0, 10),
+      // The quote's own date, never today's (R5-pricing-1, Q3d).
+      dataDate: (fi.lastTradeDate as string | null) ?? null,
       recommendedNextAction: "NONE",
     });
   } catch (e) {
@@ -6848,7 +6864,7 @@ export async function getMarketSnapshot(
   const changePct =
     (priceStats?.pctChangeTodayVsPrevClose as number | null) ??
     (lastPrice != null && prevClose != null && prevClose !== 0
-      ? +((lastPrice - prevClose) / prevClose * 100).toFixed(2)
+      ? roundHalfAwayFromZero((lastPrice - prevClose) / prevClose * 100, 2)
       : null);
 
   const snapshot: Record<string, unknown> = {
@@ -7140,6 +7156,12 @@ function outlineReadFailure(message: string): string {
  * envelope; an accession miss stays ACCESSION_NOT_FOUND.
  */
 export async function getFilingOutline(ticker: string, accessionNumber: string | null, documentUrl: string | null): Promise<string> {
+  // The ticker and accession checks the tool-call gate runs, here too, as Python's get_filing_outline does
+  // (R5-pricing-1, Q3b): a caller of this function never reads a filing for a malformed input.
+  const tickerError = validateTicker(ticker);
+  if (tickerError) return outlineFailure(ErrorCode.INPUT_VALIDATION_ERROR, tickerError);
+  const accessionError = accessionNumber ? validateAccession(accessionNumber) : null;
+  if (accessionError) return outlineFailure(ErrorCode.INPUT_VALIDATION_ERROR, accessionError);
   try {
     let resolvedAccession: string | null = accessionNumber || null;
     if (!documentUrl && accessionNumber) {

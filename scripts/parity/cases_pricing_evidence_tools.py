@@ -1044,15 +1044,12 @@ CASES += [
          expect=["Invalid ticker symbol: ''. Must be 1-20 characters: uppercase letters, digits, or . - ^ =",
                  "Invalid ticker symbol: '" + "A" * 21 + "'. Must be 1-20 characters: uppercase letters, digits, or . - ^ =", None]),
 
-    # Q3b: the Worker's get_filing_outline never validates the ticker or the accession.
-    _outline_case("tool.q3b.outline_invalid_ticker_python_rejects_worker_proceeds", ["BR-ENV-007"], "AAPL$", None, AAPL_DOC,
-                  mode="pinned", decision="Q3b",
-                  expect_py={"error": True, "code": "INPUT_VALIDATION_ERROR", "message": "Invalid ticker symbol: 'AAPL$'. Must be 1-20 characters: uppercase letters, digits, or . - ^ ="},
-                  expect_ts=OUTLINE_OK),
-    _outline_case("tool.q3b.outline_invalid_accession_python_rejects_worker_proceeds", ["BR-ENV-005"], "AAPL", "320193-24-123", AAPL_DOC,
-                  mode="pinned", decision="Q3b",
-                  expect_py={"error": True, "code": "INPUT_VALIDATION_ERROR", "message": "Invalid accession number: '320193-24-123'. Expected format: XXXXXXXXXX-YY-ZZZZZZ."},
-                  expect_ts=OUTLINE_OK),
+    # Q3b (R5-pricing-1): get_filing_outline validates the ticker and the accession itself in both runtimes, as the
+    # tool-call gate does; the Worker's function used to read the filing anyway.
+    _outline_case("tool.q3b.outline_invalid_ticker_rejected", ["BR-ENV-007"], "AAPL$", None, AAPL_DOC,
+                  expect={"error": True, "code": "INPUT_VALIDATION_ERROR", "message": "Invalid ticker symbol: 'AAPL$'. Must be 1-20 characters: uppercase letters, digits, or . - ^ ="}),
+    _outline_case("tool.q3b.outline_invalid_accession_rejected", ["BR-ENV-005"], "AAPL", "320193-24-123", AAPL_DOC,
+                  expect={"error": True, "code": "INPUT_VALIDATION_ERROR", "message": "Invalid accession number: '320193-24-123'. Expected format: XXXXXXXXXX-YY-ZZZZZZ."}),
     _outline_case("tool.q3b.outline_valid_accession_and_ticker_with_document_url_agree", ["BR-ENV-005", "BR-ENV-007"],
                   "AAPL", VALID_ACCESSION, AAPL_DOC, expect=OUTLINE_OK),
     # Q3a (2.13.0): an accession without document_url is honoured in both runtimes. The Worker resolves it through
@@ -1312,16 +1309,11 @@ CASES += [
                  expect={"error": True, "message": "Insufficient completed price data for TST: need 6 bars"}),
     _series_case("prc.slope.days_below_one_is_clamped_to_one", ["BR-PRC-014"], "slope", ["TST", 0], [100.0, 110.0],
                  select=_pick("observationCount", "slopePct"), expect={"observationCount": 2, "slopePct": 10.0}),
-    # Q3b: Python does not validate the ticker in the single-ticker path and int(days) raises on a non-number;
-    # the Worker also skips ticker validation here and falls back to 5 days.
-    _series_case("prc.slope.q3b_invalid_ticker_is_not_rejected_by_either_runtime", ["BR-PRC-014", "BR-ENV-007"], "slope",
+    # Q3b: the slope functions do not validate the ticker themselves; the tool-call gate rejects 'AAPL$' before them in
+    # both runtimes (cases_validation.py), so this pins only the function-level behaviour, which is the same.
+    _series_case("prc.slope.q3b_invalid_ticker_is_left_to_the_tool_call_gate", ["BR-PRC-014", "BR-ENV-007"], "slope",
                  ["AAPL$", 5], [100.00] + FLAT_SIX[:4] + [103.25], select=_pick("status", "ticker", "slopePct"),
-                 mode="pinned", decision="Q3b", expect={"status": "OK", "ticker": "AAPL$", "slopePct": 3.25}),
-    _series_case("prc.slope.q3b_non_numeric_days_python_raises_worker_defaults_to_five", ["BR-PRC-014"], "slope",
-                 ["TST", "abc"], [100.00] + FLAT_SIX[:4] + [103.25], select=_pick("status", "days", "slopePct", "__error__"),
-                 mode="pinned", decision="Q3b",
-                 expect_py={"__error__": "ValueError: invalid literal for int() with base 10: 'abc'"},
-                 expect_ts={"status": "OK", "days": 5, "slopePct": 3.25, "__error__": None}),
+                 expect={"status": "OK", "ticker": "AAPL$", "slopePct": 3.25}),
 ]
 
 VR_KEYS = ("status", "lastVolume", "avgVolume10d", "avgVolume90d", "ratio10d", "ratio90d", "volumeFlag")
@@ -1355,13 +1347,12 @@ CASES += [
                  mode="pinned", decision="Q3c",
                  expect_py={"status": "OK", "lastVolume": 0, "ratio10d": None, "volumeFlag": None},
                  expect_ts={"status": "OK", "lastVolume": 0, "ratio10d": 0, "volumeFlag": "LOW"}),
-    # Q3c (card, second defect): the Worker divides by the integer-rounded average, Python by the unrounded one;
-    # Python round() is half-even (1000.5 -> 1000) and JS Math.round half-up (1000.5 -> 1001).
-    _series_case("prc.volume_ratio.q3c_average_rounding_differs_between_runtimes", ["BR-PRC-033"], "volume_ratio", ["TST", 10], [50.0] * 11,
+    # Q3c/Q3d (R5-pricing-1): both runtimes divide by the unrounded average (1000 / 1000.5 = 0.9995 -> 1.0) and publish
+    # the average rounded half away from zero (1000.5 -> 1001). The Worker divided by the rounded average (0.999) and
+    # Python's round() was half-even (1000).
+    _series_case("prc.volume_ratio.q3c_ratio_uses_the_unrounded_average", ["BR-PRC-033"], "volume_ratio", ["TST", 10], [50.0] * 11,
                  volumes=[1000] * 5 + [1001] * 5 + [1000], select=_pick("avgVolume10d", "ratio10d", "volumeFlag"),
-                 mode="pinned", decision="Q3c",
-                 expect_py={"avgVolume10d": 1000, "ratio10d": 1.0, "volumeFlag": "NORMAL"},
-                 expect_ts={"avgVolume10d": 1001, "ratio10d": 0.999, "volumeFlag": "NORMAL"}),
+                 expect={"avgVolume10d": 1001, "ratio10d": 1.0, "volumeFlag": "NORMAL"}),
 
     # ── BR-SHR-006 (Q3c, 2.12.0): seven tickers is over get_price_slope's cap of 5 ──────────────
     # Both runtimes' tool-call gate rejects the call with BATCH_LIMIT_EXCEEDED before any fetch (no more truncation
@@ -1446,13 +1437,12 @@ CASES += [
     _stats_case("prc.cagr.q3i_short_history_five_year_cagr_uses_nominal_five_years", ["BR-PRC-019", "BR-PRC-021"], "CGD",
                 [("2023-10-11", 100.0), (STATS_END, 133.10)], ("cagr3y", "cagr5y"),
                 mode="pinned", decision="Q3i", expect={"cagr3y": 10.0, "cagr5y": 5.8853}),
-    # Finding (Phase 2, for Q3i triage): the horizon start differs. Python uses a calendar offset
-    # (2026-10-09 - 3y = 2023-10-09, bar included); the Worker uses 3 x 365.25 days (cutoff 2023-10-10 ~06:00Z, the
-    # 2023-10-09 20:00Z bar excluded), so the two pick different start bars (yahoo-finance.ts:2764-2774).
-    _stats_case("prc.cagr.start_bar_selection_differs_on_the_horizon_boundary", ["BR-PRC-021"], "CGE",
+    # R5-pricing-1 (Q3i G5): the horizon starts on the same exchange-local date N years back in both runtimes
+    # (2026-10-09 - 3y = 2023-10-09, bar included). The Worker used 3 x 365.25 days and dropped that bar (3.5744).
+    _stats_case("prc.cagr.horizon_starts_on_the_same_calendar_date", ["BR-PRC-021"], "CGE",
                 [("2023-10-09", 75.0), ("2025-10-09", 90.0), (STATS_END, 100.0)], ("cagr3y",),
-                mode="pinned", decision="FINDING: Python (calendar DateOffset) and Worker (365.25-day years) pick different CAGR start bars at the horizon boundary",
-                expect_py={"cagr3y": 10.0642}, expect_ts={"cagr3y": 3.5744}),
+                expect={"cagr3y": 10.0642}),
+    # The 29 February rule of the cutoff date is covered by cases_r5price1.py (addIsoYears / _add_years).
 ]
 
 
@@ -1556,18 +1546,16 @@ CASES += [
     # Q3d: the ratio is rounded to 1 dp: 75.04 reads as 75.0 (the bracket thresholds that used it were removed in 3.0.0).
     _bracket_case("prc.bracket.q3d_ratio_is_rounded_to_one_decimal", ["BR-PRC-022"], 75.04, 100.0, market_time=QUOTE_TIME,
                   keys=("referenceTargetPct",), expect={"referenceTargetPct": 75.0}),
-    # Q3d: Python round() is half-even, JS toFixed(1) rounds an exact tie up: 301/400 x 100 = 75.25 exactly.
-    _bracket_case("prc.bracket.q3d_rounding_differs_python_round_vs_ts_tofixed", ["BR-PRC-022"], 301.0, 400.0, market_time=QUOTE_TIME,
-                  keys=("referenceTargetPct",), mode="pinned", decision="Q3d",
-                  expect_py={"referenceTargetPct": 75.2},
-                  expect_ts={"referenceTargetPct": 75.3}),
-    # Q3d: with no quote time the Worker reports today as dataDate; Python reports null.
-    _bracket_case("prc.bracket.q3d_missing_quote_time_python_null_worker_today", ["BR-PRC-022"], 70.0, 100.0,
-                  keys=("dataDate",), mode="pinned", decision="Q3d",
-                  # `new Date()` ignores the Date.now override, so the Worker's date is the real current date: only its
-                  # presence (a YYYY-MM-DD string) is pinned.
-                  post=lambda v: {"dataDate": None if v["dataDate"] is None else ("<today YYYY-MM-DD>" if re.fullmatch(r"\d{4}-\d{2}-\d{2}", v["dataDate"]) else v["dataDate"])},
-                  expect_py={"dataDate": None}, expect_ts={"dataDate": "<today YYYY-MM-DD>"}),
+    # Q3d (R5-pricing-1): an exact tie rounds half away from zero in both runtimes: 301/400 x 100 = 75.25 -> 75.3
+    # (Python's round() was half-even, 75.2).
+    _bracket_case("prc.bracket.q3d_exact_tie_rounds_half_away_from_zero", ["BR-PRC-022"], 301.0, 400.0, market_time=QUOTE_TIME,
+                  keys=("referenceTargetPct",), expect={"referenceTargetPct": 75.3}),
+    # A tie the binary value only approaches still rounds on its decimal form: 1.0005 x 100 -> 100.05 -> 100.1.
+    _bracket_case("prc.bracket.q3d_decimal_tie_rounds_half_away_from_zero", ["BR-PRC-022"], 100.05, 100.0, market_time=QUOTE_TIME,
+                  keys=("referenceTargetPct",), expect={"referenceTargetPct": 100.1}),
+    # Q3d (R5-pricing-1): with no quote time dataDate is null in both runtimes; the Worker used today's date.
+    _bracket_case("prc.bracket.q3d_missing_quote_time_gives_null_data_date", ["BR-PRC-022"], 70.0, 100.0,
+                  keys=("dataDate",), expect={"dataDate": None}),
 ]
 
 
