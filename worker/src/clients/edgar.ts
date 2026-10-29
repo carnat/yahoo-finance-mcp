@@ -2,14 +2,14 @@
  * EDGAR client (Phase 4 unit 1, moved out of yahoo-finance.ts): the SEC transport and User-Agent, the SEC document
  * cache, EDGAR JSON/HTML reads, filing and exhibit-index URLs, ticker -> CIK resolution and submissions.
  * Filing selection (resolveSecFiling and its not-found envelopes) stays in yahoo-finance.ts (decision D11).
- * The Yahoo client and provider transport come from clients/yahoo.ts and clients/provider-http.ts (unit 2); the HTML
- * helper stripHtmlTags is imported back from yahoo-finance.ts until unit 3 moves it (decision D4).
+ * The Yahoo client and provider transport come from clients/yahoo.ts and clients/provider-http.ts (unit 2), and
+ * stripHtmlTags from clients/html.ts (unit 3).
  */
 
 import { BoundedTtlCache } from "../cache.js";
 import { awaitNotingBudget, consumeSubrequest, countCacheEvent, emptyCacheUsage, providerFetch, type CacheEvent, type CacheUsage } from "../request-context.js";
 import { getWorkerVar } from "../response.js";
-import { stripHtmlTags } from "../yahoo-finance.js";
+import { stripHtmlTags } from "./html.js";
 import { edgeCache, fetchProviderWithTimeout } from "./provider-http.js";
 import { countersSince, enc, yGet } from "./yahoo.js";
 

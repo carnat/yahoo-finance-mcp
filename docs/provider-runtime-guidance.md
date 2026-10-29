@@ -3190,6 +3190,16 @@ F-024, F-026, F-029). Both runtimes change alike.
 - **Tests:** 21 new parity cases in `scripts/parity/cases_audit_2251.py`.
 - **Rollback:** redeploy 2.25.0.
 
+## HTML Parsing Module Move (3.0.3)
+
+- **Why:** internal restructuring only (Phase 4 unit 3). Release type: patch. No behaviour change.
+- **What moved (Worker):** tag stripping and entity decoding, readable text and topic paragraphs, HTML table parsing
+  (`parseHtmlTable`, from `news/shared.ts`, decision D5) and financial-cell merging, numeric cells and the stated
+  unit-scale helpers now live in `worker/src/clients/html.ts`. Python already keeps these in `yfmcp/parsing/html.py`.
+- **Unchanged:** no tool name, input, output, schema, status, warning or ordering changed.
+- **Compatibility:** `yahoo-finance.ts` and `news/shared.ts` re-export the moved names other modules and tests read.
+- **Verification:** the parity harness passes with no expected value changed; tool listings (expanded and grouped) are
+  byte-identical; the moved text keeps its line multiset.
 ## One MarketInputs Source For Valuation (3.0.2)
 
 - **Why:** Phase 4 Q3g (brief §7 Q3g, V6): one `MarketInputs` contract, read by the Yahoo client, in both runtimes.
