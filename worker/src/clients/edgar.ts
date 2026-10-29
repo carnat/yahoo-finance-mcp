@@ -12,6 +12,7 @@ import { getWorkerVar } from "../response.js";
 import { stripHtmlTags } from "./html.js";
 import { edgeCache, fetchProviderWithTimeout } from "./provider-http.js";
 import { countersSince, enc, yGet } from "./yahoo.js";
+import { SEC_ARCHIVES_PREFIX, SEC_TICKER_INDEX_URL, SEC_WWW, secArchiveDocumentUrl, secBrowseEdgarAtomUrl, secFilingIndexUrl, secSubmissionsUrl, yahooQuoteSummaryUrl } from "./endpoints.js";
 
 // Ticker -> CIK fixtures, read after SEC's ticker index and before the EDGAR atom lookup. Empty in production:
 // only tests fill it, through setTickerCikFixturesForTests (2.13.0, R4 Q4; the smoke table it replaces was a
@@ -227,7 +228,7 @@ export async function edgarGetHtml(url: string, maxBytes = 5_000_000): Promise<s
   // Filing documents go through the SEC document cache and are read up to
   // SEC_DOCUMENT_READ_MAX_CHARS; large inline-XBRL 10-Ks exceed 5 MB, and a
   // cut-off read hid their later tables. Small reads (index pages) stream.
-  if (maxBytes >= 1_000_000 && url.startsWith("https://www.sec.gov/Archives/")) {
+  if (maxBytes >= 1_000_000 && url.startsWith(SEC_ARCHIVES_PREFIX)) {
     try {
       const doc = await fetchSecDocument(url);
       if (!doc.ok) return null;
@@ -281,9 +282,9 @@ export function edgarBuildFilingUrls(
   primaryDoc: string | null
 ): { edgarIndexUrl: string; edgarPrimaryDocumentUrl: string | null } {
   const noDash = accessionNumber.replace(/-/g, "");
-  const edgarIndexUrl = `https://www.sec.gov/Archives/edgar/data/${cik}/${noDash}/${accessionNumber}-index.htm`;
+  const edgarIndexUrl = secFilingIndexUrl(cik, noDash, accessionNumber);
   const edgarPrimaryDocumentUrl = primaryDoc
-    ? `https://www.sec.gov/Archives/edgar/data/${cik}/${noDash}/${primaryDoc}`
+    ? secArchiveDocumentUrl(cik, noDash, primaryDoc)
     : null;
   return { edgarIndexUrl, edgarPrimaryDocumentUrl };
 }
@@ -312,17 +313,17 @@ export function edgarDocumentUrlFromRef(cik: number, accessionNumber: string, ra
   const ref = normalizeEdgarDocumentRef(rawRef);
   if (!ref) return null;
   if (/^https?:\/\//i.test(ref)) return ref;
-  if (ref.startsWith("/Archives/")) return `https://www.sec.gov${ref}`;
+  if (ref.startsWith("/Archives/")) return `${SEC_WWW}${ref}`;
   const noDash = accessionNumber.replace(/-/g, "");
   const fileName = ref.split("/").pop() ?? ref;
-  return fileName ? `https://www.sec.gov/Archives/edgar/data/${cik}/${noDash}/${fileName}` : null;
+  return fileName ? secArchiveDocumentUrl(cik, noDash, fileName) : null;
 }
 
 function edgarDocumentUrlFromIndexUrl(indexUrl: string, rawRef: string): string | null {
   const ref = normalizeEdgarDocumentRef(rawRef);
   if (!ref) return null;
   if (/^https?:\/\//i.test(ref)) return ref;
-  if (ref.startsWith("/Archives/")) return `https://www.sec.gov${ref}`;
+  if (ref.startsWith("/Archives/")) return `${SEC_WWW}${ref}`;
   const fileName = ref.split("/").pop() ?? ref;
   const baseUrl = indexUrl.replace(/\/[^/]*$/, "/");
   return fileName ? `${baseUrl}${fileName}` : null;
@@ -395,7 +396,7 @@ let edgarTickerMapLoad: Promise<Map<string, number> | null> | null = null;
  */
 export async function getEdgarTickerCikMap(): Promise<Map<string, number> | null> {
   if (edgarTickerMap && Date.now() < edgarTickerMap.expiresAt) return edgarTickerMap.value;
-  edgarTickerMapLoad ??= edgarGetJson("https://www.sec.gov/files/company_tickers.json")
+  edgarTickerMapLoad ??= edgarGetJson(SEC_TICKER_INDEX_URL)
     .then((data) => {
       if (!data) return null;
       const map = new Map<string, number>();
@@ -439,7 +440,7 @@ export async function resolveCikForTicker(ticker: string): Promise<string | null
 
   try {
     const sec = await yGet(
-      `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${enc(ticker)}?modules=secFilings`
+      yahooQuoteSummaryUrl(enc(ticker), "secFilings")
     ) as Record<string, unknown>;
     const result = (sec?.quoteSummary as Record<string, unknown[]>)?.result?.[0] as Record<string, unknown> | undefined;
     const secFilings = result?.secFilings as Record<string, unknown> | undefined;
@@ -477,7 +478,7 @@ export async function resolveCikForTicker(ticker: string): Promise<string | null
   // Irrevocable Trust" (CIK 0001986183) ahead of Bloom Energy and was cached as BE's CIK when Yahoo and SEC's
   // ticker index were both unreadable (2.5.31, F-027).
   const atomUrls = [
-    `https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=${encodeURIComponent(ticker)}&type=&dateb=&owner=include&count=10&output=atom`,
+    secBrowseEdgarAtomUrl(encodeURIComponent(ticker)),
   ];
 
   try {
@@ -508,7 +509,7 @@ export async function getSubmissionsForTicker(ticker: string): Promise<{ cikPadd
     countCacheEvent("sec", "memoryHits");
     return { cikPadded, submissions: cachedSubmissions };
   }
-  const submissions = await edgarGetJson(`https://data.sec.gov/submissions/CIK${cikPadded}.json`);
+  const submissions = await edgarGetJson(secSubmissionsUrl(cikPadded));
   if (submissions) filingSubmissionsCache.set(key, submissions, FILING_SUBMISSIONS_TTL_MS);
   return { cikPadded, submissions };
 }
@@ -535,6 +536,6 @@ export async function resolveEx991Url(cikInt: number, accessionNumber: string): 
   // Match an EX-99.1 row in the filing index and capture its document link
   const re = /EX-99\.0?1\b[^<]{0,300}<[^>]+href="(\/Archives\/edgar\/data\/[^"]+\.(?:htm|html))"/i;
   const m = re.exec(html);
-  if (m) return `https://www.sec.gov${m[1]}`;
+  if (m) return `${SEC_WWW}${m[1]}`;
   return null;
 }

@@ -63,6 +63,7 @@ import {
   SEC_DOCUMENT_READ_MAX_CHARS,
   type SecDocumentResult,
 } from "./clients/edgar.js";
+import { filingManualLookup, SEC_ARCHIVES_PREFIX, secArchiveDocumentUrl, secCompanyConceptUrl, secCompanyFactsUrl, YAHOO_QUERY1, yahooChartUrl, yahooOptionsUrl, yahooQuoteSummaryUrl, yahooQuoteTypeUrl, yahooScreenerUrl, yahooSearchUrl, yahooTimeseriesUrl, YAHOO_VISUALIZATION_URL } from "./clients/endpoints.js";
 // Phase 4 unit 1: the EDGAR client moved to clients/edgar.ts; these re-exports keep tools.ts, index.ts,
 // evidence-pack.ts and the parity bundle (m.yahooFinance.*) unchanged.
 export {
@@ -814,7 +815,7 @@ export async function getEtfInfo(ticker: string | string[], sections?: string[] 
     ].join(",");
 
     const d = (await yGet(
-      `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${enc(ticker)}?modules=${modules}`
+      yahooQuoteSummaryUrl(enc(ticker), modules)
     )) as Record<string, unknown>;
 
     const result = (d?.quoteSummary as Record<string, unknown[]> | undefined)?.result?.[0] as
@@ -1011,7 +1012,7 @@ export async function getHistoricalPrices(
   interval: string,
   prepost: boolean = false
 ): Promise<string> {
-  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${enc(ticker)}?range=${period}&interval=${interval}${prepost ? "&includePrePost=true" : ""}`;
+  const url = yahooChartUrl(enc(ticker), `range=${period}&interval=${interval}${prepost ? "&includePrePost=true" : ""}`);
   const d = (await yGet(url, false)) as Record<string, unknown>;
 
   const result = (d?.chart as Record<string, unknown[]> | undefined)?.result?.[0] as
@@ -1084,7 +1085,7 @@ export async function getStockInfo(ticker: string | string[], includeAll = false
   ].join(",");
 
   const d = (await yGet(
-    `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${enc(ticker)}?modules=${modules}`
+    yahooQuoteSummaryUrl(enc(ticker), modules)
   )) as Record<string, unknown>;
 
   const result = (d?.quoteSummary as Record<string, unknown[]> | undefined)?.result?.[0] as
@@ -1125,7 +1126,7 @@ export async function getStockInfo(ticker: string | string[], includeAll = false
 
 export async function getStockActions(ticker: string, startDate = "", limit = 40): Promise<string> {
   const d = (await yGet(
-    `https://query1.finance.yahoo.com/v8/finance/chart/${enc(ticker)}?range=max&interval=1d&events=div%2Csplit%2CcapitalGains`,
+    yahooChartUrl(enc(ticker), "range=max&interval=1d&events=div%2Csplit%2CcapitalGains"),
     false
   )) as Record<string, unknown>;
 
@@ -1297,7 +1298,7 @@ export async function getHolderInfo(ticker: string, type: string): Promise<strin
   }
 
   const d = (await yGet(
-    `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${enc(ticker)}?modules=${mod}`
+    yahooQuoteSummaryUrl(enc(ticker), mod)
   )) as Record<string, unknown>;
 
   const result = (d?.quoteSummary as Record<string, unknown[]> | undefined)?.result?.[0] as
@@ -1623,7 +1624,7 @@ export async function getOptionExpirationDates(ticker: string): Promise<string> 
   // auth=true (default): the v7 options endpoint now requires a crumb;
   // passing false caused 401 → uncaught throw → "Error occurred during tool execution".
   try {
-    const url = `https://query2.finance.yahoo.com/v7/finance/options/${enc(ticker)}`;
+    const url = yahooOptionsUrl(enc(ticker));
     const read = (d: unknown): { result: Record<string, unknown> | undefined; dates: string[] } => {
       const result = ((d as Record<string, unknown> | undefined)?.optionChain as Record<string, unknown[]> | undefined)
         ?.result?.[0] as Record<string, unknown> | undefined;
@@ -1701,7 +1702,7 @@ export async function getOptionChain(
     const ts = Math.floor(Date.UTC(y, m - 1, day) / 1000);
 
     const d = (await yGet(
-      `https://query2.finance.yahoo.com/v7/finance/options/${enc(ticker)}?date=${ts}`
+      `${yahooOptionsUrl(enc(ticker))}?date=${ts}`
     )) as Record<string, unknown>;
 
     const result = (d?.optionChain as Record<string, unknown[]> | undefined)?.result?.[0] as
@@ -1821,7 +1822,7 @@ async function yGetFullOptions(
   ticker: string,
   expDate?: string
 ): Promise<{ dates: string[]; calls: Record<string, unknown>[]; puts: Record<string, unknown>[] }> {
-  let url = `https://query2.finance.yahoo.com/v7/finance/options/${enc(ticker)}`;
+  let url = yahooOptionsUrl(enc(ticker));
   if (expDate) {
     const [y, m, day] = expDate.split("-").map(Number);
     const ts = Math.floor(Date.UTC(y, m - 1, day) / 1000);
@@ -1857,7 +1858,7 @@ export async function getFastInfo(ticker: string | string[]): Promise<string> {
     return runPartialBatch(ticker, (t) => getFastInfo(t), tickerCap("get_market_quote"));
   }
   const d = (await yGet(
-    `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${enc(ticker)}?modules=price,summaryDetail,defaultKeyStatistics`
+    yahooQuoteSummaryUrl(enc(ticker), "price,summaryDetail,defaultKeyStatistics")
   )) as Record<string, unknown>;
 
   const result = (d?.quoteSummary as Record<string, unknown[]> | undefined)?.result?.[0] as
@@ -1928,10 +1929,10 @@ export async function getPriceStats(ticker: string | string[]): Promise<string> 
   }
   const [metaRaw, initialHistRaw] = await Promise.all([
     yGet(
-      `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${enc(ticker)}?modules=price,summaryDetail`
+      yahooQuoteSummaryUrl(enc(ticker), "price,summaryDetail")
     ),
     yGet(
-      `https://query1.finance.yahoo.com/v8/finance/chart/${enc(ticker)}?range=5y&interval=1d`,
+      yahooChartUrl(enc(ticker), "range=5y&interval=1d"),
       false
     ),
   ]);
@@ -1996,7 +1997,7 @@ export async function getPriceStats(ticker: string | string[]): Promise<string> 
     retryAttempted = true;
     try {
       histRaw = await yGet(
-        `https://query1.finance.yahoo.com/v8/finance/chart/${enc(ticker)}?range=5y&interval=1d&events=div%2Csplits&_=${Date.now()}`,
+        yahooChartUrl(enc(ticker), `range=5y&interval=1d&events=div%2Csplits&_=${Date.now()}`),
         false
       ) as Record<string, unknown>;
       const retryResult = (histRaw?.chart as Record<string, unknown[]> | undefined)?.result?.[0] as
@@ -2099,7 +2100,7 @@ export async function getAnalystConsensus(ticker: string | string[]): Promise<st
   }
   const modules = "financialData,recommendationTrend,price,upgradeDowngradeHistory";
   const d = (await yGet(
-    `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${enc(ticker)}?modules=${modules}`
+    yahooQuoteSummaryUrl(enc(ticker), modules)
   )) as Record<string, unknown>;
 
   const result = (d?.quoteSummary as Record<string, unknown[]> | undefined)?.result?.[0] as
@@ -2198,7 +2199,7 @@ export async function getAnalystConsensus(ticker: string | string[]): Promise<st
 
 export async function getEarningsAnalysis(ticker: string): Promise<string> {
   const d = (await yGet(
-    `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${enc(ticker)}?modules=earningsTrend,earningsHistory`
+    yahooQuoteSummaryUrl(enc(ticker), "earningsTrend,earningsHistory")
   )) as Record<string, unknown>;
 
   const result = (d?.quoteSummary as Record<string, unknown[]> | undefined)?.result?.[0] as
@@ -2291,7 +2292,7 @@ async function fetchValuationHistory(ticker: string, periods: number, frequency:
   const types = Object.keys(VALUATION_TYPES).map((type) => `${prefix}${type}`);
   const p2 = Math.floor(Date.now() / 1000);
   const d = (await yGet(
-    `https://query1.finance.yahoo.com/ws/fundamentals-timeseries/v1/finance/timeseries/${enc(ticker)}` +
+    yahooTimeseriesUrl(enc(ticker), YAHOO_QUERY1) +
       `?type=${types.join(",")}&period1=1483142400&period2=${p2}`
   )) as Record<string, unknown>;
   const results = ((d.timeseries as Record<string, unknown> | undefined)?.result as Record<string, unknown>[] | undefined) ?? [];
@@ -2325,7 +2326,7 @@ export async function getFinancialRatios(
     return JSON.stringify({ error: true, code: "INPUT_VALIDATION_ERROR", message: "frequency must be quarterly, monthly, yearly, or trailing" });
   }
   const d = (await yGet(
-    `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${enc(ticker)}?modules=summaryDetail,financialData,defaultKeyStatistics`
+    yahooQuoteSummaryUrl(enc(ticker), "summaryDetail,financialData,defaultKeyStatistics")
   )) as Record<string, unknown>;
 
   const result = (d?.quoteSummary as Record<string, unknown[]> | undefined)?.result?.[0] as
@@ -2513,7 +2514,7 @@ export async function analyzeShareCountTrend(
     return JSON.stringify({ error: true, code: "INPUT_VALIDATION_ERROR", message: "start_date must be before end_date" });
   }
   const d = (await yGet(
-    `https://query2.finance.yahoo.com/ws/fundamentals-timeseries/v1/finance/timeseries/${enc(ticker)}` +
+    yahooTimeseriesUrl(enc(ticker)) +
       `?symbol=${enc(ticker)}&period1=${Math.floor(start.getTime() / 1000)}&period2=${Math.floor(end.getTime() / 1000)}`
   )) as Record<string, unknown>;
   const results = ((d.timeseries as Record<string, unknown> | undefined)?.result as Record<string, unknown>[] | undefined) ?? [];
@@ -2562,7 +2563,7 @@ export async function getCalendar(ticker: string, mode: string = "upcoming", lim
     });
   }
   const d = (await yGet(
-    `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${enc(ticker)}?modules=calendarEvents`
+    yahooQuoteSummaryUrl(enc(ticker), "calendarEvents")
   )) as Record<string, unknown>;
 
   const result = (d?.quoteSummary as Record<string, unknown[]> | undefined)?.result?.[0] as
@@ -2653,7 +2654,7 @@ export async function getMarketCalendar(
           { operator: "GTE", operands: ["startdatetime", start] },
           { operator: "LTE", operands: ["startdatetime", end] },
         ] };
-  const d = (await yPost("https://query1.finance.yahoo.com/v1/finance/visualization?lang=en-US&region=US", {
+  const d = (await yPost(YAHOO_VISUALIZATION_URL, {
     size: limit,
     offset,
     query: dateQuery,
@@ -2687,7 +2688,7 @@ export async function getMarketCalendar(
 
 export async function searchTicker(query: string, maxResults: number, exchange?: string | null): Promise<string> {
   const d = (await yGet(
-    `https://query1.finance.yahoo.com/v1/finance/search?q=${enc(query)}&quotesCount=${maxResults}&newsCount=0&enableFuzzyQuery=false`,
+    yahooSearchUrl(`q=${enc(query)}&quotesCount=${maxResults}&newsCount=0&enableFuzzyQuery=false`),
     false
   )) as Record<string, unknown>;
 
@@ -2741,7 +2742,7 @@ export async function screenStocks(screenerName: string, count: number): Promise
   }
   const safeCount = Math.min(count, 250);
   const d = (await yGet(
-    `https://query1.finance.yahoo.com/v1/finance/screener/predefined/saved?scrIds=${enc(screenerName)}&count=${safeCount}&lang=en-US&region=US&corsDomain=finance.yahoo.com`
+    yahooScreenerUrl(`scrIds=${enc(screenerName)}&count=${safeCount}&lang=en-US&region=US&corsDomain=finance.yahoo.com`)
   )) as Record<string, unknown>;
 
   const financeResult = (d?.finance as Record<string, unknown>)?.result as
@@ -2779,7 +2780,7 @@ export async function getRecommendations(
   }
 
   const d = (await yGet(
-    `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${enc(ticker)}?modules=${mod}`
+    yahooQuoteSummaryUrl(enc(ticker), mod)
   )) as Record<string, unknown>;
 
   const result = (d?.quoteSummary as Record<string, unknown[]> | undefined)?.result?.[0] as
@@ -2831,7 +2832,7 @@ const SHORT_FIELDS = [
 
 export async function getShortInterest(ticker: string): Promise<string> {
   const d = (await yGet(
-    `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${enc(ticker)}?modules=defaultKeyStatistics,price`
+    yahooQuoteSummaryUrl(enc(ticker), "defaultKeyStatistics,price")
   )) as Record<string, unknown>;
 
   const result = (d?.quoteSummary as Record<string, unknown[]> | undefined)?.result?.[0] as
@@ -2939,7 +2940,7 @@ export async function getTechnicalIndicators(
   const fetchChart = async (retry: boolean): Promise<Record<string, unknown> | undefined> => {
     const cacheBuster = retry ? `&events=div%2Csplits&_=${Date.now()}` : "";
     const d = (await yGet(
-      `https://query1.finance.yahoo.com/v8/finance/chart/${enc(ticker)}?range=${lookback}&interval=1d${cacheBuster}`,
+      yahooChartUrl(enc(ticker), `range=${lookback}&interval=1d${cacheBuster}`),
       false
     )) as Record<string, unknown>;
     return (d?.chart as Record<string, unknown[]> | undefined)?.result?.[0] as
@@ -3262,7 +3263,7 @@ export async function getPriceSlope(ticker: string | string[], days: number): Pr
     const fetchResult = async (retry: boolean): Promise<Record<string, unknown> | undefined> => {
       const cacheBuster = retry ? `&events=div%2Csplits&_=${Date.now()}` : "";
       const payload = (await yGet(
-        `https://query1.finance.yahoo.com/v8/finance/chart/${enc(ticker)}?range=${range}&interval=1d${cacheBuster}`,
+        yahooChartUrl(enc(ticker), `range=${range}&interval=1d${cacheBuster}`),
         false
       )) as Record<string, unknown>;
       return (payload?.chart as Record<string, unknown[]> | undefined)?.result?.[0] as
@@ -3390,7 +3391,7 @@ export async function getVolumeRatio(ticker: string | string[], _period: number)
     const fetchChart = async (retry: boolean): Promise<Record<string, unknown> | undefined> => {
       const cacheBuster = retry ? `&events=div%2Csplits&_=${Date.now()}` : "";
       const payload = await yGet(
-        `https://query1.finance.yahoo.com/v8/finance/chart/${enc(ticker)}?range=6mo&interval=1d${cacheBuster}`,
+        yahooChartUrl(enc(ticker), `range=6mo&interval=1d${cacheBuster}`),
         false
       ) as Record<string, unknown>;
       return (payload?.chart as Record<string, unknown[]> | undefined)?.result?.[0] as
@@ -4401,7 +4402,7 @@ const FILING_FACT_CONCEPTS: Record<string, { primary: string; fallback?: string;
 export async function secFiscalYearNaming(ticker: string): Promise<FiscalYearNaming> {
   try {
     const cikPadded = await resolveCikForTicker(ticker);
-    const facts = cikPadded ? await edgarGetJson(`https://data.sec.gov/api/xbrl/companyfacts/CIK${cikPadded}.json`) : null;
+    const facts = cikPadded ? await edgarGetJson(secCompanyFactsUrl(cikPadded)) : null;
     return fiscalYearNaming(facts);
   } catch {
     return fiscalYearNaming(null);
@@ -4929,18 +4930,6 @@ function regionMatches(segmentLabel: string, region: string, includeAsiaFallback
   return false;
 }
 
-function filingManualLookup(ticker: string, cikPadded: string | null, filingType: string): Record<string, unknown> {
-  const edgarIndexUrl = cikPadded
-    ? `https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=${cikPadded}&type=${filingType}&owner=include&count=10`
-    : `https://www.sec.gov/cgi-bin/browse-edgar?company=${encodeURIComponent(ticker)}&action=getcompany&type=${filingType}&owner=include&count=10`;
-  const eftsSearchUrl = `https://efts.sec.gov/LATEST/search-index?q=${encodeURIComponent(ticker)}&forms=${encodeURIComponent(filingType)}`;
-  return {
-    edgarIndexUrl,
-    eftsSearchUrl,
-    note: "Fact not XBRL-tagged. Use search_filing_text instead.",
-  };
-}
-
 const ANNUAL_FILING_TYPE_RE = /^(?:10-K|20-F|40-F)\b/i;
 
 /**
@@ -4955,7 +4944,7 @@ async function annualCoverageWarningFor(ticker: string, payload: Record<string, 
   const latest = latestAnnualFiling(filings);
   const used = payload.value != null && typeof payload.accessionNumber === "string" ? payload.accessionNumber.replace(/-/g, "") : null;
   if (!latest || used === latest.accessionNumber.replace(/-/g, "")) return null;
-  const facts = await edgarGetJson(`https://data.sec.gov/api/xbrl/companyfacts/CIK${cikPadded}.json`).catch(() => null);
+  const facts = await edgarGetJson(secCompanyFactsUrl(cikPadded)).catch(() => null);
   return facts ? latestAnnualCoverageWarning(filings, facts) : null;
 }
 
@@ -5185,7 +5174,7 @@ async function getFilingDataUnchecked(
     failedReads.push({ endpoint, concept: conceptName, httpStatus: read.httpStatus });
     return null;
   };
-  const companyfactsUrl = `https://data.sec.gov/api/xbrl/companyfacts/CIK${cikPadded}.json`;
+  const companyfactsUrl = secCompanyFactsUrl(cikPadded);
   const secReadFailed = (conceptName: string | null): Promise<string> => {
     // Reads finish in network order; list them in candidate order, companyfacts last, so the result is stable.
     const rank = (r: { endpoint: string; concept: string | null }): number =>
@@ -5203,7 +5192,7 @@ async function getFilingDataUnchecked(
     );
   };
   const fetchConcept = async (concept: string): Promise<Record<string, unknown> | null> =>
-    readSecJson(`https://data.sec.gov/api/xbrl/companyconcept/CIK${cikPadded}/us-gaap/${concept}.json`, "companyconcept", concept);
+    readSecJson(secCompanyConceptUrl(cikPadded, concept), "companyconcept", concept);
 
   // Every equivalent concept is read; the one with the newest filing of this
   // form wins, so a filer that switched concepts is not read from its old one.
@@ -5976,7 +5965,7 @@ export async function searchFilingText(
   let filings: ResolvedSecFiling[] = [];
   let explicitTarget: FilingSearchTarget | null = null;
   if (documentUrl && !isLikelyXbrlDocumentUrl(documentUrl)) {
-    if (!documentUrl.startsWith("https://www.sec.gov/Archives/")) {
+    if (!documentUrl.startsWith(SEC_ARCHIVES_PREFIX)) {
       return mcpFailure("search_sec_filing_text", ErrorCode.INPUT_VALIDATION_ERROR, "document_url must be an https://www.sec.gov/Archives/ URL.");
     }
     explicitTarget = { key: documentUrl, url: documentUrl, documentType: "primary", defaultSection: null, primary: true, accessionNumber, filingDate: null, filingType };
@@ -6286,7 +6275,7 @@ export async function getOptionsFlowScan(ticker: string, windowLabel: string): P
 
     let currentPrice: number | null = null;
     try {
-      const pd = await yGet(`https://query1.finance.yahoo.com/v10/finance/quoteSummary/${enc(ticker)}?modules=price`) as Record<string, unknown>;
+      const pd = await yGet(yahooQuoteSummaryUrl(enc(ticker), "price")) as Record<string, unknown>;
       const pr = ((pd?.quoteSummary as Record<string, unknown[]>)?.result?.[0] as Record<string, unknown>)?.price as Record<string, unknown>;
       currentPrice = raw(pr?.regularMarketPrice) as number | null;
     } catch { /* ignore */ }
@@ -6359,7 +6348,7 @@ export async function getOptionsFlowScan(ticker: string, windowLabel: string): P
         const fetchChart = async (retry: boolean): Promise<Record<string, unknown> | undefined> => {
           const cacheBuster = retry ? `&events=div%2Csplits&_=${Date.now()}` : "";
           const chartD = await yGet(
-            `https://query1.finance.yahoo.com/v8/finance/chart/${enc(ticker)}?range=1y&interval=1d${cacheBuster}`,
+            yahooChartUrl(enc(ticker), `range=1y&interval=1d${cacheBuster}`),
             false
           ) as Record<string, unknown>;
           return (chartD?.chart as Record<string, unknown[]> | undefined)?.result?.[0] as
@@ -6758,7 +6747,7 @@ export async function getVolumeGate(ticker: string, foreignExchange: boolean, mi
     const fetchChart = async (retry: boolean): Promise<Record<string, unknown> | undefined> => {
       const cacheBuster = retry ? `&events=div%2Csplits&_=${Date.now()}` : "";
       const payload = await yGet(
-        `https://query1.finance.yahoo.com/v8/finance/chart/${enc(ticker)}?range=6mo&interval=1d${cacheBuster}`,
+        yahooChartUrl(enc(ticker), `range=6mo&interval=1d${cacheBuster}`),
         false
       ) as Record<string, unknown>;
       return (payload?.chart as Record<string, unknown[]> | undefined)?.result?.[0] as
@@ -7297,7 +7286,7 @@ export async function listSecCompanyFilings(ticker: string, filingType: string =
     const primaryDoc = primaryDocs[i] ?? "";
     const accClean = acc.replace(/-/g, "");
     const documentUrl = primaryDoc
-      ? `https://www.sec.gov/Archives/edgar/data/${cikInt}/${accClean}/${primaryDoc}`
+      ? secArchiveDocumentUrl(cikInt, accClean, primaryDoc)
       : null;
     results.push({
       filingType: forms[i],
@@ -7360,7 +7349,7 @@ export async function getFilingOutline(ticker: string, accessionNumber: string |
       resolvedAccession = resolved.filing.accessionNumber;
     }
     if (!documentUrl) return outlineFailure(ErrorCode.INPUT_VALIDATION_ERROR, "Either accession_number or document_url is required");
-    if (!documentUrl.startsWith("https://www.sec.gov/Archives/")) {
+    if (!documentUrl.startsWith(SEC_ARCHIVES_PREFIX)) {
       return outlineFailure(ErrorCode.INPUT_VALIDATION_ERROR, "Invalid SEC URL: must start with 'https://www.sec.gov/Archives/'.");
     }
     const doc = await fetchSecDocument(documentUrl);
@@ -7587,7 +7576,7 @@ export function findSectionBounds(html: string, section: string, maxChars: numbe
 
 export async function getFilingSection(ticker: string, sectionName: string, documentUrl: string, contextChars: number = 3000): Promise<string> {
   try {
-    if (!documentUrl.startsWith("https://www.sec.gov/Archives/")) {
+    if (!documentUrl.startsWith(SEC_ARCHIVES_PREFIX)) {
       return JSON.stringify({ error: true, message: "Invalid SEC URL" });
     }
     const doc = await fetchSecDocument(documentUrl);
@@ -7688,7 +7677,7 @@ function filingTableIsUsable(rows: string[][]): boolean {
 
 export async function listFilingTables(ticker: string, documentUrl: string, offset: number = 0, limit: number = 50): Promise<string> {
   try {
-    if (!documentUrl.startsWith("https://www.sec.gov/Archives/")) {
+    if (!documentUrl.startsWith(SEC_ARCHIVES_PREFIX)) {
       return JSON.stringify({ error: true, message: "Invalid SEC URL" });
     }
     const doc = await fetchSecDocument(documentUrl);
@@ -7738,7 +7727,7 @@ export async function listFilingTables(ticker: string, documentUrl: string, offs
 
 export async function getFilingTable(ticker: string, documentUrl: string, tableIndex: number, maxRows: number = 30): Promise<string> {
   try {
-    if (!documentUrl.startsWith("https://www.sec.gov/Archives/")) {
+    if (!documentUrl.startsWith(SEC_ARCHIVES_PREFIX)) {
       return JSON.stringify({ error: true, message: "Invalid SEC URL" });
     }
     const doc = await fetchSecDocument(documentUrl);
@@ -7912,7 +7901,7 @@ export async function resolveNewsCompanyIdentity(ticker: string): Promise<NewsCo
 
   try {
     const d = (await yGet(
-      `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${enc(tickerU)}?modules=price,summaryProfile,assetProfile,secFilings`
+      yahooQuoteSummaryUrl(enc(tickerU), "price,summaryProfile,assetProfile,secFilings")
     )) as Record<string, unknown>;
     const result = (d?.quoteSummary as Record<string, unknown[]> | undefined)?.result?.[0] as Record<string, unknown> | undefined;
     const price = result?.price as Record<string, unknown> | undefined;
@@ -8244,7 +8233,7 @@ export async function listSecMaterialFilings(
     const acc = accessions[i] ?? "";
     const accClean = acc.replace(/-/g, "");
     const primaryDoc = primaryDocs[i] ?? "";
-    const docUrl = primaryDoc ? `https://www.sec.gov/Archives/edgar/data/${cikInt}/${accClean}/${primaryDoc}` : null;
+    const docUrl = primaryDoc ? secArchiveDocumentUrl(cikInt, accClean, primaryDoc) : null;
 
     results.push({
       filingType: formsList[i],
@@ -8370,12 +8359,12 @@ export async function getSecFilingIntelligence(
   const primaryDoc = primaryDocs[targetIdx] ?? "";
   const cikInt = parseInt(cikPadded, 10);
   const accClean = accessionNumber.replace(/-/g, "");
-  const documentUrl = primaryDoc ? `https://www.sec.gov/Archives/edgar/data/${cikInt}/${accClean}/${primaryDoc}` : null;
+  const documentUrl = primaryDoc ? secArchiveDocumentUrl(cikInt, accClean, primaryDoc) : null;
 
   let xbrlAvailable = false;
   let xbrlStatus = "UNAVAILABLE";
   const xbrlFacts: Record<string, unknown> = {};
-  const factsData = await edgarGetJson(`https://data.sec.gov/api/xbrl/companyfacts/CIK${cikPadded}.json`);
+  const factsData = await edgarGetJson(secCompanyFactsUrl(cikPadded));
   if (factsData?.facts && typeof factsData.facts === "object") {
     xbrlAvailable = true;
     xbrlStatus = "OK";
@@ -8471,7 +8460,7 @@ export async function getSecFilingSectionMarkdown(
   const primaryDoc = primaryDocs[targetIdx] ?? "";
   const cikInt = parseInt(cikPadded, 10);
   const accClean = accessionNumber.replace(/-/g, "");
-  const documentUrl = primaryDoc ? `https://www.sec.gov/Archives/edgar/data/${cikInt}/${accClean}/${primaryDoc}` : null;
+  const documentUrl = primaryDoc ? secArchiveDocumentUrl(cikInt, accClean, primaryDoc) : null;
 
   if (!documentUrl) {
     return JSON.stringify({ ok: false, error: { code: "NO_FILING_DATA", message: `No document URL for ${accessionNumber}` } });
@@ -8724,7 +8713,7 @@ function callerUrlRefusal(url: string): string | null {
   const check = checkFetchUrl(url);
   if (!check.ok) return check.reason;
   const kind = allowedHostKind(check.url);
-  if (kind === "sec" && url.startsWith("https://www.sec.gov/Archives/")) return null;
+  if (kind === "sec" && url.startsWith(SEC_ARCHIVES_PREFIX)) return null;
   if (kind === "yahoo" && yahooTranscriptUrlTicker(url) !== null) return null;
   if (kind === "registry" && approvedRegistryUrlAllowed(url)) return null;
   return "URL path not allowed";
@@ -9172,7 +9161,7 @@ async function fetchYahooQuartrTranscript(
       if (discoveredCached) return discoveredCached;
     }
 
-    const quoteTypeUrl = `https://query1.finance.yahoo.com/v1/finance/quoteType/${yahooTickerPath(tickerU)}?lang=en-US&region=US`;
+    const quoteTypeUrl = yahooQuoteTypeUrl(yahooTickerPath(tickerU));
     const quoteResponse = await yahooTranscriptResponse(quoteTypeUrl, 20_000);
     if (!quoteResponse.ok) return yahooTranscriptHttpFailure(quoteResponse, resolvedSourceUrl, resolvedEventId);
     const quoteJson = await quoteResponse.json() as Record<string, unknown>;
@@ -9627,7 +9616,7 @@ function transcriptOfficialReleaseSource(
   return {
     ...secSource,
     sourceType: "sec_8k_ex991",
-    url: `https://www.sec.gov/Archives/edgar/data/${cik}/${accessionNumber.replace(/-/g, "")}/${document}`,
+    url: secArchiveDocumentUrl(cik, accessionNumber.replace(/-/g, ""), document),
   };
 }
 
@@ -9819,7 +9808,7 @@ export async function getEarningsCallTranscript(
           });
           continue;
         }
-        const documentUrl = `https://www.sec.gov/Archives/edgar/data/${cik}/${accessionNumber.replace(/-/g, "")}/${fileName}`;
+        const documentUrl = secArchiveDocumentUrl(cik, accessionNumber.replace(/-/g, ""), fileName);
         const html = await edgarGetHtml(documentUrl, 5_000_000);
         if (!html) {
           candidateDiagnostics.push({ type: exhibit.type ?? null, document: fileName, url: documentUrl, status: "FETCH_ERROR" });
@@ -11124,7 +11113,7 @@ function earningsReleasePicks(submissions: Record<string, unknown>, cikInt: numb
     const acc = String(recent.accessionNumber?.[i] ?? "");
     const doc = String(recent.primaryDocument?.[i] ?? "");
     if (!acc || !doc) continue;
-    picks.push({ filingDate: String(recent.filingDate?.[i] ?? ""), accessionNumber: acc, primaryUrl: `https://www.sec.gov/Archives/edgar/data/${cikInt}/${acc.replace(/-/g, "")}/${doc}`, form });
+    picks.push({ filingDate: String(recent.filingDate?.[i] ?? ""), accessionNumber: acc, primaryUrl: secArchiveDocumentUrl(cikInt, acc.replace(/-/g, ""), doc), form });
   }
   return picks;
 }
@@ -11145,7 +11134,7 @@ export async function extractOperatingDriverLedger(ticker: string, filingType = 
   const [loaded, matches, companyfacts, release] = await Promise.all([
     ixbrlSource("primary", primary).catch(() => null),
     filingTextMatches(ticker, primary, DRIVER_SEARCH_TERMS, 30, 700).catch(() => [] as TextMatch[]),
-    edgarGetJson(`https://data.sec.gov/api/xbrl/companyfacts/CIK${primary.cikPadded}.json`).catch(() => null),
+    edgarGetJson(secCompanyFactsUrl(primary.cikPadded)).catch(() => null),
     getSubmissionsForTicker(ticker).then(async ({ submissions }): Promise<Record<string, unknown>> => {
       // The newest results-of-operations 8-K, as in get_guidance_history.
       const pick = submissions ? earningsReleasePicks(submissions, primary.cikInt, 1)[0] : undefined;
@@ -11188,7 +11177,7 @@ export async function extractOperatingDriverLedger(ticker: string, filingType = 
 async function dailyHistory(ticker: string, fromDate: string): Promise<{ bars: Bar[]; splits: Split[]; currency: string | null } | null> {
   const p1 = Math.floor(Date.parse(`${fromDate}T00:00:00Z`) / 1000);
   const p2 = Math.floor(Date.now() / 1000);
-  const d = (await yGet(`https://query1.finance.yahoo.com/v8/finance/chart/${enc(ticker)}?period1=${p1}&period2=${p2}&interval=1d&events=split`, false)) as Record<string, unknown>;
+  const d = (await yGet(yahooChartUrl(enc(ticker), `period1=${p1}&period2=${p2}&interval=1d&events=split`), false)) as Record<string, unknown>;
   const result = (d?.chart as Record<string, unknown[]> | undefined)?.result?.[0] as Record<string, unknown> | undefined;
   if (!result) return null;
   const meta = (result.meta as Record<string, unknown> | undefined) ?? {};
@@ -11231,7 +11220,7 @@ function periodicReports(submissions: Record<string, unknown> | null, cikPadded:
       form,
       filed: String(recent.filingDate?.[i] ?? ""),
       reportDate: recent.reportDate?.[i] ? String(recent.reportDate[i]) : null,
-      documentUrl: `https://www.sec.gov/Archives/edgar/data/${parseInt(cikPadded, 10)}/${acc.replace(/-/g, "")}/${doc}`,
+      documentUrl: secArchiveDocumentUrl(parseInt(cikPadded, 10), acc.replace(/-/g, ""), doc),
     });
   }
   return out;
@@ -11257,7 +11246,7 @@ async function valuationHistoryFor(ticker: string, dates: string[] | null, fromD
     return { ticker: upper, status: code, code, retryable: !tickerIndex, ...AUTHORITY_BOUNDARY };
   }
   const [facts, history] = await Promise.all([
-    edgarGetJson(`https://data.sec.gov/api/xbrl/companyfacts/CIK${cikPadded}.json`).catch(() => null),
+    edgarGetJson(secCompanyFactsUrl(cikPadded)).catch(() => null),
     dailyHistory(ticker, fromDate).catch(() => null),
   ]);
   if (!facts) return { ticker: upper, status: "COMPANYFACTS_NOT_AVAILABLE", code: "COMPANYFACTS_NOT_AVAILABLE", retryable: true, ...AUTHORITY_BOUNDARY };
@@ -11355,7 +11344,7 @@ export async function reconcileMetricSources(ticker: string, metric: string, per
     const code = tickerIndex ? "NO_SEC_REGISTRANT" : "SEC_LOOKUP_UNAVAILABLE";
     return JSON.stringify({ ticker: upper, metric, status: code, code, retryable: !tickerIndex });
   }
-  const facts = await edgarGetJson(`https://data.sec.gov/api/xbrl/companyfacts/CIK${cikPadded}.json`).catch(() => null);
+  const facts = await edgarGetJson(secCompanyFactsUrl(cikPadded)).catch(() => null);
   if (!facts) return JSON.stringify({ ticker: upper, metric, status: "COMPANYFACTS_NOT_AVAILABLE", code: "COMPANYFACTS_NOT_AVAILABLE", retryable: true });
   // The latest annual report may be missing from companyfacts (2.5.30, F-015): said on every result, found or not.
   const coverageWarning = latestAnnualCoverageWarning(annualFilingsFromSubmissions(submissions), facts);
@@ -12422,7 +12411,7 @@ async function resolveEarningsPeriodFromSource(
 ): Promise<EarningsPeriodInfo> {
   const content = resolved ?? await resolveEarningsContentSource(src);
   if (!content.url) return { period: null, periodStatus: "UNRESOLVED", periodEvidence: null };
-  const html = content.url.startsWith("https://www.sec.gov/Archives/")
+  const html = content.url.startsWith(SEC_ARCHIVES_PREFIX)
     ? await edgarGetHtml(content.url, 5_000_000)
     : await fetchPublicHtml(content.url);
   return html
@@ -12459,7 +12448,7 @@ function classifyEarningsSourceUrl(url: string): { sourceType: "sec_8k" | "compa
   const check = checkFetchUrl(url.trim());
   if (!check.ok) return { sourceType: null, error: `source_url is not on the fetch allow-list (${check.reason})` };
   const kind = allowedHostKind(check.url);
-  if (kind === "sec" && u.toString().startsWith("https://www.sec.gov/Archives/")) return { sourceType: "sec_8k", error: null };
+  if (kind === "sec" && u.toString().startsWith(SEC_ARCHIVES_PREFIX)) return { sourceType: "sec_8k", error: null };
   if (kind === "registry" && approvedRegistryUrlAllowed(url.trim())) return { sourceType: "company_ir", error: null };
   return { sourceType: null, error: "source_url is not on the fetch allow-list (URL path not allowed)" };
 }
@@ -12576,7 +12565,7 @@ export function sentenceForTopic(text: string, topic: string): { excerpt: string
 async function resolveEarningsContentSource(src: Record<string, unknown>): Promise<{ url: string; sourceType: string }> {
   const srcUrl = String(src.url ?? "");
   const sourceType = String(src.sourceType ?? "company_ir");
-  if (!srcUrl.startsWith("https://www.sec.gov/Archives/")) return { url: srcUrl, sourceType };
+  if (!srcUrl.startsWith(SEC_ARCHIVES_PREFIX)) return { url: srcUrl, sourceType };
 
   const accessionNumber = String(src.accessionNumber ?? "");
   const cikInt = parseInt(String(src.cikPadded ?? "0"), 10);
@@ -12637,7 +12626,7 @@ async function resolveLatestEarningsSecSource(ticker: string): Promise<Record<st
       const primaryDoc = primaryDocs[i] ?? "";
       if (!acc || !primaryDoc) continue;
       const accClean = acc.replace(/-/g, "");
-      const documentUrl = `https://www.sec.gov/Archives/edgar/data/${cikInt}/${accClean}/${primaryDoc}`;
+      const documentUrl = secArchiveDocumentUrl(cikInt, accClean, primaryDoc);
       return {
         sourceType: "sec_8k",
         url: documentUrl,
@@ -12779,7 +12768,7 @@ export async function indexEarningsRelease(ticker: string, period = "latest", so
     return cached.value;
   }
 
-  const html = sourceUrl.startsWith("https://www.sec.gov/Archives/")
+  const html = sourceUrl.startsWith(SEC_ARCHIVES_PREFIX)
     ? await edgarGetHtml(sourceUrl, 5_000_000)
     : await fetchPublicHtml(sourceUrl);
   if (!html) return JSON.stringify({ ok: false, error: { code: "PROVIDER_ERROR", message: `Failed to fetch source: ${sourceUrl}` } });
@@ -12962,7 +12951,7 @@ export async function extractEarningsMetrics(
       let best: (QuarterFact & { concept: string }) | null = null;
       for (const concept of concepts) {
         const d = await edgarGetJson(
-          `https://data.sec.gov/api/xbrl/companyconcept/CIK${cikPadded}/us-gaap/${concept}.json`,
+          secCompanyConceptUrl(cikPadded, concept),
         );
         const facts =
           (((d?.units as Record<string, unknown>) ?? {})[unitType] as Record<string, unknown>[] | undefined) ?? [];
@@ -13008,7 +12997,7 @@ export async function extractEarningsMetrics(
 
     if (xbrlIsRecent) {
       const xbrlEv = (fact: QuarterFact & { concept: string }): Record<string, unknown> => ({
-        url: `https://data.sec.gov/api/xbrl/companyconcept/CIK${cikPadded}/us-gaap/${fact.concept}.json`,
+        url: secCompanyConceptUrl(cikPadded, fact.concept),
         sourceType: fact.form.startsWith("10-K") ? "sec_xbrl_10k" : "sec_xbrl_10q",
         publishedAt: null,
         retrievedAt,
@@ -13038,7 +13027,7 @@ export async function extractEarningsMetrics(
   }
 
   // ── Tier 2 + 3: SEC 8-K press release (iXBRL → regex fallback) ───────────
-  if (!hasHighConfidence() && srcUrl.startsWith("https://www.sec.gov/Archives/")) {
+  if (!hasHighConfidence() && srcUrl.startsWith(SEC_ARCHIVES_PREFIX)) {
     const cikInt = parseInt(cikPadded || "0", 10);
 
     // Resolve EX-99.1 exhibit URL — the actual earnings press release document.
@@ -13140,7 +13129,7 @@ export async function extractEarningsMetrics(
         if (capex.value != null) setFallbackMetric("capex", textMetric({ value: capex.value, unit: "USD", rawValue: capex.rawValue, scaleBasis: capex.scaleBasis, evidence: contentEv(capex.excerpt) }));
       }
     }
-  } else if (!hasHighConfidence() && !srcUrl.startsWith("https://www.sec.gov/Archives/")) {
+  } else if (!hasHighConfidence() && !srcUrl.startsWith(SEC_ARCHIVES_PREFIX)) {
     warnings.push({ code: "PUBLIC_RELEASE_NOT_FOUND", message: "No SEC 8-K earnings release source available" });
   }
 
@@ -13195,7 +13184,7 @@ export async function extractGuidance(ticker: string, period = "latest"): Promis
       warnings: [{ code, message, severity: "warning" }],
     });
   };
-  if (!srcUrl.startsWith("https://www.sec.gov/Archives/")) {
+  if (!srcUrl.startsWith(SEC_ARCHIVES_PREFIX)) {
     return notRead("RELEASE_NOT_RESOLVED", "No SEC earnings release was resolved, so guidance was not read.", false);
   }
   const html = await edgarGetHtml(srcUrl, 5_000_000);
@@ -13279,7 +13268,7 @@ export async function getGuidanceHistory(ticker: string, maxReleases = 8): Promi
       filingDate: p.filingDate, accessionNumber: p.accessionNumber, ...(await readReleaseText(cikInt, p.accessionNumber, p.primaryUrl)),
     }))));
   }
-  const companyfacts = await edgarGetJson(`https://data.sec.gov/api/xbrl/companyfacts/CIK${cikPadded}.json`).catch(() => null);
+  const companyfacts = await edgarGetJson(secCompanyFactsUrl(cikPadded)).catch(() => null);
   const out = guidanceHistory(ticker, releases, companyfacts);
   const unread = releases.filter((r) => r.status !== "READ").length;
   const warnings: Record<string, unknown>[] = [];
@@ -13305,7 +13294,7 @@ export async function extractManagementCommentary(
   const srcUrl = content.url;
   const sourceType = content.sourceType;
   let text = "";
-  if (srcUrl.startsWith("https://www.sec.gov/Archives/")) {
+  if (srcUrl.startsWith(SEC_ARCHIVES_PREFIX)) {
     text = _stripHtmlTagsIdx(_sanitizeFilingHtml((await edgarGetHtml(srcUrl, 5_000_000)) ?? ""));
   } else if (srcUrl) {
     text = _stripHtmlTagsIdx(_sanitizeFilingHtml((await fetchPublicHtml(srcUrl)) ?? ""));

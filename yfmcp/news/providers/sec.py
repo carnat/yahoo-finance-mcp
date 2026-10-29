@@ -23,6 +23,7 @@ from yfmcp.news.shared import (
     _short_text,
     _within_date_window,
 )
+from yfmcp.clients.endpoints import SEC_ARCHIVES_PREFIX, sec_archive_document_url, sec_filing_index_url
 
 
 def _event_type_from_form(form_type: str) -> str:
@@ -265,7 +266,7 @@ async def _try_attach_form4_transaction(item: dict, filing: dict, warnings: list
 
 def _safe_sec_url(candidate: object) -> str | None:
     url = str(candidate or "").strip()
-    return url if url.startswith("https://www.sec.gov/Archives/") else None
+    return url if url.startswith(SEC_ARCHIVES_PREFIX) else None
 
 
 def _build_sec_event_item(ticker: str, filing: dict, retrieved_at: str, issuer: str | None = None) -> tuple[dict, list[dict]]:
@@ -287,9 +288,9 @@ def _build_sec_event_item(ticker: str, filing: dict, retrieved_at: str, issuer: 
     primary_document = str(filing.get("primaryDocument") or "").strip()
     url = _safe_sec_url(filing.get("documentUrl")) or _safe_sec_url(filing.get("primaryDocumentUrl"))
     if not url and cik_int and accession and primary_document:
-        url = _safe_sec_url(f"https://www.sec.gov/Archives/edgar/data/{cik_int}/{acc_clean}/{primary_document}")
+        url = _safe_sec_url(sec_archive_document_url(cik_int, acc_clean, primary_document))
     if not url and cik_int and accession:
-        url = _safe_sec_url(f"https://www.sec.gov/Archives/edgar/data/{cik_int}/{acc_clean}/{accession}-index.htm")
+        url = _safe_sec_url(sec_filing_index_url(cik_int, acc_clean, accession))
     if not url:
         warnings.append({
             "code": "SEC_URL_INVALID",

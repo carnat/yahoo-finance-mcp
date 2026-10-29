@@ -347,7 +347,8 @@ if (heading !== "PART I - FINANCIAL INFORMATION Net 31.5 Item 2") throw new Erro
         self.assertIn("parseFilingTableRows", self.worker)
         self.assertIn('"UNUSABLE_TABLE"', self.worker)
         self.assertIn('"LIST_USABLE_TABLES"', self.worker)
-        self.assertIn("https://data.sec.gov/api/xbrl/companyfacts/CIK", self.worker)
+        # The URL is built by clients/endpoints.ts (3.0.4); scripts/test_endpoints.py pins its exact text.
+        self.assertIn("secCompanyFactsUrl(cikPadded)", self.worker)
         self.assertNotIn("xbrl_available: false,\n    xbrl_facts: {},", self.worker)
 
         fact_dispatch = re.search(

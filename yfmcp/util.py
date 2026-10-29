@@ -8,6 +8,7 @@ import datetime
 import email.utils as _email_utils
 import json
 import re as _re
+from yfmcp.clients.endpoints import YAHOO_QUOTE_SUMMARY_PREFIX_QUERY2
 
 
 def _safe_json_loads(payload: str) -> dict:
@@ -357,7 +358,7 @@ def fetch_quote_summary_module(ticker: str, module: str) -> dict | None:
     import yfinance as yf
 
     data = yf.Ticker(ticker)._data.get_raw_json(
-        "https://query2.finance.yahoo.com/v10/finance/quoteSummary/" + ticker,
+        YAHOO_QUOTE_SUMMARY_PREFIX_QUERY2 + ticker,
         params={"modules": module, "corsDomain": "finance.yahoo.com", "formatted": "true"},
     )
     results = ((data.get("quoteSummary") or {}).get("result")) if isinstance(data, dict) else None

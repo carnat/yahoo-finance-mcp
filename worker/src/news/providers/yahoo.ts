@@ -18,13 +18,14 @@ import {
   tickerInText,
 } from "../shared.js";
 import type { NewsProviderResultWithDiagnostics } from "./types.js";
+import { yahooSearchUrl } from "../../clients/endpoints.js";
 
 const YAHOO_ALLOWED_CONTENT_TYPES = new Set(["STORY", "ARTICLE", "PRESS_RELEASE"]);
 
 export async function getNews(ticker: string): Promise<string> {
   const retrievedAt = isoUtc(new Date());
   const d = (await yGet(
-    `https://query1.finance.yahoo.com/v1/finance/search?q=${enc(ticker)}&quotesCount=0&newsCount=20&enableFuzzyQuery=false`,
+    yahooSearchUrl(`q=${enc(ticker)}&quotesCount=0&newsCount=20&enableFuzzyQuery=false`),
     false
   )) as Record<string, unknown>;
 

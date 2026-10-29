@@ -58,6 +58,7 @@ from yfmcp.util import (
     fetch_quote_summary_module, unwrap_yahoo_values, yahoo_iso, yahoo_raw,
 )
 from yfmcp.clients.yahoo import _safe_parse, _valuation_market_inputs
+from yfmcp.clients.endpoints import _manual_lookup_payload, sec_archive_document_url, sec_company_concept_url, sec_company_facts_url, sec_filing_index_url
 from yfmcp.clients.market_providers import _PROVIDER_USER_AGENT
 from yfmcp import url_policy as _url_policy
 from yfmcp import filing_search as _fs
@@ -897,8 +898,8 @@ async def list_sec_filings(ticker: str, form_type: str = "10-K", max_filings: in
                 date = dates[i] if i < len(dates) else ""
                 doc = primary_docs[i] if i < len(primary_docs) else ""
                 acc_clean = acc.replace("-", "")
-                index_url = f"https://www.sec.gov/Archives/edgar/data/{cik}/{acc_clean}/{acc}-index.htm"
-                doc_url = f"https://www.sec.gov/Archives/edgar/data/{cik}/{acc_clean}/{doc}" if doc else None
+                index_url = sec_filing_index_url(cik, acc_clean, acc)
+                doc_url = sec_archive_document_url(cik, acc_clean, doc) if doc else None
                 results.append({
                     "accessionNumber": acc,
                     "filingDate": date,
@@ -2066,23 +2067,6 @@ _FILING_FACT_CONCEPTS: dict[FilingFactType, tuple[str, str | None]] = {
 }
 
 
-def _manual_lookup_payload(ticker: str, cik_padded: str | None, filing_type: str, note: str) -> dict:
-    edgar_index_url = (
-        f"https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={cik_padded}&type={filing_type}&owner=include&count=10"
-        if cik_padded
-        else f"https://www.sec.gov/cgi-bin/browse-edgar?company={ticker}&action=getcompany&type={filing_type}&owner=include&count=10"
-    )
-    efts_url = (
-        "https://efts.sec.gov/LATEST/search-index"
-        f"?q={_urlparse.quote(ticker)}&forms={_urlparse.quote(filing_type)}"
-    )
-    return {
-        "edgarIndexUrl": edgar_index_url,
-        "eftsSearchUrl": efts_url,
-        "note": note,
-    }
-
-
 def _fy_number(value: Any) -> float:
     try:
         return float(value)
@@ -2243,7 +2227,7 @@ async def _annual_coverage_warning_for(ticker: str, payload: dict) -> dict | Non
         return None
     try:
         # Read as get_filing_data reads companyfacts; an unreadable file gives no warning.
-        facts = await _edgar_get(f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik_padded}.json")
+        facts = await _edgar_get(sec_company_facts_url(cik_padded))
     except Exception:  # noqa: BLE001
         facts = None
     return _cfc.latest_annual_coverage_warning(filings, facts) if isinstance(facts, dict) else None
@@ -2452,11 +2436,11 @@ async def _get_filing_data_unchecked(
         failed_reads.append({"endpoint": endpoint, "concept": concept_name, "httpStatus": read["httpStatus"]})
         return None
 
-    companyfacts_url = f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik_padded}.json"
+    companyfacts_url = sec_company_facts_url(cik_padded)
 
     async def _concept_json(concept_name: str) -> dict | None:
         return await _read_sec_json(
-            f"https://data.sec.gov/api/xbrl/companyconcept/CIK{cik_padded}/us-gaap/{concept_name}.json",
+            sec_company_concept_url(cik_padded, concept_name),
             "companyconcept",
             concept_name,
         )
@@ -7567,7 +7551,7 @@ def _earnings_release_picks(subs: dict, cik_int: int, limit: int, include_amendm
         if not acc or not doc:
             continue
         picks.append({"filingDate": at("filingDate", i), "accessionNumber": acc,
-                      "primaryUrl": f"https://www.sec.gov/Archives/edgar/data/{cik_int}/{acc.replace('-', '')}/{doc}", "form": form_upper})
+                      "primaryUrl": sec_archive_document_url(cik_int, acc.replace('-', ''), doc), "form": form_upper})
     return picks
 
 
@@ -7752,7 +7736,7 @@ def _periodic_reports(subs: dict | None, cik_padded: str | None) -> list[dict]:
         if form_upper not in _PERIODIC_REPORT_FORMS or not acc or not doc:
             continue
         out.append({"accessionNumber": acc, "form": form_upper, "filed": at("filingDate", i), "reportDate": at("reportDate", i) or None,
-                    "documentUrl": f"https://www.sec.gov/Archives/edgar/data/{int(cik_padded)}/{acc.replace('-', '')}/{doc}"})
+                    "documentUrl": sec_archive_document_url(int(cik_padded), acc.replace('-', ''), doc)})
     return out
 
 

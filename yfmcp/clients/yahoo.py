@@ -12,6 +12,7 @@ from urllib.parse import quote as _quote
 import yfinance as yf
 
 from yfmcp import valuation as _vl
+from yfmcp.clients.endpoints import YAHOO_QUOTE_SUMMARY_PREFIX
 
 
 def _safe_parse(result: object, ticker: str) -> object:
@@ -29,7 +30,7 @@ def _safe_parse(result: object, ticker: str) -> object:
 
 
 # The Worker's valuationMarketInputs URL (worker/src/clients/yahoo.ts): one quoteSummary read with these modules.
-_QUOTE_SUMMARY_URL = "https://query1.finance.yahoo.com/v10/finance/quoteSummary/"
+_QUOTE_SUMMARY_URL = YAHOO_QUOTE_SUMMARY_PREFIX
 _MARKET_INPUT_MODULES = "price,financialData,defaultKeyStatistics,earningsTrend"
 
 
