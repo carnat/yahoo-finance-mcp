@@ -51,6 +51,7 @@ from yfmcp.cache import (
     TTL_PRICE, TTL_ANALYST, TTL_FINANCIALS, TTL_EDGAR, TTL_OPTIONS, TTL_NEWS,
     _PRICE_TTL, _STMT_TTL,
 )
+from yfmcp.pricing_notices import freshness_notices as _freshness_notices, with_notices  # noqa: E402
 from yfmcp.util import (
     _fetch_with_retry, get_last_trading_date,
     _PLACEHOLDER_IV_THRESHOLD, _compute_data_quality, _sort_by_relevance,
@@ -4660,6 +4661,7 @@ async def get_options_flow_scan(ticker: str, window_label: str) -> str:
     realized_vol_price_basis: str | None = None
     historical_bar_status = "NOT_USED"
     freshness_status = "UNKNOWN"
+    freshness_reason = None
     excluded_incomplete_bar = False
     retry_attempted = False
     fallback_used = False
@@ -4680,6 +4682,7 @@ async def get_options_flow_scan(ticker: str, window_label: str) -> str:
                 else None
             )
             freshness_status = prepared["freshnessStatus"]
+            freshness_reason = prepared.get("freshnessReason")
             excluded_incomplete_bar = prepared["excludedIncompleteBar"]
             retry_attempted = prepared["retryAttempted"]
             if freshness_status == "STALE":
@@ -4807,7 +4810,7 @@ async def get_options_flow_scan(ticker: str, window_label: str) -> str:
 
     # Cache current reading for future trend comparison (72h TTL via 3-day window check)
     _tool_cache.set(f"options_flow:{ticker}:{window_label}", json.dumps(result_dict), 72 * 3600)
-    return json.dumps(result_dict)
+    return json.dumps(with_notices(result_dict, _freshness_notices(ticker, freshness_reason)))
 
 
 # ---------------------------------------------------------------------------

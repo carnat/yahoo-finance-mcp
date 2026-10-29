@@ -3,8 +3,9 @@
 
 expectedCompletedDate is the most recent session that should already be
 complete. During an open regular session it is the previous session, named
-only when proven (Yahoo previousClose equals the last completed close, or the
-last completed bar is from the weekday just before today's session). The
+from Yahoo previousClose when it equals the last completed close, otherwise
+from the exchange holiday calendar (3.1.0, US exchanges only). Without a
+calendar the previous session is not named and freshness is UNKNOWN. The
 downstream check latestAvailableBarDate == expectedCompletedDate then holds
 exactly when the completed-session series is current.
 
@@ -48,12 +49,13 @@ def _epoch(day: str, clock: str, tz: str) -> int:
 def _scenario(*, tz: str, days: list[str], now: tuple[str, str], session: tuple[str, str, str] | None,
               market_time: tuple[str, str], previous_close_of: str | None = None,
               previous_close: float | None = None, expected: str | None, freshness: str,
-              latest: str, excluded: bool) -> dict:
+              latest: str, excluded: bool, exchange: str | None = None) -> dict:
     open_clock, close_clock = ("09:00", "15:30") if tz == TOKYO else ("09:30", "16:00")
     closes = {day: 100.0 + index for index, day in enumerate(days)}
     meta: dict = {
         "exchangeTimezoneName": tz,
         "regularMarketTime": _epoch(market_time[0], market_time[1], tz),
+        "exchangeName": exchange or ("JPX" if tz == TOKYO else "NMS"),
     }
     if session:
         day, start_clock, end_clock = session
@@ -93,16 +95,21 @@ SCENARIOS = {
         tz=NY, days=["2026-09-15", "2026-09-16", "2026-09-17", "2026-09-18", "2026-09-21"],
         now=("2026-09-21", "11:00"), session=("2026-09-21", "09:30", "16:00"), market_time=("2026-09-21", "10:59"),
         expected="2026-09-18", freshness="CURRENT", latest="2026-09-18", excluded=True),
-    # Tuesday after Labor Day (Mon 2026-09-07): only previousClose proves Friday is the previous session.
+    # Tuesday after Labor Day (Mon 2026-09-07): previousClose, or the US calendar, names Friday.
     "us_open_after_holiday_with_previous_close": _scenario(
         tz=NY, days=["2026-09-01", "2026-09-02", "2026-09-03", "2026-09-04", "2026-09-08"],
         now=("2026-09-08", "11:00"), session=("2026-09-08", "09:30", "16:00"), market_time=("2026-09-08", "10:59"),
         previous_close_of="2026-09-04",
         expected="2026-09-04", freshness="CURRENT", latest="2026-09-04", excluded=True),
-    "us_open_after_holiday_unproven": _scenario(
+    "us_open_after_holiday_named_by_calendar": _scenario(
         tz=NY, days=["2026-09-01", "2026-09-02", "2026-09-03", "2026-09-04", "2026-09-08"],
         now=("2026-09-08", "11:00"), session=("2026-09-08", "09:30", "16:00"), market_time=("2026-09-08", "10:59"),
-        expected=None, freshness="UNKNOWN", latest="2026-09-04", excluded=True),
+        expected="2026-09-04", freshness="CURRENT", latest="2026-09-04", excluded=True),
+    # The same Tuesday on an exchange without a calendar: the previous session is not named.
+    "open_after_holiday_without_calendar": _scenario(
+        tz=NY, days=["2026-09-01", "2026-09-02", "2026-09-03", "2026-09-04", "2026-09-08"],
+        now=("2026-09-08", "11:00"), session=("2026-09-08", "09:30", "16:00"), market_time=("2026-09-08", "10:59"),
+        exchange="XYZ", expected=None, freshness="UNKNOWN", latest="2026-09-04", excluded=True),
     # Yesterday's bar is missing; previousClose (yesterday's close) does not match Tuesday's.
     "us_open_previous_session_missing": _scenario(
         tz=NY, days=["2026-09-16", "2026-09-17", "2026-09-18", "2026-09-21", "2026-09-22", "2026-09-24"],

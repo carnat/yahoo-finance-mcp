@@ -3190,6 +3190,51 @@ F-024, F-026, F-029). Both runtimes change alike.
 - **Tests:** 21 new parity cases in `scripts/parity/cases_audit_2251.py`.
 - **Rollback:** redeploy 2.25.0.
 
+## Pricing Notices: Zero Volume, Short-History CAGR, US Session Calendar (3.1.0)
+
+- **Why:** R5-pricing-2, the pricing repairs that need new names (owner decisions Q3c, Q3i and Q1 BR-PRC-002;
+  owner cards 2026-10-29: the notices go in `meta.warnings`, and in a snapshot's `data.warnings`; the holiday
+  calendar covers US exchanges only; `analysis/yahoo-finance-mcp/R5PRICING2_SPEC.md`). Release type: minor. Both
+  runtimes.
+- **New warning codes:** `ZERO_VOLUME_NO_RATIO`, `INSUFFICIENT_HISTORY` and `SESSION_CALENDAR_UNKNOWN`. Each row is
+  `{code, message, ticker}` in `meta.warnings`, after the server's own warnings and in the order the tool raised
+  them. A batch call lists every ticker's rows. Tools no longer return these inside `data`.
+- **Zero volume (Q3c, BR-PRC-033):** when the latest completed session traded zero shares, `analyze_volume_ratio`
+  gives `ratio10d`, `ratio90d` and `volumeFlag` null with `ZERO_VOLUME_NO_RATIO`. Before, Python gave null without a
+  reason and the Worker gave ratio 0 with flag `LOW`. The averages are still reported.
+- **Short history (Q3i, BR-PRC-019/021):** `analyze_price_performance` gives `cagr1y`, `cagr3y` or `cagr5y` null with
+  one `INSUFFICIENT_HISTORY` row per horizon when the first completed bar is more than 10 calendar days after that
+  horizon's start date. Before, a 3-year history reported its whole gain as a 5-year CAGR (33.1% as 5.9%). The 10 days
+  absorb a listing whose first bar falls just after the start date over a holiday run.
+- **Session calendar (BR-PRC-002):** during a session, when Yahoo gives no `previousClose` to match, the expected
+  completed session is the previous session on the exchange's calendar: weekdays minus the NYSE full closures for
+  2024 to 2028 (`worker/src/exchange-calendars.json`, read by both runtimes; early closes are sessions). It covers
+  NMS, NGM, NCM, NYQ, ASE and PCX. A missing bar is now `STALE` against that session (it was `UNKNOWN`), and after a
+  Monday holiday the Friday bar is `CURRENT`. An exchange without a calendar, or a date whose previous session falls
+  outside the covered years, gives `freshnessStatus: UNKNOWN`, `expectedCompletedDate: null` and
+  `SESSION_CALENDAR_UNKNOWN`. Before, every exchange used the previous weekday. Outside a session nothing changes:
+  `regularMarketTime` still names the session.
+- **Tools that can raise `SESSION_CALENDAR_UNKNOWN`:** `analyze_price_performance`, `get_price_slope`,
+  `analyze_volume_ratio`, `check_volume_liquidity_threshold`, `get_technical_indicators` and
+  `analyze_options_flow_window`. `get_historical_prices` returns a bare array, so it keeps only its `isFinal` flags.
+- **Snapshot:** `get_market_snapshot` moves a component's rows into its own `data.warnings` as
+  `{code, component, message}`, next to the existing `STALE_BAR` and `PARTIAL` rows.
+- **Legacy envelope:** with `MCP_ENVELOPE_V2` turned off the payload is returned as the tool built it, so the rows stay
+  under `_warnings` in both runtimes.
+- **Known gap:** `get_position_score_inputs` does not pass its components' rows on yet (R5-pricing part 3).
+- **Unchanged:** no output field or enum value was added, and no tool description changed, so `schemaHash` and
+  `manifestHash` stay the same.
+- **Tests:** `scripts/parity/cases_pricing_evidence_tools.py` now asserts the same value in both runtimes for the
+  zero-volume, short-CAGR and Monday-holiday cases, with new cases for no calendar, a date past the covered years, a
+  6-month history and the 10/11-day coverage edge. `scripts/parity/cases_r5price2.py` checks both calendar helpers
+  for every day from December 2023 to January 2029 against the NYSE holiday rules, plus malformed and uncovered
+  inputs, and checks that the rows reach `meta.warnings` through the envelope and the grouped route and reach a
+  snapshot's `data.warnings`. `scripts/test_exchange_calendars.py` (in CI) checks the file and fails 90 days before
+  the last covered year ends. `scripts/test_completed_session_freshness.py` gives each scenario an exchange code; the
+  Tuesday after Labor Day without `previousClose` is now `CURRENT`, with a new no-calendar scenario that stays
+  `UNKNOWN`.
+- **Rollback:** redeploy 3.0.8.
+
 ## Pricing Repairs: Zero Price, Rounding, CAGR Start, Hedge Expiries, US Venues (3.0.8)
 
 - **Why:** R5-pricing-1, the pricing repairs that need no new name (owner decisions Q3b, Q3d and the Q3i triage,

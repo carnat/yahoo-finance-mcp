@@ -13,6 +13,7 @@ from typing import NotRequired, TypedDict
 
 from yfmcp.build_info import BUILD_DATE, SERVER_VERSION
 from yfmcp.deprecations import TOOL_RELIABILITY_CLASS
+from yfmcp.pricing_notices import lift_payload_warnings
 from yfmcp.url_policy import SUBREQUEST_BUDGET, SUBREQUEST_BUDGET_WARNING, SUBREQUEST_LIMIT
 
 # ---------------------------------------------------------------------------
@@ -611,6 +612,11 @@ def _envelope_tool_result(tool: str, result: object) -> object:
             if parsed["meta"].get("dataDate") is None:
                 parsed["meta"]["dataDate"] = _payload_data_date(parsed.get("data"))
             if parsed["ok"] is True:
+                # Payload notices (``_warnings``, 3.1.0) move to meta.warnings and never stay in data.
+                payload_warnings = lift_payload_warnings(parsed.get("data"))
+                if payload_warnings:
+                    existing = parsed["meta"].get("warnings")
+                    parsed["meta"]["warnings"] = [*(existing if isinstance(existing, list) else []), *payload_warnings]
                 parsed["data"] = _confidence_levels(tool, _enrich_facts(parsed.get("data")))
                 if tool in TOOL_RELIABILITY_CLASS:
                     parsed["meta"]["reliabilityClass"] = TOOL_RELIABILITY_CLASS[tool]
@@ -632,8 +638,11 @@ def _envelope_tool_result(tool: str, result: object) -> object:
                 message,
                 meta_extra=meta_extra or None,
             )
+    payload_warnings = lift_payload_warnings(parsed)
     data = _confidence_levels(tool, _enrich_facts(parsed))
     meta = _success_meta(tool, data_date=_payload_data_date(parsed))
+    if payload_warnings:
+        meta["warnings"] = [*meta.get("warnings", []), *payload_warnings]
     return json.dumps({"ok": True, "data": data, "meta": meta, "error": None})
 
 

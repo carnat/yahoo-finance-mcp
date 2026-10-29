@@ -178,6 +178,15 @@ export {
   verifyCompanyEvent,
 } from "./news.js";
 import exposurePresets from "./exposure-presets.json";
+import { previousExchangeSession } from "./exchange-calendars.js";
+import {
+  SESSION_CALENDAR_UNKNOWN,
+  freshnessNotices,
+  insufficientHistoryNotice,
+  takeNotices,
+  withNotices,
+  zeroVolumeNotice,
+} from "./pricing-notices.js";
 
 /** The China exposure preset (Q5): the terms extractChinaExposure and extractExposure search, shared with Python. */
 export const CHINA_PRESET = exposurePresets.presets.china;
@@ -1870,7 +1879,7 @@ export async function getPriceStats(ticker: string | string[]): Promise<string> 
     stats.cagr3y = null;
     stats.cagr5y = null;
     stats.recommendedNextAction = "RETRY";
-    return JSON.stringify(stats);
+    return JSON.stringify(withNotices(stats, freshnessNotices(ticker, prepared?.freshnessReason)));
   }
 
   const selected = selectCompletedPriceSeries(prepared.completedRows);
@@ -1884,9 +1893,10 @@ export async function getPriceStats(ticker: string | string[]): Promise<string> 
     stats.cagr1y = null;
     stats.cagr3y = null;
     stats.cagr5y = null;
-    return JSON.stringify(stats);
+    return JSON.stringify(withNotices(stats, freshnessNotices(ticker, prepared.freshnessReason)));
   }
 
+  const notices = freshnessNotices(ticker, prepared.freshnessReason);
   try {
     const observations = selected.observations;
     const closes = observations.map((row) => row.close);
@@ -1901,6 +1911,12 @@ export async function getPriceStats(ticker: string | string[]): Promise<string> 
       const endDate = barDates[barDates.length - 1];
       if (endDate == null) return null;
       const cutoffDate = addIsoYears(endDate, -years);
+      // A history that starts after the window does not cover it: null with INSUFFICIENT_HISTORY instead of dividing
+      // a shorter run by the nominal years (R5-pricing-2, 3.1.0).
+      if (!historyCovers(barDates[0] ?? null, cutoffDate)) {
+        notices.push(insufficientHistoryNotice(ticker, years));
+        return null;
+      }
       const startIndex = barDates.findIndex((d) => d != null && d >= cutoffDate);
       const startObservation = startIndex >= 0 ? observations[startIndex] : undefined;
       if (!startObservation || startObservation === endObservation || startObservation.close <= 0) {
@@ -1919,7 +1935,22 @@ export async function getPriceStats(ticker: string | string[]): Promise<string> 
     stats.recommendedNextAction = "RETRY";
   }
 
-  return JSON.stringify(stats);
+  return JSON.stringify(withNotices(stats, notices));
+}
+
+/**
+ * A CAGR window counts as covered when the history's first bar is no more than this many calendar days after the
+ * window's start date: the 5y fetch starts about five years before today, not before the last completed bar, and the
+ * first bar after that start can follow a weekend and a holiday (R5-pricing-2, 3.1.0).
+ */
+const HISTORY_START_TOLERANCE_DAYS = 10;
+
+/** Whether a history whose first bar is on firstBarDate reaches back to a window starting on cutoffDate. */
+function historyCovers(firstBarDate: string | null, cutoffDate: string): boolean {
+  if (firstBarDate == null) return false;
+  const limit = new Date(`${cutoffDate}T00:00:00Z`);
+  limit.setUTCDate(limit.getUTCDate() + HISTORY_START_TOLERANCE_DAYS);
+  return firstBarDate <= limit.toISOString().slice(0, 10);
 }
 
 export async function getAnalystConsensus(ticker: string | string[]): Promise<string> {
@@ -2871,7 +2902,7 @@ export async function getTechnicalIndicators(
   output.lastClose = +closes[closes.length - 1].toFixed(2);
   output.dataDate = latestAvailableBarDate;
 
-  return JSON.stringify(output);
+  return JSON.stringify(withNotices(output, freshnessNotices(ticker, prepared.freshnessReason)));
 }
 
 // ── get_price_slope ──────────────────────────────────────────────────────────
@@ -2890,6 +2921,8 @@ type PreparedCompletedDailySeries = {
   excludedIncompleteBar: boolean;
   expectedCompletedDate: string | null;
   freshnessStatus: "CURRENT" | "STALE" | "UNKNOWN";
+  /** SESSION_CALENDAR_UNKNOWN when the previous session could not be named for want of a calendar (3.1.0). */
+  freshnessReason: string | null;
 };
 
 function dailyBarNumber(value: unknown): number | null {
@@ -2902,15 +2935,6 @@ function priceSlopeRange(days: number): string {
   if (days <= 120) return "6mo";
   if (days <= 250) return "1y";
   return "2y";
-}
-
-/** The weekday (Mon-Fri) before an ISO date, as an ISO date. */
-function previousWeekday(isoDate: string): string {
-  const day = new Date(`${isoDate}T00:00:00Z`);
-  do {
-    day.setUTCDate(day.getUTCDate() - 1);
-  } while (day.getUTCDay() === 0 || day.getUTCDay() === 6);
-  return day.toISOString().slice(0, 10);
 }
 
 function prepareCompletedDailySeries(
@@ -2990,10 +3014,12 @@ function prepareCompletedDailySeries(
   // complete. Outside a regular session that is the session of
   // regularMarketTime. During one it is the previous session, which is only
   // named when proven: Yahoo's previousClose equals the last completed close,
-  // or (without previousClose) the last completed bar is from the weekday just
-  // before today's session, so no weekday session can be missing in between.
-  let expectedCompletedDate: string | null;
+  // or (without previousClose) the exchange's holiday calendar names it.
+  // Without a calendar it is never inferred from weekday arithmetic: the
+  // status is UNKNOWN with SESSION_CALENDAR_UNKNOWN (BR-PRC-002, 3.1.0).
+  let expectedCompletedDate: string | null = null;
   let freshnessStatus: PreparedCompletedDailySeries["freshnessStatus"];
+  let freshnessReason: string | null = null;
   if (!activeSession) {
     expectedCompletedDate = dailyBarDate(dailyBarNumber(meta.regularMarketTime), timezone);
     freshnessStatus = expectedCompletedDate == null || lastCompletedDate == null
@@ -3009,12 +3035,17 @@ function prepareCompletedDailySeries(
         <= Math.max(0.01, Math.abs(previousClose) * 1e-6);
       freshnessStatus = matches ? "CURRENT" : "STALE";
       expectedCompletedDate = matches ? lastCompletedDate : null;
-    } else if (lastCompletedDate != null && sessionDate != null && lastCompletedDate === previousWeekday(sessionDate)) {
-      freshnessStatus = "CURRENT";
-      expectedCompletedDate = lastCompletedDate;
     } else {
-      freshnessStatus = "UNKNOWN";
-      expectedCompletedDate = null;
+      const previousSession = sessionDate != null ? previousExchangeSession(meta.exchangeName, sessionDate) : null;
+      if (previousSession == null) {
+        freshnessStatus = "UNKNOWN";
+        freshnessReason = sessionDate != null ? SESSION_CALENDAR_UNKNOWN : null;
+      } else if (lastCompletedDate == null || lastCompletedDate > previousSession) {
+        freshnessStatus = "UNKNOWN";
+      } else {
+        freshnessStatus = lastCompletedDate === previousSession ? "CURRENT" : "STALE";
+        expectedCompletedDate = previousSession;
+      }
     }
   }
 
@@ -3025,6 +3056,7 @@ function prepareCompletedDailySeries(
     excludedIncompleteBar,
     expectedCompletedDate,
     freshnessStatus,
+    freshnessReason,
   };
 }
 
@@ -3164,7 +3196,7 @@ export async function getPriceSlope(ticker: string | string[], days: number): Pr
     else if (slopePct > 0) direction = "UP";
     else direction = "DOWN";
 
-    return JSON.stringify({
+    return JSON.stringify(withNotices({
       ticker,
       days: normalizedDays,
       status: "OK",
@@ -3186,7 +3218,7 @@ export async function getPriceSlope(ticker: string | string[], days: number): Pr
       direction,
       dataDate: dailyBarDate(endObservation.timestamp, timezone),
       recommendedNextAction: "NONE",
-    });
+    }, freshnessNotices(ticker, prepared.freshnessReason)));
   } catch (e) {
     return JSON.stringify({ error: true, message: `${e instanceof Error ? e.message : String(e)}`, ticker });
   }
@@ -3260,7 +3292,7 @@ export async function getVolumeRatio(ticker: string | string[], _period: number)
     const completedRows = prepared.completedRows;
     const lastRow = completedRows[completedRows.length - 1];
     if (!lastRow || lastRow.volume == null) {
-      return JSON.stringify({
+      return JSON.stringify(withNotices({
         ticker,
         status: "PARTIAL",
         lastVolume: null,
@@ -3278,7 +3310,7 @@ export async function getVolumeRatio(ticker: string | string[], _period: number)
         retryAttempted,
         dataDate,
         recommendedNextAction: "RETRY",
-      });
+      }, freshnessNotices(ticker, prepared.freshnessReason)));
     }
     // The ratio uses the unrounded average; only the published averages and ratios are rounded, half away from zero,
     // as in Python (R5-pricing-1, Q3c/Q3d).
@@ -3292,8 +3324,14 @@ export async function getVolumeRatio(ticker: string | string[], _period: number)
     const rawAvg90d = average(90);
     const avg10d = rawAvg10d != null ? roundHalfAwayFromZero(rawAvg10d, 0) : null;
     const avg90d = rawAvg90d != null ? roundHalfAwayFromZero(rawAvg90d, 0) : null;
-    const ratio10d = rawAvg10d != null && rawAvg10d !== 0 ? roundHalfAwayFromZero(lastVolume / rawAvg10d, 3) : null;
-    const ratio90d = rawAvg90d != null && rawAvg90d !== 0 ? roundHalfAwayFromZero(lastVolume / rawAvg90d, 3) : null;
+    // A zero-volume session has no ratio and no flag, with an explicit notice (Q3c, R5-pricing-2, 3.1.0).
+    const zeroVolume = lastVolume === 0;
+    const ratio10d = !zeroVolume && rawAvg10d != null && rawAvg10d !== 0
+      ? roundHalfAwayFromZero(lastVolume / rawAvg10d, 3)
+      : null;
+    const ratio90d = !zeroVolume && rawAvg90d != null && rawAvg90d !== 0
+      ? roundHalfAwayFromZero(lastVolume / rawAvg90d, 3)
+      : null;
 
     let volumeFlag: string | null = null;
     if (ratio10d != null) {
@@ -3302,7 +3340,7 @@ export async function getVolumeRatio(ticker: string | string[], _period: number)
       else volumeFlag = "NORMAL";
     }
 
-    return JSON.stringify({
+    return JSON.stringify(withNotices({
       ticker,
       status: "OK",
       lastVolume,
@@ -3320,7 +3358,7 @@ export async function getVolumeRatio(ticker: string | string[], _period: number)
       retryAttempted,
       dataDate,
       recommendedNextAction: "NONE",
-    });
+    }, [...(zeroVolume ? [zeroVolumeNotice(ticker)] : []), ...freshnessNotices(ticker, prepared.freshnessReason)]));
   } catch (e) {
     return JSON.stringify({ error: true, message: `${e instanceof Error ? e.message : String(e)}`, ticker });
   }
@@ -6154,6 +6192,7 @@ export async function getOptionsFlowScan(ticker: string, windowLabel: string): P
     let realizedVolPriceBasis: string | null = null;
     let historicalBarStatus = "NOT_USED";
     let freshnessStatus = "UNKNOWN";
+    let freshnessReason: string | null = null;
     let excludedIncompleteBar = false;
     let retryAttempted = false;
     let fallbackUsed = false;
@@ -6205,6 +6244,7 @@ export async function getOptionsFlowScan(ticker: string, windowLabel: string): P
           )
           : null;
         freshnessStatus = prepared.freshnessStatus;
+        freshnessReason = prepared.freshnessReason;
         excludedIncompleteBar = prepared.excludedIncompleteBar;
         if (prepared.freshnessStatus === "STALE") {
           historicalBarStatus = "STALE";
@@ -6331,7 +6371,7 @@ export async function getOptionsFlowScan(ticker: string, windowLabel: string): P
     };
 
     setBounded(_optionsFlowCache, `${ticker}:${windowLabel}`, { data: resultData, storedAt: Date.now() }, OPTIONS_FLOW_CACHE_MAX);
-    return JSON.stringify(resultData);
+    return JSON.stringify(withNotices({ ...resultData }, freshnessNotices(ticker, freshnessReason)));
   } catch (e) {
     return JSON.stringify({ error: true, message: `${e instanceof Error ? e.message : String(e)}`, ticker });
   }
@@ -6634,7 +6674,7 @@ export async function getVolumeGate(ticker: string, foreignExchange: boolean, mi
     const rows = prepared.completedRows;
     const lastRow = rows[rows.length - 1];
     if (!lastRow || lastRow.volume == null || lastRow.rawClose == null) {
-      return JSON.stringify({
+      return JSON.stringify(withNotices({
         ticker,
         status: "PARTIAL",
         currency,
@@ -6660,7 +6700,7 @@ export async function getVolumeGate(ticker: string, foreignExchange: boolean, mi
         dataDate,
         note: "Volume gate UNKNOWN — latest completed session lacks price or volume",
         recommendedNextAction: "RETRY",
-      });
+      }, freshnessNotices(ticker, prepared.freshnessReason)));
     }
     const average = (count: number): number | null => {
       const window = rows.slice(-(count + 1), -1);
@@ -6702,7 +6742,7 @@ export async function getVolumeGate(ticker: string, foreignExchange: boolean, mi
     const fxRate = fx.ok ? fx.fxRate : null;
     const fxPriceTimestamp = fx.ok ? fx.fxPriceTimestamp : null;
 
-    return JSON.stringify({
+    return JSON.stringify(withNotices({
       ticker,
       status: "OK",
       currency,
@@ -6731,7 +6771,7 @@ export async function getVolumeGate(ticker: string, foreignExchange: boolean, mi
       dataDate,
       note,
       recommendedNextAction,
-    });
+    }, freshnessNotices(ticker, prepared.freshnessReason)));
   } catch (e) {
     return JSON.stringify({ error: true, message: `${e instanceof Error ? e.message : String(e)}`, ticker });
   }
@@ -6822,6 +6862,10 @@ export async function getMarketSnapshot(
           component: name,
           recommendedNextAction: result.value.recommendedNextAction ?? "RETRY",
         });
+      }
+      // A component's notices join the snapshot's data.warnings with the component name (3.1.0).
+      for (const notice of takeNotices(result.value)) {
+        warnings.push({ code: notice.code, component: name, message: notice.message });
       }
       return result.value;
     }
