@@ -93,6 +93,7 @@ FILE_DOMAIN = {
     "yfmcp/parsing/extractors.py": "extractors", "yfmcp/extraction_rules.py": "extractors",
     "yfmcp/capital_structure.py": "extractors", "yfmcp/share_scenarios.py": "extractors",
     "yfmcp/funding_schedule.py": "extractors", "yfmcp/driver_ledger.py": "extractors",
+    "yfmcp/exposure_presets.py": "extractors",
     "yfmcp/valuation.py": "valuation", "yfmcp/valuation_history.py": "valuation",
     "yfmcp/metric_reconciliation.py": "valuation",
     "yfmcp/tools/earnings.py": "earnings", "yfmcp/clients/yahoo_transcripts.py": "earnings",
@@ -163,6 +164,7 @@ REGISTRIES = {
     "tool_catalog.json": ("ds:tool_catalog", "tool_catalog.json"),
     "company-ir-page-registry.json": ("ds:ir_registry", "company-ir-page-registry.json"),
     "news-source-capabilities.json": ("ds:news_capabilities", "news-source-capabilities.json"),
+    "exposure-presets.json": ("ds:exposure_presets", "exposure-presets.json"),
 }
 
 # ----------------------------------------------------------------- helpers
@@ -657,14 +659,14 @@ shared_ts = nodes.get(region_id("worker/src/yahoo-finance.ts", "shared"), {}).ge
 sec_readers = sorted({s for s, t, k in edges if t == "ds:sec-edgar"})
 open_fetch = sorted({s for s, t, k in edges if t == "ds:company-ir-sites"})
 back_calls = sorted({t for s, t, k in edges if s == "yfmcp/tools/earnings.py" and k == "dispatch"})
-py_reads_worker = sorted({s for s, t, k in edges if t in ("ds:ir_registry", "ds:news_capabilities") and s.endswith(".py") or (t in ("ds:ir_registry", "ds:news_capabilities") and "server.py" in s)})
+py_reads_worker = sorted({s for s, t, k in edges if t in ("ds:ir_registry", "ds:news_capabilities", "ds:exposure_presets") and s.endswith(".py") or (t in ("ds:ir_registry", "ds:news_capabilities", "ds:exposure_presets") and "server.py" in s)})
 
 observations = [
     f"Both god files are hubs, not layers: their 'shared' regions (server.py {shared_py} NLOC, yahoo-finance.ts {shared_ts} NLOC) are helpers reached from 2+ domains (Yahoo client, EDGAR fetch, HTML/table parsing). Extract these first — every domain module split out later will otherwise import back into the god file.",
     f"SEC EDGAR is read from {len(sec_readers)} separate nodes across both runtimes (direct URL use, not through one client). It is the single most important upstream and a single point of failure; consolidating behind yfmcp/clients/edgar.py and one TS edgar module would make fair-access/User-Agent policy enforceable in one place.",
     f"Open-fetch surface: {len(open_fetch)} nodes fetch caller- or registry-supplied URLs ({', '.join(open_fetch)}). These are the S-01/S-04 SSRF paths from ASSESSMENT.md and should sit behind one allow-listed fetcher per runtime.",
     f"Circular dependency: yfmcp/tools/earnings.py back-calls server.py through string-keyed _server_attr(...) — resolved here to {', '.join(back_calls) or 'none'}. These edges are invisible to static import analysis and block extracting earnings without first moving those targets out of server.py.",
-    "The Python runtime reads the Worker's JSON registries (company-ir-page-registry.json, news-source-capabilities.json) from worker/src at run time, so Python packaging depends on the Worker tree; the IR registry has a second writer (the daily ir-source-discovery job).",
+    "The Python runtime reads the Worker's JSON registries (company-ir-page-registry.json, news-source-capabilities.json, exposure-presets.json) from worker/src at run time, so Python packaging depends on the Worker tree; the IR registry has a second writer (the daily ir-source-discovery job).",
     "Extraction candidates (cleanest seams): News & public events (one region per god file, ~3.3k lines each, no dedicated module either side) and the Thai SEC funds pair (already isolated in both runtimes, only touched by the router).",
 ]
 if unresolved:

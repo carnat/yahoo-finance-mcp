@@ -176,6 +176,10 @@ export {
   getPublicEventTimeline,
   verifyCompanyEvent,
 } from "./news.js";
+import exposurePresets from "./exposure-presets.json";
+
+/** The China exposure preset (Q5): the terms extractChinaExposure and extractExposure search, shared with Python. */
+export const CHINA_PRESET = exposurePresets.presets.china;
 
 /**
  * Yahoo Finance API client for Cloudflare Workers.
@@ -11269,7 +11273,7 @@ export async function extractChinaExposure(
 ): Promise<string> {
   let idx = parseObjectJson(await getSecFilingIndex(ticker, filingType, period, accessionNumber));
   // The revenue read is pinned too, so its evidence names the pinned filing (2.23.0, F3).
-  const revenue = parseObjectJson(await extractRevenueExposure(ticker, "China", filingType, period, "compact", accessionNumber));
+  const revenue = parseObjectJson(await extractRevenueExposure(ticker, CHINA_PRESET.region, filingType, period, "compact", accessionNumber));
   if (idx.ok === false && idx.error && typeof idx.error === "object" && isAccessionNotFound(idx.error as Record<string, unknown>)) {
     // Not one of the actions 2.13.0 fails closed on an accession miss: it reads as FILING_NOT_FOUND_TRY_OTHER_TYPE,
     // as before (the index's payload for a filing not found), rather than falling through to the latest filing.
@@ -11353,12 +11357,12 @@ export async function extractChinaExposure(
     return { evidence: found, rejectedNoiseCount };
   };
 
-  const entityTerms = ["Tongmei", "JinMei", "BoYu"];
-  const bankTerms = ["Bank of China"];
+  const entityTerms = [...CHINA_PRESET.entityTerms];
+  const bankTerms = [...CHINA_PRESET.bankTerms];
   // "manufactured by outsourcing partners located primarily in China mainland" (AAPL) names manufacturing without the
   // word "manufacturing" (2.25.4 audit, F39). New phrases go after the old ones, so an old term still reports first.
-  const manuTerms = ["manufacturing", "production", "supply chain", "fab", "manufactured", "outsourcing partner", "contract manufacturer"];
-  const riskMentions = parseObjectJson(await extractRiskFactorMentions(ticker, ["China", "tariff", "export control", "Bank of China"], filingType, period, "compact", accessionNumber));
+  const manuTerms = [...CHINA_PRESET.manufacturingTerms];
+  const riskMentions = parseObjectJson(await extractRiskFactorMentions(ticker, [...CHINA_PRESET.riskTerms], filingType, period, "compact", accessionNumber));
 
   const entityCollected = collect(entityTerms, "entity");
   const bankCollected = collect(bankTerms, "bank");
@@ -11369,9 +11373,9 @@ export async function extractChinaExposure(
   if (manuEvidence.length === 0) {
     // Headings and table labels rarely name manufacturing locations; the
     // filing text does (as extract_exposure's operational scan reads it).
-    const chinaText = parseObjectJson(await searchFilingText(ticker, ["China"], null, filingType, accessionNumber, 800, false));
+    const chinaText = parseObjectJson(await searchFilingText(ticker, [CHINA_PRESET.region], null, filingType, accessionNumber, 800, false));
     for (const m of Array.isArray(chinaText.matches) ? chinaText.matches as Record<string, unknown>[] : []) {
-      const excerpt = readableExposureExcerpt(m?.contextText ?? "", ["China"], 240, 3);
+      const excerpt = readableExposureExcerpt(m?.contextText ?? "", [CHINA_PRESET.region], 240, 3);
       const term = excerpt ? manuTerms.find((t) => excerpt.toLowerCase().includes(t)) : undefined;
       if (!excerpt || !term) continue;
       manuEvidence.push({ source: "text", term, sectionHeading: m.sectionHeading ?? null, excerpt, excerptAvailable: true });
@@ -11385,7 +11389,7 @@ export async function extractChinaExposure(
       const item = ev as Record<string, unknown>;
       const excerpt = readableExposureExcerpt(
         item.excerpt ?? item.context ?? "",
-        [String(item.term ?? "China")],
+        [String(item.term ?? CHINA_PRESET.region)],
       );
       if (excerpt) {
         riskEvidence.push({ ...item, excerpt, excerptAvailable: true });
@@ -11456,8 +11460,8 @@ const EXPOSURE_SYNONYMS: Record<string, string[]> = {
   "rest of asia": ["restofasia", "asiapacific", "asiaxjapan"],
 };
 
-// Named entities known to be associated with China manufacturing / supply chain
-const CHINA_NAMED_ENTITIES = ["foxconn", "tsmc", "luxshare", "catl", "byd", "tongmei", "catcher", "pegatron"];
+// Named entities known to be associated with China manufacturing / supply chain (the China preset, exposure-presets.json)
+const CHINA_NAMED_ENTITIES: string[] = [...CHINA_PRESET.namedEntities];
 
 // Operational terms for geographic exposure scanning
 // The F39 manufacturing phrases apply to every region, not only the China preset (2.26.5, F62).

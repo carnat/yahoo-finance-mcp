@@ -27,6 +27,7 @@ from pydantic import Field
 # Phase 2b: yfmcp.app owns the YfmcpServer class, the yfinance_server instance, and
 # build_handler_registry.
 from yfmcp.app import create_server, yfinance_server, build_handler_registry
+from yfmcp.exposure_presets import CHINA as _CHINA_PRESET  # Q5: the China exposure preset, shared with the Worker
 from yfmcp.schemas import (
     FinancialType, HolderType, RecommendationType, FilingFactType,
     _TOOL_OUTPUT_SCHEMAS, _MARKET_SNAPSHOT_OUTPUT_SCHEMA,
@@ -8241,7 +8242,7 @@ async def extract_china_exposure(
     failure = _filing_period_failure("extract_china_exposure", period)
     if failure:
         return failure
-    risk_terms = ["China", "tariff", "export control", "Bank of China"]
+    risk_terms = list(_CHINA_PRESET["riskTerms"])
     # Warm the shared submissions cache once, then fetch the three
     # independent filing reads together.
     await _warm_sec_submissions(ticker)
@@ -8272,7 +8273,7 @@ async def extract_china_exposure(
             accession_number=resolved_filing["accessionNumber"],
         ) if resolved_filing else (_no_index() if resolve_error else _sec_filing_index_full(
             ticker=ticker, filing_type=filing_type, period=period, accession_number=accession_number)),
-        _extract_revenue_exposure(ticker=ticker, exposure_query="China", filing_type=filing_type, period=period, accession_number=accession_number),
+        _extract_revenue_exposure(ticker=ticker, exposure_query=_CHINA_PRESET["region"], filing_type=filing_type, period=period, accession_number=accession_number),
         _extract_risk_factor_mentions(ticker=ticker, terms=risk_terms, filing_type=filing_type, period=period, accession_number=accession_number),
     )
     idx = _safe_json_loads(idx_raw)
@@ -8342,11 +8343,11 @@ async def extract_china_exposure(
                     })
         return found, rejected
 
-    entity_terms = ["Tongmei", "JinMei", "BoYu"]
-    bank_terms = ["Bank of China"]
+    entity_terms = list(_CHINA_PRESET["entityTerms"])
+    bank_terms = list(_CHINA_PRESET["bankTerms"])
     # "manufactured by outsourcing partners located primarily in China mainland" (AAPL) names manufacturing without the
     # word "manufacturing" (2.25.4 audit, F39). New phrases go after the old ones, so an old term still reports first.
-    manuf_terms = ["manufacturing", "production", "supply chain", "fab", "manufactured", "outsourcing partner", "contract manufacturer"]
+    manuf_terms = list(_CHINA_PRESET["manufacturingTerms"])
 
     entity_evidence, entity_rejected = _collect(entity_terms, "entity")
     bank_evidence, bank_rejected = _collect(bank_terms, "bank")
@@ -8356,7 +8357,7 @@ async def extract_china_exposure(
     risk_evidence = []
     for ev in raw_risk_evidence:
         if isinstance(ev, dict):
-            term = str(ev.get("term") or "China")
+            term = str(ev.get("term") or _CHINA_PRESET["region"])
             excerpt = _readable_exposure_excerpt(
                 ev.get("excerpt") or ev.get("context") or "",
                 [term],
@@ -8371,13 +8372,13 @@ async def extract_china_exposure(
         # Headings and table labels rarely name manufacturing locations; the filing text does (as extract_exposure's
         # operational scan reads it).
         china_text = _safe_json_loads(await search_sec_filing_text(
-            ticker=ticker, search_terms=["China"], filing_type=filing_type, accession_number=accession_number,
+            ticker=ticker, search_terms=[_CHINA_PRESET["region"]], filing_type=filing_type, accession_number=accession_number,
             context_chars=800, return_tables=False,
         ))
         for m in china_text["matches"] if isinstance(china_text.get("matches"), list) else []:
             if not isinstance(m, dict):
                 continue
-            excerpt = _readable_exposure_excerpt(_nn(m.get("contextText"), ""), ["China"], max_len=240, min_words=3)
+            excerpt = _readable_exposure_excerpt(_nn(m.get("contextText"), ""), [_CHINA_PRESET["region"]], max_len=240, min_words=3)
             term = next((t for t in manuf_terms if t in excerpt.lower()), None) if excerpt else None
             if not excerpt or not term:
                 continue
@@ -8464,7 +8465,7 @@ async def extract_exposure(
         "india": ["india"],
         "rest of asia": ["restofasia", "asiapacific", "asiaxjapan"],
     }
-    CHINA_NAMED_ENTITIES = ["foxconn", "tsmc", "luxshare", "catl", "byd", "tongmei", "catcher", "pegatron"]
+    CHINA_NAMED_ENTITIES = list(_CHINA_PRESET["namedEntities"])
     # The F39 manufacturing phrases apply to every region, not only the China preset (2.26.5, F62).
     OPERATIONAL_TERMS = ["manufacturing", "assembly", "supply chain", "factory", "production facility", "manufactured", "outsourcing partner", "contract manufacturer"]
 

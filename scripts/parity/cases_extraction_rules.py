@@ -108,18 +108,26 @@ CASES = [
              "ext.sign.negative_wording", ["BR-EXT-015"], {"value": -5000000000, "scaleBasis": "AS_WRITTEN"}),
     _release("Free cash flow was $-5 billion for the quarter.", "freeCashFlow",
              "ext.sign.ascii_minus", ["BR-EXT-015"], {"value": -5000000000, "scaleBasis": "AS_WRITTEN"}),
-    # Finding (Phase 2, for Q3i triage): a minus written before the dollar sign ("-$5 billion") is dropped, so the
-    # figure reads positive. Both runtimes agree; recorded as current behaviour.
+    # R5-extractors-3 (Q1 BR-EXT-015 / Q3i): a figure stated as a loss, or with a minus before the dollar sign, is negative.
     _release("Free cash flow was -$5 billion for the quarter.", "freeCashFlow",
-             "ext.sign.minus_before_dollar_dropped", ["BR-EXT-015"], {"value": 5000000000, "scaleBasis": "AS_WRITTEN"}),
-    # Scheduled repair (Q1 BR-EXT-015 / Q3i): "loss" wording does not sign a monetary metric today.
-    Case(name="ext.sign.monetary_loss_wording_unsigned", ids=["BR-EXT-015"], mode="pinned", decision="Q1 BR-EXT-015 / Q3i",
-         py=lambda: er.release_text_metric("Free cash flow was a loss of $5 billion for the quarter.", "freeCashFlow"),
-         ts={"module": "extractionRules", "fn": "releaseTextMetric",
-             "args": ["Free cash flow was a loss of $5 billion for the quarter.", "freeCashFlow"]},
-         select=lambda v: None if v is None else {"value": v.get("value"), "scaleBasis": v.get("scaleBasis")},
-         expect={"value": 5000000000, "scaleBasis": "AS_WRITTEN"},
-         note="repair: a monetary figure stated as a loss must not be returned as positive"),
+             "ext.sign.minus_before_dollar_negative", ["BR-EXT-015"], {"value": -5000000000, "scaleBasis": "AS_WRITTEN"}),
+    _release("Free cash flow was \u2212$5 billion for the quarter.", "freeCashFlow",
+             "ext.sign.unicode_minus_before_dollar_negative", ["BR-EXT-015"], {"value": -5000000000, "scaleBasis": "AS_WRITTEN"}),
+    _release("Free cash flow was a loss of $5 billion for the quarter.", "freeCashFlow",
+             "ext.sign.monetary_loss_wording_negative", ["BR-EXT-015"], {"value": -5000000000, "scaleBasis": "AS_WRITTEN"}),
+    _release("Operating income was a loss of $5 million for the quarter.", "operatingIncome",
+             "ext.sign.operating_income_loss_wording_negative", ["BR-EXT-015"], {"value": -5000000, "scaleBasis": "AS_WRITTEN"}),
+    _release("Diluted EPS was a loss of $0.12 for the quarter.", "epsDiluted",
+             "ext.sign.eps_loss_of_wording_negative", ["BR-EXT-015"], {"value": -0.12, "scaleBasis": None}),
+    _release("The company reported -$0.12 per diluted share for the quarter.", "epsDiluted",
+             "ext.sign.per_share_minus_before_dollar_negative", ["BR-EXT-015"], {"value": -0.12, "scaleBasis": None}),
+    # Wording that names both outcomes, or a spaced dash used as a separator, signs nothing.
+    _release("We reported operating income (loss) of $5 million for the quarter.", "operatingIncome",
+             "ext.sign.both_outcomes_loss_in_parentheses_not_signed", ["BR-EXT-015"], {"value": 5000000, "scaleBasis": "AS_WRITTEN"}),
+    _release("We reported operating income/loss of $5 million for the quarter.", "operatingIncome",
+             "ext.sign.both_outcomes_slash_not_signed", ["BR-EXT-015"], {"value": 5000000, "scaleBasis": "AS_WRITTEN"}),
+    _release("Total revenue for the quarter - $94.9 billion, reported today.", "revenue",
+             "ext.sign.spaced_dash_separator_not_signed", ["BR-EXT-015"], {"value": 94900000000, "scaleBasis": "AS_WRITTEN"}),
     # EPS never inherits a table scale (scale applies to money metrics only).
     _release("Diluted net income per share was $1.25 for the quarter. (in millions)", "epsDiluted",
              "ext.scale.eps_never_table_scaled", ["BR-EXT-015"], {"value": 1.25, "scaleBasis": None}),
