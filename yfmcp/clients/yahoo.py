@@ -1,12 +1,13 @@
 """yfinance client helpers.
 
 Extracted from server.py in Phase 1 of the refactoring plan. Phase 4 unit 2 moved the valuation market inputs
-(_valuation_market_inputs, the Python twin of the Worker's valuationMarketInputs in worker/src/clients/yahoo.ts) here.
+(_valuation_market_inputs, the Python twin of the Worker's valuationMarketInputs in worker/src/clients/yahoo.ts) here;
+since Q3g (3.0.2) they are read from Yahoo quoteSummary, as the Worker reads them.
 """
 
 import asyncio
 import json
-from typing import Any
+from urllib.parse import quote as _quote
 
 import yfinance as yf
 
@@ -27,26 +28,37 @@ def _safe_parse(result: object, ticker: str) -> object:
         return {"error": True, "message": str(result), "ticker": ticker}
 
 
-def _estimate_rows(company: Any, attr: str) -> list[dict]:
-    try:
-        df = getattr(company, attr)
-    except Exception:
-        return []
-    if df is None or getattr(df, "empty", True):
-        return []
-    df = df.reset_index()
-    df.columns = ["period", *[str(c) for c in df.columns[1:]]]
-    return df.to_dict(orient="records")
+# The Worker's valuationMarketInputs URL (worker/src/clients/yahoo.ts): one quoteSummary read with these modules.
+_QUOTE_SUMMARY_URL = "https://query1.finance.yahoo.com/v10/finance/quoteSummary/"
+_MARKET_INPUT_MODULES = "price,financialData,defaultKeyStatistics,earningsTrend"
+
+
+class YahooHttpError(Exception):
+    """The Worker's YahooHttpError: a non-OK Yahoo answer, with the URL the Worker names (never the crumb)."""
+
+    def __init__(self, status: int, url: str) -> None:
+        super().__init__(f"Yahoo Finance API error {status} for: {url}")
+        self.status = status
+
+
+def _quote_summary_result(ticker: str, modules: str) -> dict | None:
+    """Blocking: the first quoteSummary result for ``modules`` through yfinance's crumb-aware session (Q3g, V6), or
+    None when Yahoo answers without one. A non-OK answer raises YahooHttpError with the Worker's text."""
+    url = _QUOTE_SUMMARY_URL + _quote(ticker, safe="-_.!~*'()")
+    response = yf.Ticker(ticker)._data.get(url, params={"modules": modules})
+    if not 200 <= int(response.status_code) < 300:
+        raise YahooHttpError(int(response.status_code), f"{url}?modules={modules}")
+    data = response.json()
+    results = ((data.get("quoteSummary") or {}).get("result")) if isinstance(data, dict) else None
+    return results[0] if isinstance(results, list) and results and isinstance(results[0], dict) else None
 
 
 async def _valuation_market_inputs(ticker: str) -> dict:
+    """The Worker's valuationMarketInputs: Yahoo quoteSummary mapped to MarketInputs (Q3g, 3.0.2)."""
     def fetch() -> dict:
-        company = yf.Ticker(ticker)
-        info = company.info or {}
-        # yfinance answers an unknown symbol with a near-empty info dict; with no quote type and no name there is no
-        # quote summary, as the Worker's empty result says (2.26.5, F57).
-        if not info or not any(info.get(k) for k in ("quoteType", "shortName", "longName")):
+        result = _quote_summary_result(ticker, _MARKET_INPUT_MODULES)
+        if not result:
             raise ValueError(f"No Yahoo quote summary for {ticker.upper()}")
-        return _vl.market_inputs_from_yfinance(ticker, info, _estimate_rows(company, "revenue_estimate"), _estimate_rows(company, "earnings_estimate"))
+        return _vl.market_inputs_from_quote_summary(ticker, result)
 
     return await asyncio.to_thread(fetch)

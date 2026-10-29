@@ -208,16 +208,43 @@ class TestValuationParity(unittest.TestCase):
                     "markets", "snapshot", "snapshotCashMismatch", "snapshotDebtFree", "snapshotYahoo", "snapshotPence", "upcRow", "peers"):
             self.assertEqual(self.worker[key], self.local[key], key)
 
-    def test_yfinance_adapter_matches_quote_summary_parsing(self) -> None:
-        qs = QUOTE_SUMMARIES["PEER1"]
-        info = {
-            "longName": "Peer One", "currency": "USD", "financialCurrency": "USD", "currentPrice": 50.0, "regularMarketTime": 1790000000,
-            "sharesOutstanding": 20_000_000, "totalCash": 100_000_000, "totalDebt": 50_000_000, "totalRevenue": 400_000_000,
-            "ebitda": 80_000_000, "grossMargins": 0.5, "trailingEps": 1.5, "marketCap": None,
-        }
-        revenue = [{"period": "0q", "avg": 112_500_000.0, "numberOfAnalysts": float("nan")}, {"period": "0y", "avg": 450_000_000, "numberOfAnalysts": 10}, {"period": "+1y", "avg": 540_000_000, "numberOfAnalysts": 9}]
-        earnings = [{"period": "0q", "avg": 0.01, "numberOfAnalysts": float("nan")}, {"period": "0y", "avg": 2.0, "numberOfAnalysts": 10}, {"period": "+1y", "avg": 2.5, "numberOfAnalysts": 9}]
-        self.assertEqual(vl.market_inputs_from_yfinance("PEER1", info, revenue, earnings), vl.market_inputs_from_quote_summary("PEER1", qs))
+    def test_python_client_reads_quote_summary_as_the_worker(self) -> None:
+        """Q3g (3.0.2): Python market inputs come from Yahoo quoteSummary through the Yahoo client, at the Worker's URL."""
+        from yfmcp.clients import yahoo as yc
+
+        seen: list[tuple[str, dict]] = []
+
+        class _Response:
+            def __init__(self, status: int, body: object) -> None:
+                self.status_code, self._body = status, body
+
+            def json(self) -> object:
+                return self._body
+
+        class _Data:
+            def get(self, url: str, params: dict | None = None, timeout: int = 30) -> _Response:
+                seen.append((url, dict(params or {})))
+                ticker = url.rsplit("/", 1)[1]
+                if ticker in QUOTE_SUMMARIES:
+                    return _Response(200, {"quoteSummary": {"result": [copy.deepcopy(QUOTE_SUMMARIES[ticker])], "error": None}})
+                if ticker == "EMPTY":
+                    return _Response(200, {"quoteSummary": {"result": [], "error": None}})
+                return _Response(404, {"quoteSummary": {"result": None, "error": {"code": "Not Found"}}})
+
+        class _Ticker:
+            def __init__(self, ticker: str) -> None:
+                self._data = _Data()
+
+        with patch.object(yc.yf, "Ticker", _Ticker):
+            got = asyncio.run(yc._valuation_market_inputs("PEER1"))
+            self.assertEqual(got, self.worker["markets"]["PEER1"])
+            self.assertEqual(seen[0], ("https://query1.finance.yahoo.com/v10/finance/quoteSummary/PEER1", {"modules": "price,financialData,defaultKeyStatistics,earningsTrend"}))
+            with self.assertRaises(yc.YahooHttpError) as missing:
+                asyncio.run(yc._valuation_market_inputs("ZZZZQQ"))
+            self.assertEqual(str(missing.exception), "Yahoo Finance API error 404 for: https://query1.finance.yahoo.com/v10/finance/quoteSummary/ZZZZQQ?modules=price,financialData,defaultKeyStatistics,earningsTrend")
+            with self.assertRaises(ValueError) as empty:
+                asyncio.run(yc._valuation_market_inputs("EMPTY"))
+            self.assertEqual(str(empty.exception), "No Yahoo quote summary for EMPTY")
 
 
 class TestValuationValues(unittest.TestCase):
@@ -303,7 +330,6 @@ class TestValuationValues(unittest.TestCase):
         self.assertEqual((w["secPeriodEnd"], w["yahooMostRecentQuarter"]), ("2025-12-31", "2026-06-30"))
         self.assertEqual(s["enterpriseValue"], 25 * 101_000_000 + 450_000_000 - 500_000_000)
         self.assertEqual(self.out["markets"]["STALE"]["mostRecentQuarter"], "2026-06-30")
-        self.assertEqual(vl.market_inputs_from_yfinance("STALE", {"mostRecentQuarter": 1782777600}, [], [])["mostRecentQuarter"], "2026-06-30")
 
     def test_debt_free_filing_keeps_filing_balances(self) -> None:
         s = self.out["snapshotDebtFree"]
