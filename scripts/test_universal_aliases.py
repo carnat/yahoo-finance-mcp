@@ -8,12 +8,12 @@ or when two sequential calls return slightly different quotes.
 
 Stable keys checked per tool (only keys that are structurally guaranteed):
   get_market_quote / get_fast_info   → currency, quoteType, lastPrice, previousClose
-  check_volume_liquidity_threshold    → ticker, gatePass, dataDate (meetsMinimum, minAdvUsd since 2.8.0)
+  check_volume_liquidity_threshold    → ticker, dataDate (meetsMinimum, minAdvUsd since 2.8.0; gatePass removed in 3.0.0)
   summarize_options_flow              → ticker, dataQuality
   analyze_options_flow_window         → ticker, dataQuality (or windowLabel)
-  analyze_position_signals            → t1_inputs, t2_inputs, t4_inputs, t5_inputs (analystInputs, pricePositionInputs,
-                                         earningsInputs, technicalInputs since 2.8.0)
-  calculate_price_target_distance     → ticker, currentPrice, bracket (priceAtOrAboveTarget since 2.8.0)
+  analyze_position_signals            → analystInputs, pricePositionInputs, earningsInputs, technicalInputs
+                                         (t1_inputs..t5_inputs removed in 3.0.0)
+  calculate_price_target_distance     → ticker, currentPrice, priceAtOrAboveTarget (bracket removed in 3.0.0)
 
 Note: get_market_quote/get_fast_info returns yfinance fast_info fields directly
 and does not inject a "ticker" key, so "ticker" is not a stable key for that tool.

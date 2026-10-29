@@ -295,6 +295,56 @@ class TestPutHedgeCandidateSafety(unittest.TestCase):
         self.assertIn("OPTIONS_CHAIN_LOW_QUALITY", data["warnings"])
 
 
+class TestOptionsFlowPriorWindowComparison(unittest.TestCase):
+    """3.0.0: the trend reads the prior window's putVolPer1PctStockAdv, then putVolVs10dAvg, then pcRatio; no aliases are emitted."""
+
+    def _scan(self, prior: dict | None) -> dict:
+        calls = [_make_contract(100.0, volume=100, implied_volatility=0.00001)]
+        puts = [_make_contract(100.0, volume=20_000, implied_volatility=0.00001)]
+
+        class FakeTicker:
+            fast_info = {"lastPrice": 100.0, "tenDayAverageVolume": 1_000_000}
+            options = ("2099-01-15",)
+
+            def option_chain(self, expiry):
+                chain = type("Chain", (), {})()
+                chain.calls = pd.DataFrame(calls)
+                chain.puts = pd.DataFrame(puts)
+                return chain
+
+        original = srv.yf.Ticker
+        srv.yf.Ticker = lambda ticker: FakeTicker()  # type: ignore[assignment]
+        key = "options_flow:PRIORCMP:T-14"
+        try:
+            if prior is None:
+                srv._tool_cache.set(key, json.dumps({}), 1)
+            else:
+                srv._tool_cache.set(key, json.dumps(prior), 3600)
+            return json.loads(asyncio.run(srv.get_options_flow_scan("PRIORCMP", "T-7")))
+        finally:
+            srv.yf.Ticker = original  # type: ignore[assignment]
+
+    def test_plain_name_wins_over_the_old_alias_and_pc_ratio(self):
+        # Current putVolPer1PctStockAdv is 2.0 (20,000 puts / 1% of 1M shares).
+        data = self._scan({"putVolPer1PctStockAdv": 1.0, "putVolVs10dAvg": 9.0, "pcRatio": 9.0})
+        self.assertEqual(data["putVolPer1PctStockAdv"], 2.0)
+        self.assertEqual(data["putVolTrend"], "INCREASING")
+
+    def test_old_alias_in_a_prior_reading_still_counts_when_the_plain_name_is_missing(self):
+        data = self._scan({"putVolVs10dAvg": 9.0, "pcRatio": 0.1})
+        self.assertEqual(data["putVolTrend"], "DECREASING")
+
+    def test_pc_ratio_is_the_last_resort(self):
+        data = self._scan({"pcRatio": 1.0})
+        self.assertEqual(data["putVolTrend"], "INCREASING")
+
+    def test_result_has_no_aliases_or_field_notes(self):
+        data = self._scan({"pcRatio": 1.0})
+        for removed in ("ivPctile", "putVolVs10dAvg", "fieldNotes"):
+            self.assertNotIn(removed, data)
+        self.assertIn("ivVsRealizedRangePct", data)
+
+
 class TestSortByRelevance(unittest.TestCase):
     """Relevance sort should not put deep ITM strikes first by default."""
 

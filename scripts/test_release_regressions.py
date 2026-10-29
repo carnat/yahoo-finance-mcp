@@ -37,7 +37,7 @@ ROOT = Path(__file__).resolve().parents[1]
 WORKER = ROOT / "worker"
 ESBUILD = WORKER / "node_modules" / ".bin" / "esbuild"
 sys.path.insert(0, str(ROOT))
-from scripts.source_text import python_runtime_source, worker_runtime_source  # noqa: E402
+from scripts.source_text import definition_source, python_runtime_source, worker_runtime_source  # noqa: E402
 
 REQUESTED = "0001193125-26-999999"
 
@@ -195,9 +195,13 @@ class TestSourceContracts(unittest.TestCase):
         self.assertRegex(py, r"if not keep_all:\s*\n\s*deduped = deduped\[:max_cap\]")
 
     def test_options_flow_fields_name_what_they_measure(self) -> None:
-        for runtime, text in (("worker", worker_runtime_source()), ("python", python_runtime_source())):
-            for field in ("ivVsRealizedRangePct", "putVolPer1PctStockAdv", "fieldNotes"):
+        # 3.0.0: the 2.4.4 aliases (ivPctile, putVolVs10dAvg) and fieldNotes are removed from the result.
+        for runtime, name, text in (("worker", "getOptionsFlowScan", None), ("python", "get_options_flow_scan", None)):
+            text = definition_source(runtime, name)
+            for field in ("ivVsRealizedRangePct", "putVolPer1PctStockAdv"):
                 self.assertIn(field, text, f"{field} missing from the {runtime} runtime")
+            for field in ("fieldNotes", "ivPctile, putVolVs10dAvg", '"ivPctile"', '"putVolVs10dAvg": '):
+                self.assertNotIn(field, text, f"{field} still in the {runtime} runtime")
 
 
 # ── Python runtime ───────────────────────────────────────────────────────────

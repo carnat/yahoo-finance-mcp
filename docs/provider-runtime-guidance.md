@@ -3190,6 +3190,36 @@ F-024, F-026, F-029). Both runtimes change alike.
 - **Tests:** 21 new parity cases in `scripts/parity/cases_audit_2251.py`.
 - **Rollback:** redeploy 2.25.0.
 
+## Breaking Changes (3.0.0)
+
+- **Why:** the Phase 6 major release. Every change below was announced by a `DEPRECATED_FIELD` notice or a docs notice for at least one minor version ("Neutral Field Names And Deprecations (2.8.0)", "Phase 6 Deprecation Notices (2.27.0)"). The owner chose on 2026-10-28 to ship it before the Phase 4 and Phase 5 module moves, as an exception to the brief's "Phase 5 exit" entry criterion; those moves and the non-breaking Phase 6 cleanup continue after it. Plan: `analysis/yahoo-finance-mcp/MAJOR3_SPEC.md`.
+- **Removed fields** (both runtimes unless named):
+
+  | Removed | Use instead |
+  | --- | --- |
+  | `doctrineUse` (Worker meta; data of `get_company_press_releases`, `get_sec_filing_section_markdown`) | `reliabilityClass` |
+  | `g2`, `opportunity`, `action`, `priceTarget`, `scenarioWeights`, `selectedMethod`, `selectedMultiple` on evidence-only actions | `decisionUse: EVIDENCE_ONLY` |
+  | `calculate_price_target_distance` `bracket`, `inferredTag`, `tag`, `tagNote` | `priceAtOrAboveTarget`, `referenceTargetPct` |
+  | `check_volume_liquidity_threshold` `gatePass`, `gateThresholdUsd` (the fixed $10M gate) | `meetsMinimum` with `min_adv_usd` |
+  | `get_market_snapshot` `volume.liquidityGatePass` | `volume.meetsMinimum` with `min_adv_usd` |
+  | `analyze_position_signals` `t1_inputs`, `t2_inputs`, `t4_inputs`, `t5_inputs` | `analystInputs`, `pricePositionInputs`, `earningsInputs`, `technicalInputs` |
+  | Worker `meta.decisionGrade` on `extract_sec_filing_fact`, `get_company_press_releases`, `get_sec_filing_section_markdown` (F5, F45) | the payload's `decisionGrade` |
+  | `analyze_options_flow_window` `ivPctile`, `putVolVs10dAvg`, `fieldNotes` (F61) | `ivVsRealizedRangePct`, `putVolPer1PctStockAdv` |
+  | `get_analyst_rating_changes` `upgrades30d`, `downgrades30d`, `initiations30d` (F61) | `upgrades`, `downgrades`, `initiations` with `windowDays` |
+
+  The Worker meta of the three status-table tools now reads `capabilityStatus`, `reliabilityClass`, `failureMode`, `evidenceRequired`, `sourceType`, then the table's other keys. `analyze_position_signals` `analystInputs` keeps its `upgrades30d`, `downgrades30d`, `initiations30d` (a 30-day window, unchanged values). The options-chain summary's `ivPctile` is a different field and stays.
+- **`check_volume_liquidity_threshold` note:** with the fixed gate gone, the note reads `20d average traded value $X`, then ` (≥ min_adv_usd $Y)` or ` (< min_adv_usd $Y)` when `min_adv_usd` is given, then the latest-session ratio and the FX note as before. The UNKNOWN notes are unchanged.
+- **F17, Python `get_ownership_holders`:** returns the Worker's payload, the holder type's Yahoo quoteSummary module with Yahoo's `{raw, fmt}` values unwrapped (camelCase keys, dates as `YYYY-MM-DD`), instead of yfinance's renamed columns.
+- **F47, Python `get_company_events_calendar` (upcoming):** `calendar` is the Worker's `{earnings: {earningsDate, earningsAverage, earningsLow, earningsHigh, revenueAverage, revenueLow, revenueHigh}, exDividendDate, dividendDate}` from Yahoo's calendarEvents, instead of yfinance's `Earnings Date`-style keys. A Yahoo result without calendar events returns that shape empty, as the Worker does.
+- **F20, `confidence` holds only `HIGH`, `MEDIUM`, `LOW` or null:** wherever a payload carried a status string in `confidence` (`EXTRACTION_FAILED`, `NOT_DISCLOSED`, `NOT_DECISION_GRADE`, `FILING_NOT_FOUND_TRY_OTHER_TYPE`, `FILING_TEXT_NOT_AVAILABLE`, `TICKER_NOT_FOUND`, `NOT_FOUND`), `confidence` is null and the string moves to the object's `status` when it has none (an existing `status` is kept). The rule runs over the whole response in both envelopes. The V2 envelope's fact enrichment no longer writes `NOT_DECISION_GRADE`: an untagged fact without a value has null confidence, and one with a value is still LOW. A fact's null confidence is not replaced by its parent's. Evidence-pack components are normalised before they are hashed; a stored evidence cut read back by `get_evidence_cut` is returned verbatim, so a cut stored before 3.0.0 can still carry the old strings and its SHA-256 still verifies.
+- **F59, `get_latest_earnings_release` sources:** both runtimes return the Worker's entry for the 8-K, `{sourceType: "sec_8k", url, contentUrl, filingDate, acceptedAt, accessionNumber, cikPadded, items, isInlineXBRL, confidence}`. `contentUrl` (new) is the document whose text is read: the EX-99.1 exhibit when the 8-K has one, else the 8-K. Python drops `sec_8k_ex991` in this entry, `primaryDocumentUrl`, the top-level `errorCode` and `meta.generatedAt`. Tools that read the release (`index_earnings_release` and the extractors) still report the content they read as `sec_8k_ex991`. Python's `period` falls back to `"latest"` when the release states no period, as the Worker's does (it was null). Left as they were, and pinned in the harness: Python writes timestamps such as `reportedAt` without milliseconds (`...21:05:00Z` against the Worker's `...21:05:00.000Z`), and Python's `extract_earnings_metrics` top-level `source` names `sec_8k_ex991` where the Worker's names `sec_8k`.
+- **F60, one period vocabulary:** `reconcile_metric_sources` takes `latest` (the latest quarter, now the default), `FY<yyyy>` or `FY<yyyy> Q<n>`. `FY<yyyy> Q<n>` is the issuer's fiscal quarter (SEC fy/fp of the filing that first reported it, else counted from the prior fiscal year end), the quarter `fiscalQuarter`/`fiscalYears` already reported. Before, `Q<n> <yyyy>` was the calendar quarter of the period end, which is a different quarter for off-calendar issuers such as AAPL and MSFT. `latest_quarter`, `latest_annual` and `Q<n> <yyyy>` return `INPUT_VALIDATION_ERROR` ("period must be latest, FY<yyyy> or FY<yyyy> Q<n>."); ask for the latest annual period as `FY<yyyy>`. The extractors' `latest`, `FY<yyyy>` and bare `<yyyy>` are unchanged.
+- **Notices:** no `DEPRECATED_FIELD` notice remains; the 2.8.0 and 2.27.0 notices are gone with their fields.
+- **Evidence hashes:** payloads of evidence-only actions lost the seven null boundary fields, so a new evidence cut's hash differs from a 2.x cut of the same data.
+- **Neutrality check:** `scripts/test_neutrality_contract.py` (in CI) fails when either runtime's tool listing, expanded or grouped, carries doctrine wording or advertises a removed field.
+- **Tests:** parity cases in `scripts/parity/cases_major_300.py`; the 2.8.0 and 2.27.0 notice cases flipped to the 3.0.0 contract.
+- **Rollback:** redeploy 2.27.0.
+
 ## Phase 6 Deprecation Notices (2.27.0)
 
 - **Why:** finding F61 of the 2026-10-27 audit (`analysis/yahoo-finance-mcp/F_TRIAGE.md` §7). The Phase 6 major release removes or reshapes the fields below, and each needs a notice for at least one minor version first. Release type: minor, notice only. **No value, field or status changes**; the notices are `DEPRECATED_FIELD` rows in `meta.warnings` (never in `data`), with the 2.8.0 key order and texts identical in both runtimes.

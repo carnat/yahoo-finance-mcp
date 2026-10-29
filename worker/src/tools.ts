@@ -107,8 +107,8 @@ import {
 } from "./sec-thailand.js";
 import { validateAccession, validateTicker } from "./validate.js";
 import { buildValuationEvidencePack, getConsensusForecastCurve, getEpsRevisions, getEvidenceCut, getEvidenceQuality, listEvidenceCuts } from "./evidence-pack.js";
-import { EVIDENCE_ONLY_ACTIONS, withAuthorityBoundary } from "./evidence.js";
-import { deprecationWarningsFor, parseMinAdvUsd, reliabilityClassFor } from "./deprecations.js";
+import { withAuthorityBoundary } from "./evidence.js";
+import { parseMinAdvUsd } from "./deprecations.js";
 
 export interface Tool {
   name: string;
@@ -500,7 +500,7 @@ const CANONICAL_ADDITIONS: Tool[] = [
   { name: "analyze_price_performance", description: "Analyze price performance metrics.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" } }] } }, required: ["ticker"] } },
   { name: "analyze_moving_average_position", description: "Analyze moving-average position.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" } }] } }, required: ["ticker"] } },
   { name: "analyze_volume_ratio", description: "Analyze the latest completed-session volume ratio. PARTIAL/INCOMPLETE means retry; do not use a volume signal.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" } }] }, period: { type: "number", default: 10 } }, required: ["ticker"] } },
-  { name: "check_volume_liquidity_threshold", description: "Check completed-session traded value against public liquidity thresholds: passes when the average daily traded value (volume x close) of the 20 sessions before the latest completed one is at least $10M, converted to USD for non-USD listings. ratio20d compares the latest session with that average. PARTIAL/INCOMPLETE means retry; gatePass is unknown. Pass min_adv_usd for a caller-chosen threshold; meetsMinimum reports adv20dTradedValueUsd >= min_adv_usd.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, foreign_exchange: { type: "boolean", default: false, description: "Accepted for compatibility; non-USD listings are always converted to USD." }, min_adv_usd: { type: "number", exclusiveMinimum: 0, description: "Optional caller-chosen minimum 20-day average daily traded value in USD; when supplied, meetsMinimum compares adv20dTradedValueUsd against it." } }, required: ["ticker"] } },
+  { name: "check_volume_liquidity_threshold", description: "Completed-session traded value: adv20dTradedValueUsd is the average daily traded value (volume x close) of the 20 sessions before the latest completed one, converted to USD for non-USD listings. ratio20d compares the latest session with that average. Pass min_adv_usd for a caller-chosen threshold; meetsMinimum reports adv20dTradedValueUsd >= min_adv_usd. PARTIAL/INCOMPLETE means retry; the average is unknown.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, foreign_exchange: { type: "boolean", default: false, description: "Accepted for compatibility; non-USD listings are always converted to USD." }, min_adv_usd: { type: "number", exclusiveMinimum: 0, description: "Optional caller-chosen minimum 20-day average daily traded value in USD; when supplied, meetsMinimum compares adv20dTradedValueUsd against it." } }, required: ["ticker"] } },
   { name: "get_company_profile", description: "Get company profile/fundamentals.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" } }] }, include_all: { type: "boolean" } }, required: ["ticker"] } },
   { name: "get_fund_profile", description: "Get ETF/fund profile with per-section status and as-of-date limitations. Valuation characteristics are conventional multiples; provider inverse yields are retained separately. Request overview, holdings, allocation, operations, or fixed-income sections.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" } }] }, sections: { type: "array", items: { type: "string", enum: ["overview", "holdings", "allocation", "operations", "fixed_income"] }, uniqueItems: true } }, required: ["ticker"] } },
   { name: "analyze_financial_ratios", description: "Analyze current financial ratios with explicit unitSemantics and optional historical Yahoo valuation measures.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" } }] }, history_periods: { type: "integer", minimum: 0, maximum: 20, default: 0 }, frequency: { type: "string", enum: ["quarterly", "monthly", "yearly", "trailing"], default: "quarterly" } }, required: ["ticker"] } },
@@ -555,9 +555,9 @@ const CANONICAL_ADDITIONS: Tool[] = [
   { name: "get_consensus_forecast_curve", description: "Street consensus by fiscal year, FY0 to FY+horizon, for EPS and revenue from Yahoo Finance and Alpha Vantage, each provider reported separately with fiscal year end, currency, mean/high/low, analyst count and retrieval time. Each metric and period states its coverage: PROVIDER_COVERED, PROVIDER_NOT_COVERED, INSUFFICIENT_ANALYST_COUNT or PROVIDER_CONFLICT (with the cross-provider difference). Years and metrics no provider covers stay PROVIDER_NOT_COVERED; nothing is interpolated, extended by growth rates, or derived. crossCheck states whether the providers were actually compared: a failed provider (CROSS_CHECK_DEGRADED) or figures identical to the last digit (IDENTICAL, PROVIDERS_NOT_INDEPENDENT) are flagged. A provider row whose mean falls outside its own high-low range is PROVIDER_INCONSISTENT and left out of the comparison; an EPS gap between providers that matches a recent stock split is NOT_SPLIT_ADJUSTED, not a conflict. When Alpha Vantage refuses a request for quota, a timeout or an upstream error, its figures stored up to 7 days earlier stand in, marked with their retrieval time, staleFallback and PROVIDER_DATA_STALE. With observation_date, returns the curve stored that day. Evidence only.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, horizon_years: { type: "integer", minimum: 1, maximum: 5, default: 5 }, min_analyst_count: { type: "integer", minimum: 1, maximum: 50, default: 3 }, conflict_tolerance_pct: { type: "number", minimum: 0, maximum: 100, default: 10 }, observation_date: { type: "string", pattern: "^\\d{4}-\\d{2}-\\d{2}$", description: "Read the consensus observation stored on this date (YYYY-MM-DD) instead of fetching providers now; get_eps_revisions lists the stored dates." } }, required: ["ticker"] } },
   { name: "get_eps_revisions", description: "EPS estimate revision windows for FY0 and FY+1 as each provider reports them: the mean now and 7, 30, 60 and 90 days ago with change and percent change, and up/down revision counts over 7 and 30 days. A window spanning a stock split carries no change (SPLIT_IN_WINDOW), nor does a row whose mean falls outside its own range (PROVIDER_INCONSISTENT). Stored figures standing in for a refused provider request (PROVIDER_DATA_STALE) have windows ending at their retrieval time. Revenue revisions and analyst adds/drops are PROVIDER_NOT_COVERED. Lists the dates of stored daily consensus observations. Evidence only.", inputSchema: { type: "object", properties: { ticker: { type: "string" } }, required: ["ticker"] } },
   { name: "get_historical_valuation_context", description: "Market cap, enterprise value and EV/Revenue, EV/EBITDA, P/E and P/S as they stood at each date, for a ticker and caller-named peers on the same dates. Point in time: SEC companyfacts filed on or before each date; the close on or before it with later split adjustments undone; balances at the latest balance date then filed; LTM (LFY + YTD - prior YTD) and LFY denominators with their periods, concepts and filings; reporting currency converted at that date's FX close; ADR share counts divided by ordinary shares per ADS. Shares are point in time: the cover-page or balance-sheet count, else the filing's per-class cover counts summed; a weighted-average count never sets market cap (POINT_IN_TIME_SHARES_UNRESOLVED). EBITDA is computed (operating income + D&A). Untagged or unfiled figures leave their multiples null with a status; status is OK only when all eight multiples are usable (coreStatus covers market cap and EV, coverage lists the rest); peer medians are unweighted. No multiple is selected. Evidence only.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, dates: { type: "array", items: { type: "string", pattern: "^\\d{4}-\\d{2}-\\d{2}$" }, maxItems: 12, description: "Default: the latest close and its anniversaries over five years." }, peers: { type: "array", items: { type: "string" }, maxItems: 5 } }, required: ["ticker"] } },
-  { name: "reconcile_metric_sources", description: "One metric for one period as each source states it: SEC XBRL as first filed and as latest filed (a difference is a restatement), the issuer's earnings release (only sentences naming the metric, an amount and the period's scope) and Yahoo's statement row, each compared with the latest SEC value with difference, percentage and tolerance (the larger of tolerance_pct and half the release's last stated digit). Status AGREED (two or more providers agree), PARTIAL (one provider), CONFLICT or NOT_FOUND, with source evidence. Metrics: revenue, net_income, operating_income, eps_diluted, cash_and_equivalents. Evidence only.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, metric: { type: "string", enum: ["revenue", "net_income", "operating_income", "eps_diluted", "cash_and_equivalents"] }, period: { type: "string", default: "latest_quarter", description: "latest_quarter, latest_annual, FY<yyyy> (the issuer's fiscal year from SEC fy/fp, else the fiscal year ending in that year) or Q<n> <yyyy> (calendar quarter of the period end)" }, tolerance_pct: { type: "number", minimum: 0, maximum: 10, default: 0.5 } }, required: ["ticker", "metric"] } },
+  { name: "reconcile_metric_sources", description: "One metric for one period as each source states it: SEC XBRL as first filed and as latest filed (a difference is a restatement), the issuer's earnings release (only sentences naming the metric, an amount and the period's scope) and Yahoo's statement row, each compared with the latest SEC value with difference, percentage and tolerance (the larger of tolerance_pct and half the release's last stated digit). Status AGREED (two or more providers agree), PARTIAL (one provider), CONFLICT or NOT_FOUND, with source evidence. Metrics: revenue, net_income, operating_income, eps_diluted, cash_and_equivalents. Evidence only.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, metric: { type: "string", enum: ["revenue", "net_income", "operating_income", "eps_diluted", "cash_and_equivalents"] }, period: { type: "string", default: "latest", description: "latest (the latest quarter), FY<yyyy> (the issuer's fiscal year from SEC fy/fp, else the fiscal year ending in that year) or FY<yyyy> Q<n> (the issuer's fiscal quarter)" }, tolerance_pct: { type: "number", minimum: 0, maximum: 10, default: 0.5 } }, required: ["ticker", "metric"] } },
   { name: "get_evidence_quality", description: "Preflight before a valuation evidence pack: status, freshness and coverage per evidence family (quote, latest SEC periodic filing, capital structure and dilution readiness, earnings-release guidance, material 8-Ks, FY0/FY+1 consensus cells, durable storage) and the blockers, from light requests only. Evidence only.", inputSchema: { type: "object", properties: { ticker: { type: "string" } }, required: ["ticker"] } },
-  { name: "build_valuation_evidence_pack", description: "One evidence cut for valuation work: quote, evidence quality, consensus curve, EPS revisions, current capital structure, dilution bridge at the current price, latest guidance and material filings, each with its source tool, status, warnings and failure, plus a provenance receipt hashing every component. decisionUse is EVIDENCE_ONLY; selectedMethod, selectedMultiple, scenarioWeights, priceTarget, g2, opportunity and action are always null. Stored immutably under a content-addressed evidenceCutId when storage is available; the full payload is returned either way.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, horizon_years: { type: "integer", minimum: 1, maximum: 5, default: 5 }, persist: { type: "boolean", default: true } }, required: ["ticker"] } },
+  { name: "build_valuation_evidence_pack", description: "One evidence cut for valuation work: quote, evidence quality, consensus curve, EPS revisions, current capital structure, dilution bridge at the current price, latest guidance and material filings, each with its source tool, status, warnings and failure, plus a provenance receipt hashing every component. decisionUse is EVIDENCE_ONLY. Stored immutably under a content-addressed evidenceCutId when storage is available; the full payload is returned either way.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, horizon_years: { type: "integer", minimum: 1, maximum: 5, default: 5 }, persist: { type: "boolean", default: true } }, required: ["ticker"] } },
   { name: "get_evidence_cut", description: "Retrieve a stored evidence cut by evidenceCutId and verify its integrity: the SHA-256 of the stored canonical JSON must equal the hash in the id (integrity VERIFIED or MISMATCH).", inputSchema: { type: "object", properties: { evidence_cut_id: { type: "string" } }, required: ["evidence_cut_id"] } },
   { name: "list_evidence_cuts", description: "Stored evidence cuts for a ticker, newest first, with their ids and cutoff times.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, limit: { type: "integer", minimum: 1, maximum: 100, default: 20 } }, required: ["ticker"] } },
   { name: "get_uk_company_filings", description: "UK Companies House filing history for a UK-registered issuer (e.g. IQE.L): accounts, share allotments (SH01), charges (MR01, secured lending) and resolutions, with document links; include_charges adds the charge register. Resolves by company_number, company_name, or the ticker's issuer name. Official statutory filings; RNS market announcements are not held here. Needs the COMPANIES_HOUSE_API_KEY secret.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, company_number: { type: "string" }, company_name: { type: "string" }, category: { type: "string", enum: ["accounts", "capital", "mortgage", "confirmation-statement", "resolution", "incorporation", "officers", "persons-with-significant-control", "address", "annotation", "change-of-name", "miscellaneous"] }, limit: { type: "number", minimum: 1, maximum: 100, default: 25 }, include_charges: { type: "boolean", default: false } } } },
@@ -1087,11 +1087,8 @@ const OUTPUT_SCHEMAS: Record<string, Tool["outputSchema"]> = {
       netSentiment: { type: ["number", "null"] },
       mixedSignal: { type: ["boolean", "null"] },
       upgrades: { type: ["number", "null"] },
-      upgrades30d: { type: ["number", "null"] },
       downgrades: { type: ["number", "null"] },
-      downgrades30d: { type: ["number", "null"] },
       initiations: { type: ["number", "null"] },
-      initiations30d: { type: ["number", "null"] },
       dataDate: { type: "string" },
     },
     additionalProperties: true,
@@ -1133,8 +1130,6 @@ const OUTPUT_SCHEMAS: Record<string, Tool["outputSchema"]> = {
       ticker: { type: "string" },
       windowLabel: { type: "string" },
       pcRatio: { type: ["number", "null"] },
-      ivPctile: { type: ["number", "null"] },
-      putVolVs10dAvg: { type: ["number", "null"] },
       ivVsRealizedRangePct: { type: ["number", "null"] },
       putVolPer1PctStockAdv: { type: ["number", "null"] },
       fieldNotes: { type: "object" },
@@ -1172,10 +1167,6 @@ const OUTPUT_SCHEMAS: Record<string, Tool["outputSchema"]> = {
       distanceConvention: { type: "string" },
       ioPt: { type: ["number", "null"] },
       eqfPct: { type: ["number", "null"] },
-      bracket: { type: ["string", "null"], description: "Deprecated: use priceAtOrAboveTarget (direction); referenceTargetPct gives the price/target ratio. Removed in the next major version." },
-      inferredTag: { type: ["string", "null"], description: "Deprecated: use priceAtOrAboveTarget (direction); referenceTargetPct gives the price/target ratio. Removed in the next major version." },
-      tag: { type: ["string", "null"], description: "Deprecated: use priceAtOrAboveTarget (direction); referenceTargetPct gives the price/target ratio. Removed in the next major version." },
-      tagNote: { type: ["string", "null"], description: "Deprecated: use priceAtOrAboveTarget (direction); referenceTargetPct gives the price/target ratio. Removed in the next major version." },
       invertedFlag: { type: ["boolean", "null"] },
       priceAtOrAboveTarget: { type: ["boolean", "null"], description: "currentPrice >= referenceTargetPrice on the unrounded prices; null when either price is missing or not positive." },
       recommendedNextAction: { type: "string", enum: ["NONE"] },
@@ -1188,10 +1179,6 @@ const OUTPUT_SCHEMAS: Record<string, Tool["outputSchema"]> = {
     properties: {
       ticker: { type: "string" },
       status: { type: "string", enum: ["OK", "PARTIAL"] },
-      t1_inputs: { type: "object", description: "Deprecated: use analystInputs; removed in the next major version." },
-      t2_inputs: { type: "object", description: "Deprecated: use pricePositionInputs; removed in the next major version." },
-      t4_inputs: { type: "object", description: "Deprecated: use earningsInputs; removed in the next major version." },
-      t5_inputs: { type: "object", description: "Deprecated: use technicalInputs; removed in the next major version." },
       analystInputs: { type: "object", description: "Analyst sentiment, rating-change counts, dominant rating and analyst count." },
       pricePositionInputs: { type: "object", description: "Current price and its position in the 52-week range." },
       earningsInputs: { type: "object", description: "Earnings beat rate, beat streak, average surprise and momentum." },
@@ -1222,9 +1209,7 @@ const OUTPUT_SCHEMAS: Record<string, Tool["outputSchema"]> = {
       notionalUsd: { type: ["number", "null"] },
       adv20dTradedValueUsd: { type: ["number", "null"] },
       gateBasis: { type: "string", enum: ["ADV20_TRADED_VALUE_USD"] },
-      gateThresholdUsd: { type: "number", description: "Deprecated: pass min_adv_usd and read meetsMinimum; removed in the next major version." },
       fxCurrency: { type: ["string", "null"] },
-      gatePass: { type: ["boolean", "null"], description: "Deprecated: pass min_adv_usd and read meetsMinimum; removed in the next major version." },
       meetsMinimum: { type: ["boolean", "null"], description: "adv20dTradedValueUsd >= min_adv_usd; null when min_adv_usd is not given or the average is unknown." },
       minAdvUsd: { type: ["number", "null"], description: "The caller's min_adv_usd, or null." },
       observationType: { type: "string", enum: ["COMPLETED_DAILY_VOLUME_NOTIONAL"] },
@@ -1249,7 +1234,6 @@ const OUTPUT_SCHEMAS: Record<string, Tool["outputSchema"]> = {
       volume: {
         type: "object",
         properties: {
-          liquidityGatePass: { type: ["boolean", "null"], description: "Deprecated: pass min_adv_usd and read volume.meetsMinimum; removed in the next major version." },
           meetsMinimum: { type: ["boolean", "null"], description: "20-day average traded value (USD) >= min_adv_usd; null when min_adv_usd is not given or the average is unknown." },
           minAdvUsd: { type: ["number", "null"], description: "The caller's min_adv_usd, or null." },
         },
@@ -1753,10 +1737,9 @@ function hasUsefulEvidence(evidence: unknown): boolean {
   });
 }
 
-type DoctrineToolStatus = {
+type ToolReliabilityStatus = {
   capabilityStatus: "ACTIVE" | "DEGRADED" | "PROVIDER_GATED" | "EXPERIMENTAL" | "RETIRED";
-  decisionGrade: boolean;
-  doctrineUse: "ALLOWED" | "VERIFY_ONLY" | "DIAGNOSTICS_ONLY" | "BLOCKED";
+  reliabilityClass: "RELIABLE" | "VERIFY_BEFORE_USE" | "DIAGNOSTIC" | "UNRELIABLE";
   failureMode: string | null;
   evidenceRequired: boolean;
   sourceType: "sec_xbrl" | "sec_table" | "sec_filing" | "company_ir" | "company_ir_page" | "yahoo" | "exchange" | "provider_diagnostic" | "unknown";
@@ -1765,19 +1748,17 @@ type DoctrineToolStatus = {
   note?: string;
 };
 
-const TOOL_DOCTRINE_STATUS: Record<string, DoctrineToolStatus> = {
+const TOOL_RELIABILITY_STATUS: Record<string, ToolReliabilityStatus> = {
   get_sec_filing_section_markdown: {
     capabilityStatus: "DEGRADED",
-    decisionGrade: false,
-    doctrineUse: "BLOCKED",
+    reliabilityClass: "UNRELIABLE",
     failureMode: "LIVE_SECTION_EXTRACTION_UNRELIABLE",
     evidenceRequired: true,
     sourceType: "sec_filing",
   },
   get_company_press_releases: {
     capabilityStatus: "ACTIVE",
-    decisionGrade: false,
-    doctrineUse: "ALLOWED",
+    reliabilityClass: "RELIABLE",
     failureMode: null,
     evidenceRequired: true,
     sourceType: "company_ir_page",
@@ -1787,8 +1768,7 @@ const TOOL_DOCTRINE_STATUS: Record<string, DoctrineToolStatus> = {
   },
   extract_sec_filing_fact: {
     capabilityStatus: "ACTIVE",
-    decisionGrade: true,
-    doctrineUse: "ALLOWED",
+    reliabilityClass: "RELIABLE",
     failureMode: null,
     evidenceRequired: true,
     sourceType: "sec_xbrl",
@@ -1798,25 +1778,13 @@ const TOOL_DOCTRINE_STATUS: Record<string, DoctrineToolStatus> = {
   },
 };
 
-/** A tool's status for envelope meta, with reliabilityClass beside the deprecated doctrineUse (2.8.0). */
-function doctrineStatusFor(tool: string): (DoctrineToolStatus & { reliabilityClass: string }) | undefined {
-  const status = TOOL_DOCTRINE_STATUS[tool];
-  if (!status) return undefined;
-  const { capabilityStatus, decisionGrade, doctrineUse, ...rest } = status;
-  return { capabilityStatus, decisionGrade, doctrineUse, reliabilityClass: reliabilityClassFor(doctrineUse), ...rest };
-}
-
 /**
- * Success-envelope options for a tool: its status table entry in meta, and
- * the DEPRECATED_FIELD notices its payload calls for (2.8.0).
+ * Success-envelope options for a tool: its status table entry in meta.
  */
 function successOptions(name: string): McpSuccessOptions {
-  const status = doctrineStatusFor(name);
-  const metaFields = status ? Object.keys(status) : [];
-  const evidenceOnly = EVIDENCE_ONLY_ACTIONS.has(name);
+  const status = TOOL_RELIABILITY_STATUS[name];
   return {
-    ...(status ? { metaExtra: status } : {}),
-    successWarnings: (data) => deprecationWarningsFor(name, data, { evidenceOnly, metaFields }),
+    ...(status ? { metaExtra: { ...status } } : {}),
   };
 }
 
@@ -2568,7 +2536,7 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
         Array.isArray(args.peers) ? args.peers.map(String) : null,
       );
     case "reconcile_metric_sources":
-      return reconcileMetricSources(str(args.ticker), str(args.metric), str(args.period, "latest_quarter"), num(args.tolerance_pct, 0.5));
+      return reconcileMetricSources(str(args.ticker), str(args.metric), str(args.period, "latest"), num(args.tolerance_pct, 0.5));
     case "get_consensus_forecast_curve":
       return getConsensusForecastCurve(str(args.ticker), num(args.horizon_years, 5), num(args.min_analyst_count, 3), num(args.conflict_tolerance_pct, 10),
         args.observation_date == null || args.observation_date === "" ? null : str(args.observation_date));

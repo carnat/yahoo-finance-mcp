@@ -75,8 +75,6 @@ export interface ToolMeta {
   cacheSource?: string | null;
   warnings: unknown[];
   capabilityStatus?: string;
-  decisionGrade?: boolean;
-  doctrineUse?: string;
   reliabilityClass?: string;
   failureMode?: string | null;
   evidenceRequired?: boolean;
@@ -187,6 +185,40 @@ function sourceRowsAsCells(sourceRows: unknown): string[][] {
   return [];
 }
 
+// ── Confidence levels (3.0.0, F20) ──────────────────────────────────────────
+// confidence holds only HIGH, MEDIUM or LOW, or null when there is no value to
+// be confident in. A status string that producers used to carry in confidence
+// (EXTRACTION_FAILED, NOT_DISCLOSED, ...) moves to the object's status when it
+// has none. Python mirrors this in yfmcp/envelope.py.
+
+export const CONFIDENCE_LEVELS: ReadonlySet<string> = new Set(["HIGH", "MEDIUM", "LOW"]);
+
+/** Tools whose payload is a stored evidence cut, returned verbatim so its SHA-256 still verifies. */
+export const VERBATIM_CONFIDENCE_TOOLS: ReadonlySet<string> = new Set(["get_evidence_cut"]);
+
+/**
+ * Rewrites, in place, every `confidence` string that is not a level: it
+ * becomes null, and the string moves to `status` when the object has no
+ * `status` key. Returns the value it was given.
+ */
+export function normalizeStatusConfidence<T>(value: T, depth = 0): T {
+  if (depth > 64 || value == null || typeof value !== "object") return value;
+  if (Array.isArray(value)) {
+    for (const item of value) normalizeStatusConfidence(item, depth + 1);
+    return value;
+  }
+  const rec = value as Record<string, unknown>;
+  const conf = rec.confidence;
+  if (typeof conf === "string" && !CONFIDENCE_LEVELS.has(conf)) {
+    if (!Object.prototype.hasOwnProperty.call(rec, "status") && conf !== "") rec.status = conf;
+    rec.confidence = null;
+  }
+  for (const inner of Object.values(rec)) {
+    if (inner != null && typeof inner === "object") normalizeStatusConfidence(inner, depth + 1);
+  }
+  return value;
+}
+
 function enrichFacts(val: any, parentSourceType: string | null = null, parentConfidence: string | null = null, isMetric = false): any {
   if (val && typeof val === "object") {
     if (Array.isArray(val)) {
@@ -203,21 +235,20 @@ function enrichFacts(val: any, parentSourceType: string | null = null, parentCon
     
     if (isFact) {
       const hasExplicitDecisionGrade = Object.prototype.hasOwnProperty.call(val, "decisionGrade");
-      let conf = val.confidence || parentConfidence;
+      const ownConf = val.confidence;
+      let conf: string | null = ownConf || parentConfidence;
       if (!conf) {
         // An untagged fact with a value is LOW (2.21.0): a producer tags what is genuinely HIGH.
-        if ((val.value !== undefined && val.value !== null) || (val.low !== undefined && val.low !== null) || (val.valueRatio !== undefined && val.valueRatio !== null)) {
-          conf = "LOW";
-        } else {
-          conf = "NOT_DECISION_GRADE";
-        }
+        // Without a value there is no confidence to state (3.0.0, F20).
+        const hasValue = (val.value !== undefined && val.value !== null) || (val.low !== undefined && val.low !== null) || (val.valueRatio !== undefined && val.valueRatio !== null);
+        conf = hasValue ? "LOW" : null;
       }
-      conf = String(conf).toUpperCase();
-      if (!["HIGH", "MEDIUM", "LOW", "NOT_DECISION_GRADE"].includes(conf)) {
-        if (conf === "NOT_DISCLOSED") {
-          conf = "NOT_DECISION_GRADE";
-        } else {
-          conf = "LOW";
+      if (conf != null) {
+        conf = String(conf).toUpperCase();
+        if (!CONFIDENCE_LEVELS.has(conf)) {
+          // A status string in confidence (F20): it moves to status, and confidence is null.
+          if (typeof ownConf === "string" && ownConf !== "" && !Object.prototype.hasOwnProperty.call(val, "status")) val.status = ownConf;
+          conf = null;
         }
       }
       val.confidence = conf;
@@ -350,7 +381,8 @@ function enrichFacts(val: any, parentSourceType: string | null = null, parentCon
     }
     
     const sourceType = val.source || val.sourceType || parentSourceType;
-    const confidence = val.confidence || parentConfidence;
+    // A fact passes its own resolved confidence (null included) to its children.
+    const confidence = isFact ? val.confidence : (val.confidence || parentConfidence);
     
     for (const key of Object.keys(val)) {
       if (["confidence", "sourceType", "evidenceRequired", "decisionGrade", "evidence", "sourceEvidence", "xbrlContext", "calculation"].includes(key)) {
@@ -414,8 +446,26 @@ export function mcpSuccess(tool: string, rawData: string, opts?: McpSuccessOptio
   return mcpSuccessResult(tool, rawData, opts).text;
 }
 
+/** The F20 rule over a whole payload, except a stored evidence cut (returned verbatim). */
+function confidenceLevels<T>(tool: string, data: T): T {
+  return VERBATIM_CONFIDENCE_TOOLS.has(tool) ? data : normalizeStatusConfidence(data);
+}
+
+/** The legacy envelope's payload text with the F20 rule applied; unchanged when there is nothing to rewrite. */
+function legacyConfidenceText(tool: string, rawData: string): string {
+  if (VERBATIM_CONFIDENCE_TOOLS.has(tool) || !rawData.includes('"confidence"')) return rawData;
+  try {
+    const parsed = JSON.parse(rawData);
+    const before = JSON.stringify(parsed);
+    const after = JSON.stringify(normalizeStatusConfidence(parsed));
+    return after === before ? rawData : after;
+  } catch {
+    return rawData;
+  }
+}
+
 export function mcpSuccessResult(tool: string, rawData: string, opts?: McpSuccessOptions): ToolResult {
-  if (!envelopeV2Enabled()) return { text: rawData };
+  if (!envelopeV2Enabled()) return { text: legacyConfidenceText(tool, rawData) };
   let parsed: unknown;
   try {
     parsed = JSON.parse(rawData);
@@ -435,7 +485,7 @@ export function mcpSuccessFromValue(
   rawData: string,
   opts?: McpSuccessOptions,
 ): ToolResult {
-  if (!envelopeV2Enabled()) return { text: rawData };
+  if (!envelopeV2Enabled()) return { text: legacyConfidenceText(tool, rawData) };
   let data: unknown;
   try {
     if (
@@ -454,7 +504,7 @@ export function mcpSuccessFromValue(
       const workerVersionId = baseMeta.workerVersionId;
       const resp: McpResponse = {
         ok: inner.ok === true,
-        data: inner.ok === true ? enrichFacts(inner.data) : inner.data ?? null,
+        data: inner.ok === true ? confidenceLevels(tool, enrichFacts(inner.data)) : inner.data ?? null,
         meta: {
           ...baseMeta,
           ...innerMeta,
@@ -508,7 +558,7 @@ export function mcpSuccessFromValue(
       return toolResult(resp);
     }
     data = parsed;
-    data = enrichFacts(data);
+    data = confidenceLevels(tool, enrichFacts(data));
   } catch {
     data = rawData;
   }

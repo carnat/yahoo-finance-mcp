@@ -28,13 +28,6 @@ export const EPS_BASIS = {
 
 export const AUTHORITY_BOUNDARY = {
   decisionUse: "EVIDENCE_ONLY",
-  selectedMethod: null,
-  selectedMultiple: null,
-  scenarioWeights: null,
-  priceTarget: null,
-  g2: null,
-  opportunity: null,
-  action: null,
 } as const;
 
 type Rec = Record<string, unknown>;

@@ -205,8 +205,7 @@ class _PackAssertions:
         self.assertEqual(pack["schema"], "yfmcp.evidence-cut/1")
         self.assertEqual(pack["decisionUse"], "EVIDENCE_ONLY")
         for field in AUTHORITY:
-            self.assertIn(field, pack)
-            self.assertIsNone(pack[field])
+            self.assertNotIn(field, pack)
         for name in COMPONENTS:
             self.assertIn(pack[name]["status"], {"OK", "LIMITED", "FAILED", "NOT_APPLICABLE"}, name)
             self.assertIn("sourceTool", pack[name])

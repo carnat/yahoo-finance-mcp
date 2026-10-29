@@ -420,7 +420,7 @@ class TestFundingSchedule(unittest.TestCase):
             ("cash_and_equivalents", "COMPANY_DISCLOSED_BALANCE"), ("undrawn_credit_facility", "CONTRACTUAL_AVAILABILITY"),
             ("atm_remaining_capacity", "AVAILABLE_AT_COMPANY_DISCRETION")])
         self.assertEqual(self.out["decisionUse"], "EVIDENCE_ONLY")
-        self.assertIsNone(self.out["priceTarget"])
+        self.assertNotIn("priceTarget", self.out)  # removed in 3.0.0 (N2)
         empty = _python_outputs()["emptySchedule"]
         self.assertEqual((empty["status"], empty["warnings"][0]["code"]), ("NOT_FOUND", "NO_INLINE_XBRL"))
 

@@ -193,7 +193,7 @@ BOUNDARY_CASES = [
     ["get_historical_valuation_context", json.dumps({"error": True, "code": "INPUT_VALIDATION_ERROR", "message": "At most 5 peers."})],
     ["get_quote", json.dumps({"status": "OK"})],
     ["get_guidance_history", COMPLETE],
-    ["get_share_count_scenarios", json.dumps({"status": "OK", "decisionUse": "EVIDENCE_ONLY", "priceTarget": 5})],
+    ["get_share_count_scenarios", json.dumps({"status": "OK", "decisionUse": "ACTION"})],
     ["list_evidence_cuts", "not json"],
     ["get_evidence_quality", "[1, 2]"],
     ["build_valuation_evidence_pack", json.dumps({"ok": True, "data": {}, "meta": {}, "error": None})],
@@ -591,9 +591,9 @@ class TestConsensusCurve(unittest.TestCase):
         for key in ("curve", "revisions", "quality"):
             payload = self.out[key]
             self.assertEqual(payload["decisionUse"], "EVIDENCE_ONLY")
+            # 3.0.0: the seven always-null fields are gone; decisionUse alone marks the boundary.
             for field in ("selectedMethod", "selectedMultiple", "scenarioWeights", "priceTarget", "g2", "opportunity", "action"):
-                self.assertIn(field, payload)
-                self.assertIsNone(payload[field])
+                self.assertNotIn(field, payload)
         eps = _cell(self.out["curve"], "FY0", "eps")
         self.assertNotIn("mean", eps)
         self.assertNotIn("value", eps)
@@ -938,7 +938,7 @@ class TestAuthorityBoundaryOnEveryResult(unittest.TestCase):
         self.assertEqual((out[5], out[6]), ("not json", [1, 2]))
         self.assertNotIn("decisionUse", out[7])
         # A stray value is overwritten, never passed through as authority.
-        self.assertIsNone(out[4]["priceTarget"])
+        self.assertEqual(out[4]["decisionUse"], "EVIDENCE_ONLY")
         # A complete payload is returned as is, byte for byte.
         self.assertIs(ev.with_authority_boundary("get_guidance_history", COMPLETE), COMPLETE)
 
@@ -952,7 +952,7 @@ class TestAuthorityBoundaryOnEveryResult(unittest.TestCase):
         self.assertEqual((failed["ok"], failed["data"]), (False, None))
 
     def test_deprecation_notice_is_in_meta_warnings_and_the_payload_is_unchanged(self) -> None:
-        """2.8.0 (Q14-N2): the seven always-null fields stay in data; DEPRECATED_FIELD goes to meta.warnings only."""
+        """3.0.0: the seven always-null fields are gone from data and no DEPRECATED_FIELD notice names them."""
         from unittest.mock import patch
         from yfmcp.envelope import _envelope_tool_result
 
@@ -961,15 +961,8 @@ class TestAuthorityBoundaryOnEveryResult(unittest.TestCase):
         out = json.loads(_envelope_tool_result(action, raw))
         self.assertEqual(out["data"], before)
         self.assertEqual(json.dumps(out["data"], sort_keys=True), json.dumps(before, sort_keys=True))
-        self.assertEqual(out["meta"]["warnings"], [{
-            "code": "DEPRECATED_FIELD",
-            "message": "g2, opportunity, action, priceTarget, scenarioWeights, selectedMethod, selectedMultiple are always null "
-                       "and will be removed in the next major version; decisionUse=EVIDENCE_ONLY marks the evidence boundary.",
-            "severity": "info",
-            "fields": ["g2", "opportunity", "action", "priceTarget", "scenarioWeights", "selectedMethod", "selectedMultiple"],
-            "replacement": "decisionUse",
-        }])
-        self.assertEqual(list(out["meta"]["warnings"][0]), ["code", "message", "severity", "fields", "replacement"])
+        self.assertEqual(out["meta"]["warnings"], [])
+        self.assertEqual(out["data"], {"ticker": "DG", "metric": "revenue", "status": "PERIOD_NOT_FOUND", "spec": "FY2026", "decisionUse": "EVIDENCE_ONLY"})
         self.assertNotIn("DEPRECATED_FIELD", json.dumps(out["data"]))
         # No notice on a failure, for a tool that is not evidence-only, or in the legacy envelope.
         failed = json.loads(_envelope_tool_result(*BOUNDARY_CASES[1]))

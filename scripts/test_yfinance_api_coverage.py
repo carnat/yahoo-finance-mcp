@@ -69,12 +69,20 @@ class TestYfinanceApiCoverage(unittest.TestCase):
         self.assertFalse(data["decisionGrade"])
 
     def test_company_calendar_never_infers_official_confirmation(self):
+        # 3.0.0 (F47): the calendar comes from Yahoo's quoteSummary calendarEvents, as in the Worker.
+        class FakeData:
+            def get_raw_json(self, url, params=None):
+                return {"quoteSummary": {"result": [{"calendarEvents": {
+                    "earnings": {"earningsDate": [{"raw": 1785542400, "fmt": "2026-08-01"}]},
+                }}]}}
+
         class FakeTicker:
             fast_info = _FastInfo()
-            calendar = {"Earnings Date": [pd.Timestamp("2026-08-01")]}
+            _data = FakeData()
 
         srv.yf.Ticker = lambda ticker: FakeTicker()  # type: ignore[assignment]
         data = json.loads(_run(srv.get_company_events_calendar("TSTCAL")))
+        self.assertEqual(data["calendar"]["earnings"]["earningsDate"], ["2026-08-01T00:00:00.000Z"])
         self.assertEqual(data["earningsDateSource"], "YAHOO_CALENDAR")
         self.assertEqual(data["confirmationStatus"], "UNVERIFIED")
         self.assertFalse(data["earningsDateConfirmed"])

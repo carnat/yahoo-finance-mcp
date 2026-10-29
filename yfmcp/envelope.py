@@ -12,7 +12,7 @@ import re
 from typing import NotRequired, TypedDict
 
 from yfmcp.build_info import BUILD_DATE, SERVER_VERSION
-from yfmcp.deprecations import TOOL_RELIABILITY_CLASS, deprecation_warnings_for
+from yfmcp.deprecations import TOOL_RELIABILITY_CLASS
 from yfmcp.url_policy import SUBREQUEST_BUDGET, SUBREQUEST_BUDGET_WARNING, SUBREQUEST_LIMIT
 
 # ---------------------------------------------------------------------------
@@ -229,6 +229,56 @@ def _source_rows_as_cells(source_rows: object) -> list[list[str]]:
     return []
 
 
+# ---------------------------------------------------------------------------
+# Confidence levels (3.0.0, F20). Mirrors worker/src/response.ts.
+# ---------------------------------------------------------------------------
+# confidence holds only HIGH, MEDIUM or LOW, or None when there is no value to be confident in. A status string
+# that producers used to carry in confidence (EXTRACTION_FAILED, NOT_DISCLOSED, ...) moves to the object's status
+# when it has none.
+CONFIDENCE_LEVELS = frozenset({"HIGH", "MEDIUM", "LOW"})
+
+# Tools whose payload is a stored evidence cut, returned verbatim so its SHA-256 still verifies.
+VERBATIM_CONFIDENCE_TOOLS = frozenset({"get_evidence_cut"})
+
+
+def normalize_status_confidence(value, depth: int = 0):
+    """Rewrites, in place, every ``confidence`` string that is not a level: it becomes None, and the string moves to
+    ``status`` (appended) when the object has no ``status`` key. Returns the value it was given."""
+    if depth > 64 or value is None or not isinstance(value, (dict, list)):
+        return value
+    if isinstance(value, list):
+        for item in value:
+            normalize_status_confidence(item, depth + 1)
+        return value
+    conf = value.get("confidence")
+    if isinstance(conf, str) and conf not in CONFIDENCE_LEVELS:
+        if "status" not in value and conf != "":
+            value["status"] = conf
+        value["confidence"] = None
+    for inner in list(value.values()):
+        if isinstance(inner, (dict, list)):
+            normalize_status_confidence(inner, depth + 1)
+    return value
+
+
+def _confidence_levels(tool: str, data):
+    """The F20 rule over a whole payload, except a stored evidence cut (returned verbatim)."""
+    return data if tool in VERBATIM_CONFIDENCE_TOOLS else normalize_status_confidence(data)
+
+
+def _legacy_confidence_text(tool: str, raw: str) -> str:
+    """The legacy envelope's payload text with the F20 rule applied; unchanged when there is nothing to rewrite."""
+    if tool in VERBATIM_CONFIDENCE_TOOLS or '"confidence"' not in raw:
+        return raw
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        return raw
+    before = json.dumps(parsed)
+    after = json.dumps(normalize_status_confidence(parsed))
+    return raw if after == before else after
+
+
 def _enrich_facts(val, parent_source_type=None, parent_confidence=None, is_metric=False):
     if isinstance(val, dict):
         # OHLC price bars carry high/low keys but are raw exchange prices, not
@@ -243,20 +293,21 @@ def _enrich_facts(val, parent_source_type=None, parent_confidence=None, is_metri
         
         if is_fact:
             has_explicit_decision_grade = "decisionGrade" in val
-            conf = val.get("confidence") or parent_confidence
+            own_conf = val.get("confidence")
+            conf = own_conf or parent_confidence
             if not conf:
-                if val.get("value") is not None or val.get("low") is not None or val.get("valueRatio") is not None:
-                    conf = "LOW"
-                else:
-                    conf = "NOT_DECISION_GRADE"
-            
-            conf = str(conf).upper()
-            if conf not in {"HIGH", "MEDIUM", "LOW", "NOT_DECISION_GRADE"}:
-                if conf == "NOT_DISCLOSED":
-                    conf = "NOT_DECISION_GRADE"
-                else:
-                    conf = "LOW"
-                    
+                # An untagged fact with a value is LOW (2.21.0). Without a value there is no confidence to
+                # state (3.0.0, F20).
+                has_value = val.get("value") is not None or val.get("low") is not None or val.get("valueRatio") is not None
+                conf = "LOW" if has_value else None
+            if conf is not None:
+                conf = str(conf).upper()
+                if conf not in CONFIDENCE_LEVELS:
+                    # A status string in confidence (F20): it moves to status, and confidence is None.
+                    if isinstance(own_conf, str) and own_conf != "" and "status" not in val:
+                        val["status"] = own_conf
+                    conf = None
+
             val["confidence"] = conf
             
             urls = []
@@ -373,8 +424,9 @@ def _enrich_facts(val, parent_source_type=None, parent_confidence=None, is_metri
                 val["decisionGrade"] = False
             
         source_type = val.get("source") or val.get("sourceType") or parent_source_type
-        confidence = val.get("confidence") or parent_confidence
-        
+        # A fact passes its own resolved confidence (None included) to its children.
+        confidence = val.get("confidence") if is_fact else (val.get("confidence") or parent_confidence)
+
         for k, v in list(val.items()):
             if k in {"confidence", "sourceType", "evidenceRequired", "decisionGrade", "evidence", "sourceEvidence", "xbrlContext", "calculation"}:
                 continue
@@ -524,17 +576,6 @@ def _success_meta(tool: str, **kwargs) -> dict:
     return meta
 
 
-def _with_deprecation_notices(tool: str, meta: dict, data: object) -> dict:
-    """``meta`` with the DEPRECATED_FIELD notices the success payload ``data`` calls for appended to
-    meta.warnings (2.8.0). The notices stay out of ``data``: evidence payloads are hashed into the cut id."""
-    from yfmcp.evidence import EVIDENCE_ONLY_ACTIONS
-
-    notices = deprecation_warnings_for(tool, data, evidence_only=tool in EVIDENCE_ONLY_ACTIONS)
-    if notices:
-        meta["warnings"] = [*(meta.get("warnings") or []), *notices]
-    return meta
-
-
 def _envelope_tool_result(tool: str, result: object) -> object:
     """Return a tool's raw result in the V2 envelope, as the Worker does.
 
@@ -547,8 +588,10 @@ def _envelope_tool_result(tool: str, result: object) -> object:
     from yfmcp.evidence import with_authority_boundary
 
     result = with_authority_boundary(tool, result)
-    if not _ENVELOPE_V2 or not isinstance(result, str):
+    if not isinstance(result, str):
         return result
+    if not _ENVELOPE_V2:
+        return _legacy_confidence_text(tool, result)
     text = result.strip()
     try:
         parsed = json.loads(text)
@@ -568,10 +611,9 @@ def _envelope_tool_result(tool: str, result: object) -> object:
             if parsed["meta"].get("dataDate") is None:
                 parsed["meta"]["dataDate"] = _payload_data_date(parsed.get("data"))
             if parsed["ok"] is True:
-                parsed["data"] = _enrich_facts(parsed.get("data"))
+                parsed["data"] = _confidence_levels(tool, _enrich_facts(parsed.get("data")))
                 if tool in TOOL_RELIABILITY_CLASS:
                     parsed["meta"]["reliabilityClass"] = TOOL_RELIABILITY_CLASS[tool]
-                _with_deprecation_notices(tool, parsed["meta"], parsed["data"])
             return json.dumps(parsed)
         if parsed.get("error") is True:
             meta_extra: dict = {}
@@ -590,8 +632,8 @@ def _envelope_tool_result(tool: str, result: object) -> object:
                 message,
                 meta_extra=meta_extra or None,
             )
-    data = _enrich_facts(parsed)
-    meta = _with_deprecation_notices(tool, _success_meta(tool, data_date=_payload_data_date(parsed)), data)
+    data = _confidence_levels(tool, _enrich_facts(parsed))
+    meta = _success_meta(tool, data_date=_payload_data_date(parsed))
     return json.dumps({"ok": True, "data": data, "meta": meta, "error": None})
 
 

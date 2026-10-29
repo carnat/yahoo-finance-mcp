@@ -35,13 +35,6 @@ EPS_BASIS: dict[str, Any] = {
 
 AUTHORITY_BOUNDARY: dict[str, Any] = {
     "decisionUse": "EVIDENCE_ONLY",
-    "selectedMethod": None,
-    "selectedMultiple": None,
-    "scenarioWeights": None,
-    "priceTarget": None,
-    "g2": None,
-    "opportunity": None,
-    "action": None,
 }
 
 

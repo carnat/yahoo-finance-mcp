@@ -312,7 +312,7 @@ This server provides financial market data from Yahoo Finance and SEC EDGAR via 
 - analyze_price_performance: % distance from 52w high/low and MAs, 30d annualised volatility, CAGR.
 - analyze_moving_average_position: % vs 50DMA/200DMA, trend (BULLISH/BEARISH/MIXED).
 - analyze_volume_ratio: Completed-session volume vs 10d/90d averages. PARTIAL/INCOMPLETE means retry and do not use volumeFlag.
-- check_volume_liquidity_threshold: Completed-session 20d ADV liquidity gate. PARTIAL/INCOMPLETE means gatePass is unknown. Reports adv20dTradedValueUsd; pass min_adv_usd for a caller-chosen threshold and read meetsMinimum.
+- check_volume_liquidity_threshold: Completed-session 20d ADV liquidity gate. PARTIAL/INCOMPLETE means the average is unknown. Reports adv20dTradedValueUsd; pass min_adv_usd for a caller-chosen threshold and read meetsMinimum.
 - get_technical_indicators: Pre-computed RSI-14 (Wilder) and MACD (12,26,9) from daily closes.
 - get_price_slope: N completed-session close-to-close change using N+1 bars. Excludes unfinished bars and returns same-bar endRawClose, priceBasis, freshness/retry diagnostics, dataDate, and direction (UP/DOWN/FLAT). Not a real-time quote.
 - get_short_interest: Short % of float, shares short, days-to-cover, prior-month comparison.
@@ -346,7 +346,7 @@ This server provides financial market data from Yahoo Finance and SEC EDGAR via 
 - get_eps_revisions: FY0/FY+1 EPS mean now and 7/30/60/90 days ago, up/down revision counts per provider; evidence only.
 
 ### Evidence cuts
-- build_valuation_evidence_pack: Quote, evidence quality, consensus curve, EPS revisions, capital structure, dilution at the current price, guidance and material filings in one content-addressed evidence cut with a provenance receipt. decisionUse EVIDENCE_ONLY; method, multiple, weights, price target, G2, opportunity and action are always null.
+- build_valuation_evidence_pack: Quote, evidence quality, consensus curve, EPS revisions, capital structure, dilution at the current price, guidance and material filings in one content-addressed evidence cut with a provenance receipt. decisionUse EVIDENCE_ONLY.
 - get_evidence_quality: Preflight status, freshness and blockers per evidence family.
 - get_evidence_cut: Retrieve a stored evidence cut and verify its SHA-256 integrity.
 - list_evidence_cuts: Stored evidence cuts for a ticker, newest first.

@@ -110,20 +110,49 @@ function annualFiscalYear(rows: Row[], r: Row): { year: number; source: string; 
     : { year: endYear, source: "PERIOD_END_YEAR", first };
 }
 
-const LABEL_BASIS = "FY<yyyy> is the issuer's fiscal year (SEC fy/fp) when companyfacts gives it, else the fiscal year ending in that year; Q<n> <yyyy> is the calendar quarter of the period end (fiscalQuarter gives the issuer's)";
+const LABEL_BASIS = "FY<yyyy> is the issuer's fiscal year (SEC fy/fp) when companyfacts gives it, else the fiscal year ending in that year; FY<yyyy> Q<n> is the issuer's fiscal quarter (SEC fy/fp of the filing that first reported it, else counted from the prior fiscal year end)";
 
 /**
- * The period a spec names: latest_quarter, latest_annual, FY<year> (the
- * issuer's fiscal year, else the fiscal year ending in that year) or Q<n>
- * <year> (the quarter ending in that calendar quarter). Instants take the end
- * of the matching revenue period.
+ * The period a spec names (3.0.0, F60: one vocabulary across tools): latest
+ * (the latest quarter), FY<year> (the issuer's fiscal year, else the fiscal
+ * year ending in that year) or FY<year> Q<n> (the issuer's fiscal quarter).
+ * Instants take the end of the matching revenue period. A period it cannot
+ * read is an input error before any fetch (2.26.5, F60, as F28).
  */
-/** A period reconcile_metric_sources can read; any other is an input error before any fetch (2.26.5, F60, as F28). */
 export function isReconcilePeriod(spec: unknown): boolean {
-  return /^(?:latest_quarter|latest_annual|FY\s?\d{4}|Q[1-4]\s?\d{4})$/i.test(String(spec ?? "").trim());
+  return /^(?:latest|FY\s?\d{4}(?:\s+Q[1-4])?)$/i.test(String(spec ?? "").trim());
 }
 
-export const RECONCILE_PERIOD_HELP = "period must be latest_quarter, latest_annual, FY<yyyy> or Q<n> <yyyy>.";
+export const RECONCILE_PERIOD_HELP = "period must be latest, FY<yyyy> or FY<yyyy> Q<n>.";
+
+/** The fiscal quarter and year(s) the issuer gives a quarter row, from companyfacts. */
+function quarterFiscalIdentity(rows: Row[], best: Row): Rec {
+  const first = firstReported(rows, best);
+  const fy = first?.fy ?? null;
+  const fp = first?.fp ?? null;
+  const endYear = Number(best.end.slice(0, 4));
+  const priorEnds = rows.filter(isAnnual).map((r) => r.end).filter((e) => e < best.end).sort();
+  const prior = priorEnds.length > 0 ? priorEnds[priorEnds.length - 1] : null;
+  const priorYear = prior ? Number(prior.slice(0, 4)) : null;
+  const counted = prior ? Math.min(4, Math.max(1, Math.floor(days(prior, best.end) / 91.25 + 0.5))) : null;
+  const fpQuarter = fp && /^Q[1-3]$/.test(fp) ? Number(fp[1]) : fp === "FY" ? 4 : null;
+  const fyFits = fy != null && (priorYear == null ? fy === endYear || fy === endYear + 1 || fy === endYear - 1 : fy === priorYear || fy === priorYear + 1);
+  if (fy != null && fpQuarter != null && fyFits && (counted == null || counted === fpQuarter)) {
+    return { fiscalQuarter: fpQuarter, fiscalYears: [fy], fiscalYearSource: "SEC_FY_FP", fiscalBasis: `companyfacts fy ${fy} fp ${fp} of the filing that first reported the period (${first.accn})` };
+  }
+  if (prior && counted != null && priorYear != null) {
+    const fiscalYears = Number(prior.slice(5, 7)) <= 3 ? [priorYear + 1, priorYear] : [priorYear + 1];
+    return {
+      fiscalQuarter: counted,
+      fiscalYears,
+      fiscalYearSource: "DERIVED_FROM_PRIOR_YEAR_END",
+      fiscalBasis: `counted from the prior fiscal year end ${prior}`,
+      ...(fiscalYears.length > 1 ? { fiscalYearAmbiguous: true } : {}),
+      ...(fy != null || fp != null ? { fiscalMetadataNotUsed: { fy, fp } } : {}),
+    };
+  }
+  return {};
+}
 
 export function resolvePeriod(companyfacts: unknown, metric: string, spec: string): Rec {
   // The company's reporting periods come from its revenue (ASTS stopped tagging undimensioned EPS in 2022,
@@ -134,12 +163,9 @@ export function resolvePeriod(companyfacts: unknown, metric: string, spec: strin
   let candidates: Row[] = [];
   let periodType: string;
   let m: RegExpExecArray | null;
-  if (/^latest_quarter$/i.test(text)) {
+  if (/^latest$/i.test(text)) {
     periodType = "QUARTER";
     candidates = rows.filter(isQuarter);
-  } else if (/^latest_annual$/i.test(text)) {
-    periodType = "ANNUAL";
-    candidates = rows.filter(isAnnual);
   } else if ((m = /^FY\s?(\d{4})$/i.exec(text))) {
     periodType = "ANNUAL";
     // By the issuer's fiscal year where companyfacts names it; a period the issuer names is never chosen
@@ -148,17 +174,22 @@ export function resolvePeriod(companyfacts: unknown, metric: string, spec: strin
     const named = rows.filter(isAnnual).map((r) => ({ r, id: annualFiscalYear(rows, r) })).filter((x) => x.id.year === year);
     const bySec = named.filter((x) => x.id.source === "SEC_FY_FP");
     candidates = (bySec.length > 0 ? bySec : named).map((x) => x.r);
-  } else if ((m = /^Q([1-4])\s?(\d{4})$/i.exec(text))) {
+  } else if ((m = /^FY\s?(\d{4})\s+Q([1-4])$/i.exec(text))) {
     periodType = "QUARTER";
-    const q = Number(m[1]);
-    const year = m[2];
-    candidates = rows.filter((r) => isQuarter(r) && r.end.slice(0, 4) === year && Math.ceil(Number(r.end.slice(5, 7)) / 3) === q);
+    // By the issuer's fiscal quarter: SEC fy/fp where companyfacts names it, else counted from the prior
+    // fiscal year end, as fiscalQuarter/fiscalYears report it.
+    const year = Number(m[1]);
+    const q = Number(m[2]);
+    const named = rows.filter(isQuarter).map((r) => ({ r, id: quarterFiscalIdentity(rows, r) }))
+      .filter((x) => x.id.fiscalQuarter === q && Array.isArray(x.id.fiscalYears) && (x.id.fiscalYears as number[]).includes(year));
+    const bySec = named.filter((x) => x.id.fiscalYearSource === "SEC_FY_FP");
+    candidates = (bySec.length > 0 ? bySec : named).map((x) => x.r);
   } else {
-    return { status: "INVALID_PERIOD", message: "period must be latest_quarter, latest_annual, FY<yyyy> or Q<n> <yyyy>." };
+    return { status: "INVALID_PERIOD", message: RECONCILE_PERIOD_HELP };
   }
   if (candidates.length === 0) {
     const fyYears = [...new Set(rows.filter(isAnnual).map((r) => annualFiscalYear(rows, r).year))].sort((a, b) => a - b);
-    return /^FY/i.test(text)
+    return periodType === "ANNUAL"
       ? { status: "PERIOD_NOT_FOUND", spec: text, periodType, message: `No annual period in companyfacts is fiscal year ${text.replace(/^FY\s?/i, "")} (the issuer's SEC fy, else the year the period ends).`, fiscalYearsAvailable: fyYears.slice(-5), labelBasis: LABEL_BASIS }
       : { status: "PERIOD_NOT_FOUND", spec: text, periodType, message: `No ${periodType.toLowerCase()} period in companyfacts matches ${text} (20-F and 40-F filers tag annual periods only).` };
   }
@@ -171,28 +202,9 @@ export function resolvePeriod(companyfacts: unknown, metric: string, spec: strin
   const first = firstReported(rows, best);
   const fy = first?.fy ?? null;
   const fp = first?.fp ?? null;
-  const endYear = Number(best.end.slice(0, 4));
   let fiscal: Rec = {};
   if (periodType === "QUARTER") {
-    const priorEnds = rows.filter(isAnnual).map((r) => r.end).filter((e) => e < best.end).sort();
-    const prior = priorEnds.length > 0 ? priorEnds[priorEnds.length - 1] : null;
-    const priorYear = prior ? Number(prior.slice(0, 4)) : null;
-    const counted = prior ? Math.min(4, Math.max(1, Math.floor(days(prior, best.end) / 91.25 + 0.5))) : null;
-    const fpQuarter = fp && /^Q[1-3]$/.test(fp) ? Number(fp[1]) : fp === "FY" ? 4 : null;
-    const fyFits = fy != null && (priorYear == null ? fy === endYear || fy === endYear + 1 || fy === endYear - 1 : fy === priorYear || fy === priorYear + 1);
-    if (fy != null && fpQuarter != null && fyFits && (counted == null || counted === fpQuarter)) {
-      fiscal = { fiscalQuarter: fpQuarter, fiscalYears: [fy], fiscalYearSource: "SEC_FY_FP", fiscalBasis: `companyfacts fy ${fy} fp ${fp} of the filing that first reported the period (${first.accn})` };
-    } else if (prior && counted != null && priorYear != null) {
-      const fiscalYears = Number(prior.slice(5, 7)) <= 3 ? [priorYear + 1, priorYear] : [priorYear + 1];
-      fiscal = {
-        fiscalQuarter: counted,
-        fiscalYears,
-        fiscalYearSource: "DERIVED_FROM_PRIOR_YEAR_END",
-        fiscalBasis: `counted from the prior fiscal year end ${prior}`,
-        ...(fiscalYears.length > 1 ? { fiscalYearAmbiguous: true } : {}),
-        ...(fy != null || fp != null ? { fiscalMetadataNotUsed: { fy, fp } } : {}),
-      };
-    }
+    fiscal = quarterFiscalIdentity(rows, best);
   } else {
     const id = annualFiscalYear(rows, best);
     fiscal = id.source === "SEC_FY_FP"

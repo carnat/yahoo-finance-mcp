@@ -1483,11 +1483,6 @@ async def get_short_momentum(ticker: str | list[str]) -> str:
 
 # ---------------------------------------------------------------------------
 
-# A listing passes the liquidity gate when it trades at least this much a day
-# on average (USD). Mirrors the Worker's getVolumeGate.
-LIQUIDITY_GATE_MIN_ADV_USD = 10_000_000
-
-
 def _usd_compact(value: float) -> str:
     """$14.22B above a billion, else $12.3M (the Worker's usdCompact)."""
     return f"${value / 1e9:.2f}B" if value >= 1e9 else f"${value / 1e6:.1f}M"
@@ -1573,7 +1568,6 @@ async def get_volume_gate(ticker: str, foreign_exchange: bool = False, min_adv_u
             "fxRate": None,
             "fxPriceTimestamp": None,
             "notionalUsd": None,
-            "gatePass": None,
             "meetsMinimum": None,
             "minAdvUsd": min_adv_usd,
             "observationType": "COMPLETED_DAILY_VOLUME_NOTIONAL",
@@ -1623,7 +1617,6 @@ async def get_volume_gate(ticker: str, foreign_exchange: bool = False, min_adv_u
             "fxRate": None,
             "fxPriceTimestamp": None,
             "notionalUsd": None,
-            "gatePass": None,
             "meetsMinimum": None,
             "minAdvUsd": min_adv_usd,
             "observationType": "COMPLETED_DAILY_VOLUME_NOTIONAL",
@@ -1655,7 +1648,6 @@ async def get_volume_gate(ticker: str, foreign_exchange: bool = False, min_adv_u
     ratio20d: float | None = None
     daily_notional_usd: float | None = None
     adv20d_traded_value_usd: float | None = None
-    gate_pass: bool | None = None
     recommended_next_action = "NONE"
     if adv20d and adv20d > 0:
         ratio20d = round(last_volume / adv20d, 2)
@@ -1675,10 +1667,10 @@ async def get_volume_gate(ticker: str, foreign_exchange: bool = False, min_adv_u
     else:
         adv20d_traded_value_usd = round(adv20d_traded_value / fx["localPerUsd"], 2)
         daily_notional_usd = last_volume * last_price / fx["localPerUsd"]
-        gate_pass = adv20d_traded_value_usd >= LIQUIDITY_GATE_MIN_ADV_USD
+        meets = meets_minimum(adv20d_traded_value_usd, min_adv_usd)
         note = (
-            f"Volume gate {'PASS' if gate_pass else 'FAIL'} — 20d average traded value "
-            f"{_usd_compact(adv20d_traded_value_usd)} ({'≥' if gate_pass else '<'} $10M)"
+            f"20d average traded value {_usd_compact(adv20d_traded_value_usd)}"
+            + (f" ({'≥' if meets else '<'} min_adv_usd {_usd_compact(min_adv_usd)})" if meets is not None and min_adv_usd is not None else "")
             + (f"; latest session {ratio20d:.2f}x 20d ADV" if ratio20d is not None else "")
             + fx["note"]
         )
@@ -1703,8 +1695,6 @@ async def get_volume_gate(ticker: str, foreign_exchange: bool = False, min_adv_u
         "notionalUsd": round(daily_notional_usd, 2) if daily_notional_usd is not None else None,
         "adv20dTradedValueUsd": adv20d_traded_value_usd,
         "gateBasis": "ADV20_TRADED_VALUE_USD",
-        "gateThresholdUsd": LIQUIDITY_GATE_MIN_ADV_USD,
-        "gatePass": gate_pass,
         "meetsMinimum": meets_minimum(adv20d_traded_value_usd, min_adv_usd),
         "minAdvUsd": min_adv_usd,
         "observationType": "COMPLETED_DAILY_VOLUME_NOTIONAL",
@@ -1958,7 +1948,6 @@ async def get_market_snapshot(
             "ratio20d": volume_gate.get("ratio20d") if volume_gate else None,
             "ratio90d": volume_ratio.get("ratio90d") if volume_ratio else None,
             "volumeFlag": volume_ratio.get("volumeFlag") if volume_ratio else None,
-            "liquidityGatePass": volume_gate.get("gatePass") if volume_gate else None,
             "meetsMinimum": meets_minimum(volume_gate.get("adv20dTradedValueUsd") if volume_gate else None, min_adv_usd),
             "minAdvUsd": min_adv_usd,
         },

@@ -336,9 +336,9 @@ FY_SELECT = [
     [FISCAL_RECON, "FY2026"],
 ]
 DG_TEXTS = [
-    ["latest_annual", "Net sales for fiscal 2025 were $42.0 billion."],
-    ["latest_annual", "Net sales for fiscal 2026 were $44.0 billion."],
-    ["latest_quarter", "Second quarter fiscal 2026 net sales were $11.0 billion."],
+    ["FY2025", "Net sales for fiscal 2025 were $42.0 billion."],
+    ["FY2025", "Net sales for fiscal 2026 were $44.0 billion."],
+    ["latest", "Second quarter fiscal 2026 net sales were $11.0 billion."],
 ]
 
 DATE_CASES = [[None, "2026-09-25"], [None, "2028-02-29"], [["2025-03-03", "2024-01-02", "2025-03-03"], None], [["2025-13-01"], None],
@@ -352,6 +352,8 @@ RECON = {"facts": {"us-gaap": {
         _f("2025-04-01", "2025-06-30", 21_000_000, *Q226),
         _f("2026-04-01", "2026-06-30", 31_520_000, *Q226),
         _f("2025-01-01", "2025-12-31", 70_918_000, "10-K", "2026-03-02", "k25"),
+        # The prior fiscal year end that dates the 2025 quarter (FY2025 Q2) when companyfacts names no fiscal quarter.
+        _f("2024-01-01", "2024-12-31", 44_000_000, "10-K", "2025-03-03", "k24r"),
     ),
     "NetIncomeLoss": _usd(_f("2026-04-01", "2026-06-30", -230_909_000, *Q226)),
     "ProfitLoss": _usd(_f("2026-04-01", "2026-06-30", -299_919_000, *Q226)),
@@ -373,14 +375,14 @@ YAHOO_Q = [{"date": "2026-06-30", "totalRevenue": 31_520_000.0, "netIncome": -23
 YAHOO_A = [{"date": "2025-12-31", "totalRevenue": 70_918_000.0}]
 
 RECON_CASES = [
-    ["revenue", "latest_quarter", RELEASES, YAHOO_Q, 0.5],
-    ["net_income", "latest_quarter", RELEASES, YAHOO_Q, 0.5],
-    ["eps_diluted", "latest_quarter", RELEASES, YAHOO_Q, 0.5],
-    ["cash_and_equivalents", "Q2 2026", RELEASES, YAHOO_Q, 0.5],
-    ["revenue", "Q2 2025", [], YAHOO_Q, 0.5],
+    ["revenue", "latest", RELEASES, YAHOO_Q, 0.5],
+    ["net_income", "latest", RELEASES, YAHOO_Q, 0.5],
+    ["eps_diluted", "latest", RELEASES, YAHOO_Q, 0.5],
+    ["cash_and_equivalents", "FY2026 Q2", RELEASES, YAHOO_Q, 0.5],
+    ["revenue", "FY2025 Q2", [], YAHOO_Q, 0.5],
     ["revenue", "FY2025", RELEASES, YAHOO_A, 0.5],
-    ["revenue", "latest_quarter", [RELEASES[0]], None, 0.5],
-    ["revenue", "latest_quarter", [{"status": "NOT_READ", "url": "u", "filingDate": "2026-08-10", "accessionNumber": "x", "text": None}], YAHOO_Q, 0.0],
+    ["revenue", "latest", [RELEASES[0]], None, 0.5],
+    ["revenue", "latest", [{"status": "NOT_READ", "url": "u", "filingDate": "2026-08-10", "accessionNumber": "x", "text": None}], YAHOO_Q, 0.0],
 ]
 # 2.5.15 fixtures. NBIS reported in RUB as Yandex to FY2023 and in USD from FY2024: the longer RUB history is not its unit.
 NBIS_FACTS = {"facts": {"us-gaap": {"Revenues": {"units": {
@@ -425,7 +427,9 @@ RELEASE_TEXTS_2515 = [
     ["eps_diluted", "Statements (in thousands) Diluted net income per share was $0.77 for the second quarter."],
     ["revenue", "Second quarter revenue was $31,520,000."],
 ]
-PERIOD_SPECS = ["latest_quarter", "latest_annual", "FY2025", "fy 2025", "Q2 2026", "Q4 2026", "2026", "Q2 2025"]
+PERIOD_SPECS = ["latest", "FY2025", "fy 2025", "FY2026 Q2", "fy2026 q2", "FY2026 Q4", "FY2025 Q2", "2026",
+               # Forms removed in 3.0.0 (F60) are no longer read.
+               "latest_quarter", "latest_annual", "Q2 2026", "Q2 2025"]
 RELEASE_TEXTS = [
     ["eps_diluted", "Diluted loss per share of $(0.77) for the second quarter."],
     ["eps_diluted", "Net loss per diluted share was $0.77 in the second quarter."],
@@ -440,7 +444,7 @@ RELEASE_TEXTS = [
 
 def _python_outputs() -> dict:
     periods = {spec: mr.resolve_period(RECON, "revenue", spec) for spec in PERIOD_SPECS}
-    quarter = mr.resolve_period(RECON, "revenue", "Q2 2026")
+    quarter = mr.resolve_period(RECON, "revenue", "FY2026 Q2")
     peers = [vh.historical_valuation({**HV_INPUTS["syn"], "ticker": t}) for t in ("p1", "p2")]
     peers[1]["points"][2]["multiples"]["LTM"]["evToRevenue"] = {"value": 3.0, "status": "OK"}
     return {
@@ -456,8 +460,8 @@ def _python_outputs() -> dict:
                        for m, text in RELEASE_TEXTS],
         "currency": mr.release_observation(RELEASES[1], "revenue", quarter, "TWD"),
         "unitChoice": [_mf(NBIS_FACTS), _mf(UNIT_TIE_FACTS)],
-        "beSecObs": [mr.sec_observations(facts, m, mr.resolve_period(facts, m, "latest_annual")) for m, facts in BE_CASES],
-        "beRecon": mr.metric_reconciliation(ticker="be", metric="net_income", period=mr.resolve_period(BE_FACTS, "net_income", "latest_annual"),
+        "beSecObs": [mr.sec_observations(facts, m, mr.resolve_period(facts, m, "FY2025")) for m, facts in BE_CASES],
+        "beRecon": mr.metric_reconciliation(ticker="be", metric="net_income", period=mr.resolve_period(BE_FACTS, "net_income", "FY2025"),
                                             companyfacts=BE_FACTS, releases=[], yahoo_rows=None, tolerance_pct=0.5),
         "releaseObs2515": [mr.release_observation({"status": "READ", "text": text, "url": None, "filingDate": None, "accessionNumber": None}, m, quarter, "USD")
                            for m, text in RELEASE_TEXTS_2515],
@@ -469,9 +473,9 @@ def _python_outputs() -> dict:
             {"source": "ISSUER_RELEASE", "provider": "ISSUER_RELEASE", "status": "FOUND", "value": 100.0, "precision": 0},
             {"source": "YAHOO", "provider": "YAHOO", "status": "FOUND", "value": 120.0, "precision": 0},
         ], 0.5),
-        "fiscalPeriod": mr.resolve_period(FISCAL_RECON, "revenue", "latest_quarter"),
+        "fiscalPeriod": mr.resolve_period(FISCAL_RECON, "revenue", "latest"),
         "fiscalObs": [mr.release_observation({"status": "READ", "text": t, "url": None, "filingDate": None, "accessionNumber": None}, "revenue",
-                                             mr.resolve_period(FISCAL_RECON, "revenue", "latest_quarter"), "USD") for t in FISCAL_TEXTS],
+                                             mr.resolve_period(FISCAL_RECON, "revenue", "latest"), "USD") for t in FISCAL_TEXTS],
         "latestRelease": mr.pick_release_observation([
             {"source": "ISSUER_RELEASE", "provider": "ISSUER_RELEASE", "status": "FOUND", "value": 31_500_000, "filingDate": "2026-08-10"},
             {"source": "ISSUER_RELEASE", "provider": "ISSUER_RELEASE", "status": "FOUND", "value": 31_600_000, "filingDate": "2026-08-20"},
@@ -483,10 +487,10 @@ def _python_outputs() -> dict:
         "currencyAt": [vh.reporting_currency_at(SWITCH, d) for d in ("2020-01-01", "2024-06-03", "2025-04-30", "2025-12-31")]
         + [vh.reporting_currency_at(IFRS_FACTS, "2025-06-02"), vh.reporting_currency_at({}, "2025-06-02")],
         "currencies": [vh.reporting_currencies(SWITCH, ["2024-06-03", "2025-12-31", "2026-01-02"]), vh.reporting_currencies(SYN, DATES)],
-        "fiscalMetaPeriod": mr.resolve_period(FISCAL_META, "revenue", "latest_quarter"),
-        "fiscalMetaObs": [_read_obs(t, mr.resolve_period(FISCAL_META, "revenue", "latest_quarter")) for t in FISCAL_META_TEXTS],
-        "fiscalDerivedObs": [_read_obs(t, mr.resolve_period(FISCAL_RECON, "revenue", "latest_quarter")) for t in FISCAL_META_TEXTS],
-        "dgPeriods": [mr.resolve_period(DG_META, "revenue", s) for s in ("latest_quarter", "latest_annual")],
+        "fiscalMetaPeriod": mr.resolve_period(FISCAL_META, "revenue", "latest"),
+        "fiscalMetaObs": [_read_obs(t, mr.resolve_period(FISCAL_META, "revenue", "latest")) for t in FISCAL_META_TEXTS],
+        "fiscalDerivedObs": [_read_obs(t, mr.resolve_period(FISCAL_RECON, "revenue", "latest")) for t in FISCAL_META_TEXTS],
+        "dgPeriods": [mr.resolve_period(DG_META, "revenue", s) for s in ("latest", "FY2025")],
         "dgObs": [_read_obs(t, mr.resolve_period(DG_META, "revenue", s)) for s, t in DG_TEXTS],
         "normalized": [mr.normalize_fiscal_tokens(t) for t in FISCAL_META_TEXTS],
         "fySelect": [mr.resolve_period(f, "revenue", spec) for f, spec in FY_SELECT],
@@ -511,7 +515,7 @@ const f = JSON.parse(readFileSync(fixturesPath, "utf8"));
 const readObs = (text, period) => mr.releaseObservation({ status: "READ", text, url: null, filingDate: null, accessionNumber: null }, "revenue", period, "USD");
 const periods = {};
 for (const spec of f.periodSpecs) periods[spec] = mr.resolvePeriod(f.recon, "revenue", spec);
-const quarter = mr.resolvePeriod(f.recon, "revenue", "Q2 2026");
+const quarter = mr.resolvePeriod(f.recon, "revenue", "FY2026 Q2");
 const peers = ["p1", "p2"].map((t) => vh.historicalValuation({ ...f.hv.syn, ticker: t }));
 peers[1].points[2].multiples.LTM.evToRevenue = { value: 3.0, status: "OK" };
 const hv = {};
@@ -527,8 +531,8 @@ const out = {
   releaseObs: f.releaseTexts.map(([m, text]) => mr.releaseObservation({ status: "READ", text, url: null, filingDate: null, accessionNumber: null }, m, quarter, "USD")),
   currency: mr.releaseObservation(f.releases[1], "revenue", quarter, "TWD"),
   unitChoice: [f.nbisFacts, f.unitTieFacts].map((facts) => mr.metricFacts(facts, "revenue")),
-  beSecObs: f.beCases.map(([m, facts]) => mr.secObservations(facts, m, mr.resolvePeriod(facts, m, "latest_annual"))),
-  beRecon: mr.metricReconciliation({ ticker: "be", metric: "net_income", period: mr.resolvePeriod(f.beFacts, "net_income", "latest_annual"), companyfacts: f.beFacts, releases: [], yahooRows: null, tolerancePct: 0.5 }),
+  beSecObs: f.beCases.map(([m, facts]) => mr.secObservations(facts, m, mr.resolvePeriod(facts, m, "FY2025"))),
+  beRecon: mr.metricReconciliation({ ticker: "be", metric: "net_income", period: mr.resolvePeriod(f.beFacts, "net_income", "FY2025"), companyfacts: f.beFacts, releases: [], yahooRows: null, tolerancePct: 0.5 }),
   releaseObs2515: f.releaseTexts2515.map(([m, text]) => mr.releaseObservation({ status: "READ", text, url: null, filingDate: null, accessionNumber: null }, m, quarter, "USD")),
   noSecAgreement: (() => {
     const r = mr.reconcileObservations([
@@ -544,9 +548,9 @@ const out = {
     ], 0.5);
     return [r.comparisons, r.status, r.restated];
   })(),
-  fiscalPeriod: mr.resolvePeriod(f.fiscalRecon, "revenue", "latest_quarter"),
+  fiscalPeriod: mr.resolvePeriod(f.fiscalRecon, "revenue", "latest"),
   fiscalObs: f.fiscalTexts.map((text) => mr.releaseObservation({ status: "READ", text, url: null, filingDate: null, accessionNumber: null }, "revenue",
-    mr.resolvePeriod(f.fiscalRecon, "revenue", "latest_quarter"), "USD")),
+    mr.resolvePeriod(f.fiscalRecon, "revenue", "latest"), "USD")),
   latestRelease: mr.pickReleaseObservation([
     { source: "ISSUER_RELEASE", provider: "ISSUER_RELEASE", status: "FOUND", value: 31_500_000, filingDate: "2026-08-10" },
     { source: "ISSUER_RELEASE", provider: "ISSUER_RELEASE", status: "FOUND", value: 31_600_000, filingDate: "2026-08-20" },
@@ -558,10 +562,10 @@ const out = {
   currencyAt: [...["2020-01-01", "2024-06-03", "2025-04-30", "2025-12-31"].map((d) => vh.reportingCurrencyAt(f.switchFacts, d)),
     vh.reportingCurrencyAt(f.ifrsFacts, "2025-06-02"), vh.reportingCurrencyAt({}, "2025-06-02")],
   currencies: [vh.reportingCurrencies(f.switchFacts, ["2024-06-03", "2025-12-31", "2026-01-02"]), vh.reportingCurrencies(f.syn, f.dates)],
-  fiscalMetaPeriod: mr.resolvePeriod(f.fiscalMeta, "revenue", "latest_quarter"),
-  fiscalMetaObs: f.fiscalMetaTexts.map((t) => readObs(t, mr.resolvePeriod(f.fiscalMeta, "revenue", "latest_quarter"))),
-  fiscalDerivedObs: f.fiscalMetaTexts.map((t) => readObs(t, mr.resolvePeriod(f.fiscalRecon, "revenue", "latest_quarter"))),
-  dgPeriods: ["latest_quarter", "latest_annual"].map((s) => mr.resolvePeriod(f.dgMeta, "revenue", s)),
+  fiscalMetaPeriod: mr.resolvePeriod(f.fiscalMeta, "revenue", "latest"),
+  fiscalMetaObs: f.fiscalMetaTexts.map((t) => readObs(t, mr.resolvePeriod(f.fiscalMeta, "revenue", "latest"))),
+  fiscalDerivedObs: f.fiscalMetaTexts.map((t) => readObs(t, mr.resolvePeriod(f.fiscalRecon, "revenue", "latest"))),
+  dgPeriods: ["latest", "FY2025"].map((s) => mr.resolvePeriod(f.dgMeta, "revenue", s)),
   dgObs: f.dgTexts.map(([s, t]) => readObs(t, mr.resolvePeriod(f.dgMeta, "revenue", s))),
   normalized: f.fiscalMetaTexts.map((t) => mr.normalizeFiscalTokens(t)),
   fySelect: f.fySelect.map(([facts, spec]) => mr.resolvePeriod(facts, "revenue", spec)),
@@ -1081,10 +1085,23 @@ class TestReconciliation(unittest.TestCase):
 
     def test_periods(self) -> None:
         p = _python_outputs()["periods"]
-        self.assertEqual(p["latest_annual"]["periodEnd"], "2025-12-31")
+        self.assertEqual(p["FY2025"]["periodEnd"], "2025-12-31")
         self.assertEqual(p["fy 2025"]["periodEnd"], "2025-12-31")
-        self.assertEqual(p["Q4 2026"]["status"], "PERIOD_NOT_FOUND")
+        self.assertEqual(p["FY2026 Q4"]["status"], "PERIOD_NOT_FOUND")
         self.assertEqual(p["2026"]["status"], "INVALID_PERIOD")
+        # F60 (3.0.0): one vocabulary, latest, FY<yyyy> and FY<yyyy> Q<n>; the old forms are not read.
+        for removed in ("latest_quarter", "latest_annual", "Q2 2026", "Q2 2025"):
+            self.assertEqual(p[removed], {"status": "INVALID_PERIOD", "message": mr.RECONCILE_PERIOD_HELP})
+            self.assertFalse(mr.is_reconcile_period(removed))
+        self.assertEqual(mr.RECONCILE_PERIOD_HELP, "period must be latest, FY<yyyy> or FY<yyyy> Q<n>.")
+        for accepted in ("latest", "LATEST", "FY2026", "fy 2026", "FY2026 Q3", "fy2026  q3"):
+            self.assertTrue(mr.is_reconcile_period(accepted), accepted)
+        self.assertEqual(p["latest"]["periodEnd"], "2026-06-30")
+        self.assertEqual((p["FY2026 Q2"]["periodEnd"], p["FY2026 Q2"]["fiscalQuarter"], p["FY2026 Q2"]["fiscalYears"]), ("2026-06-30", 2, [2026]))
+        self.assertEqual(p["fy2026 q2"]["periodEnd"], "2026-06-30")
+        self.assertEqual((p["FY2025 Q2"]["periodEnd"], p["FY2025 Q2"]["fiscalYears"]), ("2025-06-30", [2025]))
+        self.assertEqual(p["FY2026 Q4"]["periodType"], "QUARTER")
+        self.assertIn("FY<yyyy> Q<n> is the issuer's fiscal quarter", p["FY2026 Q2"]["labelBasis"])
 
     def test_agreement_requires_sec_baseline(self) -> None:
         comparisons, status, _ = _python_outputs()["noSecAgreement"]
@@ -1144,13 +1161,21 @@ class TestReconciliation(unittest.TestCase):
         # Q2 fiscal 2027 in every wording; never fiscal 2026's second quarter; calendar Q3 2026 is the same period.
         self.assertEqual(found, [True, False, True, True, True, False, True, True, True, False, True])
         # Without metadata, both adjacent years remain possible for a January year end, and that is flagged.
-        derived = mr.resolve_period(FISCAL_RECON, "revenue", "latest_quarter")
+        derived = mr.resolve_period(FISCAL_RECON, "revenue", "latest")
         self.assertEqual((derived["fiscalYears"], derived["fiscalYearAmbiguous"]), ([2027, 2026], True))
         self.assertEqual(out["fiscalDerivedObs"][1]["status"], "FOUND")
         dg_quarter, dg_annual = out["dgPeriods"]
         self.assertEqual((dg_quarter["fiscalQuarter"], dg_quarter["fiscalYears"], dg_annual["fiscalYears"]), (2, [2026], [2025]))
         self.assertEqual([o["status"] for o in out["dgObs"]], ["FOUND", "NOT_FOUND_IN_TEXT", "FOUND"])
         self.assertEqual(out["normalized"][3], "Q2 fiscal 2027 revenue was $96.2 billion.")
+        # F60: FY<yyyy> Q<n> is the issuer's fiscal quarter, not the calendar quarter of the period end (2026-07-26 is
+        # calendar Q3, fiscal 2027 Q2): SEC fy/fp name it, and fiscal 2026 has no such quarter.
+        fiscal_q = [mr.resolve_period(FISCAL_META, "revenue", spec) for spec in ("FY2027 Q2", "FY2026 Q2", "FY2026 Q3", "FY2027 Q3")]
+        self.assertEqual((fiscal_q[0]["status"], fiscal_q[0]["periodEnd"], fiscal_q[0]["fiscalYearSource"]), ("OK", "2026-07-26", "SEC_FY_FP"))
+        self.assertEqual([q["status"] for q in fiscal_q[1:]], ["PERIOD_NOT_FOUND"] * 3)
+        # Without metadata either naming convention is possible for a January year end, so both match.
+        self.assertEqual([mr.resolve_period(FISCAL_RECON, "revenue", spec)["status"] for spec in ("FY2027 Q2", "FY2026 Q2", "FY2026 Q3")],
+                         ["OK", "OK", "PERIOD_NOT_FOUND"])
         # The evidence keeps the sentence as written.
         self.assertEqual(out["fiscalMetaObs"][3]["sentence"], "Q2 FY27 revenue was $96.2 billion.")
 

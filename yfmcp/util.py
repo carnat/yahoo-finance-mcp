@@ -309,3 +309,56 @@ def _filter_paragraphs_by_topics(text: str, topics: list[str], context_chars: in
         if matched:
             results.append({"paragraph": para[:context_chars * 5] if len(para) > context_chars * 5 else para, "matchedTopics": matched})
     return results
+
+
+# ---------------------------------------------------------------------------
+# Yahoo quoteSummary helpers (mirror worker/src/yahoo-finance.ts)
+# ---------------------------------------------------------------------------
+_YAHOO_DATE_FMT = _re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
+
+
+def unwrap_yahoo_values(value: object) -> object:
+    """Worker ``unwrapYahooValues``: Yahoo quoteSummary values arrive as {raw, fmt, longFmt} objects.
+    Keep the number (or the formatted date, for date values) and drop Yahoo's maxAge bookkeeping:
+    {pctHeld: {raw: 0.08, fmt: "8%"}} -> {pctHeld: 0.08}."""
+    if isinstance(value, list):
+        return [unwrap_yahoo_values(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    if "raw" in value and all(key in ("raw", "fmt", "longFmt") for key in value):
+        fmt = value.get("fmt")
+        if isinstance(fmt, str) and _YAHOO_DATE_FMT.fullmatch(fmt):
+            return fmt
+        return value.get("raw")
+    if not value:
+        return None
+    return {key: unwrap_yahoo_values(inner) for key, inner in value.items() if key != "maxAge"}
+
+
+def yahoo_raw(value: object) -> object:
+    """Worker ``raw``: the ``raw`` of Yahoo's {raw, fmt} wrapper; {} is null."""
+    if isinstance(value, dict):
+        if "raw" in value:
+            return value["raw"]
+        if not value:
+            return None
+    return value
+
+
+def yahoo_iso(ts: float) -> str:
+    """Worker ``iso``: ``new Date(ts * 1000).toISOString()``, e.g. 2026-11-05T21:00:00.000Z."""
+    moment = datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc) + datetime.timedelta(milliseconds=int(ts * 1000))
+    return moment.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def fetch_quote_summary_module(ticker: str, module: str) -> dict | None:
+    """Blocking: the first quoteSummary result for ``module`` through yfinance's crumb-aware fetcher, or None
+    when Yahoo returns no result. Run it in a thread."""
+    import yfinance as yf
+
+    data = yf.Ticker(ticker)._data.get_raw_json(
+        "https://query2.finance.yahoo.com/v10/finance/quoteSummary/" + ticker,
+        params={"modules": module, "corsDomain": "finance.yahoo.com", "formatted": "true"},
+    )
+    results = ((data.get("quoteSummary") or {}).get("result")) if isinstance(data, dict) else None
+    return results[0] if isinstance(results, list) and results and isinstance(results[0], dict) else None

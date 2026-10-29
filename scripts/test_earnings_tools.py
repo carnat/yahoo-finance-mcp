@@ -93,48 +93,77 @@ class TestGetLatestEarningsRelease(unittest.TestCase):
             self.assertEqual(data.get("period"), "FY2026 Q2")
             self.assertEqual(data.get("periodStatus"), "EX99_TEXT_RESOLVED")
 
+    @staticmethod
+    def _submissions(cik: str, filings: list[dict]) -> tuple[str, dict]:
+        columns = {"form": [], "filingDate": [], "acceptanceDateTime": [], "accessionNumber": [], "primaryDocument": [], "items": [], "isInlineXBRL": []}
+        for f in filings:
+            columns["form"].append(f.get("form", "8-K"))
+            columns["filingDate"].append(f["filingDate"])
+            columns["acceptanceDateTime"].append(f.get("acceptedAt"))
+            columns["accessionNumber"].append(f["accessionNumber"])
+            columns["primaryDocument"].append(f["primaryDocument"])
+            columns["items"].append(f.get("items", ""))
+            columns["isInlineXBRL"].append(f.get("isInlineXBRL", 0))
+        return cik, {"filings": {"recent": columns}}
+
     def test_exhibit_url_uses_issuer_cik_not_accession_agent_prefix(self):
-        filings_payload = {
-            "cik": "0001040470",
-            "filings": [{
-                "filingDate": "2026-07-14",
-                "acceptedAt": "2026-07-14T16:50:31.000Z",
-                "accessionNumber": "0001654954-26-006655",
-                "documentUrl": "https://www.sec.gov/Archives/edgar/data/1040470/000165495426006655/aehr_8k.htm",
-            }],
-        }
-        with patch("server.list_sec_company_filings", new_callable=AsyncMock) as mocked_filings, patch(
-            "yfmcp.tools.earnings._edgar_list_exhibits_from_index", new_callable=AsyncMock
-        ) as mocked_exhibits:
-            mocked_filings.return_value = json.dumps(filings_payload)
-            mocked_exhibits.return_value = [{"type": "EX-99.1", "document": "aehr_ex991.htm"}]
+        # F59 (3.0.0): the source is the 8-K; its EX-99.1 exhibit is contentUrl, found under the issuer's CIK.
+        submissions = self._submissions("0001040470", [{
+            "filingDate": "2026-07-14", "acceptedAt": "2026-07-14T16:50:31.000Z", "accessionNumber": "0001654954-26-006655",
+            "primaryDocument": "aehr_8k.htm", "items": "2.02,9.01", "isInlineXBRL": 1,
+        }])
+        eight_k = "https://www.sec.gov/Archives/edgar/data/1040470/000165495426006655/aehr_8k.htm"
+        exhibit = "https://www.sec.gov/Archives/edgar/data/1040470/000165495426006655/aehr_ex991.htm"
+        with patch("yfmcp.tools.earnings._get_submissions_for_ticker", new_callable=AsyncMock, return_value=submissions), patch(
+            "yfmcp.tools.earnings._resolve_ex991_url", new_callable=AsyncMock
+        ) as mocked_ex991:
+            mocked_ex991.return_value = exhibit
             source = _run(earnings_tools._resolve_latest_earnings_sec_source("AEHR"))
-            self.assertEqual(source["sourceType"], "sec_8k_ex991")
-            self.assertEqual(
-                source["url"],
-                "https://www.sec.gov/Archives/edgar/data/1040470/000165495426006655/aehr_ex991.htm",
-            )
+            self.assertEqual(list(source), ["sourceType", "url", "filingDate", "acceptedAt", "accessionNumber", "cikPadded", "items", "isInlineXBRL", "confidence"])
+            self.assertEqual((source["sourceType"], source["url"], source["cikPadded"], source["items"], source["isInlineXBRL"]),
+                             ("sec_8k", eight_k, "0001040470", "2.02,9.01", True))
+            content = _run(earnings_tools._resolve_earnings_content_source(source))
+            self.assertEqual(content, {"url": exhibit, "sourceType": "sec_8k_ex991"})
+            # The exhibit is looked up under the issuer's CIK, not the filing agent's accession prefix.
+            mocked_ex991.assert_awaited_with("0001654954-26-006655", 1040470)
+            mocked_ex991.return_value = None
+            self.assertEqual(_run(earnings_tools._resolve_earnings_content_source(source)), {"url": eight_k, "sourceType": "sec_8k"})
+
+    def test_latest_release_source_carries_content_url_after_url(self):
+        # F59: sources[0] keeps the 8-K as url and gains contentUrl (EX-99.1 when found, else the 8-K) right after it.
+        submissions = self._submissions("0001040470", [{
+            "filingDate": "2026-07-14", "acceptedAt": "2026-07-14T16:50:31.000Z", "accessionNumber": "0001654954-26-006655",
+            "primaryDocument": "aehr_8k.htm", "items": "2.02", "isInlineXBRL": 0,
+        }])
+        eight_k = "https://www.sec.gov/Archives/edgar/data/1040470/000165495426006655/aehr_8k.htm"
+        exhibit = "https://www.sec.gov/Archives/edgar/data/1040470/000165495426006655/aehr_ex991.htm"
+        for ex991, content_url in ((exhibit, exhibit), (None, eight_k)):
+            with patch("yfmcp.tools.earnings._get_submissions_for_ticker", new_callable=AsyncMock, return_value=submissions), patch(
+                "yfmcp.tools.earnings._resolve_ex991_url", new_callable=AsyncMock, return_value=ex991
+            ), patch("yfmcp.tools.earnings._edgar_get_html", new_callable=AsyncMock, return_value="<p>Fourth Quarter Fiscal 2026 Results</p>"):
+                raw = _run(srv.get_latest_earnings_release("AEHR"))
+            payload = json.loads(raw)
+            self.assertNotIn("errorCode", payload)
+            self.assertNotIn("generatedAt", json.dumps(payload))
+            src = payload["sources"][0]
+            self.assertEqual(list(src), ["sourceType", "url", "contentUrl", "filingDate", "acceptedAt", "accessionNumber",
+                                         "cikPadded", "items", "isInlineXBRL", "confidence"])
+            self.assertEqual((src["sourceType"], src["url"], src["contentUrl"]), ("sec_8k", eight_k, content_url))
+            self.assertNotIn("primaryDocumentUrl", src)
+            self.assertEqual(payload["period"], "FY2026 Q4")
 
     def test_results_8k_is_preferred_over_a_later_8k_for_another_item(self):
         # COHR (2.5.9): the Aug 31 8-K (Items 5.02, 8.01) is not the Aug 12 earnings release (Item 2.02).
         base = "https://www.sec.gov/Archives/edgar/data/820318"
-        filings_payload = {"cik": "0000820318", "filings": [
-            {"filingDate": "2026-08-31", "accessionNumber": "0001193125-26-375462", "documentUrl": f"{base}/000119312526375462/d110649d8k.htm", "items": "5.02,8.01"},
-            {"filingDate": "2026-08-12", "accessionNumber": "0001193125-26-346860", "documentUrl": f"{base}/000119312526346860/d128030d8k.htm", "items": "2.02,7.01,9.01"},
-        ]}
-        with patch("server.list_sec_company_filings", new_callable=AsyncMock) as mocked_filings, patch(
-            "yfmcp.tools.earnings._edgar_list_exhibits_from_index", new_callable=AsyncMock
-        ) as mocked_exhibits:
-            mocked_filings.return_value = json.dumps(filings_payload)
-            mocked_exhibits.return_value = [{"type": "EX-99.1", "document": "d128030dex991.htm"}]
+        filings = [
+            {"filingDate": "2026-08-31", "accessionNumber": "0001193125-26-375462", "primaryDocument": "d110649d8k.htm", "items": "5.02,8.01"},
+            {"filingDate": "2026-08-12", "accessionNumber": "0001193125-26-346860", "primaryDocument": "d128030d8k.htm", "items": "2.02,7.01,9.01"},
+        ]
+        with patch("yfmcp.tools.earnings._get_submissions_for_ticker", new_callable=AsyncMock, return_value=self._submissions("0000820318", filings)):
             source = _run(earnings_tools._resolve_latest_earnings_sec_source("COHR"))
-            self.assertEqual((source["accessionNumber"], source["url"]), ("0001193125-26-346860", f"{base}/000119312526346860/d128030dex991.htm"))
+            self.assertEqual((source["accessionNumber"], source["url"]), ("0001193125-26-346860", f"{base}/000119312526346860/d128030d8k.htm"))
         # With no Item 2.02 8-K listed, the newest 8-K is still read.
-        with patch("server.list_sec_company_filings", new_callable=AsyncMock) as mocked_filings, patch(
-            "yfmcp.tools.earnings._edgar_list_exhibits_from_index", new_callable=AsyncMock
-        ) as mocked_exhibits:
-            mocked_filings.return_value = json.dumps({**filings_payload, "filings": filings_payload["filings"][:1]})
-            mocked_exhibits.return_value = []
+        with patch("yfmcp.tools.earnings._get_submissions_for_ticker", new_callable=AsyncMock, return_value=self._submissions("0000820318", filings[:1])):
             self.assertEqual(_run(earnings_tools._resolve_latest_earnings_sec_source("COHR"))["accessionNumber"], "0001193125-26-375462")
 
     def test_period_prefers_current_release_heading_over_prior_year_comparison(self):
@@ -200,7 +229,9 @@ class TestExtractEarningsMetrics(unittest.TestCase):
             metrics = data.get("metrics", {})
             for key in ("revenue", "epsDiluted", "grossMargin", "operatingIncome", "freeCashFlow", "capex"):
                 self.assertIn(key, metrics)
-            self.assertEqual(metrics["freeCashFlow"].get("confidence"), "NOT_DECISION_GRADE")
+            # F20 (3.0.0): a metric with no value has no confidence; its status string moved to status.
+            self.assertIsNone(metrics["freeCashFlow"].get("confidence"))
+            self.assertEqual(metrics["freeCashFlow"].get("status"), "NOT_DISCLOSED")
             self.assertIsNone(metrics["freeCashFlow"].get("value"))
             self.assertEqual(metrics["revenue"].get("confidence"), "LOW")
             self.assertIsNotNone(metrics["revenue"].get("evidence"))

@@ -1,14 +1,15 @@
 """Parity cases: R5-shared (2.21.0), the untagged-fact confidence default becomes LOW (BR-ENV-001, R5SHARED_SPEC.md).
 
 Both enrichers (Python `yfmcp/envelope.py` `_enrich_facts`, Worker `worker/src/response.ts` `enrichFacts`) give a fact-shaped
-dict with no own or inherited `confidence` the value LOW when `value`, `low` or `valueRatio` is non-null (HIGH before 2.21.0),
-and NOT_DECISION_GRADE otherwise. The normalisation (upper-case; NOT_DISCLOSED -> NOT_DECISION_GRADE; any other value -> LOW)
-is unchanged.
+dict with no own or inherited `confidence` the value LOW when `value`, `low` or `valueRatio` is non-null (HIGH before 2.21.0).
+3.0.0 (F20): without a value the confidence is null (it was NOT_DECISION_GRADE), and a fact's own string that is not
+HIGH, MEDIUM or LOW (after upper-casing) moves to `status` when the fact has none and confidence is null (it was
+NOT_DECISION_GRADE for NOT_DISCLOSED and LOW for any other string).
 
 The producers that reached the default (spec section 1):
   A. get_analyst_consensus priceTargets               -> LOW (both runtimes)
   B. get_earnings_analysis earningsEstimate[] / revenueEstimate[] rows -> LOW (both runtimes)
-  C. get_ownership_holders rows with Yahoo's lowercase `value` -> LOW (Worker only; Python's rows use `Value`, finding F17)
+  C. get_ownership_holders rows with Yahoo's lowercase `value` -> LOW (both runtimes since 3.0.0; F17 aligned Python to the Worker's quoteSummary rows)
   D. extract_dilution_bridge WARRANT_EXERCISE_NOT_OUTSTANDING counts[] -> tagged HIGH at the producer, so unchanged
 
 F19 (fixed in 2.25.0): the Worker's get_analyst_consensus now sets the top-level source / evidenceClass / decisionGrade /
@@ -62,16 +63,17 @@ def _default_view(v: dict) -> dict:
     return {"untaggedValue": d["untaggedValue"]["confidence"], "untaggedLow": d["untaggedLow"]["confidence"],
             "untaggedRatio": d["untaggedRatio"]["confidence"], "onlyHigh": d["onlyHigh"]["confidence"],
             "nullValue": d["nullValue"]["confidence"], "taggedHigh": d["taggedHigh"]["confidence"],
-            "notDisclosed": d["notDisclosed"]["confidence"], "otherString": d["otherString"]["confidence"],
-            "inheritedFromParent": d["parent"]["child"]["confidence"], "inheritedFromFact": d["taggedFact"]["inner"]["confidence"]}
+            "notDisclosed": [d["notDisclosed"]["confidence"], d["notDisclosed"].get("status")],
+            "otherString": [d["otherString"]["confidence"], d["otherString"].get("status")],
+            "nullValueStatus": d["nullValue"].get("status"), "inheritedFromParent": d["parent"]["child"]["confidence"], "inheritedFromFact": d["taggedFact"]["inner"]["confidence"]}
 
 
-_DEFAULT_TS = {"untaggedValue": "LOW", "untaggedLow": "LOW", "untaggedRatio": "LOW", "onlyHigh": "NOT_DECISION_GRADE",
-               "nullValue": "NOT_DECISION_GRADE", "taggedHigh": "HIGH", "notDisclosed": "NOT_DECISION_GRADE", "otherString": "LOW",
-               "inheritedFromParent": "MEDIUM", "inheritedFromFact": "HIGH"}
+_DEFAULT_TS = {"untaggedValue": "LOW", "untaggedLow": "LOW", "untaggedRatio": "LOW", "onlyHigh": None,
+               "nullValue": None, "taggedHigh": "HIGH", "notDisclosed": [None, "not_disclosed"], "otherString": [None, "EXTRACTION_FAILED"],
+               "nullValueStatus": None, "inheritedFromParent": "MEDIUM", "inheritedFromFact": "HIGH"}
 
 CASES += [
-    Case(name="confidence.default.untagged_fact_with_a_value_is_low_only_high_is_not_decision_grade_inherited_wins",
+    Case(name="confidence.default.untagged_fact_with_a_value_is_low_no_value_is_null_status_strings_move_to_status_inherited_wins",
          ids=["BR-ENV-001"],
          py=lambda: _envelope_tool_result("extract_sec_filing_fact", json.dumps(_DEFAULT_PAYLOAD)),
          ts={"js": _worker("return JSON.parse(m.response.mcpSuccess(args[0], args[1]));"),
@@ -190,12 +192,9 @@ _HOLDERS_ROUTES = {**YAHOO_AUTH_ROUTES,
 
 
 def _py_holders_envelope() -> str:
-    frame = pd.DataFrame([
-        {"Date Reported": pd.Timestamp("2026-06-30"), "Holder": "Fund One", "pctHeld": 0.08, "Shares": 1_000_000,
-         "Value": 120_000_000, "pctChange": 0.01},
-        {"Date Reported": pd.Timestamp("2026-06-30"), "Holder": "Fund Two", "pctHeld": 0.05, "Shares": 600_000,
-         "Value": 72_000_000, "pctChange": -0.02}])
-    company = SimpleNamespace(fast_info=SimpleNamespace(currency="USD"), institutional_holders=frame)
+    # 3.0.0 (F17): Python reads the same quoteSummary module as the Worker, through yfinance's crumb-aware fetcher.
+    company = SimpleNamespace(fast_info=SimpleNamespace(currency="USD"),
+                              _data=SimpleNamespace(get_raw_json=lambda url, params=None, timeout=30: _HOLDERS_SUMMARY))
     with patch.object(server.yf, "Ticker", lambda _t: company):
         raw = asyncio.run(server.get_ownership_holders(_TICKER_C, "institutional_holders"))
     return _envelope_tool_result("get_ownership_holders", raw)
@@ -206,10 +205,9 @@ def _holder_rows(data):
 
 
 CASES += [
-    # R5-shared decision 3: the Worker's rows carry Yahoo's lowercase `value`, so they are facts and fall to LOW. Python's rows
-    # (yfinance's institutional_holders frame) use `Value`, so they are not fact-shaped and carry no confidence (finding F17,
-    # not aligned here: rule P5). Not a python-mirror item.
-    Case(name="confidence.ownership_holders.finding_f17_worker_institutional_rows_are_low_python_rows_are_not_facts",
+    # R5-shared decision 3: the rows carry Yahoo's lowercase `value`, so they are facts and fall to LOW. Python's rows were
+    # yfinance's institutional_holders frame (`Value`, not fact-shaped, finding F17) until 3.0.0 gave them the Worker's shape.
+    Case(name="confidence.ownership_holders.institutional_rows_are_low_in_both_runtimes",
          ids=["BR-ENV-001"], py=_py_holders_envelope,
          ts={"js": _ts_with_clock(GATE_NOW, _worker(
              f'const r = await m.tools.callToolResult("get_ownership_holders", {{ticker: "{_TICKER_C}", holder_type: "institutional_holders"}}); return r.value;')),
@@ -217,10 +215,7 @@ CASES += [
          routes=_HOLDERS_ROUTES,
          select=lambda v: [{"keys": sorted(k for k in row if k in ("value", "Value")), "confidence": row.get("confidence")}
                            for row in _holder_rows(v["data"]) or []],
-         mode="pinned",
-         decision="FINDING F17 (R5-shared decision 3): Worker holder rows use Yahoo's lowercase `value` and default to LOW; Python rows use `Value` and are not fact-shaped",
-         expect_py=[{"keys": ["Value"], "confidence": None}, {"keys": ["Value"], "confidence": None}],
-         expect_ts=[{"keys": ["value"], "confidence": "LOW"}, {"keys": ["value"], "confidence": "LOW"}]),
+         expect=[{"keys": ["value"], "confidence": "LOW"}, {"keys": ["value"], "confidence": "LOW"}]),
 ]
 
 
