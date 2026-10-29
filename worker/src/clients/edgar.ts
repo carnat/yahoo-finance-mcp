@@ -2,14 +2,16 @@
  * EDGAR client (Phase 4 unit 1, moved out of yahoo-finance.ts): the SEC transport and User-Agent, the SEC document
  * cache, EDGAR JSON/HTML reads, filing and exhibit-index URLs, ticker -> CIK resolution and submissions.
  * Filing selection (resolveSecFiling and its not-found envelopes) stays in yahoo-finance.ts (decision D11).
- * The Yahoo, provider-transport and HTML helpers it uses are imported back from yahoo-finance.ts until units 2-3
- * move them (decision D4).
+ * The Yahoo client and provider transport come from clients/yahoo.ts and clients/provider-http.ts (unit 2); the HTML
+ * helper stripHtmlTags is imported back from yahoo-finance.ts until unit 3 moves it (decision D4).
  */
 
 import { BoundedTtlCache } from "../cache.js";
 import { awaitNotingBudget, consumeSubrequest, countCacheEvent, emptyCacheUsage, providerFetch, type CacheEvent, type CacheUsage } from "../request-context.js";
 import { getWorkerVar } from "../response.js";
-import { countersSince, edgeCache, enc, fetchProviderWithTimeout, stripHtmlTags, yGet } from "../yahoo-finance.js";
+import { stripHtmlTags } from "../yahoo-finance.js";
+import { edgeCache, fetchProviderWithTimeout } from "./provider-http.js";
+import { countersSince, enc, yGet } from "./yahoo.js";
 
 // Ticker -> CIK fixtures, read after SEC's ticker index and before the EDGAR atom lookup. Empty in production:
 // only tests fill it, through setTickerCikFixturesForTests (2.13.0, R4 Q4; the smoke table it replaces was a

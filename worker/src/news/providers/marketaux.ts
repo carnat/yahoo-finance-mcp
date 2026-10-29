@@ -12,6 +12,8 @@ import {
   setProviderCache,
   providerHttpStatus,
   fetchProviderWithTimeout,
+} from "../../clients/provider-http.js";
+import {
   _str,
   toIsoUtc,
 } from "../../yahoo-finance.js";

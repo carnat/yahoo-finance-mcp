@@ -7,7 +7,8 @@
 import { providerFetch } from "../../request-context.js";
 import registryManifest from "../../company-ir-page-registry.json";
 import { companyIrPageUrlAllowed } from "../../url-policy.js";
-import { UA, stripHtmlTags, _str } from "../../yahoo-finance.js";
+import { UA } from "../../clients/provider-http.js";
+import { stripHtmlTags, _str } from "../../yahoo-finance.js";
 import {
   sourceDecisionUse,
   normalizeIso,
