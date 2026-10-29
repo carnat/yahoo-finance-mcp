@@ -1,5 +1,5 @@
 import { BoundedTtlCache, setBounded } from "./cache.js";
-import { budgetRefusalCount, countCacheEvent, countProviderRetry, isBudgetExhaustedError, providerFetch, withBudgetWatch } from "./request-context.js";
+import { budgetRefusalCount, countCacheEvent, countProviderRetry, providerFetch } from "./request-context.js";
 import { classifyErrorMessage, ErrorCode, getWorkerVar, mcpFailure } from "./response.js";
 import { tickerCap } from "./tool-catalog.js";
 import { yahooTranscriptContentSha256 } from "./transcript-contract.js";
@@ -131,26 +131,33 @@ import {
   mergeFinancialCells,
   parseFinancialTableRows,
   parseNumericCell,
-  sanitizeFilingHtml,
   stripHtmlTags,
   tableUnitScale,
   TOTAL_LABELS,
   UNIT_SCALE_ASSUMED_WARNING,
   type UnitScaleSource,
+  _sanitizeFilingHtml,
+  _stripHtmlTagsIdx,
 } from "./clients/html.js";
 // Phase 4 unit 3: the HTML and filing-table parsing helpers moved to clients/html.ts; these re-exports keep
 // tools.ts, the parity bundle (m.yahooFinance.*) and the news modules unchanged.
 export {
+  _stripHtmlTagsIdx,
   isShareScaleStatement,
   mergeFinancialCells,
   stripHtmlTags,
   tableUnitScale,
   type UnitScaleSource,
 } from "./clients/html.js";
-import newsSourceCapabilities from "./news-source-capabilities.json";
+import { _str, clampInt, compactExcerpt, dailyBarDate, getLastTradingDate, parseObjectJson, toIsoUtc } from "./util.js";
+import { BATCH_TICKER_CONCURRENCY, mapWithConcurrency, runPartialBatch, safeJsonParse } from "./batch.js";
+import { finnhubEligibility, resolveNewsCompanyIdentity } from "./news/identity.js";
+// Phase 4 unit 5: the generic helpers moved to util.ts, the batch runner to batch.ts and the news company identity
+// to news/identity.ts; these re-exports keep the parity bundle (m.yahooFinance.*) unchanged.
+export { _str, clampInt, toIsoUtc } from "./util.js";
+export { runPartialBatch } from "./batch.js";
+export { COMPANY_IR_DISCOVERY_TTL_MS, finnhubEligibility, resolveNewsCompanyIdentity, type NewsCompanyIdentity } from "./news/identity.js";
 import {
-  hostWithoutWww,
-  blockedCompanyWebsiteHost,
   getCompanyNews,
 } from "./news.js";
 export {
@@ -178,18 +185,6 @@ export {
  *                                        /ws/fundamentals-timeseries/
  * Endpoints that work without auth:      /v8/finance/chart/, /v1/finance/search
  */
-
-/**
- * Batch ticker caps. Cloudflare Workers Free allows 50 subrequests per
- * invocation (Cache API calls and redirect hops included), and since 2.11.0 new
- * upstream work stops at a budget of 45 (request-context.ts). The per-tool caps
- * live in tool_catalog.json `tickerCaps` (2.12.0): each action's schema
- * maxItems is generated from them, and the tool-call gate in tools.ts rejects a
- * longer array with BATCH_LIMIT_EXCEEDED before any fetch. Nothing is truncated.
- * MAX_TICKERS is only the default for runPartialBatch callers without a catalog
- * cap (analyze_position_signals).
- */
-const MAX_TICKERS = 5;
 
 const ALPHA_VANTAGE_API = "https://www.alphavantage.co/query";
 const FINNHUB_API = "https://finnhub.io/api/v1";
@@ -343,28 +338,6 @@ async function fetchFinnhubJson(
     const status = /timeout|timed out|abort/i.test(message) ? "TIMEOUT" : "PROVIDER_ERROR";
     return { payload: null, status, publicUrl, providerAttempted: true, cacheStatus: "MISS", message };
   }
-}
-
-export const COMPANY_IR_DISCOVERY_TTL_MS = 24 * 60 * 60 * 1000;
-const COMPANY_IR_IDENTITY_CACHE_MAX = 500;
-const companyIrIdentityCache = new Map<string, { value: NewsCompanyIdentity; storedAt: number }>();
-
-/**
- * Returns the last trading date as a YYYY-MM-DD string.
- * If a unix-seconds timestamps array is provided, uses the last element.
- * Falls back to the last weekday from the UTC system clock.
- * Note: does not account for market holidays — weekday fallback only.
- */
-function getLastTradingDate(timestamps?: number[]): string {
-  if (timestamps && timestamps.length > 0) {
-    return new Date(timestamps[timestamps.length - 1] * 1000).toISOString().slice(0, 10);
-  }
-  const d = new Date();
-  let safety = 0;
-  while ((d.getUTCDay() === 0 || d.getUTCDay() === 6) && safety++ < 7) {
-    d.setUTCDate(d.getUTCDate() - 1);
-  }
-  return d.toISOString().slice(0, 10);
 }
 
 const PLACEHOLDER_IV_THRESHOLD = 0.10;
@@ -584,162 +557,6 @@ function classifyAnalystChange(action: unknown, fromGrade: unknown, toGrade: unk
   if (ANALYST_UPGRADE_GRADES.has(toLower) && fromLower && !ANALYST_UPGRADE_GRADES.has(fromLower)) return "UPGRADE";
   if (toLower && !fromLower) return "INITIATED";
   return "MAINTAIN";
-}
-
-/** Parse a JSON string returned by a single-ticker handler, falling back to a
- *  structured error object if the string is not valid JSON (e.g. plain error messages). */
-function safeJsonParse(s: string, ticker: string): Record<string, unknown> {
-  try {
-    return JSON.parse(s) as Record<string, unknown>;
-  } catch {
-    return { error: true, message: s, ticker };
-  }
-}
-
-function toBatchError(message: string, code = "PROVIDER_ERROR", retryable = false): Record<string, unknown> {
-  return { code, message, retryable };
-}
-
-function normalizeBatchSymbolResult(parsed: unknown, ticker: string): Record<string, unknown> {
-  if (parsed != null && typeof parsed === "object") {
-    const p = parsed as Record<string, unknown>;
-    if (typeof p.ok === "boolean" && ("data" in p || "error" in p)) {
-      if (p.ok === true) {
-        return { ok: true, data: p.data ?? null };
-      }
-      const errObj = p.error as Record<string, unknown> | null | undefined;
-      const code = typeof errObj?.code === "string" ? errObj.code : "PROVIDER_ERROR";
-      const message = typeof errObj?.message === "string" ? errObj.message : `Error for ${ticker}`;
-      const retryable = errObj?.retryable === true || code === "PROVIDER_TIMEOUT";
-      return { ok: false, data: null, error: toBatchError(message, code, retryable) };
-    }
-    if (p.error === true || p.error != null) {
-      const message = typeof p.message === "string" ? p.message : (typeof p.error === "string" ? p.error : `Error for ${ticker}`);
-      // R-news D (2.22.0, F13c): a legacy-envelope entry (MCP_ENVELOPE_V2=false) keeps its own code, read as the V2 branch above
-      // reads error.code; the message heuristics below only classify entries without one.
-      if (typeof p.code === "string") {
-        return { ok: false, data: null, error: toBatchError(message, p.code, p.retryable === true || p.code === "PROVIDER_TIMEOUT") };
-      }
-      const lower = message.toLowerCase();
-      if (lower.includes("no data found for ticker") || lower.includes("not found") || lower.includes("api error 404")) {
-        return { ok: false, data: null, error: toBatchError(message, "TICKER_NOT_FOUND", false) };
-      }
-      if (lower.includes("timeout")) {
-        return { ok: false, data: null, error: toBatchError(message, "PROVIDER_TIMEOUT", true) };
-      }
-      return { ok: false, data: null, error: toBatchError(message, "PROVIDER_ERROR", false) };
-    }
-    return { ok: true, data: p, error: null };
-  }
-  return { ok: false, data: null, error: toBatchError(`Malformed response for ${ticker}`, "PROVIDER_ERROR", false) };
-}
-
-// Per-ticker work in a batch runs a few symbols at a time: enough overlap to
-// cut latency without multiplying simultaneous Yahoo connections.
-const BATCH_TICKER_CONCURRENCY = 3;
-
-/** Map items with at most `limit` pending calls; results keep input order. */
-async function mapWithConcurrency<T, R>(
-  items: T[],
-  limit: number,
-  fn: (item: T) => Promise<R>,
-): Promise<R[]> {
-  const results = new Array<R>(items.length);
-  let next = 0;
-  const worker = async (): Promise<void> => {
-    while (next < items.length) {
-      const index = next++;
-      results[index] = await fn(items[index]);
-    }
-  };
-  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
-  return results;
-}
-
-export async function runPartialBatch(
-  tickers: string[],
-  perTicker: (ticker: string) => Promise<string>,
-  maxTickers: number = MAX_TICKERS,
-): Promise<string> {
-  // Capped actions are rejected earlier, by the tool-call gate (tools.ts), with
-  // BATCH_LIMIT_EXCEEDED; this check only guards direct callers.
-  if (tickers.length > maxTickers) {
-    return JSON.stringify({
-      error: true,
-      code: "INPUT_VALIDATION_ERROR",
-      message: `Too many tickers: ${tickers.length}. Maximum is ${maxTickers} per call.`,
-    });
-  }
-  const out: Record<string, unknown> = {};
-  let successCount = 0;
-  let errorCount = 0;
-  // Each ticker runs in its own scope, so a fetch the subrequest budget refused
-  // is charged to the ticker that asked for it (2.11.0).
-  const settled = await mapWithConcurrency(tickers, BATCH_TICKER_CONCURRENCY, (t) =>
-    withBudgetWatch(() => perTicker(t).then(
-      (raw) => ({ raw }),
-      (error: unknown) => ({ error }),
-    )).then(({ result, starved }) => ({ ...result, starved })));
-  for (const [index, t] of tickers.entries()) {
-    const starved = settled[index].starved;
-    try {
-      const result = settled[index];
-      if ("error" in result) throw result.error;
-      const raw = result.raw;
-      const parsed = safeJsonParse(raw, t);
-      const shaped = normalizeBatchSymbolResult(parsed, t);
-      if (shaped.ok === true) successCount += 1;
-      else errorCount += 1;
-      out[t] = shaped.ok === true
-        ? (shaped.data ?? null)
-        : starved
-          ? {
-              error: true,
-              code: ErrorCode.PROVIDER_BUDGET_EXHAUSTED,
-              message: typeof (shaped.error as Record<string, unknown> | undefined)?.message === "string"
-                ? (shaped.error as Record<string, unknown>).message
-                : `Error for ${t}`,
-              retryable: true,
-              recoveryAction: "RETRY_LATER",
-            }
-          : {
-            error: true,
-            code: typeof (shaped.error as Record<string, unknown> | undefined)?.code === "string"
-              ? (shaped.error as Record<string, unknown>).code
-              : "PROVIDER_ERROR",
-            message: typeof (shaped.error as Record<string, unknown> | undefined)?.message === "string"
-              ? (shaped.error as Record<string, unknown>).message
-              : `Error for ${t}`,
-            retryable: (shaped.error as Record<string, unknown> | undefined)?.retryable === true,
-          };
-    } catch (e) {
-      errorCount += 1;
-      const message = e instanceof Error ? e.message : String(e);
-      const lower = message.toLowerCase();
-      if (starved || isBudgetExhaustedError(e)) {
-        out[t] = {
-          ok: false,
-          data: null,
-          error: { ...toBatchError(message, ErrorCode.PROVIDER_BUDGET_EXHAUSTED, true), recoveryAction: "RETRY_LATER" },
-        };
-        continue;
-      }
-      const code = lower.includes("timeout") ? "PROVIDER_TIMEOUT"
-        : lower.includes("api error 404") ? "TICKER_NOT_FOUND"
-        : "PROVIDER_ERROR";
-      out[t] = {
-        ok: false,
-        data: null,
-        error: toBatchError(message, code, lower.includes("timeout")),
-      };
-    }
-  }
-  out.__batchMeta = {
-    partialSuccess: successCount > 0 && errorCount > 0,
-    successCount,
-    errorCount,
-  };
-  return JSON.stringify(out);
 }
 
 
@@ -3072,24 +2889,6 @@ function priceSlopeRange(days: number): string {
   if (days <= 120) return "6mo";
   if (days <= 250) return "1y";
   return "2y";
-}
-
-function dailyBarDate(timestamp: number | null, timezone: string): string | null {
-  if (timestamp == null) return null;
-  try {
-    const parts = new Intl.DateTimeFormat("en-US", {
-      timeZone: timezone,
-      year: "numeric",
-      month: "2-digit",
-      day: "2-digit",
-    }).formatToParts(new Date(timestamp * 1000));
-    const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
-    return values.year && values.month && values.day
-      ? `${values.year}-${values.month}-${values.day}`
-      : null;
-  } catch {
-    return new Date(timestamp * 1000).toISOString().slice(0, 10);
-  }
 }
 
 /** The weekday (Mon-Fri) before an ISO date, as an ISO date. */
@@ -7802,157 +7601,7 @@ export async function extractFilingFact(ticker: string, factName: string, _docum
 
 // ─── Public news / event helpers ──────────────────────────────────────────────
 
-export const _str = (v: unknown, fallback = ""): string => (typeof v === "string" ? v : fallback);
-
 const PRE_REVENUE_EPS_EPSILON = 1e-9;
-
-export function clampInt(value: number, fallback: number, min: number, max: number): number {
-  const n = Number.isFinite(value) ? Math.trunc(value) : fallback;
-  return Math.min(max, Math.max(min, n));
-}
-
-export type NewsCompanyIdentity = {
-  ticker: string;
-  shortName: string | null;
-  longName: string | null;
-  companyName: string | null;
-  website: string | null;
-  websiteHost: string | null;
-  websiteRoot: string | null;
-  exchange: string | null;
-  cik: string | null;
-  sources: string[];
-  confidence: "HIGH" | "MEDIUM" | "LOW";
-  warnings: Record<string, unknown>[];
-};
-
-export function finnhubEligibility(ticker: string): { eligible: boolean; reasonCode: string | null } {
-  const policy = newsSourceCapabilities.providers.finnhub;
-  const tickerU = ticker.toUpperCase();
-  const ineligible = policy.ineligibleTickers.includes(tickerU)
-    || policy.ineligibleTickerSuffixes.some(suffix => tickerU.endsWith(suffix));
-  return { eligible: !ineligible, reasonCode: ineligible ? policy.reasonCode : null };
-}
-
-function companyHostRoot(host: string): string {
-  let root = hostWithoutWww(host);
-  for (const prefix of ["investors.", "investor.", "ir.", "newsroom.", "news."]) {
-    if (root.startsWith(prefix)) root = root.slice(prefix.length);
-  }
-  return root;
-}
-
-function normalizeCompanyWebsite(raw: unknown): { url: string | null; host: string | null; root: string | null; warning: Record<string, unknown> | null } {
-  let text = _str(raw).trim();
-  if (!text) {
-    return {
-      url: null,
-      host: null,
-      root: null,
-      warning: { code: "COMPANY_WEBSITE_NOT_AVAILABLE", message: "No company website was available from public profile data.", severity: "warning" },
-    };
-  }
-  if (!/^https?:\/\//i.test(text)) text = `https://${text}`;
-  try {
-    const u = new URL(text);
-    if (!["http:", "https:"].includes(u.protocol)) {
-      return {
-        url: null,
-        host: null,
-        root: null,
-        warning: { code: "COMPANY_WEBSITE_NOT_AVAILABLE", message: `Company website uses unsupported scheme: ${u.protocol}`, severity: "warning" },
-      };
-    }
-    if (blockedCompanyWebsiteHost(u.hostname)) {
-      return {
-        url: null,
-        host: null,
-        root: null,
-        warning: { code: "COMPANY_WEBSITE_NOT_AVAILABLE", message: `Company website host is not an official company domain: ${u.hostname}`, severity: "warning" },
-      };
-    }
-    u.hash = "";
-    u.search = "";
-    u.pathname = "/";
-    const host = hostWithoutWww(u.hostname);
-    return { url: u.toString(), host, root: companyHostRoot(host), warning: null };
-  } catch {
-    return {
-      url: null,
-      host: null,
-      root: null,
-      warning: { code: "COMPANY_WEBSITE_NOT_AVAILABLE", message: "Company website URL from public profile data was malformed.", severity: "warning" },
-    };
-  }
-}
-
-export async function resolveNewsCompanyIdentity(ticker: string): Promise<NewsCompanyIdentity> {
-  const tickerU = ticker.toUpperCase();
-  const cached = companyIrIdentityCache.get(tickerU);
-  if (cached && Date.now() - cached.storedAt < COMPANY_IR_DISCOVERY_TTL_MS) return cached.value;
-
-  const warnings: Record<string, unknown>[] = [];
-  let shortName: string | null = null;
-  let longName: string | null = null;
-  let websiteRaw: unknown = null;
-  let exchange: string | null = null;
-  let cik: string | null = null;
-  const sources: string[] = [];
-
-  try {
-    const d = (await yGet(
-      yahooQuoteSummaryUrl(enc(tickerU), "price,summaryProfile,assetProfile,secFilings")
-    )) as Record<string, unknown>;
-    const result = (d?.quoteSummary as Record<string, unknown[]> | undefined)?.result?.[0] as Record<string, unknown> | undefined;
-    const price = result?.price as Record<string, unknown> | undefined;
-    const summaryProfile = result?.summaryProfile as Record<string, unknown> | undefined;
-    const assetProfile = result?.assetProfile as Record<string, unknown> | undefined;
-    const secFilings = result?.secFilings as Record<string, unknown> | undefined;
-    shortName = _str(price?.shortName || price?.displayName || price?.symbol || summaryProfile?.name) || null;
-    longName = _str(price?.longName || assetProfile?.longName || summaryProfile?.longName) || null;
-    websiteRaw = summaryProfile?.website ?? assetProfile?.website ?? null;
-    exchange = _str(price?.exchangeName || price?.fullExchangeName || price?.exchange) || null;
-    const cikRaw = secFilings?.cik;
-    if (cikRaw != null) cik = String(cikRaw).replace(/\D/g, "").padStart(10, "0");
-    sources.push("yahoo_profile");
-  } catch (e) {
-    warnings.push({
-      code: "COMPANY_IDENTITY_PROVIDER_ERROR",
-      message: `Yahoo profile identity lookup failed: ${e instanceof Error ? e.message : String(e)}`,
-      severity: "warning",
-    });
-  }
-
-  if (!cik) {
-    try {
-      cik = await resolveCikForTicker(tickerU);
-      if (cik) sources.push("sec_company_tickers");
-    } catch {
-      // CIK improves diagnostics but is not required for RSS discovery.
-    }
-  }
-
-  const website = normalizeCompanyWebsite(websiteRaw);
-  if (website.warning) warnings.push(website.warning);
-  const companyName = longName || shortName || null;
-  const confidence: NewsCompanyIdentity["confidence"] = website.url && companyName ? "HIGH" : (companyName || cik ? "MEDIUM" : "LOW");
-  const identity: NewsCompanyIdentity = {
-    ticker: tickerU,
-    shortName,
-    longName,
-    companyName,
-    website: website.url,
-    websiteHost: website.host,
-    websiteRoot: website.root,
-    exchange,
-    cik,
-    sources,
-    confidence,
-    warnings,
-  };
-  setBounded(companyIrIdentityCache, tickerU, { value: identity, storedAt: Date.now() }, COMPANY_IR_IDENTITY_CACHE_MAX);
-  return identity;
-}
 
 // ── get_sec_filing_index ───────────────────────────────────────────────────────
 
@@ -7961,28 +7610,6 @@ const _INDEX_KEYWORDS = [
   "customers", "long-lived assets", "risk factors", "americas", "europe",
   "japan", "asia", "rest of asia",
 ];
-
-export function _stripHtmlTagsIdx(html: string): string {
-  const sanitizedHtml = html
-    .replace(/<!--[\s\S]*?-->/g, " ")
-    .replace(/<script\b[^>]*>[\s\S]*?<\/script[^>]*>/gi, " ")
-    .replace(/<style\b[^>]*>[\s\S]*?<\/style[^>]*>/gi, " ")
-    .replace(/\s+on[a-z]+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, " ");
-  const blockBroken = sanitizedHtml
-    .replace(/<(?:br|\/p|\/div|\/li|\/tr|\/h[1-6]|\/section)\b[^>]*>/gi, "\n")
-    .replace(/<(?:p|div|li|tr|h[1-6]|section)\b[^>]*>/gi, "\n");
-  // Inline tags render without a break: "FINANC</span><span>IAL" is one word
-  // (ASTS 10-Q headings, 2.4.5). Whitespace written in the HTML still separates.
-  const noTags = blockBroken.replace(/<\/?(?:span|font|b|i|u|em|strong|a|sup|sub|small|ix:[a-z]+)\b[^>]*>/gi, "").replace(/<[^>]+>/g, " ");
-  const decoded = decodeHtmlEntities(noTags);
-  // A no-break space is a space (2.5.20): Python's ASCII \s would not match it in the mirrored readers.
-  const lines = decoded.split("\n").map(line => line.replace(/[ \t\u00a0]+/g, " ").trim());
-  return lines.filter(Boolean).join("\n");
-}
-
-function _sanitizeFilingHtml(html: string): string {
-  return sanitizeFilingHtml(html);
-}
 
 function _buildFilingIndexFromHtml(
   html: string,
@@ -9950,20 +9577,6 @@ export async function getEarningsCallTranscript(
         }
       : nextTranscriptFallback(attemptedSources),
   });
-}
-
-function parseObjectJson(raw: string): Record<string, unknown> {
-  try {
-    const parsed = JSON.parse(raw) as unknown;
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {};
-  } catch {
-    return {};
-  }
-}
-
-function compactExcerpt(text: unknown, maxLen = 240): string {
-  const cleaned = String(text ?? "").replace(/\s+/g, " ").trim();
-  return cleaned.length <= maxLen ? cleaned : `${cleaned.slice(0, maxLen).trimEnd()}...`;
 }
 
 const EXPOSURE_XBRL_TOKEN_RE = /\b(?:us-gaap|srt|country|dei):[A-Za-z0-9_.-]+\b/gi;
@@ -12394,14 +12007,6 @@ export async function querySecFilingIndex(
 
 function nowIsoUtc(): string {
   return new Date().toISOString();
-}
-
-export function toIsoUtc(ts: unknown): string | null {
-  if (typeof ts !== "string" || !ts.trim()) return null;
-  const s = ts.trim();
-  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return `${s}T00:00:00Z`;
-  const d = new Date(s);
-  return Number.isFinite(d.getTime()) ? d.toISOString() : null;
 }
 
 

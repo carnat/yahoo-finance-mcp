@@ -56,6 +56,8 @@ from yfmcp.util import (
     _utc_now_iso, _to_iso_utc, _parse_rss_date,
     _filter_paragraphs_by_topics, _safe_json_loads, _compact_excerpt,
     fetch_quote_summary_module, unwrap_yahoo_values, yahoo_iso, yahoo_raw,
+    _add_years, _clamp_int, _df_period_rows, _fy_number, _js_json_numbers, _nn, _now_iso, _plain, _unwrap_payload,
+    _utf16_length,
 )
 from yfmcp.clients.yahoo import _safe_parse, _valuation_market_inputs
 from yfmcp.clients.endpoints import _manual_lookup_payload, sec_archive_document_url, sec_company_concept_url, sec_company_facts_url, sec_filing_index_url
@@ -74,7 +76,6 @@ from yfmcp.deprecations import MIN_ADV_USD_DESCRIPTION, TOOL_RELIABILITY_CLASS a
 from yfmcp.fiscal_calendar import document_fiscal_year_focus, filing_fiscal_year_label, fiscal_year_naming
 from yfmcp import valuation_history as _vh
 from yfmcp.clients.edgar import (
-    _SEC_REQUIRED_UA,
     _resolve_cik_for_ticker, _get_submissions_for_ticker,
     _EDGAR_TICKERS, _EDGAR_TICKERS_LOADED_AT, _EDGAR_TTL,
     _load_edgar_tickers, _edgar_get, EdgarError,
@@ -2067,24 +2068,6 @@ _FILING_FACT_CONCEPTS: dict[FilingFactType, tuple[str, str | None]] = {
 }
 
 
-def _fy_number(value: Any) -> float:
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return 0.0
-
-
-def _js_json_numbers(value: Any) -> Any:
-    """The payload as JavaScript's JSON.stringify writes its numbers: an integral float is an int (2023994000.0 -> 2023994000)."""
-    if isinstance(value, float):
-        return int(value) if value.is_integer() else value
-    if isinstance(value, dict):
-        return {k: _js_json_numbers(v) for k, v in value.items()}
-    if isinstance(value, list):
-        return [_js_json_numbers(v) for v in value]
-    return value
-
-
 def _accession_not_found_error(ticker: str, accession_number: str) -> dict:
     """The Worker's accessionNotFoundError: an explicit accession missing from recent filings fails closed (2.13.0, R4 Q3a)."""
     return {
@@ -2182,11 +2165,6 @@ async def _resolve_sec_filing(ticker: str, requested_filing_type: str = "10-K", 
         "suggestedFilingTypes": ["20-F"] if requested == "10-K" and filing_type.upper() == "20-F" else [],
         "warnings": warnings,
     }, None
-
-
-def _utf16_length(text: str) -> int:
-    """A string's length as JavaScript counts it (UTF-16 code units)."""
-    return len(text.encode("utf-16-le", "surrogatepass")) // 2
 
 
 def _filing_has_relevant_geo_text(html: str, region: str) -> bool:
@@ -6423,11 +6401,6 @@ def _explicit_revenue_limitation_status(status: object, warnings: list | None = 
     return None
 
 
-def _nn(value: object, default: object = None) -> object:
-    """JavaScript's `value ?? default`: only None falls back, never "", 0 or False."""
-    return default if value is None else value
-
-
 async def _may_be_20f_filer(ticker: str) -> bool:
     _, submissions = await _get_submissions_for_ticker(ticker)
     if not isinstance(submissions, dict):
@@ -7184,22 +7157,6 @@ _IXBRL_DOCUMENT_MAX = 8
 _AWARD_TABLE_SEARCH_TERMS = ["unvested", "nonvested"]
 _ATM_SEARCH_TERMS = ["at-the-market", "at the market offering", "ATM program", "equity distribution agreement", "sales agreement"]
 _FUNDING_SEARCH_TERMS = ["sufficient to fund", "sufficient to meet", "fully funded", "going concern", "cash runway", "next twelve months", "next 12 months", "at-the-market", "capital expenditures"]
-
-
-def _unwrap_payload(raw: str) -> dict:
-    data = _safe_json_loads(raw)
-    if "ok" in data and isinstance(data.get("data"), dict):
-        return data["data"]
-    return data
-
-
-def _clamp_int(value: Any, fallback: int, low: int, high: int) -> int:
-    try:
-        number = float(value)
-        n = int(number) if math.isfinite(number) else fallback
-    except (TypeError, ValueError):
-        n = fallback
-    return min(high, max(low, n))
 
 
 def _resolve_failure(error: dict, ticker: str) -> str:
@@ -9127,31 +9084,6 @@ from yfmcp.clients.market_providers import fetch_alpha_vantage_json as _fetch_al
 
 # Estimates move slowly and the server's key allows 25 requests a day: one request per ticker per day (2.5.29).
 _ALPHA_VANTAGE_ESTIMATES_TTL_SECONDS = 24 * 60 * 60
-
-
-def _now_iso() -> str:
-    return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
-
-
-def _plain(value: Any) -> Any:
-    return value.item() if hasattr(value, "item") else value
-
-
-def _df_period_rows(df: Any) -> dict[str, dict]:
-    if df is None or getattr(df, "empty", True):
-        return {}
-    rows: dict[str, dict] = {}
-    for period, row in df.iterrows():
-        rows[str(period)] = {str(k): _plain(v) for k, v in row.items()}
-    return rows
-
-
-def _add_years(iso_date: str, years: int) -> str:
-    d = datetime.date.fromisoformat(iso_date)
-    try:
-        return d.replace(year=d.year + years).isoformat()
-    except ValueError:  # 29 February
-        return d.replace(year=d.year + years, day=28).isoformat()
 
 
 def _yahoo_consensus_snapshot(ticker: str) -> tuple[dict, dict]:

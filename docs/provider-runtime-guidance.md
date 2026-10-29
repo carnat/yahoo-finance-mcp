@@ -3190,6 +3190,33 @@ F-024, F-026, F-029). Both runtimes change alike.
 - **Tests:** 21 new parity cases in `scripts/parity/cases_audit_2251.py`.
 - **Rollback:** redeploy 2.25.0.
 
+## Shared Utilities Module Move (3.0.5)
+
+- **Why:** internal restructuring only (Phase 4 unit 5, planner decision D1 (a) and (c)). Release type: patch. No
+  behaviour change.
+- **What moved:**
+  - Worker: the generic helpers (`_str`, `clampInt`, `parseObjectJson`, `compactExcerpt`, `toIsoUtc`,
+    `getLastTradingDate`, `dailyBarDate`) to `worker/src/util.ts`; the batch runner (`runPartialBatch` and its
+    result shaping and concurrency helpers) to `worker/src/batch.ts`; the news company identity
+    (`resolveNewsCompanyIdentity`, its website normalisation and cache, `finnhubEligibility`) to
+    `worker/src/news/identity.ts`; and the two filing-index HTML helpers (`_stripHtmlTagsIdx`,
+    `_sanitizeFilingHtml`) to `worker/src/clients/html.ts`.
+  - Python: `_clamp_int`, `_now_iso`, `_plain`, `_df_period_rows`, `_add_years`, `_fy_number`, `_js_json_numbers`,
+    `_nn`, `_unwrap_payload` and `_utf16_length` to `yfmcp/util.py`.
+  - `news.ts` and the news providers no longer import `yahoo-finance.ts`.
+  - `server.py` drops its unused import of `_SEC_REQUIRED_UA`, so no SEC User-Agent reference remains outside the two
+    EDGAR clients (Phase 4 exit check 2).
+- **Topology rule (D1 (c)):** `extract_topology.py` gains a `DOMAIN_OVERRIDES` table. A tool handler or tool-only
+  helper that the call-graph rule placed in `shared` only because two or more domains call it is assigned to its
+  catalog domain (SEC filing selection and the filing-data tools to `sec`, the shared extractors to `extractors`,
+  the earnings-release reads to `earnings`, the analyst and consensus handlers to `fundamentals`, and so on). They
+  move in Phase 5. With the moves above, neither god file has a `shared` region left.
+- **Unchanged:** no tool name, input, output, schema, status, warning or ordering changed.
+- **Compatibility:** `yahoo-finance.ts` and `server.py` re-export the moved names other modules and tests read.
+- **Verification:** the moved Worker text keeps its line multiset (only `export` keywords and import lines differ);
+  the moved Python functions keep their `ast.dump`; tool listings (expanded and grouped) are byte-identical; every
+  new module evaluates as the sole entry; the parity harness passes with no expected value changed.
+
 ## Endpoint Builder (3.0.4)
 
 - **Why:** internal restructuring only (Phase 4 unit 4, decision D8). Release type: patch. No behaviour change.

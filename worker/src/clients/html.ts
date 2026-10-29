@@ -270,3 +270,25 @@ export function tableUnitScale(tableHtml: string, beforeHtml: string): "thousand
   if (before.length > 0) return scaleOf(before[before.length - 1]);
   return "unknown";
 }
+
+export function _stripHtmlTagsIdx(html: string): string {
+  const sanitizedHtml = html
+    .replace(/<!--[\s\S]*?-->/g, " ")
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script[^>]*>/gi, " ")
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style[^>]*>/gi, " ")
+    .replace(/\s+on[a-z]+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, " ");
+  const blockBroken = sanitizedHtml
+    .replace(/<(?:br|\/p|\/div|\/li|\/tr|\/h[1-6]|\/section)\b[^>]*>/gi, "\n")
+    .replace(/<(?:p|div|li|tr|h[1-6]|section)\b[^>]*>/gi, "\n");
+  // Inline tags render without a break: "FINANC</span><span>IAL" is one word
+  // (ASTS 10-Q headings, 2.4.5). Whitespace written in the HTML still separates.
+  const noTags = blockBroken.replace(/<\/?(?:span|font|b|i|u|em|strong|a|sup|sub|small|ix:[a-z]+)\b[^>]*>/gi, "").replace(/<[^>]+>/g, " ");
+  const decoded = decodeHtmlEntities(noTags);
+  // A no-break space is a space (2.5.20): Python's ASCII \s would not match it in the mirrored readers.
+  const lines = decoded.split("\n").map(line => line.replace(/[ \t\u00a0]+/g, " ").trim());
+  return lines.filter(Boolean).join("\n");
+}
+
+export function _sanitizeFilingHtml(html: string): string {
+  return sanitizeFilingHtml(html);
+}

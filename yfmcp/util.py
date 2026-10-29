@@ -7,7 +7,9 @@ import asyncio
 import datetime
 import email.utils as _email_utils
 import json
+import math
 import re as _re
+from typing import Any
 from yfmcp.clients.endpoints import YAHOO_QUOTE_SUMMARY_PREFIX_QUERY2
 
 
@@ -363,3 +365,72 @@ def fetch_quote_summary_module(ticker: str, module: str) -> dict | None:
     )
     results = ((data.get("quoteSummary") or {}).get("result")) if isinstance(data, dict) else None
     return results[0] if isinstance(results, list) and results and isinstance(results[0], dict) else None
+
+
+def _fy_number(value: Any) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _js_json_numbers(value: Any) -> Any:
+    """The payload as JavaScript's JSON.stringify writes its numbers: an integral float is an int (2023994000.0 -> 2023994000)."""
+    if isinstance(value, float):
+        return int(value) if value.is_integer() else value
+    if isinstance(value, dict):
+        return {k: _js_json_numbers(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_js_json_numbers(v) for v in value]
+    return value
+
+
+def _nn(value: object, default: object = None) -> object:
+    """JavaScript's `value ?? default`: only None falls back, never "", 0 or False."""
+    return default if value is None else value
+
+
+def _unwrap_payload(raw: str) -> dict:
+    data = _safe_json_loads(raw)
+    if "ok" in data and isinstance(data.get("data"), dict):
+        return data["data"]
+    return data
+
+
+def _clamp_int(value: Any, fallback: int, low: int, high: int) -> int:
+    try:
+        number = float(value)
+        n = int(number) if math.isfinite(number) else fallback
+    except (TypeError, ValueError):
+        n = fallback
+    return min(high, max(low, n))
+
+
+def _now_iso() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def _plain(value: Any) -> Any:
+    return value.item() if hasattr(value, "item") else value
+
+
+def _df_period_rows(df: Any) -> dict[str, dict]:
+    if df is None or getattr(df, "empty", True):
+        return {}
+    rows: dict[str, dict] = {}
+    for period, row in df.iterrows():
+        rows[str(period)] = {str(k): _plain(v) for k, v in row.items()}
+    return rows
+
+
+def _add_years(iso_date: str, years: int) -> str:
+    d = datetime.date.fromisoformat(iso_date)
+    try:
+        return d.replace(year=d.year + years).isoformat()
+    except ValueError:  # 29 February
+        return d.replace(year=d.year + years, day=28).isoformat()
+
+
+def _utf16_length(text: str) -> int:
+    """A string's length as JavaScript counts it (UTF-16 code units)."""
+    return len(text.encode("utf-16-le", "surrogatepass")) // 2
