@@ -28,7 +28,6 @@ from scripts.parity.cases_pricing_evidence_tools import (
 )
 from scripts.parity.cases_accession import _python_sec_state
 from scripts.parity.harness import Case
-from scripts.parity.cases_notices_2270 import CONFIDENCE_NOTICE
 
 import server  # noqa: F401,E402
 from yfmcp.envelope import _envelope_tool_result  # noqa: E402
@@ -36,12 +35,6 @@ from yfmcp.tools import news as news_tools  # noqa: E402
 from yfmcp.news.providers import yahoo as yahoo_provider  # noqa: E402
 
 CASES: list[Case] = []
-
-REMOVAL = "will be removed in the next major version"
-
-
-def _notice(fields: list[str], replacement: str, message: str) -> dict:
-    return {"code": "DEPRECATED_FIELD", "message": message, "severity": "info", "fields": fields, "replacement": replacement}
 
 
 
@@ -347,16 +340,16 @@ CASES += [
                routes=SECTION_ROUTES, ids=("Q14-N1",),
                expect={"ok": True, "metaReliabilityClass": "UNRELIABLE", "dataReliabilityClass": "UNRELIABLE", "dataHasReliabilityClass": True}),
     # 3.0.0: neither runtime emits doctrineUse or the status table's meta.decisionGrade, and neither gives their notices.
-    # A status string in confidence still gets the F20 notice in both runtimes (the fact and section fixtures).
+    # F20 (3.0.0): a status string in confidence moves to status; no DEPRECATED_FIELD notice remains.
     _tool_case("neutral.n1.doctrine_use_and_meta_decision_grade_are_gone_press_releases", PRESS[0], PRESS[1], PRESS[2],
                _doctrine_view, expect={"metaHasDoctrineUse": False, "dataHasDoctrineUse": False, "metaHasDecisionGrade": False, "warnings": []}),
     _tool_case("neutral.n1.doctrine_use_and_meta_decision_grade_are_gone_extract_sec_filing_fact", FACT[0], FACT[1], FACT[2],
                _doctrine_view, expect={"metaHasDoctrineUse": False, "dataHasDoctrineUse": False, "metaHasDecisionGrade": False,
-                                       "warnings": [CONFIDENCE_NOTICE]}),
+                                       "warnings": []}),
     _tool_case("neutral.n1.doctrine_use_and_meta_decision_grade_are_gone_section_markdown", SECTION[0], SECTION[1], SECTION[2],
                _doctrine_view, routes=SECTION_ROUTES,
                expect={"metaHasDoctrineUse": False, "dataHasDoctrineUse": False, "metaHasDecisionGrade": False,
-                       "warnings": [CONFIDENCE_NOTICE]}),
+                       "warnings": []}),
 ]
 
 
@@ -371,7 +364,7 @@ def _section_view(v: dict) -> dict:
 CASES.append(_tool_case(
     "neutral.n1.finding_section_markdown_status_decision_grade_and_warning_differ", SECTION[0], SECTION[1], SECTION[2],
     _section_view, routes=SECTION_ROUTES,
-    expect={"status": "SECTION_MARKDOWN_UNVERIFIED", "decisionGrade": False, "confidence": "NOT_DECISION_GRADE",
+    expect={"status": "SECTION_MARKDOWN_UNVERIFIED", "decisionGrade": False, "confidence": None,
             "warningCodes": ["LIVE_SECTION_EXTRACTION_UNRELIABLE"], "hasWarnings": True,
             "source": "html_parser_fallback", "section": "Item 1A. Risk Factors"}))
 
@@ -545,46 +538,3 @@ CASES.append(Case(
     expect_ts={"ratingCount": 7, "numberOfAnalysts": 7, "totalAnalysts": None, "targetContributors": 3}))
 
 
-# ══════════════════════════════════════════════════════════════════════════════════════
-# Notice selection (Q14-N1..N3): 3.0.0 removed every notice except F20, so a payload that still carries one of the
-# removed keys (or any other shape) gets no DEPRECATED_FIELD notice in either runtime.
-# ══════════════════════════════════════════════════════════════════════════════════════
-
-from yfmcp.deprecations import deprecation_warnings_for  # noqa: E402
-
-_VOLUME = "check_volume_liquidity_threshold"
-_NOTICE_SHAPES = [
-    # (label, tool, evidence_only, data)
-    ("price_target_key_present_with_null_value", "calculate_price_target_distance", False, {"bracket": None}),
-    ("price_target_only_tag_note", "calculate_price_target_distance", False, {"tagNote": "x"}),
-    ("price_target_none_of_the_fields", "calculate_price_target_distance", False, {"priceAtOrAboveTarget": True}),
-    ("price_target_batch_keyed_by_ticker", "calculate_price_target_distance", False,
-     {"AAA": {"error": True}, "BBB": {"inferredTag": "LONG"}}),
-    ("volume_gate_stale_payload_still_has_gate_pass", _VOLUME, False, {"status": "STALE_BAR", "gatePass": None}),
-    ("volume_gate_only_the_new_fields", _VOLUME, False, {"meetsMinimum": True, "minAdvUsd": 5}),
-    ("volume_gate_batch_keyed_by_ticker", _VOLUME, False, {"AAA": {"gateThresholdUsd": 1}}),
-    ("snapshot_dotted_path_present", "get_market_snapshot", False, {"volume": {"liquidityGatePass": None}}),
-    ("snapshot_volume_without_the_removed_key", "get_market_snapshot", False, {"volume": {"meetsMinimum": True}}),
-    ("snapshot_batch_under_tickers", "get_market_snapshot", False,
-     {"tickers": {"AAA": {"volume": {"liquidityGatePass": True}}}, "truncated": False}),
-    ("snapshot_batch_entry_without_volume", "get_market_snapshot", False, {"tickers": {"AAA": {"error": True}}}),
-    ("position_one_group_is_enough", "analyze_position_signals", False, {"t5_inputs": {}}),
-    ("position_batch_keyed_by_ticker", "analyze_position_signals", False, {"AAA": {"t1_inputs": {}}}),
-    ("position_new_groups_only", "analyze_position_signals", False, {"analystInputs": {}}),
-    ("evidence_only_null_field_present", "get_evidence_quality", True, {"g2": None}),
-    ("evidence_only_action_not_flagged", "get_evidence_quality", False, {"g2": None}),
-    ("evidence_only_without_the_fields", "get_evidence_quality", True, {"decisionUse": "EVIDENCE_ONLY"}),
-    ("evidence_only_list_payload", "get_evidence_quality", True, [{"g2": None}]),
-    ("unrelated_tool_with_a_gate_pass_key", "get_market_quote", False, {"gatePass": True, "bracket": 1}),
-]
-
-
-def _notice_case(label: str, tool: str, evidence_only: bool, data) -> Case:
-    return Case(
-        name=f"neutral.notice_selection.{label}", ids=["Q14-N2", "Q14-N3"],
-        py=lambda: deprecation_warnings_for(tool, data, evidence_only=evidence_only),
-        ts={"js": "return m.deprecations.deprecationWarningsFor(args[0], args[1]);", "args": [tool, data]},
-        select=lambda v: [w["replacement"] for w in v], expect=[])
-
-
-CASES += [_notice_case(*shape) for shape in _NOTICE_SHAPES]

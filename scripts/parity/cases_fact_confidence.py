@@ -1,9 +1,10 @@
 """Parity cases: R5-shared (2.21.0), the untagged-fact confidence default becomes LOW (BR-ENV-001, R5SHARED_SPEC.md).
 
 Both enrichers (Python `yfmcp/envelope.py` `_enrich_facts`, Worker `worker/src/response.ts` `enrichFacts`) give a fact-shaped
-dict with no own or inherited `confidence` the value LOW when `value`, `low` or `valueRatio` is non-null (HIGH before 2.21.0),
-and NOT_DECISION_GRADE otherwise. The normalisation (upper-case; NOT_DISCLOSED -> NOT_DECISION_GRADE; any other value -> LOW)
-is unchanged.
+dict with no own or inherited `confidence` the value LOW when `value`, `low` or `valueRatio` is non-null (HIGH before 2.21.0).
+3.0.0 (F20): without a value the confidence is null (it was NOT_DECISION_GRADE), and a fact's own string that is not
+HIGH, MEDIUM or LOW (after upper-casing) moves to `status` when the fact has none and confidence is null (it was
+NOT_DECISION_GRADE for NOT_DISCLOSED and LOW for any other string).
 
 The producers that reached the default (spec section 1):
   A. get_analyst_consensus priceTargets               -> LOW (both runtimes)
@@ -62,16 +63,17 @@ def _default_view(v: dict) -> dict:
     return {"untaggedValue": d["untaggedValue"]["confidence"], "untaggedLow": d["untaggedLow"]["confidence"],
             "untaggedRatio": d["untaggedRatio"]["confidence"], "onlyHigh": d["onlyHigh"]["confidence"],
             "nullValue": d["nullValue"]["confidence"], "taggedHigh": d["taggedHigh"]["confidence"],
-            "notDisclosed": d["notDisclosed"]["confidence"], "otherString": d["otherString"]["confidence"],
-            "inheritedFromParent": d["parent"]["child"]["confidence"], "inheritedFromFact": d["taggedFact"]["inner"]["confidence"]}
+            "notDisclosed": [d["notDisclosed"]["confidence"], d["notDisclosed"].get("status")],
+            "otherString": [d["otherString"]["confidence"], d["otherString"].get("status")],
+            "nullValueStatus": d["nullValue"].get("status"), "inheritedFromParent": d["parent"]["child"]["confidence"], "inheritedFromFact": d["taggedFact"]["inner"]["confidence"]}
 
 
-_DEFAULT_TS = {"untaggedValue": "LOW", "untaggedLow": "LOW", "untaggedRatio": "LOW", "onlyHigh": "NOT_DECISION_GRADE",
-               "nullValue": "NOT_DECISION_GRADE", "taggedHigh": "HIGH", "notDisclosed": "NOT_DECISION_GRADE", "otherString": "LOW",
-               "inheritedFromParent": "MEDIUM", "inheritedFromFact": "HIGH"}
+_DEFAULT_TS = {"untaggedValue": "LOW", "untaggedLow": "LOW", "untaggedRatio": "LOW", "onlyHigh": None,
+               "nullValue": None, "taggedHigh": "HIGH", "notDisclosed": [None, "not_disclosed"], "otherString": [None, "EXTRACTION_FAILED"],
+               "nullValueStatus": None, "inheritedFromParent": "MEDIUM", "inheritedFromFact": "HIGH"}
 
 CASES += [
-    Case(name="confidence.default.untagged_fact_with_a_value_is_low_only_high_is_not_decision_grade_inherited_wins",
+    Case(name="confidence.default.untagged_fact_with_a_value_is_low_no_value_is_null_status_strings_move_to_status_inherited_wins",
          ids=["BR-ENV-001"],
          py=lambda: _envelope_tool_result("extract_sec_filing_fact", json.dumps(_DEFAULT_PAYLOAD)),
          ts={"js": _worker("return JSON.parse(m.response.mcpSuccess(args[0], args[1]));"),

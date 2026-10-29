@@ -273,8 +273,11 @@ def _check_axti_not_disclosed_schema(data: dict) -> None:
     extraction = data.get("extractionMethod")
     if extraction not in (None, "NONE", "NOT_DISCLOSED"):
         raise AssertionError(f"AXTI: extractionMethod should be NONE/NOT_DISCLOSED, got {extraction!r}")
-    if confidence not in ("NOT_DISCLOSED", "NOT_DECISION_GRADE"):
-        raise AssertionError(f"AXTI: confidence should be NOT_DISCLOSED/NOT_DECISION_GRADE, got {confidence!r}")
+    # 3.0.0 (F20): confidence holds only HIGH/MEDIUM/LOW or null; the limitation is the payload's status.
+    if confidence is not None:
+        raise AssertionError(f"AXTI: confidence should be null for an undisclosed value, got {confidence!r}")
+    if status not in ("NOT_DISCLOSED", "NOT_DECISION_GRADE"):
+        raise AssertionError(f"AXTI: status should be NOT_DISCLOSED/NOT_DECISION_GRADE, got {status!r}")
 
 
 def _check_geographic_revenue_schema(data: dict, label: str, require_positive: bool = False) -> bool:
@@ -362,8 +365,12 @@ def _check_geographic_revenue_schema(data: dict, label: str, require_positive: b
     if observed_statuses & explicit_limitations:
         print(f"  {label}: tolerated explicit limitation {sorted(observed_statuses & explicit_limitations)}")
         return False
-    if confidence not in ("NOT_DISCLOSED", "NOT_FOUND", "NOT_DECISION_GRADE"):
-        raise AssertionError(f"{label}: expected NOT_DISCLOSED/NOT_FOUND/NOT_DECISION_GRADE confidence, got {confidence!r}")
+    # 3.0.0 (F20): confidence is null here and the limitation is the payload's status.
+    outcome = data.get("status")
+    if confidence is not None:
+        raise AssertionError(f"{label}: confidence should be null for an undisclosed or unfound value, got {confidence!r}")
+    if outcome not in ("NOT_DISCLOSED", "NOT_FOUND", "NOT_DECISION_GRADE"):
+        raise AssertionError(f"{label}: expected NOT_DISCLOSED/NOT_FOUND/NOT_DECISION_GRADE status, got {outcome!r}")
 
     stable_null_keys = (
         "value",
@@ -376,7 +383,7 @@ def _check_geographic_revenue_schema(data: dict, label: str, require_positive: b
     for key in stable_null_keys:
         if key in data and data.get(key) is not None:
             raise AssertionError(f"{label}: {key} should be null in NOT_DISCLOSED/NOT_FOUND payload")
-    if confidence == "NOT_DISCLOSED":
+    if outcome == "NOT_DISCLOSED":
         evidence = data.get("evidence")
         if isinstance(evidence, list) and evidence:
             evidence = evidence[0]

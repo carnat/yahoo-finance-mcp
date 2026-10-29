@@ -121,24 +121,53 @@ def _annual_fiscal_year(rows: list[dict], r: dict) -> tuple[int, str, dict]:
 
 
 LABEL_BASIS = ("FY<yyyy> is the issuer's fiscal year (SEC fy/fp) when companyfacts gives it, else the fiscal year ending in that year; "
-               "Q<n> <yyyy> is the calendar quarter of the period end (fiscalQuarter gives the issuer's)")
+               "FY<yyyy> Q<n> is the issuer's fiscal quarter (SEC fy/fp of the filing that first reported it, else counted from the prior fiscal year end)")
 
 
-RECONCILE_PERIOD_HELP = "period must be latest_quarter, latest_annual, FY<yyyy> or Q<n> <yyyy>."
+RECONCILE_PERIOD_HELP = "period must be latest, FY<yyyy> or FY<yyyy> Q<n>."
+
+RECONCILE_PERIOD_DESCRIPTION = ("latest (the latest quarter), FY<yyyy> (the issuer's fiscal year from SEC fy/fp, else the fiscal year ending in that year) "
+                                "or FY<yyyy> Q<n> (the issuer's fiscal quarter)")
 
 
 def is_reconcile_period(spec: Any) -> bool:
-    """The Worker's isReconcilePeriod (2.26.5, F60): a period reconcile_metric_sources can read."""
-    return re.fullmatch(r"(?:latest_quarter|latest_annual|FY\s?\d{4}|Q[1-4]\s?\d{4})", str(spec if spec is not None else "").strip(), re.I) is not None
+    """The Worker's isReconcilePeriod (3.0.0, F60): a period reconcile_metric_sources can read."""
+    return re.fullmatch(r"(?:latest|FY\s?\d{4}(?:\s+Q[1-4])?)", str(spec if spec is not None else "").strip(), re.I) is not None
+
+
+def _quarter_fiscal_identity(rows: list[dict], best: dict) -> dict:
+    """The Worker's quarterFiscalIdentity: the fiscal quarter and year(s) the issuer gives a quarter row, from companyfacts."""
+    first = _first_reported(rows, best)
+    fy = first["fy"] if first else None
+    fp = first["fp"] if first else None
+    end_year = int(best["end"][:4])
+    prior_ends = sorted(r["end"] for r in rows if _is_annual(r) and r["end"] < best["end"])
+    prior = prior_ends[-1] if prior_ends else None
+    prior_year = int(prior[:4]) if prior else None
+    counted = min(4, max(1, math.floor(_days(prior, best["end"]) / 91.25 + 0.5))) if prior else None
+    fp_quarter = int(fp[1]) if fp and re.fullmatch(r"Q[1-3]", fp) else 4 if fp == "FY" else None
+    fy_fits = fy is not None and (fy in (end_year, end_year + 1, end_year - 1) if prior_year is None else fy in (prior_year, prior_year + 1))
+    if fy is not None and fp_quarter is not None and fy_fits and (counted is None or counted == fp_quarter):
+        return {"fiscalQuarter": fp_quarter, "fiscalYears": [fy], "fiscalYearSource": "SEC_FY_FP",
+                "fiscalBasis": f"companyfacts fy {fy} fp {fp} of the filing that first reported the period ({first['accn']})"}
+    if prior and counted is not None and prior_year is not None:
+        fiscal_years = [prior_year + 1, prior_year] if int(prior[5:7]) <= 3 else [prior_year + 1]
+        fiscal = {"fiscalQuarter": counted, "fiscalYears": fiscal_years, "fiscalYearSource": "DERIVED_FROM_PRIOR_YEAR_END",
+                  "fiscalBasis": f"counted from the prior fiscal year end {prior}"}
+        if len(fiscal_years) > 1:
+            fiscal["fiscalYearAmbiguous"] = True
+        if fy is not None or fp is not None:
+            fiscal["fiscalMetadataNotUsed"] = {"fy": fy, "fp": fp}
+        return fiscal
+    return {}
 
 
 def resolve_period(companyfacts: Any, metric: str, spec: str) -> dict:
-    """The period a spec names.
+    """The period a spec names (3.0.0, F60: one vocabulary across tools).
 
-    latest_quarter, latest_annual, FY<year> (the issuer's fiscal year, else
-    the fiscal year ending in that year) or Q<n> <year> (the quarter ending in
-    that calendar quarter). Instants take the end of the matching revenue
-    period.
+    latest (the latest quarter), FY<year> (the issuer's fiscal year, else the
+    fiscal year ending in that year) or FY<year> Q<n> (the issuer's fiscal
+    quarter). Instants take the end of the matching revenue period.
     """
     # The company's reporting periods come from its revenue (ASTS stopped tagging undimensioned EPS in 2022,
     # so its own latest EPS quarter is not the latest quarter); without revenue, the metric's own or net income's.
@@ -146,12 +175,9 @@ def resolve_period(companyfacts: Any, metric: str, spec: str) -> dict:
     if not rows:
         _, _, rows = metric_facts(companyfacts, metric if METRICS[metric]["kind"] == "duration" else "net_income")
     text = spec.strip()
-    if re.fullmatch(r"latest_quarter", text, re.I):
+    if re.fullmatch(r"latest", text, re.I):
         period_type = "QUARTER"
         candidates = [r for r in rows if _is_quarter(r)]
-    elif re.fullmatch(r"latest_annual", text, re.I):
-        period_type = "ANNUAL"
-        candidates = [r for r in rows if _is_annual(r)]
     elif (m := re.fullmatch(r"FY\s?(\d{4})", text, re.I)):
         period_type = "ANNUAL"
         # By the issuer's fiscal year where companyfacts names it; a period the issuer names is never chosen
@@ -161,15 +187,20 @@ def resolve_period(companyfacts: Any, metric: str, spec: str) -> dict:
         named = [(r, fid) for r, fid in named if fid[0] == year]
         by_sec = [(r, fid) for r, fid in named if fid[1] == "SEC_FY_FP"]
         candidates = [r for r, _ in (by_sec or named)]
-    elif (m := re.fullmatch(r"Q([1-4])\s?(\d{4})", text, re.I)):
+    elif (m := re.fullmatch(r"FY\s?(\d{4})\s+Q([1-4])", text, re.I)):
         period_type = "QUARTER"
-        q = int(m.group(1))
-        year = m.group(2)
-        candidates = [r for r in rows if _is_quarter(r) and r["end"][:4] == year and math.ceil(int(r["end"][5:7]) / 3) == q]
+        # By the issuer's fiscal quarter: SEC fy/fp where companyfacts names it, else counted from the prior
+        # fiscal year end, as fiscalQuarter/fiscalYears report it.
+        year = int(m.group(1))
+        q = int(m.group(2))
+        named = [(r, _quarter_fiscal_identity(rows, r)) for r in rows if _is_quarter(r)]
+        named = [(r, fid) for r, fid in named if fid.get("fiscalQuarter") == q and year in (fid.get("fiscalYears") or [])]
+        by_sec = [(r, fid) for r, fid in named if fid.get("fiscalYearSource") == "SEC_FY_FP"]
+        candidates = [r for r, _ in (by_sec or named)]
     else:
-        return {"status": "INVALID_PERIOD", "message": "period must be latest_quarter, latest_annual, FY<yyyy> or Q<n> <yyyy>."}
+        return {"status": "INVALID_PERIOD", "message": RECONCILE_PERIOD_HELP}
     if not candidates:
-        if re.match(r"FY", text, re.I):
+        if period_type == "ANNUAL":
             fy_years = sorted({_annual_fiscal_year(rows, r)[0] for r in rows if _is_annual(r)})
             asked = re.sub(r"^FY\s?", "", text, flags=re.I)
             return {"status": "PERIOD_NOT_FOUND", "spec": text, "periodType": period_type,
@@ -186,26 +217,9 @@ def resolve_period(companyfacts: Any, metric: str, spec: str) -> dict:
     first = _first_reported(rows, best)
     fy = first["fy"] if first else None
     fp = first["fp"] if first else None
-    end_year = int(best["end"][:4])
     fiscal: dict = {}
     if period_type == "QUARTER":
-        prior_ends = sorted(r["end"] for r in rows if _is_annual(r) and r["end"] < best["end"])
-        prior = prior_ends[-1] if prior_ends else None
-        prior_year = int(prior[:4]) if prior else None
-        counted = min(4, max(1, math.floor(_days(prior, best["end"]) / 91.25 + 0.5))) if prior else None
-        fp_quarter = int(fp[1]) if fp and re.fullmatch(r"Q[1-3]", fp) else 4 if fp == "FY" else None
-        fy_fits = fy is not None and (fy in (end_year, end_year + 1, end_year - 1) if prior_year is None else fy in (prior_year, prior_year + 1))
-        if fy is not None and fp_quarter is not None and fy_fits and (counted is None or counted == fp_quarter):
-            fiscal = {"fiscalQuarter": fp_quarter, "fiscalYears": [fy], "fiscalYearSource": "SEC_FY_FP",
-                      "fiscalBasis": f"companyfacts fy {fy} fp {fp} of the filing that first reported the period ({first['accn']})"}
-        elif prior and counted is not None and prior_year is not None:
-            fiscal_years = [prior_year + 1, prior_year] if int(prior[5:7]) <= 3 else [prior_year + 1]
-            fiscal = {"fiscalQuarter": counted, "fiscalYears": fiscal_years, "fiscalYearSource": "DERIVED_FROM_PRIOR_YEAR_END",
-                      "fiscalBasis": f"counted from the prior fiscal year end {prior}"}
-            if len(fiscal_years) > 1:
-                fiscal["fiscalYearAmbiguous"] = True
-            if fy is not None or fp is not None:
-                fiscal["fiscalMetadataNotUsed"] = {"fy": fy, "fp": fp}
+        fiscal = _quarter_fiscal_identity(rows, best)
     else:
         year_id, source, _ = _annual_fiscal_year(rows, best)
         if source == "SEC_FY_FP":

@@ -1282,7 +1282,9 @@ RECON_OBS_CASES = [
 _RECON_FACTS = {"facts": {"us-gaap": {"RevenueFromContractWithCustomerIncludingAssessedTax": _usd(
     _f("2025-04-01", "2025-06-30", 20_000_000, "10-Q", "2025-08-11", "q225"),
     _f("2025-04-01", "2025-06-30", 21_000_000, "10-Q", "2026-08-10", "q226"),
-    _f("2026-04-01", "2026-06-30", 31_512_000, "10-Q", "2026-08-10", "q226"))}}}
+    _f("2026-04-01", "2026-06-30", 31_512_000, "10-Q", "2026-08-10", "q226"),
+    # The prior fiscal year end that dates the 2025 quarter as FY2025 Q2 (3.0.0, F60: no calendar-quarter form).
+    _f("2024-01-01", "2024-12-31", 44_000_000, "10-K", "2025-03-03", "k24"))}}}
 _RELEASE = {"status": "READ", "url": "https://www.sec.gov/r.htm", "filingDate": "2026-08-10", "accessionNumber": "r1",
             "text": "Second quarter 2026 revenue was $31.5 million from government and commercial customers."}
 _RELEASE_JS = ("const [facts, metric, spec, releases, rows, tol] = args; const mrm = m.metricReconciliation; "
@@ -1311,35 +1313,35 @@ def _recon_expect(status, comparisons, *, restated=False, agreeing=(), found=("S
 
 RECON_FLOW_CASES = [
     # Card BR-VAL-020: SEC and Yahoo both found revenue within tolerance, release not found -> AGREED, providersAgreeingWithSec ['YAHOO'], independentChecks 1.
-    _recon("val.recon.card_020_sec_and_yahoo_agree_release_not_found", ["BR-VAL-020", "BR-VAL-019", "BR-VAL-022"], "latest_quarter", [],
+    _recon("val.recon.card_020_sec_and_yahoo_agree_release_not_found", ["BR-VAL-020", "BR-VAL-019", "BR-VAL-022"], "latest", [],
            [{"date": "2026-06-30", "totalRevenue": 31_520_000.0}], 0.5,
            _recon_expect("AGREED", [[_SEC1, "MATCH", 31_512_000, 0, 0, 157_560], [_YAH, "MATCH", 31_520_000, 8_000, 0.0254, 157_560]], agreeing=["YAHOO"], found=("SEC", "YAHOO"))),
     # Release text read through the whole path: "$31.5 million" has precision 50,000 and matches 31,512,000 (card BR-VAL-021).
-    _recon("val.recon.release_text_precision_through_full_path", ["BR-VAL-021", "BR-VAL-019", "BR-VAL-022"], "latest_quarter", [_RELEASE], None, 0.5,
+    _recon("val.recon.release_text_precision_through_full_path", ["BR-VAL-021", "BR-VAL-019", "BR-VAL-022"], "latest", [_RELEASE], None, 0.5,
            _recon_expect("AGREED", [[_SEC1, "MATCH", 31_512_000, 0, 0, 157_560], [_REL, "MATCH", 31_500_000, -12_000, -0.0381, 157_560]], agreeing=["ISSUER_RELEASE"], found=("SEC", "ISSUER_RELEASE"))),
-    _recon("val.recon.release_and_yahoo_both_agree", ["BR-VAL-019", "BR-VAL-020", "BR-VAL-022"], "latest_quarter", [_RELEASE], [{"date": "2026-06-30", "totalRevenue": 31_512_000.0}], 0.5,
+    _recon("val.recon.release_and_yahoo_both_agree", ["BR-VAL-019", "BR-VAL-020", "BR-VAL-022"], "latest", [_RELEASE], [{"date": "2026-06-30", "totalRevenue": 31_512_000.0}], 0.5,
            _recon_expect("AGREED", [[_SEC1, "MATCH", 31_512_000, 0, 0, 157_560], [_REL, "MATCH", 31_500_000, -12_000, -0.0381, 157_560], [_YAH, "MATCH", 31_512_000, 0, 0, 157_560]],
                          agreeing=["ISSUER_RELEASE", "YAHOO"], found=("SEC", "ISSUER_RELEASE", "YAHOO"))),
-    _recon("val.recon.yahoo_dates_within_7_days_matched", ["BR-VAL-022"], "latest_quarter", [], [{"date": "2026-07-07", "totalRevenue": 31_512_000.0}], 0.5,
+    _recon("val.recon.yahoo_dates_within_7_days_matched", ["BR-VAL-022"], "latest", [], [{"date": "2026-07-07", "totalRevenue": 31_512_000.0}], 0.5,
            _recon_expect("AGREED", [[_SEC1, "MATCH", 31_512_000, 0, 0, 157_560], [_YAH, "MATCH", 31_512_000, 0, 0, 157_560]], agreeing=["YAHOO"], found=("SEC", "YAHOO"))),
-    _recon("val.recon.yahoo_row_8_days_off_not_found", ["BR-VAL-022"], "latest_quarter", [], [{"date": "2026-07-08", "totalRevenue": 31_512_000.0}], 0.5,
+    _recon("val.recon.yahoo_row_8_days_off_not_found", ["BR-VAL-022"], "latest", [], [{"date": "2026-07-08", "totalRevenue": 31_512_000.0}], 0.5,
            _recon_expect("PARTIAL", [[_SEC1, "MATCH", 31_512_000, 0, 0, 157_560]])),
     # Two SEC observations are one provider; a restated value alone is PARTIAL and restated, never a conflict.
-    _recon("val.recon.restated_sec_value_alone_is_partial", ["BR-VAL-019", "BR-VAL-020", "BR-VAL-022"], "Q2 2025", [], None, 0.5,
+    _recon("val.recon.restated_sec_value_alone_is_partial", ["BR-VAL-019", "BR-VAL-020", "BR-VAL-022"], "FY2025 Q2", [], None, 0.5,
            _recon_expect("PARTIAL", [[_SEC1, "RESTATED", 20_000_000, -1_000_000, -4.7619, 105_000]], restated=True)),
     # Restatement + AGREED: Yahoo matches the latest (21.0M) value, so the restated first-filed value does not stop AGREED.
-    _recon("val.recon.restatement_with_yahoo_match_is_agreed", ["BR-VAL-019", "BR-VAL-020", "BR-VAL-022"], "Q2 2025", [], [{"date": "2025-06-30", "totalRevenue": 21_000_000.0}], 0.5,
+    _recon("val.recon.restatement_with_yahoo_match_is_agreed", ["BR-VAL-019", "BR-VAL-020", "BR-VAL-022"], "FY2025 Q2", [], [{"date": "2025-06-30", "totalRevenue": 21_000_000.0}], 0.5,
            _recon_expect("AGREED", [[_SEC1, "RESTATED", 20_000_000, -1_000_000, -4.7619, 105_000], [_YAH, "MATCH", 21_000_000, 0, 0, 105_000]],
                          restated=True, agreeing=["YAHOO"], found=("SEC", "YAHOO"))),
     # Yahoo holding the first-filed value (20.0M) disagrees with the latest SEC value: a conflict as well as a restatement.
-    _recon("val.recon.yahoo_with_first_filed_value_conflicts", ["BR-VAL-020", "BR-VAL-022"], "Q2 2025", [], [{"date": "2025-06-30", "totalRevenue": 20_000_000.0}], 0.5,
+    _recon("val.recon.yahoo_with_first_filed_value_conflicts", ["BR-VAL-020", "BR-VAL-022"], "FY2025 Q2", [], [{"date": "2025-06-30", "totalRevenue": 20_000_000.0}], 0.5,
            _recon_expect("CONFLICT", [[_SEC1, "RESTATED", 20_000_000, -1_000_000, -4.7619, 105_000], [_YAH, "MISMATCH", 20_000_000, -1_000_000, -4.7619, 105_000]],
                          restated=True, found=("SEC", "YAHOO"))),
-    _recon("val.recon.release_mismatch_beats_yahoo_match", ["BR-VAL-020", "BR-VAL-022"], "latest_quarter",
+    _recon("val.recon.release_mismatch_beats_yahoo_match", ["BR-VAL-020", "BR-VAL-022"], "latest",
            [{**_RELEASE, "text": "Second quarter 2026 revenue was $33.0 million."}], [{"date": "2026-06-30", "totalRevenue": 31_512_000.0}], 0.5,
            _recon_expect("CONFLICT", [[_SEC1, "MATCH", 31_512_000, 0, 0, 157_560], [_REL, "MISMATCH", 33_000_000, 1_488_000, 4.722, 157_560], [_YAH, "MATCH", 31_512_000, 0, 0, 157_560]],
                          agreeing=["YAHOO"], found=("SEC", "ISSUER_RELEASE", "YAHOO"))),
-    _recon("val.recon.nothing_found_net_income_is_not_found", ["BR-VAL-020", "BR-VAL-022"], "latest_quarter", [], None, 0.5,
+    _recon("val.recon.nothing_found_net_income_is_not_found", ["BR-VAL-020", "BR-VAL-022"], "latest", [], None, 0.5,
            _recon_expect("NOT_FOUND", [], found=()), metric="net_income"),
 ]
 
@@ -1370,8 +1372,8 @@ def _nsel(v: list) -> list:
 
 def _secobs(name: str, ids: list[str], facts: dict, expect: list, metric: str = "net_income", **kw) -> Case:
     return Case(name=name, ids=ids,
-                py=lambda: mr.sec_observations(facts, metric, mr.resolve_period(facts, metric, "latest_annual")),
-                ts={"js": "const p = m.metricReconciliation.resolvePeriod(args[0], args[1], 'latest_annual'); return m.metricReconciliation.secObservations(args[0], args[1], p);",
+                py=lambda: mr.sec_observations(facts, metric, mr.resolve_period(facts, metric, "FY2025")),
+                ts={"js": "const p = m.metricReconciliation.resolvePeriod(args[0], args[1], 'FY2025'); return m.metricReconciliation.secObservations(args[0], args[1], p);",
                     "args": [facts, metric]},
                 select=_nsel, expect=expect, **kw)
 
@@ -1469,14 +1471,14 @@ def _tolerances_py(values: list) -> list:
     out = []
     with patch.dict(edgar._FILING_CIK_CACHE, {"TST": "0001234567"}), patch.object(server, "_yahoo_statement_rows_sync", no_yahoo):
         for v in values:
-            args = ("TST", "revenue", "latest_quarter") + (() if v == _OMIT else (v,))
+            args = ("TST", "revenue", "latest") + (() if v == _OMIT else (v,))
             result = json.loads(asyncio.run(server.reconcile_metric_sources(*args)))
             out.append(result.get("tolerancePct", result))
     return out
 
 
 _TOLERANCES_JS = ("const out = []; for (const v of args[0]) { const t = v === '__omit__' ? [] : [v === 'NaN' ? NaN : v === 'Infinity' ? Infinity : v === '-Infinity' ? -Infinity : v]; "
-                  "const r = JSON.parse(await m.yahooFinance.reconcileMetricSources('TST', 'revenue', 'latest_quarter', ...t)); out.push(r.tolerancePct ?? r); } return out;")
+                  "const r = JSON.parse(await m.yahooFinance.reconcileMetricSources('TST', 'revenue', 'latest', ...t)); out.push(r.tolerancePct ?? r); } return out;")
 
 
 def _tolerances(name: str, ids: list[str], values: list, **kw) -> Case:

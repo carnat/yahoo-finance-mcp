@@ -367,10 +367,13 @@ class TestWorkerDoctrineSafety(unittest.TestCase):
             console.log(JSON.stringify({ v2, failure, legacy }));
             """
         )
-        self.assertEqual(payload["v2"]["data"], {"confidence": "EXTRACTION_FAILED"})
+        # 3.0.0 (F20): the status string in confidence moves to status in the V2 data and in the legacy text. The generic
+        # successWarnings option still puts a notice in meta, never in data; no tool passes one any more.
+        moved = {"confidence": None, "status": "EXTRACTION_FAILED"}
+        self.assertEqual(payload["v2"]["data"], moved)
         self.assertEqual(payload["v2"]["meta"]["warnings"][0]["code"], "DEPRECATED_FIELD")
         self.assertEqual(payload["failure"]["meta"]["warnings"], [])
-        self.assertEqual(json.loads(payload["legacy"]), {"confidence": "EXTRACTION_FAILED"})
+        self.assertEqual(json.loads(payload["legacy"]), moved)
 
 
 if __name__ == "__main__":

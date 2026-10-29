@@ -26,7 +26,7 @@ from pydantic import Field
 from yfmcp import url_policy as _url_policy
 from yfmcp.app import yfinance_server
 from yfmcp.schemas import _TOOL_OUTPUT_SCHEMAS
-from yfmcp.envelope import ErrorCode, _wrap_envelope_v2
+from yfmcp.envelope import ErrorCode, _mcp_failure, _wrap_envelope_v2
 from yfmcp.validation import _validate_ticker, _sanitize_sec_html
 from yfmcp.cache import TTL_EDGAR, _tool_cache
 from yfmcp.util import (
@@ -81,8 +81,9 @@ def _extract_earnings_period_from_text(text: str) -> dict[str, str | None]:
     return _extract_release_period(text)
 
 
-async def _resolve_earnings_period_from_source(source: dict) -> dict[str, str | None]:
-    source_url = str(source.get("url") or "")
+async def _resolve_earnings_period_from_source(source: dict, resolved: dict | None = None) -> dict[str, str | None]:
+    """The period an earnings source's text states; ``resolved`` is its content source when the caller has it."""
+    source_url = str((resolved if resolved is not None else source).get("url") or "")
     if not source_url:
         return _extract_earnings_period_from_text("")
     if source_url.startswith("https://www.sec.gov/Archives/"):
@@ -257,46 +258,80 @@ def _first_sentence_for_topic(text: str, topic: str) -> str | None:
 
 
 async def _resolve_latest_earnings_sec_source(ticker: str) -> dict | None:
-    raw = await _server_attr("list_sec_company_filings")(ticker=ticker, filing_type="8-K", limit=20)
-    payload = _safe_json_loads(raw)
-    filings = payload.get("filings") if isinstance(payload.get("filings"), list) else []
-    try:
-        issuer_cik = int(str(payload.get("cik") or "").lstrip("0"))
-    except (TypeError, ValueError):
-        issuer_cik = None
-    if not filings:
+    """The Worker's resolveLatestEarningsSecSource: the newest 8-K reporting results of operations (Item 2.02), else
+    the newest 8-K, as one sec_8k source whose url is the 8-K's primary document (3.0.0, F59)."""
+    cik_padded, submissions = await _get_submissions_for_ticker(ticker)
+    if not cik_padded or not submissions:
         return None
-    # An 8-K reporting results of operations (Item 2.02) first, as the Worker
-    # does; a later 8-K for another item (COHR's Items 5.02/8.01) is not the
-    # earnings release. Any 8-K is the fallback.
-    dicts = [f for f in filings if isinstance(f, dict)]
-    ordered = [f for f in dicts if "2.02" in str(f.get("items") or "")] + dicts
-    for filing in ordered:
-        doc_url = str(filing.get("documentUrl") or "")
-        if not doc_url.startswith("https://www.sec.gov/Archives/"):
-            continue
-        accn = filing.get("accessionNumber")
-        # Try to resolve EX-99.1 exhibit URL (contains the actual press release)
-        ex991_url = None
-        if accn:
-            # The accession prefix identifies the filing agent, not necessarily
-            # the issuer. SEC archive paths must use the issuer CIK returned by
-            # the submission response (AEHR is a concrete counterexample).
-            cik = issuer_cik
-            if cik:
-                ex991_url = await _resolve_ex991_url(accn, cik)
-        source_url = ex991_url or doc_url
-        source_type = "sec_8k_ex991" if ex991_url else "sec_8k"
-        return {
-            "sourceType": source_type,
-            "url": source_url,
-            "primaryDocumentUrl": doc_url,
-            "filingDate": filing.get("filingDate"),
-            "acceptedAt": filing.get("acceptedAt"),
-            "accessionNumber": accn,
-            "confidence": "HIGH",
-        }
+    cik_int = int(cik_padded)
+    filings = submissions.get("filings") if isinstance(submissions.get("filings"), dict) else {}
+    recent = filings.get("recent") if isinstance(filings.get("recent"), dict) else {}
+
+    def column(name: str) -> list:
+        value = recent.get(name)
+        return value if isinstance(value, list) else []
+
+    forms = column("form")
+    dates = column("filingDate")
+    accessions = column("accessionNumber")
+    primary_docs = column("primaryDocument")
+    accepted_dts = column("acceptanceDateTime")
+    items = column("items")
+    is_inline_xbrl = column("isInlineXBRL")
+
+    def at(values: list, i: int):
+        return values[i] if i < len(values) else None
+
+    # Two passes: prefer item-2.02 (earnings) 8-Ks; fall back to any 8-K
+    for require_item_202 in (True, False):
+        checked = 0
+        for i in range(len(forms)):
+            if checked >= 20:
+                break
+            if str(forms[i] or "").upper() != "8-K":
+                continue
+            checked += 1
+            item_str = "" if at(items, i) is None else str(items[i])
+            if require_item_202 and "2.02" not in item_str:
+                continue
+            acc = at(accessions, i) or ""
+            primary_doc = at(primary_docs, i) or ""
+            if not acc or not primary_doc:
+                continue
+            acc_clean = str(acc).replace("-", "")
+            document_url = f"https://www.sec.gov/Archives/edgar/data/{cik_int}/{acc_clean}/{primary_doc}"
+            filing_date = at(dates, i)
+            accepted_at = at(accepted_dts, i)
+            return {
+                "sourceType": "sec_8k",
+                "url": document_url,
+                "filingDate": filing_date if filing_date is not None else None,
+                "acceptedAt": accepted_at if accepted_at is not None else None,
+                "accessionNumber": acc,
+                "cikPadded": cik_padded,
+                "items": item_str,
+                "isInlineXBRL": bool(at(is_inline_xbrl, i)),
+                "confidence": "HIGH",
+            }
     return None
+
+
+async def _resolve_earnings_content_source(src: dict) -> dict:
+    """The Worker's resolveEarningsContentSource: the document whose text is read for an earnings source, the EX-99.1
+    exhibit (sourceType sec_8k_ex991) when an SEC 8-K has one, else the source's own url."""
+    src_url = str(src.get("url") or "")
+    source_type = str(src.get("sourceType") if src.get("sourceType") is not None else "company_ir")
+    if not src_url.startswith("https://www.sec.gov/Archives/"):
+        return {"url": src_url, "sourceType": source_type}
+    accession_number = str(src.get("accessionNumber") or "")
+    try:
+        cik_int = int(str(src.get("cikPadded") or "0"))
+    except ValueError:
+        cik_int = 0
+    if not accession_number or not cik_int:
+        return {"url": src_url, "sourceType": source_type}
+    ex991 = await _resolve_ex991_url(accession_number, cik_int)
+    return {"url": ex991, "sourceType": "sec_8k_ex991"} if ex991 else {"url": src_url, "sourceType": source_type}
 
 
 def _latest_past_earnings_date(dates: list, now: datetime.datetime | None = None) -> str | None:
@@ -384,13 +419,27 @@ async def get_latest_earnings_release(ticker: str, period: str = "latest") -> st
     _ = period  # reserved for future explicit periods
     err = _validate_ticker(ticker)
     if err:
-        return _wrap_envelope_v2("get_latest_earnings_release", None, error=err, error_code=ErrorCode.INPUT_VALIDATION_ERROR)
+        return _mcp_failure("get_latest_earnings_release", ErrorCode.INPUT_VALIDATION_ERROR, err)
     data = await _resolve_latest_earnings_release(ticker)
     sources = data.get("sources") if isinstance(data.get("sources"), list) else []
     source = sources[0] if sources and isinstance(sources[0], dict) else None
+    content = None
+    if source and str(source.get("sourceType") or "") == "sec_8k":
+        # F59 (3.0.0): the document whose text is read, the EX-99.1 exhibit when the 8-K has one; placed after url.
+        content = await _resolve_earnings_content_source(source)
+        with_content: dict = {}
+        for key, value in source.items():
+            with_content[key] = value
+            if key == "url":
+                with_content["contentUrl"] = content["url"] or None
+        sources[0] = with_content
     if source and str(source.get("sourceType") or "") != "yahoo_estimate":
-        data.update(await _resolve_earnings_period_from_source(source))
-    return _wrap_envelope_v2("get_latest_earnings_release", data)
+        period_info = await _resolve_earnings_period_from_source(source, content)
+        prior_period = data.get("period")
+        data.update(period_info)
+        data["period"] = period_info.get("period") if period_info.get("period") is not None else (prior_period if prior_period is not None else "latest")
+    # The payload as the Worker returns it; the tool boundary wraps it (no errorCode, no meta.generatedAt).
+    return json.dumps(data)
 
 
 @yfinance_server.tool(
@@ -412,9 +461,10 @@ async def index_earnings_release(ticker: str, period: str = "latest", source_url
         latest = await _resolve_latest_earnings_release(ticker)
         sources = latest.get("sources") if isinstance(latest.get("sources"), list) else []
         src = sources[0] if sources and isinstance(sources[0], dict) else {}
-        source_type = str(src.get("sourceType") or "")
-        source_url = str(src.get("url") or "")
-        source_meta = src
+        content = await _resolve_earnings_content_source(src)
+        source_type = content["sourceType"]
+        source_url = content["url"]
+        source_meta = {**src, "sourceType": source_type}
 
     if not source_url:
         data = {
@@ -648,8 +698,10 @@ async def extract_earnings_metrics(
     warnings: list[dict] = []
     sources = release.get("sources") if isinstance(release.get("sources"), list) else []
     src = sources[0] if sources and isinstance(sources[0], dict) else {}
-    src_url = str(src.get("url") or "")
-    src_type = str(src.get("sourceType") or "yahoo")
+    # The document whose text is read: the EX-99.1 exhibit when the 8-K has one (F59, the Worker's content resolution).
+    content = await _resolve_earnings_content_source(src)
+    src_url = content["url"]
+    src_type = content["sourceType"] if src.get("sourceType") else "yahoo"
     src_published = _to_iso_utc(src.get("filingDate") or src.get("publishedAt"))
     retrieved_at = _utc_now_iso()
     period_info = _extract_earnings_period_from_text("")
@@ -746,7 +798,8 @@ async def extract_guidance(ticker: str, period: str = "latest") -> str:
     }
     sources = release.get("sources") if isinstance(release.get("sources"), list) else []
     src = sources[0] if sources and isinstance(sources[0], dict) else {}
-    src_url = str(src.get("url") or "")
+    content = await _resolve_earnings_content_source(src)
+    src_url = content["url"]
 
     # A release that was not found or not read is not a company that gave no guidance (2.5.2).
     def not_read(code: str, message: str, retryable: bool) -> str:
@@ -812,7 +865,7 @@ async def extract_guidance(ticker: str, period: str = "latest") -> str:
                 "high": hi,
                 "midpoint": (lo + hi) / 2.0,
                 "unit": "USD",
-                "evidence": [{"url": src_url, "sourceType": src.get("sourceType", "sec_8k"), "publishedAt": _to_iso_utc(src.get("filingDate")), "retrievedAt": _utc_now_iso(), "excerpt": _compact_excerpt(patterns["revenue"]["excerpt"])}],
+                "evidence": [{"url": src_url, "sourceType": content["sourceType"], "publishedAt": _to_iso_utc(src.get("filingDate")), "retrievedAt": _utc_now_iso(), "excerpt": _compact_excerpt(patterns["revenue"]["excerpt"])}],
             }
     if patterns["grossMargin"]:
         lo = float(patterns["grossMargin"]["low"])
@@ -826,7 +879,7 @@ async def extract_guidance(ticker: str, period: str = "latest") -> str:
             "lowPct": lo,
             "highPct": hi,
             "midpointPct": (lo + hi) / 2.0,
-            "evidence": [{"url": src_url, "sourceType": src.get("sourceType", "sec_8k"), "publishedAt": _to_iso_utc(src.get("filingDate")), "retrievedAt": _utc_now_iso(), "excerpt": _compact_excerpt(patterns["grossMargin"]["excerpt"])}],
+            "evidence": [{"url": src_url, "sourceType": content["sourceType"], "publishedAt": _to_iso_utc(src.get("filingDate")), "retrievedAt": _utc_now_iso(), "excerpt": _compact_excerpt(patterns["grossMargin"]["excerpt"])}],
         }
     if patterns["eps"]:
         lo = float(patterns["eps"]["low"])
@@ -841,7 +894,7 @@ async def extract_guidance(ticker: str, period: str = "latest") -> str:
             "high": hi,
             "midpoint": (lo + hi) / 2.0,
             "unit": "USD/share",
-            "evidence": [{"url": src_url, "sourceType": src.get("sourceType", "sec_8k"), "publishedAt": _to_iso_utc(src.get("filingDate")), "retrievedAt": _utc_now_iso(), "excerpt": _compact_excerpt(patterns["eps"]["excerpt"])}],
+            "evidence": [{"url": src_url, "sourceType": content["sourceType"], "publishedAt": _to_iso_utc(src.get("filingDate")), "retrievedAt": _utc_now_iso(), "excerpt": _compact_excerpt(patterns["eps"]["excerpt"])}],
         }
     found = any(base[k]["status"] == "FOUND" for k in ("revenue", "grossMargin", "eps"))
     return _wrap_envelope_v2("extract_guidance", {
@@ -863,7 +916,8 @@ async def extract_management_commentary(ticker: str, period: str = "latest", top
     release = await _resolve_latest_earnings_release(ticker)
     sources = release.get("sources") if isinstance(release.get("sources"), list) else []
     src = sources[0] if sources and isinstance(sources[0], dict) else {}
-    src_url = str(src.get("url") or "")
+    content = await _resolve_earnings_content_source(src)
+    src_url = content["url"]
     text = ""
     if src_url.startswith("https://www.sec.gov/Archives/"):
         html = await _edgar_get_html(src_url, max_bytes=5_000_000)
@@ -875,7 +929,7 @@ async def extract_management_commentary(ticker: str, period: str = "latest", top
         hit = _sentence_for_topic(text, topic) if text else None
         if hit:
             excerpt = hit["excerpt"]
-            source_type = str(src.get("sourceType") or "company_ir")
+            source_type = content["sourceType"]
             out_topics.append({
                 "topic": topic,
                 "status": "FOUND",
@@ -2088,7 +2142,9 @@ async def get_earnings_call_transcript(
         }
     else:
         accession = str(sec_source.get("accessionNumber") or "")
-        official_release_source = sec_source if sec_source.get("sourceType") == "sec_8k_ex991" else None
+        # The EX-99.1 exhibit as an official release source for the period it states; an 8-K without one has none.
+        sec_content = await _resolve_earnings_content_source(sec_source)
+        official_release_source = {**sec_source, **sec_content} if sec_content["sourceType"] == "sec_8k_ex991" else None
         # The issuer's CIK comes from the ticker; the accession prefix is only a fallback.
         cik_padded, _ = await _get_submissions_for_ticker(ticker)
         cik = int(cik_padded) if cik_padded else None

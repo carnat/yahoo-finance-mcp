@@ -38,7 +38,7 @@ from yfmcp.schemas import (
 # ---------------------------------------------------------------------------
 from yfmcp.envelope import (
     SERVER_VERSION, _ENVELOPE_V2, ErrorCode, ToolMeta, ErrorDetail, McpResponse,
-    _mcp_success, _mcp_failure, _wrap_envelope_v2, _classify_error_message,
+    _mcp_success, _mcp_failure, _wrap_envelope_v2, _classify_error_message, normalize_status_confidence,
 )
 from yfmcp.validation import (
     _TICKER_RE, _ACCESSION_RE,
@@ -7894,7 +7894,7 @@ def _yahoo_statement_rows_sync(ticker: str, annual: bool, balance: bool) -> list
     name="reconcile_metric_sources",
     description="One metric for one period as each source states it: SEC XBRL as first filed and as latest filed (a difference is a restatement), the issuer's earnings release (only sentences naming the metric, an amount and the period's scope) and Yahoo's statement row, each compared with the latest SEC value with difference, percentage and tolerance (the larger of tolerance_pct and half the release's last stated digit). Status AGREED requires latest SEC plus at least one independent matching provider; PARTIAL covers a missing SEC baseline or only one provider; otherwise CONFLICT or NOT_FOUND, with source evidence. Metrics: revenue, net_income, operating_income, eps_diluted, cash_and_equivalents. Evidence only.",
 )
-async def reconcile_metric_sources(ticker: str, metric: str, period: str = "latest_quarter", tolerance_pct: float = _mr.DEFAULT_TOLERANCE_PCT) -> str:
+async def reconcile_metric_sources(ticker: str, metric: str, period: Annotated[str, Field(description=_mr.RECONCILE_PERIOD_DESCRIPTION)] = "latest", tolerance_pct: float = _mr.DEFAULT_TOLERANCE_PCT) -> str:
     upper = ticker.upper()
     if metric not in _mr.METRICS:
         return json.dumps({"error": True, "code": "INPUT_VALIDATION_ERROR", "message": f"metric must be one of: {', '.join(_mr.METRICS)}"})
@@ -9541,6 +9541,9 @@ async def build_valuation_evidence_pack(ticker: str, horizon_years: int = 5, per
     # A pack whose providers all failed is still evidence of that; its components say so.
     if all(not i["periods"] for i in inputs):
         components["consensus"]["status"] = "LIMITED"
+    # Components carry confidence levels only (F20), fixed before they are hashed.
+    for component in components.values():
+        normalize_status_confidence(component)
     hashes = {name: _es.sha256_hex(_ev.canonical_json(c)) for name, c in components.items()}
     receipt = _ev.build_receipt(ticker=symbol, evidence_cutoff=cutoff, server_version=SERVER_VERSION, build_sha=_BUILD_SHA, runtime="python_local",
                                 components=components, component_hashes=hashes, components_sha256=_es.sha256_hex(_ev.canonical_json(components)))

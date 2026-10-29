@@ -181,20 +181,22 @@ for _key, _msg, _expect in [
                       ts={"js": 'return m.yahooFinance.peerValuationError("ZZZZQQ", args[0]);', "args": [_msg]}, expect=_expect))
 
 
-# ── F60 part 1: the reconcile period is checked before any fetch ──────────────────────────────────────────────
-for _spec, _ok in [("latest_quarter", True), ("latest_annual", True), ("FY2026", True), ("fy 2026", True), ("Q3 2026", True),
-                   ("q32026", True), ("FY2026 Q3", False), ("2026", False), ("latest", False), ("", False)]:
+# ── F60 part 1: the reconcile period is checked before any fetch (3.0.0: one vocabulary, latest | FY<yyyy> | FY<yyyy> Q<n>) ───
+for _spec, _ok in [("latest", True), ("LATEST", True), ("FY2026", True), ("fy 2026", True), ("FY2026 Q3", True), ("fy2026 q3", True),
+                   ("FY 2026  Q3", True), ("latest_quarter", False), ("latest_annual", False), ("Q3 2026", False), ("q32026", False),
+                   ("FY2026 Q5", False), ("FY2026Q3", False), ("2026", False), ("", False)]:
     CASES.append(Case(name=f"audit2265.is_reconcile_period.{_spec.replace(' ', '_') or 'empty'}", ids=["F60"],
                       py=(lambda s=_spec: _mr.is_reconcile_period(s)),
                       ts={"js": "return m.metricReconciliation.isReconcilePeriod(args[0]);", "args": [_spec]}, expect=_ok))
 
-CASES.append(Case(
-    name="audit2265.reconcile_metric_sources.unreadable_period_is_input_validation_error", ids=["F60"],
-    py=lambda: json.loads(asyncio.run(server.reconcile_metric_sources("AAPL", "revenue", "FY2026 Q3"))),
-    ts={"js": "return JSON.parse(await m.yahooFinance.reconcileMetricSources('AAPL', 'revenue', 'FY2026 Q3'));", "isolate": True},
-    # No routes: a fetch would fail the case instead of returning the validation error.
-    routes={}, select=lambda v: {"error": v.get("error"), "code": v.get("code"), "message": v.get("message")},
-    expect={"error": True, "code": "INPUT_VALIDATION_ERROR", "message": _mr.RECONCILE_PERIOD_HELP}))
+for _spec in ("latest_quarter", "latest_annual", "Q3 2026", "FY2026 Q5"):
+    CASES.append(Case(
+        name=f"audit2265.reconcile_metric_sources.unreadable_period_{_spec.replace(' ', '_')}_is_input_validation_error", ids=["F60"],
+        py=lambda s=_spec: json.loads(asyncio.run(server.reconcile_metric_sources("AAPL", "revenue", s))),
+        ts={"js": "return JSON.parse(await m.yahooFinance.reconcileMetricSources('AAPL', 'revenue', args[0]));", "args": [_spec], "isolate": True},
+        # No routes: a fetch would fail the case instead of returning the validation error.
+        routes={}, select=lambda v: {"error": v.get("error"), "code": v.get("code"), "message": v.get("message")},
+        expect={"error": True, "code": "INPUT_VALIDATION_ERROR", "message": "period must be latest, FY<yyyy> or FY<yyyy> Q<n>."}))
 
 
 # ── F60 part 2: a 10-Q column header with no year is not a period ─────────────────────────────────────────────

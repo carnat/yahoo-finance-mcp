@@ -432,6 +432,7 @@ def _worker_e2e() -> dict:
 
 def _python_e2e() -> dict:
     import server as srv
+    from yfmcp.envelope import normalize_status_confidence
 
     srv._FILING_TEXT_CACHE.clear()
     srv._FILING_TEXT_CACHE_CHARS = 0
@@ -454,6 +455,8 @@ def _python_e2e() -> dict:
             before = len([u for u in fetches if u in DOCUMENTS])
             raw = json.loads(asyncio.run(srv.search_sec_filing_text(**params)))
             data = raw["data"] if isinstance(raw, dict) and "ok" in raw else raw
+            # The Worker's result passes its tool boundary, which keeps confidence to HIGH/MEDIUM/LOW or null (3.0.0, F20).
+            data = normalize_status_confidence(data)
             out[name] = {"data": data, "archiveFetches": len([u for u in fetches if u in DOCUMENTS]) - before}
     return out
 

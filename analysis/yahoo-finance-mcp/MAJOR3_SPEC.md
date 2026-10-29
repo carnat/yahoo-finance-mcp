@@ -1,6 +1,6 @@
 # 3.0.0 breaking-change release: scope draft
 
-Status: **draft, 2026-10-28.** Written while the owner decides whether the Phase 6 removals ship now as 3.0.0 (with an exception to the "Phase 5 exit" entry criterion) or after the Phase 4 and Phase 5 moves. Nothing here is built yet.
+Status: **approved and built as 3.0.0.** On 2026-10-28 the owner chose to ship the Phase 6 removals now, as an exception to the "Phase 5 exit" entry criterion. On 2026-10-29 the owner chose the section 3 rules as proposed: F20 null confidence with the string moved to `status`; F59 the Worker's shape plus `contentUrl`; F60 `FY<yyyy> Q<n>` as the fiscal quarter, with `latest` as the latest quarter. As built, F20 is one rule applied over the whole response (and to evidence-pack components before hashing) rather than an edit at each site. Docs: `docs/provider-runtime-guidance.md` "Breaking Changes (3.0.0)".
 
 ## 1. Why now is possible
 
