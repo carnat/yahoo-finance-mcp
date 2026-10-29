@@ -4,7 +4,7 @@
  * Moved out of news.ts in 2.15.1 (pure restructure); providers never import news.ts.
  */
 
-import { _str } from "../yahoo-finance.js";
+import { _str } from "../util.js";
 
 // Phase 4 unit 3: parseHtmlTable moved to clients/html.ts.
 export { parseHtmlTable } from "../clients/html.js";

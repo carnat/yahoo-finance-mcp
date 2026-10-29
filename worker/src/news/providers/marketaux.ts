@@ -16,7 +16,7 @@ import {
 import {
   _str,
   toIsoUtc,
-} from "../../yahoo-finance.js";
+} from "../../util.js";
 import { shortText, eventTypeFromKeywords, makeDupGroupId, withinDateWindow, normalizeExchange, withoutZeroMillis } from "../shared.js";
 import type { NewsProviderResultWithDiagnostics } from "./types.js";
 

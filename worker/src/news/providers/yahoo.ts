@@ -4,7 +4,8 @@
  */
 
 import { enc, yGet } from "../../clients/yahoo.js";
-import { _str, type NewsCompanyIdentity } from "../../yahoo-finance.js";
+import { _str } from "../../util.js";
+import { type NewsCompanyIdentity } from "../identity.js";
 import {
   sourceDecisionUse,
   normalizeIso,

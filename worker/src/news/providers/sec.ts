@@ -5,7 +5,7 @@
 
 import { edgarGetHtml, edgarTickerMapLoaded, getSubmissionsForTicker } from "../../clients/edgar.js";
 import { parseHtmlTable, stripHtmlTags } from "../../clients/html.js";
-import { _str } from "../../yahoo-finance.js";
+import { _str } from "../../util.js";
 import {
   sourceDecisionUse,
   normalizeIso,

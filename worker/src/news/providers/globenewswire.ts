@@ -7,7 +7,7 @@ import { setBounded } from "../../cache.js";
 import { providerFetch } from "../../request-context.js";
 import { UA } from "../../clients/provider-http.js";
 import { stripHtmlTags } from "../../clients/html.js";
-import { _str } from "../../yahoo-finance.js";
+import { _str } from "../../util.js";
 import {
   sourceDecisionUse,
   normalizeIso,

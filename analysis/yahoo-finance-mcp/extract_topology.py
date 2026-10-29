@@ -97,12 +97,18 @@ FILE_DOMAIN = {
     "yfmcp/metric_reconciliation.py": "valuation",
     "yfmcp/tools/earnings.py": "earnings", "yfmcp/clients/yahoo_transcripts.py": "earnings",
     "yfmcp/tools/news.py": "news",
+    "yfmcp/news/__init__.py": "news", "yfmcp/news/shared.py": "news", "yfmcp/news/providers/__init__.py": "news",
+    "yfmcp/news/providers/company_ir.py": "news", "yfmcp/news/providers/company_ir_page.py": "news",
+    "yfmcp/news/providers/finnhub.py": "news", "yfmcp/news/providers/globenewswire.py": "news",
+    "yfmcp/news/providers/marketaux.py": "news", "yfmcp/news/providers/sec.py": "news",
+    "yfmcp/news/providers/yahoo.py": "news", "yfmcp/url_policy.py": "envelope",
     "yfmcp/earnings_period.py": "earnings", "yfmcp/guidance_history.py": "earnings",
     "yfmcp/evidence.py": "evidence", "yfmcp/evidence_store.py": "evidence",
     "yfmcp/tools/thai_funds.py": "thai",
     # TypeScript
     "worker/src/index.ts": "transport", "worker/src/mcp.ts": "transport", "worker/src/tools.ts": "transport",
-    "worker/src/tool-catalog.ts": "transport",
+    "worker/src/tool-catalog.ts": "transport", "worker/src/access-keys.ts": "transport",
+    "worker/src/auth.ts": "transport", "worker/src/telemetry.ts": "transport", "worker/src/url-policy.ts": "envelope",
     "worker/src/response.ts": "envelope", "worker/src/request-context.ts": "envelope",
     "worker/src/cache.ts": "envelope", "worker/src/validate.ts": "envelope",
     "worker/src/filing-search.ts": "sec", "worker/src/sec-facts.ts": "sec",
@@ -121,6 +127,7 @@ FILE_DOMAIN = {
     "worker/src/clients/edgar.ts": "sec",
     "worker/src/clients/yahoo.ts": "pricing", "worker/src/clients/provider-http.ts": "providers",
     "worker/src/clients/html.ts": "sec", "worker/src/clients/endpoints.ts": "sec",
+    "worker/src/util.ts": "envelope", "worker/src/batch.ts": "envelope", "worker/src/news/identity.ts": "news",
     "worker/src/news/shared.ts": "news", "worker/src/news/providers/types.ts": "news",
     "worker/src/news/providers/company-ir.ts": "news", "worker/src/news/providers/company-ir-page.ts": "news",
     "worker/src/news/providers/finnhub.ts": "news", "worker/src/news/providers/globenewswire.ts": "news",
@@ -330,6 +337,40 @@ def region_id(f: str, dom: str) -> str:
     return f"{f}#{dom}"
 
 
+# Planner decision D1 (c), PHASE4_SPEC.md §11a: a tool handler or tool-only helper that the call-graph rule put in
+# "shared" only because two or more domains call it belongs to its catalog domain. It is domain code, not hub code,
+# and moves with its Phase 5 unit. Each entry seeds that function's domain; helpers only it calls follow it.
+DOMAIN_OVERRIDES: dict[str, dict[str, str]] = {
+    "server.py": {
+        # SEC filing selection and retrieval (D11), the filing-data and filing-text tools.
+        "_resolve_sec_filing": "sec", "_sec_filing_index_full": "sec", "_accession_not_found_envelope": "sec",
+        "_is_accession_not_found": "sec", "_filing_period_failure": "sec",
+        "_legacy_accession_miss_payload": "sec", "_resolve_periodic_filings": "sec",
+        "_is_decision_grade_sec_xbrl_fact": "sec", "_sec_xbrl_source_evidence": "sec",
+        "get_filing_data": "sec", "_get_filing_data_unchecked": "sec", "search_filing_text": "sec",
+        # SEC extractors reached from query_sec_filing_index as well as their own tools.
+        "_extract_customer_concentration": "extractors", "_extract_revenue_exposure": "extractors",
+        "_extract_risk_factor_mentions": "extractors", "_extract_segment_revenue": "extractors",
+        "_extract_total_revenue": "extractors", "_as_status": "extractors",
+        # Earnings-release reads shared by guidance history, the driver ledger and reconciliation.
+        "_earnings_release_picks": "earnings", "_read_release_text": "earnings",
+        # analyst_data / stock_fundamentals handlers and the consensus helpers behind them.
+        "get_earnings_momentum": "fundamentals", "get_analyst_upgrade_radar": "fundamentals",
+        "_consensus_naming": "fundamentals", "_consensus_policy": "fundamentals",
+        "_consensus_providers": "fundamentals", "_write_consensus_observation": "fundamentals",
+    },
+    "worker/src/yahoo-finance.ts": {
+        "resolveSecFiling": "sec", "filingNotFoundPayload": "sec", "legacyAccessionMissPayload": "sec",
+        "uniqueRecentForms": "sec", "accessionNotFoundEnvelope": "sec", "isAccessionNotFound": "sec",
+        "_buildFilingIndexFromHtml": "sec",
+        "extractGeoRevenueFromHtml": "extractors", "geoRegionAliases": "extractors", "normalizeStatus": "extractors",
+        "earningsReleasePicks": "earnings", "readReleaseText": "earnings",
+        "fetchAlphaVantageJson": "providers",
+        "snapshotComponentMessage": "pricing",
+    },
+}
+
+
 def seed_handlers(f: str) -> dict[str, str]:
     seeds = {}
     if GOD_FILES[f] == "py":
@@ -338,6 +379,10 @@ def seed_handlers(f: str) -> dict[str, str]:
                 seeds[handler] = action_domain(action)
         if "get_server" in functions[f]:
             seeds["get_server"] = "transport"
+    for name, dom in DOMAIN_OVERRIDES.get(f, {}).items():
+        if name not in functions[f]:
+            raise SystemExit(f"DOMAIN_OVERRIDES names {name}, which {f} no longer defines")
+        seeds[name] = dom
     return seeds
 
 
