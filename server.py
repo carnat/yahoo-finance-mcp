@@ -51,7 +51,7 @@ from yfmcp.cache import (
     TTL_PRICE, TTL_ANALYST, TTL_FINANCIALS, TTL_EDGAR, TTL_OPTIONS, TTL_NEWS,
     _PRICE_TTL, _STMT_TTL,
 )
-from yfmcp.pricing_notices import freshness_notices as _freshness_notices, with_notices  # noqa: E402
+from yfmcp.pricing_notices import freshness_notices as _freshness_notices, take_notices, unique_notices, with_notices  # noqa: E402
 from yfmcp.util import (
     _fetch_with_retry, get_last_trading_date,
     _PLACEHOLDER_IV_THRESHOLD, _compute_data_quality, _sort_by_relevance,
@@ -4890,8 +4890,14 @@ async def get_price_target_bracket(
 # CR-14 — get_position_score_inputs
 # ---------------------------------------------------------------------------
 
+POSITION_SINGLE_TICKER_MESSAGE = "analyze_position_signals takes one ticker as a string, not a list."
+
+
 async def get_position_score_inputs(ticker: str) -> str:
     """Return grouped public inputs for caller-defined scoring workflows."""
+    # Q3i call 4 (3.2.0): one ticker, as the declared schema says; a list is refused, not passed to the components.
+    if not isinstance(ticker, str):
+        return json.dumps({"error": True, "code": "INPUT_VALIDATION_ERROR", "message": POSITION_SINGLE_TICKER_MESSAGE})
     results = await asyncio.gather(
         get_analyst_upgrade_radar(ticker, days_back=30),
         get_analyst_consensus(ticker),
@@ -4906,9 +4912,10 @@ async def get_position_score_inputs(ticker: str) -> str:
         if isinstance(r, Exception):
             return {}
         try:
-            return json.loads(str(r)) if isinstance(r, str) else {}
+            value = json.loads(str(r)) if isinstance(r, str) else {}
         except Exception:
             return {}
+        return value if isinstance(value, dict) else {}
 
     upgrade = _parse(results[0])
     consensus = _parse(results[1])
@@ -4976,19 +4983,18 @@ async def get_position_score_inputs(ticker: str) -> str:
         "lastClose": tech.get("lastClose"),
     }
 
-    # Data date: prefer last OHLCV row from technical indicators for consistent timing.
-    data_date = tech.get("dataDate") or ma.get("dataDate") or get_last_trading_date()
+    # Data date: the last completed bar of the technicals, else of the moving averages; never today (Q3d, 3.2.0).
+    data_date = tech.get("dataDate") or ma.get("dataDate") or None
+    # The components' notices (3.1.0) reach this tool's meta.warnings, once each.
+    notices = unique_notices([n for payload in component_payloads.values() for n in take_notices(payload)])
+    quote_timestamp = price.get("priceTimestamp") if isinstance(price.get("priceTimestamp"), str) and price.get("priceTimestamp") else None
 
-    return json.dumps({
+    return json.dumps(with_notices({
         "ticker": ticker,
         "status": "PARTIAL" if failed_components or limited_components else "OK",
         "dataDate": data_date,
-        "quoteDataDate": (
-            str(price.get("priceTimestamp"))[:10]
-            if price.get("priceTimestamp")
-            else None
-        ),
-        "quoteTimestamp": price.get("priceTimestamp"),
+        "quoteDataDate": quote_timestamp[:10] if quote_timestamp else None,
+        "quoteTimestamp": quote_timestamp,
         "completedBarDataDate": tech.get("dataDate"),
         "analystInputs": t1,
         "pricePositionInputs": t2,
@@ -5000,7 +5006,7 @@ async def get_position_score_inputs(ticker: str) -> str:
         "recommendedNextAction": (
             "RETRY" if failed_components or limited_components else "NONE"
         ),
-    })
+    }, notices))
 
 
 # ---------------------------------------------------------------------------

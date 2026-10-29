@@ -7,6 +7,8 @@ component name. Worker: worker/src/pricing-notices.ts.
 
 from __future__ import annotations
 
+import json
+
 ZERO_VOLUME_NO_RATIO = "ZERO_VOLUME_NO_RATIO"
 INSUFFICIENT_HISTORY = "INSUFFICIENT_HISTORY"
 SESSION_CALENDAR_UNKNOWN = "SESSION_CALENDAR_UNKNOWN"
@@ -51,6 +53,19 @@ def with_notices(payload: dict, notices: list[dict]) -> dict:
     if notices:
         payload[PAYLOAD_WARNINGS_KEY] = notices
     return payload
+
+
+def unique_notices(notices: list) -> list:
+    """Notices without repeats (same code, ticker and message), in first-seen order."""
+    seen: set = set()
+    out = []
+    for notice in notices:
+        key = json.dumps([notice.get("code"), notice.get("ticker"), notice.get("message")]) if isinstance(notice, dict) \
+            else json.dumps(notice, default=str)
+        if key not in seen:
+            seen.add(key)
+            out.append(notice)
+    return out
 
 
 def take_notices(payload: object) -> list:

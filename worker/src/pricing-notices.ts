@@ -50,6 +50,17 @@ export function withNotices<T extends Record<string, unknown>>(payload: T, notic
   return payload;
 }
 
+/** Notices without repeats (same code, ticker and message), in first-seen order. */
+export function uniqueNotices(notices: PricingNotice[]): PricingNotice[] {
+  const seen = new Set<string>();
+  return notices.filter((notice) => {
+    const key = JSON.stringify([notice.code, notice.ticker ?? null, notice.message]);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 /** Removes `_warnings` from a payload and returns them (component payloads folded by the snapshot). */
 export function takeNotices(payload: Record<string, unknown> | null | undefined): PricingNotice[] {
   if (!payload || typeof payload !== "object") return [];

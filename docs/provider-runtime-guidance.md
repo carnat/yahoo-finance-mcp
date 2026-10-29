@@ -3190,6 +3190,40 @@ F-024, F-026, F-029). Both runtimes change alike.
 - **Tests:** 21 new parity cases in `scripts/parity/cases_audit_2251.py`.
 - **Rollback:** redeploy 2.25.0.
 
+## Position Signals: Component Status, Quote Date, MACD, One Ticker (3.2.0)
+
+- **Why:** R5-pricing part 3, the `analyze_position_signals` rows of the binding Q3i triage (calls 1 to 4 and G6)
+  and decision Q3d (no synthesised `dataDate`); `analysis/yahoo-finance-mcp/R5PRICING3_SPEC.md`. Release type:
+  minor, because the Worker's `componentStatus` keys change. The Worker takes Python's shape, so Python output is
+  unchanged apart from `dataDate`, the refused ticker list and the warning rows.
+- **Component status (call 1):** the Worker reports Python's six components, `analystUpgrades`,
+  `analystConsensus`, `priceStats`, `earningsMomentum`, `technicalIndicators` and `maPosition`, and adds
+  `failedComponents`. **Renamed Worker keys:** `pricePerformance` is now `priceStats` and `movingAveragePosition` is
+  now `maPosition`; `technicalIndicators` keeps its name. A component that fails is `FAILED`, is listed in
+  `failedComponents`, and makes the result `PARTIAL` with `recommendedNextAction: RETRY`. Before, the Worker did not
+  check the analyst and earnings components, and one component that threw failed the whole tool. It now waits for
+  every component, as Python does.
+- **Quote time and date (call 2, G6):** the Worker adds `quoteTimestamp`, the `priceTimestamp` of the quote behind
+  `currentPrice`. In both runtimes `quoteDataDate` is that timestamp's date, or null. Before, the Worker used the
+  moving-average date, which is a bar date.
+- **MACD (call 3):** the Worker adds `technicalInputs.macd`, which it already computed.
+- **One ticker (call 4):** a ticker list is refused with `INPUT_VALIDATION_ERROR` ("analyze_position_signals takes
+  one ticker as a string, not a list."). The grouped route already refused it. Before, the Worker's single tool
+  batched a list and Python passed it to its components.
+- **Data date (Q3d):** `dataDate` is the technicals' completed-bar date, else the moving averages' date, else null.
+  Before, Python fell back to the last weekday and the Worker to today.
+- **Warning rows:** the components' 3.1.0 rows (`INSUFFICIENT_HISTORY`, `ZERO_VOLUME_NO_RATIO`,
+  `SESSION_CALENDAR_UNKNOWN`) reach this tool's `meta.warnings`, each row once. This closes the gap left in 3.1.0.
+- **Unchanged:** the output schema already listed `failedComponents` and allows extra keys, and no description
+  changed, so `schemaHash` and `manifestHash` stay the same. The `analystCount` source (Python reads
+  `totalAnalysts`, the Worker `numberOfAnalysts`) gives the same count and stays pinned.
+- **Tests:** in `scripts/parity/cases_neutrality.py` the macd, component-status and quote-date cases now assert the
+  same value in both runtimes, the batch case is gone, and the Python stub for price stats carries the history rows
+  the Worker raises on the same market. `scripts/parity/cases_r5price3.py` covers the refused list in the grouped
+  route and the single tool, a chart outage (two components failed, the rest still delivered), a total outage (six
+  failed, `dataDate` null) and the repeated-row rule.
+- **Rollback:** redeploy 3.1.0.
+
 ## Pricing Notices: Zero Volume, Short-History CAGR, US Session Calendar (3.1.0)
 
 - **Why:** R5-pricing-2, the pricing repairs that need new names (owner decisions Q3c, Q3i and Q1 BR-PRC-002;
