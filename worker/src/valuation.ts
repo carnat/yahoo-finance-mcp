@@ -332,10 +332,12 @@ export function valuationSnapshot(input: SnapshotInput): Record<string, unknown>
     });
   }
 
-  // Convertibles counted as shares leave the debt, so they are not counted twice.
+  // Convertibles counted as shares leave the debt, so they are not counted twice. Only when the bridge's diluted count
+  // is the share count used: with Yahoo's or the basic count the conversion shares are not in equity, so the
+  // principal stays in debt (Q3i, BR-VAL-046/074/082, 3.2.1).
   let convertibleAdjustment = 0;
   const convertibles = ((bridge?.components ?? []) as Record<string, unknown>[]).find((c) => c.component === "convertible_debt");
-  for (const inst of ((convertibles?.instruments ?? []) as Record<string, unknown>[])) {
+  for (const inst of (diluted != null ? (convertibles?.instruments ?? []) : []) as Record<string, unknown>[]) {
     if ((num(inst.incrementalShares) ?? 0) > 0) convertibleAdjustment += num(inst.principal) ?? 0;
   }
   if (debt != null) convertibleAdjustment = Math.min(convertibleAdjustment, debt);

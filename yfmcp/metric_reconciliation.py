@@ -24,6 +24,7 @@ from typing import Any
 from yfmcp.capital_structure import _collapse
 from yfmcp.capital_structure import round_half_up as _round
 from yfmcp.evidence import AUTHORITY_BOUNDARY
+from yfmcp.fiscal_calendar import nominal_period_end
 from yfmcp.sec_facts import REVENUE_CONCEPTS
 
 METRICS: dict[str, dict] = {
@@ -374,7 +375,10 @@ def _explicit_period_matches(sentence: str, amount_start: int, period: dict) -> 
         # A quarter and year name the period as a pair: its calendar quarter in the calendar year, or its fiscal
         # quarter in its fiscal year. NVDA's quarter ended 2026-07-26 is Q3 2026 or Q2 fiscal 2027, never
         # "second quarter fiscal 2026" (the prior year's quarter).
-        pairs = [(math.ceil(int(end[5:7]) / 3), end[:4])]
+        # The calendar quarter is read a week before the end, so a 52/53-week quarter ending January 1-7 is Q4 of the year
+        # before (fiscal_calendar.py's drift rule; BR-VAL-068, 3.2.1).
+        nominal = nominal_period_end(end) or end
+        pairs = [(math.ceil(int(nominal[5:7]) / 3), nominal[:4])]
         if isinstance(period.get("fiscalQuarter"), int):
             pairs += [(period["fiscalQuarter"], str(y)) for y in period.get("fiscalYears") or []]
 

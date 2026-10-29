@@ -7858,11 +7858,11 @@ async def reconcile_metric_sources(ticker: str, metric: str, period: Annotated[s
     # A period it cannot read is an input error before any fetch, not ok:true with INVALID_PERIOD (2.26.5, F60).
     if not _mr.is_reconcile_period(period):
         return json.dumps({"error": True, "code": "INPUT_VALIDATION_ERROR", "message": _mr.RECONCILE_PERIOD_HELP})
-    try:
+    # Q3e (3.2.1): only a finite number is clamped to 0-10; NaN, an infinity, a numeric string or anything else is the
+    # 0.5 default, as in the Worker (min/max before the finiteness check turned NaN into 0 and +inf into 10).
+    if isinstance(tolerance_pct, (int, float)) and not isinstance(tolerance_pct, bool) and math.isfinite(tolerance_pct):
         tolerance = min(10.0, max(0.0, float(tolerance_pct)))
-        if not math.isfinite(tolerance):
-            raise ValueError
-    except (TypeError, ValueError):
+    else:
         tolerance = _mr.DEFAULT_TOLERANCE_PCT
     cik_padded, subs = await _get_submissions_for_ticker(ticker)
     if not cik_padded:
@@ -8165,7 +8165,10 @@ async def get_valuation_snapshot(
     try:
         market = await _valuation_market_inputs(ticker)
     except Exception as exc:
-        return json.dumps({"error": True, "message": f"Yahoo quote summary failed for {ticker.upper()}: {exc}"})
+        # As compare_peer_valuations (F57): an unknown ticker is TICKER_NOT_FOUND, and no provider URL is shown (3.2.1).
+        failure = _peer_valuation_error(ticker.upper(), str(exc))
+        message = failure["message"] if failure["code"] == "TICKER_NOT_FOUND" else f"Yahoo quote summary failed for {ticker.upper()}: {failure['message']}"
+        return json.dumps({"error": True, "code": failure["code"], "message": message})
     quote = price if price is not None else market["price"]
     sec_warnings: list[dict] = []
     bridge = capital = None

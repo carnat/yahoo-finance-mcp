@@ -11297,7 +11297,13 @@ export async function getValuationSnapshot(
   try {
     market = await valuationMarketInputs(ticker);
   } catch (e) {
-    return JSON.stringify({ error: true, message: `Yahoo quote summary failed for ${ticker.toUpperCase()}: ${e instanceof Error ? e.message : String(e)}` });
+    // As compare_peer_valuations (F57): an unknown ticker is TICKER_NOT_FOUND, and no provider URL is shown (3.2.1).
+    const failure = peerValuationError(ticker.toUpperCase(), e instanceof Error ? e.message : String(e));
+    return JSON.stringify({
+      error: true,
+      code: failure.code,
+      message: failure.code === "TICKER_NOT_FOUND" ? failure.message : `Yahoo quote summary failed for ${ticker.toUpperCase()}: ${failure.message}`,
+    });
   }
   const quote = price ?? market.price;
   const secWarnings: Record<string, unknown>[] = [];
