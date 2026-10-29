@@ -125,8 +125,11 @@ const FAMILIES: { family: string; buckets: Bucket[]; totals: string[] }[] = [
 const PURCHASE_COMMITMENT = "LongTermPurchaseCommitmentAmount";
 const UNDRAWN_FACILITY = "LineOfCreditFacilityRemainingBorrowingCapacity";
 
-function addYears(date: string, years: number): string {
-  return `${parseInt(date.slice(0, 4), 10) + years}${date.slice(4)}`;
+/** The same month and day `years` later; 29 February becomes 28 February in a common year (R5-extractors-2). */
+export function addYears(date: string, years: number): string {
+  const y = parseInt(date.slice(0, 4), 10) + years;
+  if (date.slice(4, 10) === "-02-29" && !(y % 4 === 0 && (y % 100 !== 0 || y % 400 === 0))) return `${y}-02-28${date.slice(10)}`;
+  return `${y}${date.slice(4)}`;
 }
 
 function plainAt(facts: PlainFact[], local: string, at: string | null): PlainFact | null {
@@ -136,7 +139,10 @@ function plainAt(facts: PlainFact[], local: string, at: string | null): PlainFac
 
 // ── Text classification ──────────────────────────────────────────────────────
 
-const MONEY_RE = /(?:US)?\$\s?(\d[\d,]*(?:\.\d+)?)\s*(billion|million|thousand|bn|mm|m|k)?\b/gi;
+// A dollar amount and its currency (R5-extractors-2, BR-EXT-059/064): NT$, A$, C$, HK$, S$ and NZ$ carry their own currency,
+// never USD, and a "$" right after any other letters (R$) is not read as an amount.
+const MONEY_RE = /(?<![A-Za-z])(US|NT|AU|A|CA|C|HK|S|NZ)?\$\s?(\d[\d,]*(?:\.\d+)?)\s*(billion|million|thousand|bn|mm|m|k)?\b/gi;
+const DOLLAR_CURRENCY: Record<string, string> = { "": "USD", US: "USD", NT: "TWD", AU: "AUD", A: "AUD", CA: "CAD", C: "CAD", HK: "HKD", S: "SGD", NZ: "NZD" };
 const EQUITY_AWARD_RE = /\b(?:stock|share|equity|RSU|option|incentive)[- ](?:based )?(?:awards?|compensation|grants?)\b|\brestricted stock\b|\bRSUs?\b|\bPSUs?\b|\bvest(?:s|ed|ing)?\b/i;
 // Without an amount, a sentence is kept only when it names a funding or capex obligation outright.
 const STRONG_RE = /\bcapital expenditures?\b|\bcapex\b|\bpurchase (?:commitments?|obligations?)\b|\bcommitments?\b|\bcommitted\b|\bnon-?cancell?able\b|\bobligated\b|\bgrants?\b|\bmilestones?\b|\bCHIPS\b|\bincentive agreement\b/i;
@@ -161,6 +167,7 @@ interface Amount {
   qualifier: string | null;
   amountStatus: "STATED" | "SCALE_NOT_STATED" | "NOT_STATED";
   asWritten: string | null;
+  currency: string | null;
 }
 
 const PER_UNIT_RE = /^\s*per (?:share|unit|warrant|note)\b/i;
@@ -172,22 +179,23 @@ const PER_UNIT_RE = /^\s*per (?:share|unit|warrant|note)\b/i;
  */
 function amounts(sentence: string): Amount {
   const matches = [...sentence.matchAll(MONEY_RE)]
-    .map((m) => ({ index: m.index ?? 0, end: (m.index ?? 0) + m[0].length, text: m[0], amount: m[1], unit: m[2] }))
+    .map((m) => ({ index: m.index ?? 0, end: (m.index ?? 0) + m[0].length, text: m[0], amount: m[2], unit: m[3], currency: DOLLAR_CURRENCY[(m[1] ?? "").toUpperCase()] }))
     .filter((m) => !PER_UNIT_RE.test(sentence.slice(m.end)));
-  const none: Amount = { low: null, high: null, qualifier: null, amountStatus: "NOT_STATED", asWritten: null };
+  const none: Amount = { low: null, high: null, qualifier: null, amountStatus: "NOT_STATED", asWritten: null, currency: null };
   if (matches.length === 0) return none;
   const a = matches[0];
   const b = matches[1];
   // Two amounts are a range only when they run low to high: "committed $1.2 billion and $300 million" is two (2.5.20).
-  const isRange = b != null && RANGE_JOIN_RE.test(sentence.slice(a.end, b.index)) && moneyValue(a.amount, a.unit ?? b.unit) <= moneyValue(b.amount, b.unit ?? a.unit);
+  // Amounts in two currencies are never a range.
+  const isRange = b != null && a.currency === b.currency && RANGE_JOIN_RE.test(sentence.slice(a.end, b.index)) && moneyValue(a.amount, a.unit ?? b.unit) <= moneyValue(b.amount, b.unit ?? a.unit);
   const unit = isRange ? (a.unit ?? b.unit) : a.unit;
   const low = moneyValue(a.amount, unit);
   const high = isRange ? moneyValue(b.amount, b.unit ?? unit) : low;
   const asWritten = (isRange ? sentence.slice(a.index, b.end) : a.text).trim();
   const before = sentence.slice(Math.max(0, a.index - 24), a.index).toLowerCase();
   const qualifier = /up to\s*$/.test(before) ? "up_to" : /(?:approximately|about|around|roughly|~)\s*$/.test(before) ? "approximately" : low !== high ? "range" : "stated";
-  if (unit == null && high < 100000) return { low: null, high: null, qualifier, amountStatus: "SCALE_NOT_STATED", asWritten };
-  return { low, high, qualifier, amountStatus: "STATED", asWritten };
+  if (unit == null && high < 100000) return { low: null, high: null, qualifier, amountStatus: "SCALE_NOT_STATED", asWritten, currency: a.currency };
+  return { low, high, qualifier, amountStatus: "STATED", asWritten, currency: a.currency };
 }
 
 const ORDINAL: Record<string, number> = { first: 1, second: 2, third: 3, fourth: 4 };
@@ -263,7 +271,7 @@ function textItems(statements: Statement[], limit: number): Rec[] {
         amountQualifier: amt.qualifier,
         amountStatus: amt.amountStatus,
         amountAsWritten: amt.asWritten,
-        currency: amt.amountStatus === "NOT_STATED" ? null : "USD",
+        currency: amt.currency,
         timing,
         unresolvedReason: classification === "UNRESOLVED" ? (amt.amountStatus === "NOT_STATED" ? "no amount stated" : "type not stated") : null,
         evidence: {

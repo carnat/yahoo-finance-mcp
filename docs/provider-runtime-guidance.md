@@ -3190,6 +3190,32 @@ F-024, F-026, F-029). Both runtimes change alike.
 - **Tests:** 21 new parity cases in `scripts/parity/cases_audit_2251.py`.
 - **Rollback:** redeploy 2.25.0.
 
+## Extractor Repairs: In-The-Money At The Strike, Leap Days, Foreign Dollars (3.0.6)
+
+- **Why:** R5-extractors-2, the extractor repairs that must ship before the Phase 5 extractors move (owner decisions
+  Q3f and Q3i, 2026-10-15, and the leap-day and currency choices, 2026-10-29;
+  `analysis/yahoo-finance-mcp/R5EXTRACTORS2_SPEC.md`). Release type: patch. Both runtimes.
+- **In the money at the strike (Q3f; BR-EXT-003, BR-EXT-082, BR-EXT-083):** options, option tranches, warrants and
+  capped calls are `inTheMoney: true` when the price equals the exercise price, as convertibles and convertible
+  preferred already were. Treasury stock still adds 0 shares at the strike, so no share count or dilution figure
+  changes; only the flag does.
+- **Leap days (BR-EXT-044, BR-EXT-045, BR-EXT-110):** a period end of 29 February plus N years is 28 February in a
+  common year (it stays 29 February in a leap year). This affects `periodThrough` in the funding schedule's
+  contractual rows and in the capital-structure maturity ladder, and debt term ends. Before, the result was an invalid
+  date such as `2025-02-29`.
+- **Foreign dollar amounts (BR-EXT-059, BR-EXT-064):** in `extract_funding_capex_schedule` text items, an amount
+  written `NT$`, `A$`/`AU$`, `C$`/`CA$`, `HK$`, `S$` or `NZ$` keeps its currency (`TWD`, `AUD`, `CAD`, `HKD`, `SGD`,
+  `NZD`) and `amountAsWritten` includes the prefix; it was read as USD before. A `$` right after any other letters
+  (for example `R$`) is not read as an amount. Two amounts in different currencies are never one range. The ATM
+  capacity read in the dilution bridge counts US dollars only (`amountUsd`), so it no longer reads `NT$` or `A$`
+  figures as dollars.
+- **Unchanged:** no field, status, warning code or enum was added. `currency` already held ISO codes.
+- **Tests:** the pinned Q3f, leap-day and foreign-dollar parity cases now assert the repaired values in both runtimes.
+  `scripts/parity/cases_r5ext2_properties.py` adds property cases: every 1-to-5, 7, 10 and 30-year anniversary of about 14,000 dates
+  from 1896 to 2404 matches the calendar (Python `datetime` is the oracle), and across 20 strikes and about 240 prices
+  every option, warrant and convertible is in the money exactly when price >= threshold, with treasury-stock shares 0
+  at or below the strike, never above the count, and never falling as the price rises.
+
 ## Shared Utilities Module Move (3.0.5)
 
 - **Why:** internal restructuring only (Phase 4 unit 5, planner decision D1 (a) and (c)). Release type: patch. No
