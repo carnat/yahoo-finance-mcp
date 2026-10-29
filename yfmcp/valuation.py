@@ -322,10 +322,12 @@ def valuation_snapshot(ticker: str, market: dict, supplied_price: float | None, 
             "yahooTotalCash": yahoo_cash,
         })
 
-    # Convertibles counted as shares leave the debt, so they are not counted twice.
+    # Convertibles counted as shares leave the debt, so they are not counted twice. Only when the bridge's diluted count
+    # is the share count used: with Yahoo's or the basic count the conversion shares are not in equity, so the
+    # principal stays in debt (Q3i, BR-VAL-046/074/082, 3.2.1).
     convertible_adjustment = 0
     convertibles = next((c for c in ((bridge or {}).get("components") or []) if c.get("component") == "convertible_debt"), None)
-    for inst in (convertibles or {}).get("instruments") or []:
+    for inst in ((convertibles or {}).get("instruments") or []) if diluted is not None else []:
         if (_num(inst.get("incrementalShares")) or 0) > 0:
             convertible_adjustment += _num(inst.get("principal")) or 0
     if debt is not None:

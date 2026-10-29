@@ -3190,6 +3190,35 @@ F-024, F-026, F-029). Both runtimes change alike.
 - **Tests:** 21 new parity cases in `scripts/parity/cases_audit_2251.py`.
 - **Rollback:** redeploy 2.25.0.
 
+## Valuation Repairs: Tolerance Input, AGREED Wording, Convertible Basis, 52/53-Week Quarters (3.2.1)
+
+- **Why:** R5-valuation part 1, the valuation repairs that need no new name (decision Q3e, the binding Q3i triage
+  for the EV convertible basis, BR-VAL-068 and the numeric-string tolerance, and the F57 rule;
+  `analysis/yahoo-finance-mcp/R5VALUATION1_SPEC.md`). Release type: patch. Both runtimes. The partly tagged debt
+  group (BR-VAL-006) and untagged NCI (BR-VAL-025) need new names and wait for the owner's decision.
+- **Tolerance input (Q3e, BR-VAL-019/063):** `reconcile_metric_sources` clamps `tolerance_pct` to 0 to 10 only when
+  it is a finite number. NaN, an infinity, a numeric string ("5") or a boolean is the 0.5 default. Before, Python
+  clamped first, so NaN became 0 and +inf became 10, and it read "5" as 5.
+- **AGREED wording (Q3e, BR-VAL-020):** the Worker's `reconcile_metric_sources` description now says what both code
+  paths do: AGREED needs the latest SEC value plus at least one independent matching provider. It said "two or more
+  providers agree". This changes `schemaHash`.
+- **Convertible basis (Q3i, BR-VAL-046/074/082):** `get_valuation_snapshot` takes in-the-money convertible principal
+  out of debt only when the share count in the equity value is the dilution bridge's diluted count. With Yahoo's
+  count (SHARE_BASIS_MISMATCH) or the basic count (no diluted count in the bridge), the principal stays in debt.
+  Before, it left debt in those cases too, so the convertible was in neither debt nor shares and EV was understated.
+- **52/53-week quarters (BR-VAL-068):** when an issuer release names a calendar quarter ("fourth quarter of 2026"),
+  the quarter is read from the date a week before the period end (`fiscal_calendar`'s drift rule). A quarter ending
+  January 1 to 7 is Q4 of the year before. Before, the quarter ended 2027-01-02 matched "first quarter of 2027" and
+  not "fourth quarter of 2026". Period selection was already fiscal (3.0.0, F60).
+- **Unknown ticker:** `get_valuation_snapshot` fails as `compare_peer_valuations` does since 2.26.5 (F57). An
+  unknown ticker is `TICKER_NOT_FOUND` with "No provider data was found for the requested ticker.", and any other
+  quote-summary failure is `PROVIDER_ERROR` without the provider URL. Before, it was `PROVIDER_ERROR` with the URL.
+- **Unchanged:** no field, status, warning code or enum value was added. `manifestHash` stays the same.
+- **Tests:** in `scripts/parity/cases_valuation.py` the NaN/infinity tolerance, numeric-string tolerance, AGREED
+  wording and both convertible-basis cases now assert the same value in both runtimes. `scripts/parity/cases_r5val1.py`
+  covers the 52/53-week quarter sentences and the two snapshot failures.
+- **Rollback:** redeploy 3.2.0.
+
 ## Position Signals: Component Status, Quote Date, MACD, One Ticker (3.2.0)
 
 - **Why:** R5-pricing part 3, the `analyze_position_signals` rows of the binding Q3i triage (calls 1 to 4 and G6)

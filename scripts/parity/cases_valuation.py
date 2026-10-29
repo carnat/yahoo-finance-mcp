@@ -516,22 +516,20 @@ EV_CASES = [
           expect={"status": "PARTIAL", "enterpriseValue": None, "equityValue": None, "shares.basis": None,
                   "warningCodes": ["YAHOO_BALANCES", "ENTERPRISE_VALUE_INCOMPLETE"]}),
 
-    # ── Q3i: the convertible principal leaves debt even when the SEC share count is not used (owner decision, repair scheduled) ──
-    # Today: SHARE_BASIS_MISMATCH puts Yahoo's 200M basic shares in the equity value, yet the 300M convertible principal still leaves debt
-    # (380M - 300M) although no conversion shares were added. EV = 25 x 200M + 380M - 300M - 140M = 4,940M; with the conversion shares
-    # missing and the debt reduced, the convertible is in neither.
-    _snap("val.ev.pinned_convertible_deducted_when_sec_share_count_rejected", ["BR-VAL-046", "BR-VAL-074", "BR-VAL-082"],
+    # ── Q3i (3.2.1): the convertible principal leaves debt only when the bridge's diluted count is the share count used ──
+    # SHARE_BASIS_MISMATCH puts Yahoo's 200M basic shares in the equity value, so the 300M convertible stays in debt:
+    # EV = 25 x 200M + 380M - 140M = 5,240M. Before, the principal left debt too (4,940M) and the convertible was in neither.
+    _snap("val.ev.q3i_convertible_stays_in_debt_when_sec_share_count_rejected", ["BR-VAL-046", "BR-VAL-074", "BR-VAL-082"],
           _mk(sharesOutstanding=200_000_000), bridge=_bridge(400_000_000, 410_000_000, "10-K", components=[_conv(300_000_000, 15_000_000)]),
           capital=_cap(140_000_000, 380_000_000, period_end="2025-03-31"), select=_EV_SEL,
-          mode="pinned", decision="Q3i",
-          expect={"equityValue": 5_000_000_000, "enterpriseValue": 4_940_000_000, "status": "COMPUTED", "balances.convertibleDebtCountedAsShares": 300_000_000,
+          expect={"equityValue": 5_000_000_000, "enterpriseValue": 5_240_000_000, "status": "COMPUTED", "balances.convertibleDebtCountedAsShares": 0,
                   "balances.preferredLiquidationPreferenceInEv": 0, "shares.usedForValue": 200_000_000, "warningCodes": ["SHARE_BASIS_MISMATCH"]}),
-    # Same defect with a usable SEC count but no diluted count in the bridge: equity uses the basic count, principal still leaves debt.
-    _snap("val.ev.pinned_convertible_deducted_when_bridge_has_no_diluted_count", ["BR-VAL-046", "BR-VAL-074", "BR-VAL-082"],
+    # A usable SEC count but no diluted count in the bridge: equity uses the basic count, so the principal stays in debt
+    # (20 x 100M + 500M - 200M - 100M = 2,200M; before 1,900M).
+    _snap("val.ev.q3i_convertible_stays_in_debt_when_bridge_has_no_diluted_count", ["BR-VAL-046", "BR-VAL-074", "BR-VAL-082"],
           _mk(price=20.0, **_SAME_SIZE_MKT), bridge=_bridge(100_000_000, None, components=[_conv(300_000_000, 15_000_000)]),
           capital=_cap(200_000_000, 500_000_000, sti=100_000_000), select=_EV_SEL,
-          mode="pinned", decision="Q3i",
-          expect={"equityValue": 2_000_000_000, "enterpriseValue": 1_900_000_000, "status": "COMPUTED", "balances.convertibleDebtCountedAsShares": 300_000_000,
+          expect={"equityValue": 2_000_000_000, "enterpriseValue": 2_200_000_000, "status": "COMPUTED", "balances.convertibleDebtCountedAsShares": 0,
                   "balances.preferredLiquidationPreferenceInEv": 0, "shares.usedForValue": 100_000_000, "warningCodes": []}),
 ]
 
@@ -1490,15 +1488,13 @@ TOLERANCE_CASES = [
     # In range, out of range, default (argument omitted), and values that are not numbers: clamped to 0-10, else 0.5.
     _tolerances("val.recon.tolerance_clamp_finite_and_unusable_values", ["BR-VAL-021", "BR-VAL-022", "BR-VAL-063"], [15.0, -1.0, 3.0, 10.0, 0.0, _OMIT, "abc", None],
                 expect=[10, 0, 3, 10, 0, 0.5, 0.5, 0.5]),
-    # Q3e: Python clamps before its finiteness check (min(10, max(0, nan)) is 0.0; +inf is 10), so NaN -> 0 and +inf -> 10; the Worker tests finiteness
-    # first and answers the 0.5 default for NaN and both infinities. The repair makes them agree.
-    _tolerances("val.recon.pinned_tolerance_nan_and_infinity", ["BR-VAL-019", "BR-VAL-063", "BR-VAL-021"], [_NAN, _INF, -_INF],
-                mode="pinned", decision="Q3e", expect_py=[0, 10, 0], expect_ts=[0.5, 0.5, 0.5]),
-    # Finding (Phase 2, for Q3e triage): a numeric string is coerced by Python's float() ("5" -> 5.0) but not by the Worker's Number.isFinite (-> 0.5).
-    # Only reachable if the MCP layer passes the string through; the schema declares a number.
-    _tolerances("val.recon.pinned_tolerance_numeric_string", ["BR-VAL-063"], ["5"],
-                mode="pinned", decision="FINDING: numeric-string tolerance_pct is 5.0 in Python (float() coerces) but the 0.5 default in the Worker (Number.isFinite does not coerce)",
-                expect_py=[5], expect_ts=[0.5]),
+    # Q3e (3.2.1): NaN and both infinities are the 0.5 default in both runtimes. Python used to clamp before its finiteness check
+    # (NaN -> 0, +inf -> 10).
+    _tolerances("val.recon.q3e_tolerance_nan_and_infinity_are_the_default", ["BR-VAL-019", "BR-VAL-063", "BR-VAL-021"], [_NAN, _INF, -_INF],
+                expect=[0.5, 0.5, 0.5]),
+    # Q3i triage: a numeric string is not a number, so it is the 0.5 default in both (Python's float() used to coerce "5" to 5.0).
+    _tolerances("val.recon.q3i_tolerance_numeric_string_is_the_default", ["BR-VAL-063"], ["5", True],
+                expect=[0.5, 0.5]),
 ]
 
 
@@ -1513,16 +1509,14 @@ def _agreed_wording_py() -> str:
 _AGREED_PHRASE = re.compile(r"Status AGREED.*?with source evidence")
 
 DESCRIPTION_CASES = [
-    # Q3e (card BR-VAL-020 suspected defect): the Worker's tool description says AGREED needs "two or more providers agree"; the Python description
-    # (and both code paths) require the latest SEC value plus at least one independent matching provider. The repair corrects the Worker text.
-    Case(name="val.recon.pinned_tool_description_agreed_wording", ids=["BR-VAL-020", "BR-VAL-019"],
+    # Q3e (card BR-VAL-020, 3.2.1): both descriptions say what both code paths do: AGREED needs the latest SEC value plus at least
+    # one independent matching provider. The Worker used to say "two or more providers agree".
+    Case(name="val.recon.q3e_tool_description_agreed_wording", ids=["BR-VAL-020", "BR-VAL-019"],
          py=_agreed_wording_py,
          ts={"js": "return m.tools.TOOLS.find((t) => t.name === 'reconcile_metric_sources').description;"},
          select=lambda v: _AGREED_PHRASE.search(v).group(0),
-         mode="pinned", decision="Q3e",
-         expect_py="Status AGREED requires latest SEC plus at least one independent matching provider; PARTIAL covers a missing SEC baseline or only one provider; "
-                   "otherwise CONFLICT or NOT_FOUND, with source evidence",
-         expect_ts="Status AGREED (two or more providers agree), PARTIAL (one provider), CONFLICT or NOT_FOUND, with source evidence"),
+         expect="Status AGREED requires latest SEC plus at least one independent matching provider; PARTIAL covers a missing SEC baseline or only one provider; "
+                "otherwise CONFLICT or NOT_FOUND, with source evidence"),
 ]
 
 CASES = (ADR_CASES + SHARE_BASIS_CASES + BALANCE_CASES + CURRENCY_CASES + EV_CASES + EV_CASES_HIST + BAL_HIST_CASES + PRICE_CASES + MCAP_CASES + COVER_CASES

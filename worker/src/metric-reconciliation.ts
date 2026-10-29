@@ -18,6 +18,7 @@
 import { AUTHORITY_BOUNDARY } from "./evidence.js";
 import { collapse, round } from "./capital-structure.js";
 import { REVENUE_CONCEPTS } from "./sec-facts.js";
+import { nominalPeriodEnd } from "./fiscal-calendar.js";
 
 type Rec = Record<string, unknown>;
 
@@ -333,7 +334,10 @@ function explicitPeriodMatches(sentence: string, amountStart: number, period: Re
     // A quarter and year name the period as a pair: its calendar quarter in the calendar year, or its fiscal
     // quarter in its fiscal year. NVDA's quarter ended 2026-07-26 is Q3 2026 or Q2 fiscal 2027, never
     // "second quarter fiscal 2026" (the prior year's quarter).
-    const pairs: [number, string][] = [[Math.ceil(Number(end.slice(5, 7)) / 3), end.slice(0, 4)]];
+    // The calendar quarter is read a week before the end, so a 52/53-week quarter ending January 1-7 is Q4 of the year
+    // before (fiscal-calendar.ts's drift rule; BR-VAL-068, 3.2.1).
+    const nominal = nominalPeriodEnd(end) ?? end;
+    const pairs: [number, string][] = [[Math.ceil(Number(nominal.slice(5, 7)) / 3), nominal.slice(0, 4)]];
     if (typeof period.fiscalQuarter === "number") {
       for (const y of (period.fiscalYears ?? []) as unknown[]) pairs.push([period.fiscalQuarter, String(y)]);
     }
