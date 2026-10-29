@@ -509,7 +509,9 @@ _RELEASE_ATTRIBUTED_RE = re.compile(
 # The word before a label: a period or GAAP qualifier, a result verb, or a sentence, clause or heading boundary.
 _RELEASE_QUALIFIER_RE = re.compile(
     r"^(?:gaap|total|record|quarterly|consolidated|reported|delivered|achieved|generated|posted|preliminary|the|our|its|with|and|of|in|for|q[1-4]|fy[0-9]{2,4}|(?:19|20)[0-9]{2}|first|second|third|fourth|(?:first|second|third|fourth)-quarter|quarter|fiscal)$", _F)
-_RELEASE_NEGATIVE_RE = re.compile(r"\bnegative\s*$", _F)
+# Stated right before the figure (BR-EXT-015, R5-extractors-3): "negative $5 billion", "a loss of $5 billion", or a minus
+# written before the dollar sign ("-$5 billion"). "(loss)" and "income/loss" name both outcomes and sign nothing.
+_RELEASE_NEGATIVE_RE = re.compile(r"(?:\bnegative|(?<![(/])\bloss(?:\s+of)?)\s*$|(?:^|[\s(])[-\u2212]$", _F)
 _RELEASE_LOSS_RE = re.compile(r"\bloss\b", _F)
 _RELEASE_INCOME_RE = re.compile(r"\b(?:income|earnings)\b", _F)
 _RELEASE_NET_RESULT_RE = re.compile(r"\bnet (?:income|earnings|loss)\b", _F)
@@ -601,8 +603,8 @@ def release_text_metric(text: str, metric: str) -> dict | None:
             magnitude = float(int_part.replace(",", "") + (frac or ""))
             scaled = _whole(magnitude) if scale == 1 else int(math.floor(magnitude * scale + 0.5))
             # An unsigned figure stated as a loss is negative: "diluted net loss per share of $0.12", "net loss of $0.12 per
-            # diluted share", "free cash flow was negative $5 billion".
-            stated_loss = bool(_RELEASE_NEGATIVE_RE.search(gap))
+            # diluted share", "free cash flow was negative $5 billion", "operating income was a loss of $5 million", "-$5 billion".
+            stated_loss = bool(_RELEASE_NEGATIVE_RE.search(gap if kind == "label" else lead))
             if not stated_loss and metric == "epsDiluted":
                 if kind == "label":
                     stated_loss = bool(_RELEASE_LOSS_RE.search(m.group(1))) and not _RELEASE_INCOME_RE.search(m.group(1))

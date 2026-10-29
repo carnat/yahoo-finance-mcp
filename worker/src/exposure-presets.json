@@ -1,0 +1,16 @@
+{
+  "schemaVersion": "1",
+  "description": "Term lists for governed exposure presets (Q5, R5-extractors-3). Both runtimes read this file: the Worker compiles it in, Python reads it from worker/src. Order matters: the first matching term is the one reported.",
+  "presets": {
+    "china": {
+      "region": "China",
+      "riskTerms": ["China", "tariff", "export control", "Bank of China"],
+      "entityTerms": ["Tongmei", "JinMei", "BoYu"],
+      "entityTermsNote": "Subsidiaries of AXT Inc. (AXTI) in China. Searched for every issuer, as before the move.",
+      "bankTerms": ["Bank of China"],
+      "manufacturingTerms": ["manufacturing", "production", "supply chain", "fab", "manufactured", "outsourcing partner", "contract manufacturer"],
+      "namedEntities": ["foxconn", "tsmc", "luxshare", "catl", "byd", "tongmei", "catcher", "pegatron"],
+      "namedEntitiesNote": "Named entities associated with China manufacturing or supply chain; extract_exposure with topic china searches the first three."
+    }
+  }
+}

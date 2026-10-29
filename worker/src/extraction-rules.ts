@@ -490,6 +490,10 @@ const RELEASE_ATTRIBUTED_RE = /^\s*(?:of|in)\s+(?:[A-Za-z-]+\s+){0,2}?(free cash
 // The word before a label: a period or GAAP qualifier, a result verb, or a sentence, clause or heading boundary.
 const RELEASE_QUALIFIER_RE = /^(?:gaap|total|record|quarterly|consolidated|reported|delivered|achieved|generated|posted|preliminary|the|our|its|with|and|of|in|for|q[1-4]|fy[0-9]{2,4}|(?:19|20)[0-9]{2}|first|second|third|fourth|(?:first|second|third|fourth)-quarter|quarter|fiscal)$/i;
 
+// Stated right before the figure (BR-EXT-015, R5-extractors-3): "negative $5 billion", "a loss of $5 billion", or a minus
+// written before the dollar sign ("-$5 billion"). "(loss)" and "income/loss" name both outcomes and sign nothing.
+const RELEASE_NEGATIVE_RE = /(?:\bnegative|(?<![(/])\bloss(?:\s+of)?)\s*$|(?:^|[\s(])[-\u2212]$/i;
+
 function releaseScales(text: string): string[] {
   return [...new Set([...text.matchAll(RELEASE_TABLE_SCALE_RE)].map((m) => m[1].toLowerCase().replace(/s$/, "")))];
 }
@@ -564,8 +568,8 @@ export function releaseTextMetric(text: string, metric: ReleaseMetricName): Rele
       if (!Number.isFinite(magnitude)) continue;
       const scaled = scale === 1 ? magnitude : Math.round(magnitude * scale);
       // An unsigned figure stated as a loss is negative: "diluted net loss per share of $0.12", "net loss of $0.12 per
-      // diluted share", "free cash flow was negative $5 billion".
-      const statedLoss = /\bnegative\s*$/i.test(gap) || (metric === "epsDiluted" && (kind === "label"
+      // diluted share", "free cash flow was negative $5 billion", "operating income was a loss of $5 million", "-$5 billion".
+      const statedLoss = RELEASE_NEGATIVE_RE.test(kind === "label" ? gap : lead) || (metric === "epsDiluted" && (kind === "label"
         ? /\bloss\b/i.test(m[1]) && !/\b(?:income|earnings)\b/i.test(m[1])
         : /\bnet loss\b/i.test(lead.match(/\bnet (?:income|earnings|loss)\b/gi)?.pop() ?? "")));
       const negative = !!outerParen || innerParen === "(" || minus === "-" || statedLoss;

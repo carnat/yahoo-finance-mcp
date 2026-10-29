@@ -3190,6 +3190,29 @@ F-024, F-026, F-029). Both runtimes change alike.
 - **Tests:** 21 new parity cases in `scripts/parity/cases_audit_2251.py`.
 - **Rollback:** redeploy 2.25.0.
 
+## Extractor Repairs: Loss Sign, China Preset As Data (3.0.7)
+
+- **Why:** R5-extractors-3, the last extractor repairs before the Phase 5 extractors move (owner decisions Q1
+  BR-EXT-015 / Q3i, 2026-10-15, and Q5; `analysis/yahoo-finance-mcp/R5EXTRACTORS3_SPEC.md`). Release type: patch.
+  Both runtimes.
+- **Loss sign (BR-EXT-015):** a figure that `extract_earnings_metrics` reads from release text (revenue, diluted
+  EPS, gross margin, operating income, free cash flow, capex; `compare_earnings_actual_vs_estimate` reads them too) is
+  negative when the words right before
+  it state a loss ("operating income was a loss of $5 million", "diluted EPS was a loss of $0.12") or when a minus
+  sits directly before the dollar sign ("-$5 billion", also U+2212). Before, both read as positive. "Negative $5
+  billion", parentheses and "$-5" were already negative. Wording that names both outcomes ("income (loss) of",
+  "income/loss of") and a spaced dash used as a separator ("revenue - $94.9 billion") still sign nothing.
+- **China preset as data (Q5):** the term lists `extract_china_exposure` and `extract_exposure` (topic `china`)
+  search, including the issuer aliases Tongmei, JinMei and BoYu, moved from code into
+  `worker/src/exposure-presets.json`. The Worker compiles it in; Python reads it from `worker/src`
+  (`yfmcp/exposure_presets.py`), as it already does for the news registries. Terms and order are unchanged, so output
+  is unchanged.
+- **Unchanged:** no field, status, warning code or enum was added. The public `extract_china_exposure` action stays.
+- **Tests:** the pinned loss-wording case and the "-$5 billion" finding now assert negative values in both
+  runtimes, with new cases for operating income, EPS, the per-share form, U+2212 and the three wordings that stay
+  unsigned (`scripts/parity/cases_extraction_rules.py`). `scripts/parity/cases_r5ext3.py` pins the preset lists each
+  runtime loads to the lists the code held before the move.
+
 ## Extractor Repairs: In-The-Money At The Strike, Leap Days, Foreign Dollars (3.0.6)
 
 - **Why:** R5-extractors-2, the extractor repairs that must ship before the Phase 5 extractors move (owner decisions
