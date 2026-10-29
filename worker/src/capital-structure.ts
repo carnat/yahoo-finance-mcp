@@ -543,13 +543,13 @@ function optionsComponent(sources: IxSource[], price: number): Record<string, un
       range: t.label,
       outstanding: t.count,
       weightedAverageExercisePrice: t.strike,
-      inTheMoney: price > t.strike,
+      inTheMoney: price >= t.strike,
       incrementalShares: round(treasuryStock(t.count, t.strike, price)),
     }));
     out.incrementalShares = round(inc);
   } else if (strike) {
     out.method = "treasury_stock_on_weighted_average_strike";
-    out.inTheMoney = price > strike.value;
+    out.inTheMoney = price >= strike.value;
     out.incrementalShares = round(treasuryStock(outstanding, strike.value, price));
     out.note = "One weighted-average strike stands in for every tranche; tranche-level strikes can give a different count.";
   } else {
@@ -1001,7 +1001,7 @@ function warrantsComponent(sources: IxSource[], price: number, lifecycle: Warran
       exercisable,
       exercisableBasis,
       exercisePrice: strike ? strike.value : null,
-      inTheMoney: strike ? price > strike.value! : null,
+      inTheMoney: strike ? price >= strike.value! : null,
       // No warrants exercisable adds no shares, whatever the strike; an unknown exercisable count adds an unknown number.
       incrementalShares: exercisable == null ? null : strike ? round(treasuryStock(exercisable, strike.value!, price)) : exercisable === 0 ? 0 : null,
     };
@@ -1527,7 +1527,8 @@ export type TextMatch = {
 };
 
 const ATM_RE = /\bat[- ]the[- ]market\b|\bATM (?:program|offering|facility|agreement)\b|\b(?:equity distribution|open market sale|controlled equity offering|sales) agreement\b/i;
-const MONEY_RE = /(?:US)?\$\s?(\d[\d,]*(?:\.\d+)?)\s*(billion|million|thousand|bn|mm|m|k)?\b/gi;
+// US dollars only: a "$" right after other letters (NT$, A$, C$) is another currency, not an ATM amount in USD (R5-extractors-2).
+const MONEY_RE = /(?<![A-Za-z])(?:US)?\$\s?(\d[\d,]*(?:\.\d+)?)\s*(billion|million|thousand|bn|mm|m|k)?\b/gi;
 
 export function moneyValue(amount: string, unit: string | undefined): number {
   const base = parseFloat(amount.replace(/,/g, ""));
@@ -2287,8 +2288,10 @@ function leaseInclusiveDebt(doc: IxDocument, at: string | null): Record<string, 
   return { value: gross, components: used.map((p) => ({ concept: p.concept, amount: p.value })), basis: `${grossBasis} (debt including finance leases; no finance-lease liability tagged to take out)`, leases: "INCLUDED" };
 }
 
-function addYears(date: string, years: number): string {
+/** The same month and day `years` later; 29 February becomes 28 February in a common year (R5-extractors-2). */
+export function addYears(date: string, years: number): string {
   const y = parseInt(date.slice(0, 4), 10) + years;
+  if (date.slice(4, 10) === "-02-29" && !(y % 4 === 0 && (y % 100 !== 0 || y % 400 === 0))) return `${y}-02-28${date.slice(10)}`;
   return `${y}${date.slice(4)}`;
 }
 

@@ -129,7 +129,7 @@ def _treasury(count: float, strike: float, price: float) -> float:
 
 
 def _exercisable(component: str, instrument: str, count: float | None, count_basis: str, strike: float | None, treatment: str, price: float) -> dict:
-    itm = price > strike if strike is not None else None
+    itm = price >= strike if strike is not None else None
     if treatment == "exclude":
         return _line(component, instrument, treatment, count, count_basis, strike, price, itm, None, "excluded by scenario", 0)
     if count is None:
@@ -138,7 +138,7 @@ def _exercisable(component: str, instrument: str, count: float | None, count_bas
         return _line(component, instrument, treatment, count, count_basis, strike, price, itm, None, "gross: every share counted", _round(count))
     if strike is None:
         return _line(component, instrument, treatment, count, count_basis, strike, price, None, None, "treasury_stock", None, "exercise price not tagged")
-    return _line(component, instrument, treatment, count, count_basis, strike, price, price > strike, strike,
+    return _line(component, instrument, treatment, count, count_basis, strike, price, price >= strike, strike,
                  "treasury_stock: count x (1 - exercise price / price) when price > exercise price", _round(_treasury(count, strike, price)))
 
 
@@ -227,7 +227,7 @@ def _scenario_lines(bridge: dict, s: dict) -> list[dict]:
             strike, cap, covered = _num(call.get("strikePrice")), _num(call.get("capPrice")), _num(call.get("coveredShares"))
             args = ("capped_call", f"{_first(inst.get('instrument'), 'Convertible notes')} capped call", t["capped_calls"], covered,
                     str(_first(call.get("coverageBasis"), "NOT_STATED")), strike, price)
-            itm = price > strike if strike is not None else None
+            itm = price >= strike if strike is not None else None
             if strike is None or cap is None or covered is None:
                 lines.append(_line(*args, itm, strike, t["capped_calls"], None, "capped call terms not stated: " + (", ".join(call.get("missingTerms") or []) or "unknown")))
             else:

@@ -94,7 +94,11 @@ _UNDRAWN_FACILITY = "LineOfCreditFacilityRemainingBorrowingCapacity"
 
 
 def _add_years(date: str, years: int) -> str:
-    return f"{int(date[:4]) + years}{date[4:]}"
+    """The same month and day ``years`` later; 29 February becomes 28 February in a common year (R5-extractors-2)."""
+    y = int(date[:4]) + years
+    if date[4:10] == "-02-29" and not (y % 4 == 0 and (y % 100 != 0 or y % 400 == 0)):
+        return f"{y}-02-28{date[10:]}"
+    return f"{y}{date[4:]}"
 
 
 def _plain_at(facts: list[dict], local: str, at: str | None) -> dict | None:
@@ -104,7 +108,10 @@ def _plain_at(facts: list[dict], local: str, at: str | None) -> dict | None:
 
 # ── Text classification ──────────────────────────────────────────────────────
 
-_MONEY_RE = re.compile(r"(?:US)?\$\s?(\d[\d,]*(?:\.\d+)?)\s*(billion|million|thousand|bn|mm|m|k)?\b", _F)
+# A dollar amount and its currency (R5-extractors-2, BR-EXT-059/064): NT$, A$, C$, HK$, S$ and NZ$ carry their own currency,
+# never USD, and a "$" right after any other letters (R$) is not read as an amount.
+_MONEY_RE = re.compile(r"(?<![A-Za-z])(US|NT|AU|A|CA|C|HK|S|NZ)?\$\s?(\d[\d,]*(?:\.\d+)?)\s*(billion|million|thousand|bn|mm|m|k)?\b", _F)
+_DOLLAR_CURRENCY = {"": "USD", "US": "USD", "NT": "TWD", "AU": "AUD", "A": "AUD", "CA": "CAD", "C": "CAD", "HK": "HKD", "S": "SGD", "NZ": "NZD"}
 _EQUITY_AWARD_RE = re.compile(r"\b(?:stock|share|equity|RSU|option|incentive)[- ](?:based )?(?:awards?|compensation|grants?)\b|\brestricted stock\b|\bRSUs?\b|\bPSUs?\b|\bvest(?:s|ed|ing)?\b", _F)
 # Without an amount, a sentence is kept only when it names a funding or capex obligation outright.
 _STRONG_RE = re.compile(r"\bcapital expenditures?\b|\bcapex\b|\bpurchase (?:commitments?|obligations?)\b|\bcommitments?\b|\bcommitted\b|\bnon-?cancell?able\b|\bobligated\b|\bgrants?\b|\bmilestones?\b|\bCHIPS\b|\bincentive agreement\b", _F)
@@ -134,14 +141,15 @@ def _amounts(sentence: str) -> dict:
     reports in millions) keeps its wording and is SCALE_NOT_STATED rather than
     read at face value.
     """
-    matches = [(m.start(), m.end(), m.group(0), m.group(1), m.group(2)) for m in _MONEY_RE.finditer(sentence)
-               if not _PER_UNIT_RE.match(sentence[m.end():])]
+    matches = [(m.start(), m.end(), m.group(0), m.group(2), m.group(3), _DOLLAR_CURRENCY[(m.group(1) or "").upper()])
+               for m in _MONEY_RE.finditer(sentence) if not _PER_UNIT_RE.match(sentence[m.end():])]
     if not matches:
-        return {"low": None, "high": None, "qualifier": None, "amountStatus": "NOT_STATED", "asWritten": None}
+        return {"low": None, "high": None, "qualifier": None, "amountStatus": "NOT_STATED", "asWritten": None, "currency": None}
     a = matches[0]
     b = matches[1] if len(matches) > 1 else None
     # Two amounts are a range only when they run low to high: "committed $1.2 billion and $300 million" is two (2.5.20).
-    is_range = (b is not None and bool(_RANGE_JOIN_RE.match(sentence[a[1]:b[0]]))
+    # Amounts in two currencies are never a range.
+    is_range = (b is not None and a[5] == b[5] and bool(_RANGE_JOIN_RE.match(sentence[a[1]:b[0]]))
                 and _money_value(a[3], a[4] if a[4] is not None else b[4]) <= _money_value(b[3], b[4] if b[4] is not None else a[4]))
     unit = (a[4] if a[4] is not None else b[4]) if is_range else a[4]
     low = _money_value(a[3], unit)
@@ -155,8 +163,8 @@ def _amounts(sentence: str) -> dict:
     else:
         qualifier = "range" if low != high else "stated"
     if unit is None and high < 100000:
-        return {"low": None, "high": None, "qualifier": qualifier, "amountStatus": "SCALE_NOT_STATED", "asWritten": as_written}
-    return {"low": low, "high": high, "qualifier": qualifier, "amountStatus": "STATED", "asWritten": as_written}
+        return {"low": None, "high": None, "qualifier": qualifier, "amountStatus": "SCALE_NOT_STATED", "asWritten": as_written, "currency": a[5]}
+    return {"low": low, "high": high, "qualifier": qualifier, "amountStatus": "STATED", "asWritten": as_written, "currency": a[5]}
 
 
 _ORDINAL = {"first": 1, "second": 2, "third": 3, "fourth": 4}
@@ -250,7 +258,7 @@ def _text_items(statements: list[dict], limit: int) -> list[dict]:
                 "amountQualifier": amt["qualifier"],
                 "amountStatus": amt["amountStatus"],
                 "amountAsWritten": amt["asWritten"],
-                "currency": None if amt["amountStatus"] == "NOT_STATED" else "USD",
+                "currency": amt["currency"],
                 "timing": timing,
                 "unresolvedReason": ("no amount stated" if amt["amountStatus"] == "NOT_STATED" else "type not stated") if classification == "UNRESOLVED" else None,
                 "evidence": {

@@ -601,13 +601,13 @@ def _options_component(sources: list[IxSource], price: float) -> dict | None:
             "range": t["label"],
             "outstanding": t["count"],
             "weightedAverageExercisePrice": t["strike"],
-            "inTheMoney": price > t["strike"],
+            "inTheMoney": price >= t["strike"],
             "incrementalShares": round_half_up(_treasury_stock(t["count"], t["strike"], price)),
         } for t in tranches]
         out["incrementalShares"] = round_half_up(inc)
     elif strike:
         out["method"] = "treasury_stock_on_weighted_average_strike"
-        out["inTheMoney"] = price > strike["value"]
+        out["inTheMoney"] = price >= strike["value"]
         out["incrementalShares"] = round_half_up(_treasury_stock(outstanding["value"], strike["value"], price))
         out["note"] = "One weighted-average strike stands in for every tranche; tranche-level strikes can give a different count."
     else:
@@ -1067,7 +1067,7 @@ def _warrants_component(sources: list[IxSource], price: float, lifecycle: list[d
             "exercisable": exercisable,
             "exercisableBasis": exercisable_basis,
             "exercisePrice": strike.value if strike else None,
-            "inTheMoney": price > strike.value if strike else None,
+            "inTheMoney": price >= strike.value if strike else None,
             # No warrants exercisable adds no shares, whatever the strike; an unknown exercisable count adds an unknown number.
             "incrementalShares": (None if exercisable is None
                                   else round_half_up(_treasury_stock(exercisable, strike.value, price)) if strike
@@ -1691,7 +1691,8 @@ class TextMatch:
 
 
 _ATM_RE = re.compile(r"\bat[- ]the[- ]market\b|\bATM (?:program|offering|facility|agreement)\b|\b(?:equity distribution|open market sale|controlled equity offering|sales) agreement\b", _F)
-_MONEY_RE = re.compile(r"(?:US)?\$\s?(\d[\d,]*(?:\.\d+)?)\s*(billion|million|thousand|bn|mm|m|k)?\b", _F)
+# US dollars only: a "$" right after other letters (NT$, A$, C$) is another currency, not an ATM amount in USD (R5-extractors-2).
+_MONEY_RE = re.compile(r"(?<![A-Za-z])(?:US)?\$\s?(\d[\d,]*(?:\.\d+)?)\s*(billion|million|thousand|bn|mm|m|k)?\b", _F)
 
 
 def _money_value(amount: str, unit: str | None) -> float:
@@ -2536,7 +2537,11 @@ def _lease_inclusive_debt(doc: IxDocument, at: str | None) -> dict | None:
 
 
 def _add_years(date: str, years: int) -> str:
-    return f"{int(date[:4]) + years}{date[4:]}"
+    """The same month and day ``years`` later; 29 February becomes 28 February in a common year (R5-extractors-2)."""
+    y = int(date[:4]) + years
+    if date[4:10] == "-02-29" and not (y % 4 == 0 and (y % 100 != 0 or y % 400 == 0)):
+        return f"{y}-02-28{date[10:]}"
+    return f"{y}{date[4:]}"
 
 
 def _credit_facility_groups(doc: IxDocument, period_end: str | None, taken: set[str]) -> list[_DebtGroup]:

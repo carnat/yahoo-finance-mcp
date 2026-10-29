@@ -135,16 +135,16 @@ function treasury(count: number, strike: number, price: number): number {
 function exercisable(component: string, instrument: string, count: number | null, countBasis: string, strike: number | null, treatment: string, price: number): Line {
   const base = { component, instrument, treatment, count, countBasis, exercisePrice: strike, price };
   if (treatment === "exclude") {
-    return line({ ...base, inTheMoney: strike != null ? price > strike : null, thresholdPrice: null, method: "excluded by scenario", incrementalShares: 0 });
+    return line({ ...base, inTheMoney: strike != null ? price >= strike : null, thresholdPrice: null, method: "excluded by scenario", incrementalShares: 0 });
   }
   if (count == null) return line({ ...base, inTheMoney: null, thresholdPrice: null, method: treatment, incrementalShares: null, unresolvedReason: "count not tagged" });
   if (treatment === "gross") {
-    return line({ ...base, inTheMoney: strike != null ? price > strike : null, thresholdPrice: null, method: "gross: every share counted", incrementalShares: round(count) });
+    return line({ ...base, inTheMoney: strike != null ? price >= strike : null, thresholdPrice: null, method: "gross: every share counted", incrementalShares: round(count) });
   }
   if (strike == null) return line({ ...base, inTheMoney: null, thresholdPrice: null, method: "treasury_stock", incrementalShares: null, unresolvedReason: "exercise price not tagged" });
   return line({
     ...base,
-    inTheMoney: price > strike,
+    inTheMoney: price >= strike,
     thresholdPrice: strike,
     method: "treasury_stock: count x (1 - exercise price / price) when price > exercise price",
     incrementalShares: round(treasury(count, strike, price)),
@@ -236,7 +236,7 @@ function scenarioLines(bridge: Rec, s: ShareScenario): Line[] {
       const base = {
         component: "capped_call", instrument: `${String(inst.instrument ?? "Convertible notes")} capped call`, treatment: t.capped_calls,
         count: covered, countBasis: String(call.coverageBasis ?? "NOT_STATED"), exercisePrice: strike, price,
-        inTheMoney: strike != null ? price > strike : null, thresholdPrice: strike,
+        inTheMoney: strike != null ? price >= strike : null, thresholdPrice: strike,
       };
       if (strike == null || cap == null || covered == null) {
         lines.push(line({ ...base, method: t.capped_calls, incrementalShares: null, unresolvedReason: `capped call terms not stated: ${(Array.isArray(call.missingTerms) ? call.missingTerms as string[] : []).join(", ") || "unknown"}` }));

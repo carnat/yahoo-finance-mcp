@@ -269,12 +269,12 @@ add(_bridge("cap.ifconv.below_conversion_price_adds_nothing", _R3, _FACE_ONLY, 4
             expect={"ifConvertedShares": 6_000_000, "inTheMoney": False, "incrementalShares": 0}))
 # Scheduled repair Q3f (BR-EXT-003 card, "Suspected defect"): the convertible test is price >= conversion price while options and
 # warrants need price > strike, so at exactly the conversion price a note counts all its shares and an option counts none.
-add(Case(name="cap.ifconv.price_equal_conversion_price_counts_all_shares", ids=_R3, mode="pinned", decision="Q3f",
+add(Case(name="cap.ifconv.price_equal_conversion_price_counts_all_shares", ids=_R3,
          py=lambda: _bridge_py(_FACE_ONLY, 50, "10-Q", [], None, None, None, "USD"),
          ts={"js": _BRIDGE_JS, "args": [50, "10-Q", [], None, None, None, "USD", None], "fx": {"html": _FACE_ONLY, "url": URL, "kUrl": T.K_URL}},
          select=lambda v: pick(conv_view(v)["instrument"], "ifConvertedShares", "inTheMoney", "incrementalShares"),
          expect={"ifConvertedShares": 6_000_000, "inTheMoney": True, "incrementalShares": 6_000_000},
-         note="repair: boundary rule for in-the-money (>= for convertibles, > for options/warrants) to be decided by Q3f"))
+         note="Q3f (R5-extractors-2): in the money at price >= the threshold, for every instrument"))
 
 # Card 003 example: $300M face, $250M carrying (< 95% of face), $50 conversion price, price $60.
 add(_bridge("cap.ifconv.reduced_carrying_amount_is_the_principal", _R3,
@@ -475,17 +475,16 @@ add(_scen("cap.scen.capped_call_offset_between_and_above_cap", ["BR-EXT-024"],
               "at-strike": [{"component": "convertible_debt", "incrementalShares": 20_000_000}, {"component": "capped_call", "incrementalShares": 0}],
               "ignored": [{"component": "convertible_debt", "incrementalShares": 20_000_000}]}}))
 
-# Scheduled repair Q3f: at price == strike an option or warrant is not in the money (> strictly), at price == conversion price a note is (>=).
+# Q3f (R5-extractors-2): at price == strike every instrument is in the money (>=); treasury stock adds 0 option and warrant shares there.
 add(_scen("cap.scen.in_the_money_boundary_options_vs_convertibles", ["BR-EXT-003", "BR-EXT-005", "BR-EXT-018", "BR-EXT-021", "BR-EXT-024", "BR-EXT-082", "BR-EXT-083"],
           {"r": {"bridge": _inv([_OPT, {"component": "warrants", "classes": [{"class": "W", "outstanding": 1_000_000, "exercisable": 1_000_000, "exercisePrice": 10.0}]},
                                  _notes(1_000_000, 10.0, 10_000_000)]),
                  "scenarios": [_sc("equal", 10)]}},
           lines(fields=("component", "inTheMoney", "thresholdPrice", "incrementalShares")),
-          mode="pinned", decision="Q3f",
-          expect={"r": {"equal": [{"component": "stock_options", "inTheMoney": False, "thresholdPrice": 10, "incrementalShares": 0},
-                                  {"component": "warrants", "inTheMoney": False, "thresholdPrice": 10, "incrementalShares": 0},
+          expect={"r": {"equal": [{"component": "stock_options", "inTheMoney": True, "thresholdPrice": 10, "incrementalShares": 0},
+                                  {"component": "warrants", "inTheMoney": True, "thresholdPrice": 10, "incrementalShares": 0},
                                   {"component": "convertible_debt", "inTheMoney": True, "thresholdPrice": 10, "incrementalShares": 1_000_000}]}},
-          note="repair: one in-the-money boundary rule across instruments (Q3f)"))
+          note="Q3f (R5-extractors-2): one inclusive boundary; treasury stock still adds 0 shares at the strike"))
 
 # 2.23.0 (BR-EXT-084): a class with no `exercisable` key at all is untagged exactly like a null one: under vested_only its count is
 # unknown ("count not tagged"), never its outstanding count; under warrant_vesting "all" the outstanding count is used.
@@ -633,9 +632,9 @@ add(_bridge("cap.pref.below_conversion_price_keeps_liquidation_preference", ["BR
 add(_bridge("cap.pref.above_conversion_price_if_converted", ["BR-EXT-004"], _PREF_F, 95, claims=[], select=_PSEL,
             expect={"component": 21_800_000, "instrument": {"preferredSharesOutstanding": 2_000_000, "ifConvertedShares": 21_800_000, "ifConvertedBasis": "shares_issuable_tagged",
                                                             "conversionPrice": 91.84, "inTheMoney": True, "incrementalShares": 21_800_000, "liquidationPreference": _LIQ}}))
-add(_bridge("cap.pref.price_equal_conversion_price_counts_all_shares", ["BR-EXT-004", "BR-EXT-082"], _PREF_F, 91.84, claims=[], mode="pinned", decision="Q3f",
+add(_bridge("cap.pref.price_equal_conversion_price_counts_all_shares", ["BR-EXT-004", "BR-EXT-082"], _PREF_F, 91.84, claims=[],
             select=lambda v: _PSEL(v)["instrument"]["incrementalShares"], expect=21_800_000,
-            note="repair: preferred uses >= like notes today; Q3f decides the single boundary rule"))
+            note="Q3f (R5-extractors-2): preferred keeps >=, now the rule for every instrument"))
 add(_bridge("cap.pref.dividend_rate_and_aggregate_liquidation_preference", ["BR-EXT-004"], T.PREFLIQ_Q, 10, claims=[],
             select=lambda v: pick(comp(v, "convertible_preferred")["instruments"][0], "dividendRatePct", "liquidationPreference", "incrementalShares", "inTheMoney"),
             expect={"dividendRatePct": 6, "liquidationPreference": {"amount": 100_000_000, "basis": "per_share_tagged_x_shares_outstanding", "perShare": 100, "asOf": "2026-06-30"},
@@ -938,14 +937,14 @@ add(_sched("cap.funding.facts_but_no_schedule_info_warning", ["BR-EXT-044", "BR-
 _LEAP = "2024-02-29"
 add(_sched("cap.funding.leap_day_period_through_invalid_date", ["BR-EXT-044", "BR-EXT-045", "BR-EXT-110"], _LEAP,
            [_plain(_DEBT + f, 1, _LEAP) for f in ("InNextTwelveMonths", "InYearTwo", "InYearThree", "InYearFour", "InYearFive")], [],
-           lambda v: [r["periodThrough"] for r in v["contractual"]], mode="pinned", decision="Q3i",
-           expect=["2025-02-29", "2026-02-29", "2027-02-29", "2028-02-29", "2029-02-29"],
-           note="repair: roll Feb 29 to a valid date (Feb 28 or Mar 1: SME question)"))
+           lambda v: [r["periodThrough"] for r in v["contractual"]],
+           expect=["2025-02-28", "2026-02-28", "2027-02-28", "2028-02-29", "2029-02-28"],
+           note="R5-extractors-2: 29 February becomes 28 February in a common year and stays 29 February in a leap year"))
 _LEAP_K = _filing([], "<p>" + "".join(T._num(f"us-gaap:{_DEBT}{f}", "end", "usd", "1") for f in ("InNextTwelveMonths", "InYearTwo")) + "</p>",
                   end=_LEAP, end_text="February 29, 2024", start="2023-03-01", doc_type="10-K")
 add(_capital("cap.funding.leap_day_maturity_ladder_period_through_invalid_date", ["BR-EXT-044", "BR-EXT-045", "BR-EXT-110"], _LEAP_K, filing="10-K",
-             select=lambda v: [[r["bucket"], r["periodThrough"]] for r in v["maturityLadder"]], mode="pinned", decision="Q3i",
-             expect=[["next_12_months", "2025-02-29"], ["year_2", "2026-02-29"]]))
+             select=lambda v: [[r["bucket"], r["periodThrough"]] for r in v["maturityLadder"]],
+             expect=[["next_12_months", "2025-02-28"], ["year_2", "2026-02-28"]]))
 
 # BR-EXT-059: the first dollar amount, ranges only low to high, no-scale figures under $100,000.
 def items(v: dict) -> list:
@@ -979,13 +978,21 @@ add(_text("cap.funding.text_per_unit_price_is_not_the_amount", ["BR-EXT-059"],
           "We committed to purchase equipment at $2.50 per unit under the long-term supply agreement.",
           [{"classification": "UNRESOLVED", "amountLow": None, "amountHigh": None, "amountQualifier": None, "amountStatus": "NOT_STATED",
             "amountAsWritten": None, "currency": None}]))
-# Scheduled repair Q3i (BR-EXT-059 / 064): "$" inside NT$, A$ or C$ is read as dollars and the currency is always written USD.
-for _cur, _tag in (("NT$", "ntd"), ("A$", "aud"), ("C$", "cad")):
-    add(_text(f"cap.funding.text_{_tag}_dollar_labelled_usd", ["BR-EXT-059", "BR-EXT-064"],
+# R5-extractors-2 (BR-EXT-059 / 064): NT$, A$, C$, HK$, S$ and NZ$ amounts carry their own currency, never USD.
+for _cur, _tag, _iso in (("NT$", "ntd", "TWD"), ("A$", "aud", "AUD"), ("C$", "cad", "CAD"), ("HK$", "hkd", "HKD"), ("US$", "usd_prefix", "USD")):
+    add(_text(f"cap.funding.text_{_tag}_dollar_carries_its_currency", ["BR-EXT-059", "BR-EXT-064"],
               f"We have committed {_cur}5 billion to the new fabrication facility expansion through 2028.",
               [{"classification": "COMPANY_DISCLOSED_COMMITTED", "amountLow": 5_000_000_000, "amountHigh": 5_000_000_000, "amountQualifier": "stated",
-                "amountStatus": "STATED", "amountAsWritten": "$5 billion", "currency": "USD"}], mode="pinned", decision="Q3i",
-              note="repair: foreign-dollar amounts are excluded or carry their own currency (SME question)"))
+                "amountStatus": "STATED", "amountAsWritten": f"{_cur}5 billion", "currency": _iso}]))
+# A "$" right after other letters (R$) is not read as an amount; two currencies are never one range.
+add(_text("cap.funding.text_unlisted_dollar_prefix_is_not_an_amount", ["BR-EXT-059", "BR-EXT-064"],
+          "We have committed R$5 billion to the new fabrication facility expansion through 2028.",
+          [{"classification": "UNRESOLVED", "amountLow": None, "amountHigh": None, "amountQualifier": None, "amountStatus": "NOT_STATED",
+            "amountAsWritten": None, "currency": None}]))
+add(_text("cap.funding.text_two_currencies_are_not_a_range", ["BR-EXT-059", "BR-EXT-064"],
+          "We have committed NT$5 billion to $6 billion to the new fabrication facility expansion through 2028.",
+          [{"classification": "COMPANY_DISCLOSED_COMMITTED", "amountLow": 5_000_000_000, "amountHigh": 5_000_000_000, "amountQualifier": "stated",
+            "amountStatus": "STATED", "amountAsWritten": "NT$5 billion", "currency": "TWD"}]))
 
 # BR-EXT-064: eligibility of funding text items and the unresolved reason.
 add(_text("cap.funding.text_commitment_without_amount_is_unresolved", ["BR-EXT-064"],
