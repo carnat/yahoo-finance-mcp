@@ -8,6 +8,7 @@ import { BoundedTtlCache } from "../cache.js";
 import { awaitNotingBudget, consumeSubrequest, countCacheEvent, countProviderRetry, emptyCacheUsage, type CacheEvent, type CacheUsage } from "../request-context.js";
 import { marketInputsFromQuoteSummary, type MarketInputs } from "../valuation.js";
 import { edgeCache, fetchProviderWithTimeout, UA } from "./provider-http.js";
+import { yahooQuoteSummaryUrl, yahooTimeseriesUrl } from "./endpoints.js";
 
 // Module-level crumb cache — shared within a Cloudflare isolate session
 let _crumb: { value: string; cookie: string; exp: number } | null = null;
@@ -443,7 +444,7 @@ export async function fetchTimeseriesByDate(
   // period1: 1985-08-20 (yfinance default); period2: now
   const p2 = Math.floor(Date.now() / 1000);
   const d = (await yGet(
-    `https://query2.finance.yahoo.com/ws/fundamentals-timeseries/v1/finance/timeseries/${enc(ticker)}` +
+    yahooTimeseriesUrl(enc(ticker)) +
       `?type=${types.join(",")}&period1=493590046&period2=${p2}` +
       `&lang=en-US&region=US&corsDomain=finance.yahoo.com`
   )) as Record<string, unknown>;
@@ -489,7 +490,7 @@ export async function fetchTimeseriesByDate(
 
 export async function valuationMarketInputs(ticker: string): Promise<MarketInputs> {
   const d = (await yGet(
-    `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${enc(ticker)}?modules=price,financialData,defaultKeyStatistics,earningsTrend`
+    yahooQuoteSummaryUrl(enc(ticker), "price,financialData,defaultKeyStatistics,earningsTrend")
   )) as Record<string, unknown>;
   const result = (d?.quoteSummary as Record<string, unknown[]> | undefined)?.result?.[0] as Record<string, unknown> | undefined;
   if (!result) throw new Error(`No Yahoo quote summary for ${ticker.toUpperCase()}`);

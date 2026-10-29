@@ -19,6 +19,7 @@ import yfinance as yf
 
 from yfmcp import url_policy as _url_policy
 from yfmcp.parsing.html import _strip_html_tags
+from yfmcp.clients.endpoints import SEC_ARCHIVES_PREFIX, SEC_TICKER_INDEX_URL, SEC_WWW, sec_archive_document_url, sec_browse_edgar_atom_url, sec_company_facts_url, sec_filing_index_url, sec_submissions_url
 
 # ---------------------------------------------------------------------------
 # SEC request constants and in-process caches
@@ -88,7 +89,7 @@ async def _load_edgar_tickers() -> dict[str, int]:
 
     def _fetch() -> dict[str, int]:
         req = _urlreq.Request(
-            "https://www.sec.gov/files/company_tickers.json",
+            SEC_TICKER_INDEX_URL,
             headers={"User-Agent": _SEC_REQUIRED_UA},
         )
         with _url_policy.urlopen(req, timeout=15) as resp:  # noqa: S310
@@ -146,7 +147,7 @@ async def _edgar_get_company_facts(cik_padded: str) -> dict | None:
     if cached_entry is not None and (now - cached_entry[1]) < _EDGAR_TTL:
         return cached_entry[0]
     try:
-        data = await _edgar_get(f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik_padded}.json")
+        data = await _edgar_get(sec_company_facts_url(cik_padded))
     except EdgarError:
         return None
     if data is not None:
@@ -163,7 +164,7 @@ async def _edgar_read_submissions(cik_padded: str) -> dict:
     cached_entry = _EDGAR_SUBS_CACHE.get(cik_padded)
     if cached_entry is not None and (now - cached_entry[1]) < _EDGAR_SUBS_TTL:
         return cached_entry[0]
-    data = await _edgar_get(f"https://data.sec.gov/submissions/CIK{cik_padded}.json")
+    data = await _edgar_get(sec_submissions_url(cik_padded))
     if data is not None:
         _bounded_set(_EDGAR_SUBS_CACHE, cik_padded, (data, now), _EDGAR_SUBS_CACHE_MAX)
     return data
@@ -181,14 +182,12 @@ def _edgar_build_filing_urls(cik: int, accession_number: str, primary_doc: str |
     """Build the EDGAR index URL and primary document URL for a filing."""
     accession_nodash = accession_number.replace("-", "")
     index_url = (
-        f"https://www.sec.gov/Archives/edgar/data/{cik}"
-        f"/{accession_nodash}/{accession_number}-index.htm"
+        sec_filing_index_url(cik, accession_nodash, accession_number)
     )
     primary_url: str | None = None
     if primary_doc:
         primary_url = (
-            f"https://www.sec.gov/Archives/edgar/data/{cik}"
-            f"/{accession_nodash}/{primary_doc}"
+            sec_archive_document_url(cik, accession_nodash, primary_doc)
         )
     return index_url, primary_url
 
@@ -288,7 +287,7 @@ def _fetch_edgar_html(url: str, max_bytes: int) -> str | None:
 # Archive fetches share one in-flight request and a size-limited body cache.
 # Each MCP call runs its own event loop on its own thread, so sharing uses
 # thread-safe futures rather than loop-bound tasks.
-_EDGAR_ARCHIVE_PREFIX = "https://www.sec.gov/Archives/"
+_EDGAR_ARCHIVE_PREFIX = SEC_ARCHIVES_PREFIX
 _EDGAR_HTML_TTL = 30 * 60
 _EDGAR_HTML_CACHE_MAX_CHARS = 64 * 1024 * 1024
 _EDGAR_HTML_CACHE: dict[tuple[str, int], tuple[str, float]] = {}
@@ -442,8 +441,7 @@ async def _resolve_cik_for_ticker(ticker: str) -> str | None:
     # when Yahoo and SEC's ticker index were both unreadable (2.5.31, F-027).
     atom_urls = [
         (
-            "https://www.sec.gov/cgi-bin/browse-edgar?"
-            f"action=getcompany&CIK={_urlparse.quote(ticker)}&type=&dateb=&owner=include&count=10&output=atom"
+            sec_browse_edgar_atom_url(_urlparse.quote(ticker))
         ),
     ]
     loop = asyncio.get_event_loop()
@@ -529,11 +527,11 @@ async def _resolve_ex991_url(accession_number: str, cik: int | None) -> str | No
             doc_name = ex.get("document")
             if doc_name:
                 accession_nodash = accession_number.replace("-", "")
-                return f"https://www.sec.gov/Archives/edgar/data/{cik}/{accession_nodash}/{doc_name}"
+                return sec_archive_document_url(cik, accession_nodash, doc_name)
     html = await _edgar_get_html(index_url, 100_000)
     if not html:
         return None
     m = _re.search(r'EX-99\.0?1\b[^<]{0,300}<[^>]+href="(/Archives/edgar/data/[^"]+\.(?:htm|html))"', html, _re.IGNORECASE)
     if m:
-        return f"https://www.sec.gov{m.group(1)}"
+        return f"{SEC_WWW}{m.group(1)}"
     return None

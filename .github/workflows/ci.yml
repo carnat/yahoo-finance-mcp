@@ -207,6 +207,7 @@ jobs:
           python scripts/test_scenarios_and_schedule.py -v
           python scripts/test_guidance_and_drivers.py -v
           python scripts/test_valuation_history_and_reconcile.py -v
+          python scripts/test_endpoints.py -v
 
       - name: Behaviour-contract parity harness (Python ↔ Worker)
         run: python scripts/test_parity_harness.py -v

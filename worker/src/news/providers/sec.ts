@@ -15,6 +15,7 @@ import {
   roundHalfAwayFromZero,
 } from "../shared.js";
 import type { NewsProviderResult } from "./types.js";
+import { SEC_ARCHIVES_PREFIX, secArchiveDocumentUrl, secFilingIndexUrl } from "../../clients/endpoints.js";
 
 function eventTypeFromForm(formType: string): string {
   // An amendment (8-K/A) types as the form it amends (2.25.4, F43).
@@ -179,7 +180,7 @@ function parseForm4Transaction(xml: string): Record<string, unknown> | null {
 async function tryAttachForm4Transaction(item: Record<string, unknown>, filing: Record<string, unknown>, warnings: Record<string, unknown>[]): Promise<void> {
   if (_str(filing.filingType).toUpperCase() !== "4") return;
   const url = _str(item.url);
-  if (!url.startsWith("https://www.sec.gov/Archives/")) {
+  if (!url.startsWith(SEC_ARCHIVES_PREFIX)) {
     warnings.push({ code: "FORM4_PARSE_UNAVAILABLE", message: "Form 4 primary document URL is unavailable.", severity: "warning" });
     return;
   }
@@ -224,12 +225,12 @@ function buildSecEventItem(
   const primaryDocument = _str(filing.primaryDocument);
   let url = _str(filing.documentUrl || filing.primaryDocumentUrl);
   if (!url && cikInt && accessionNumber && primaryDocument) {
-    url = `https://www.sec.gov/Archives/edgar/data/${cikInt}/${accClean}/${primaryDocument}`;
+    url = secArchiveDocumentUrl(cikInt, accClean, primaryDocument);
   }
   if (!url && cikInt && accessionNumber) {
-    url = `https://www.sec.gov/Archives/edgar/data/${cikInt}/${accClean}/${accessionNumber}-index.htm`;
+    url = secFilingIndexUrl(cikInt, accClean, accessionNumber);
   }
-  if (!url.startsWith("https://www.sec.gov/Archives/")) {
+  if (!url.startsWith(SEC_ARCHIVES_PREFIX)) {
     url = "";
     warnings.push({ code: "SEC_URL_INVALID", message: "SEC event URL missing or invalid SEC Archives URL.", severity: "warning" });
   }

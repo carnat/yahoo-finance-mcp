@@ -32,6 +32,7 @@ import { sourceDecisionUse, shortText, withinDateWindow, isoUtc, tickerInText } 
 import newsSourceRegistry from "./news-source-registry.json";
 import { ErrorCode, getWorkerVar, mcpFailure } from "./response.js";
 import { validateTicker } from "./validate.js";
+import { yahooQuoteSummaryUrl } from "./clients/endpoints.js";
 // Names other modules and tests import from news.ts (2.15.1 provider move).
 export { parseHtmlTable } from "./news/shared.js";
 export { getNews, yahooItemIssuer, collectYahooEvents } from "./news/providers/yahoo.js";
@@ -1428,7 +1429,7 @@ export async function verifyCompanyEvent(
     };
     try {
       const priceD = await yGet(
-        `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${enc(ticker)}?modules=price`
+        yahooQuoteSummaryUrl(enc(ticker), "price")
       ) as Record<string, unknown>;
       const priceResult = ((priceD?.quoteSummary as Record<string, unknown> | undefined)
         ?.result as Record<string, unknown>[] | undefined)?.[0]?.price as Record<string, unknown> | undefined;

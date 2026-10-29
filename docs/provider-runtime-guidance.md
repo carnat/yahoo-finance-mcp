@@ -3190,6 +3190,20 @@ F-024, F-026, F-029). Both runtimes change alike.
 - **Tests:** 21 new parity cases in `scripts/parity/cases_audit_2251.py`.
 - **Rollback:** redeploy 2.25.0.
 
+## Endpoint Builder (3.0.4)
+
+- **Why:** internal restructuring only (Phase 4 unit 4, decision D8). Release type: patch. No behaviour change.
+- **What moved:** every Yahoo Finance API and SEC EDGAR URL template is now built in one place:
+  `worker/src/clients/endpoints.ts` (quoteSummary, chart, options, timeseries, search, quoteType, screener and
+  visualization; SEC submissions, companyfacts, companyconcept, archive documents, filing index pages, the EDGAR Atom
+  browse feed and the manual-lookup links) and its twin `yfmcp/clients/endpoints.py`. Call sites keep their own
+  encoding and pass the encoded symbol, CIK or accession in.
+- **Unchanged:** every builder returns exactly the string its call site wrote before, so no request URL, cache key,
+  tool name, input, output, schema, status or warning changed. The Python manual-lookup links keep their own encoding
+  (the Worker encodes `company=` and `/`; Python does not), as before.
+- **Verification:** `scripts/test_endpoints.py` pins every builder in both runtimes to the old hand-written literal;
+  the parity harness passes with no expected value changed; tool listings (expanded and grouped) are byte-identical.
+
 ## HTML Parsing Module Move (3.0.3)
 
 - **Why:** internal restructuring only (Phase 4 unit 3). Release type: patch. No behaviour change.
@@ -3200,6 +3214,7 @@ F-024, F-026, F-029). Both runtimes change alike.
 - **Compatibility:** `yahoo-finance.ts` and `news/shared.ts` re-export the moved names other modules and tests read.
 - **Verification:** the parity harness passes with no expected value changed; tool listings (expanded and grouped) are
   byte-identical; the moved text keeps its line multiset.
+
 ## One MarketInputs Source For Valuation (3.0.2)
 
 - **Why:** Phase 4 Q3g (brief §7 Q3g, V6): one `MarketInputs` contract, read by the Yahoo client, in both runtimes.

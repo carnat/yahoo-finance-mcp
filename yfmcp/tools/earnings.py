@@ -55,6 +55,7 @@ from yfmcp.clients.yahoo_transcripts import (
     validate_yahoo_transcript_payload_identity,
 )
 from yfmcp.parsing.html import _strip_html_blocks, _strip_html_tags
+from yfmcp.clients.endpoints import SEC_ARCHIVES_PREFIX, sec_archive_document_url, sec_company_concept_url
 
 
 def _server_attr(name: str):
@@ -86,7 +87,7 @@ async def _resolve_earnings_period_from_source(source: dict, resolved: dict | No
     source_url = str((resolved if resolved is not None else source).get("url") or "")
     if not source_url:
         return _extract_earnings_period_from_text("")
-    if source_url.startswith("https://www.sec.gov/Archives/"):
+    if source_url.startswith(SEC_ARCHIVES_PREFIX):
         html = await _edgar_get_html(source_url, max_bytes=500_000)
     else:
         html = _fetch_public_html(source_url, max_bytes=500_000)
@@ -299,7 +300,7 @@ async def _resolve_latest_earnings_sec_source(ticker: str) -> dict | None:
             if not acc or not primary_doc:
                 continue
             acc_clean = str(acc).replace("-", "")
-            document_url = f"https://www.sec.gov/Archives/edgar/data/{cik_int}/{acc_clean}/{primary_doc}"
+            document_url = sec_archive_document_url(cik_int, acc_clean, primary_doc)
             filing_date = at(dates, i)
             accepted_at = at(accepted_dts, i)
             return {
@@ -321,7 +322,7 @@ async def _resolve_earnings_content_source(src: dict) -> dict:
     exhibit (sourceType sec_8k_ex991) when an SEC 8-K has one, else the source's own url."""
     src_url = str(src.get("url") or "")
     source_type = str(src.get("sourceType") if src.get("sourceType") is not None else "company_ir")
-    if not src_url.startswith("https://www.sec.gov/Archives/"):
+    if not src_url.startswith(SEC_ARCHIVES_PREFIX):
         return {"url": src_url, "sourceType": source_type}
     accession_number = str(src.get("accessionNumber") or "")
     try:
@@ -481,9 +482,7 @@ async def index_earnings_release(ticker: str, period: str = "latest", source_url
     if cached is not None:
         return cached[0]
 
-    html = await _edgar_get_html(source_url, max_bytes=5_000_000) if source_url.startswith(
-        "https://www.sec.gov/Archives/"
-    ) else _fetch_public_html(source_url)
+    html = await _edgar_get_html(source_url, max_bytes=5_000_000) if source_url.startswith(SEC_ARCHIVES_PREFIX) else _fetch_public_html(source_url)
     if not html:
         return _wrap_envelope_v2("index_earnings_release", None, error=f"Failed to fetch source: {source_url}", error_code=ErrorCode.PROVIDER_ERROR)
 
@@ -599,7 +598,7 @@ async def _xbrl_quarter_metrics(ticker: str, cik_padded: str, release_filing_dat
         concepts = list(primary) if isinstance(primary, list) else [primary, *([fallback] if fallback else [])]
         best = None
         for concept in concepts:
-            read = await read_json(f"https://data.sec.gov/api/xbrl/companyconcept/CIK{cik_padded}/us-gaap/{concept}.json")
+            read = await read_json(sec_company_concept_url(cik_padded, concept))
             data = read.get("json") if read.get("ok") else None
             units = data.get("units") if isinstance(data, dict) else None
             facts = units.get(unit) if isinstance(units, dict) else None
@@ -635,7 +634,7 @@ async def _xbrl_quarter_metrics(ticker: str, cik_padded: str, release_filing_dat
     def _ev(fact: dict) -> dict:
         derived = fact["method"] == "YTD_DIFFERENCE"
         return {
-            "url": f"https://data.sec.gov/api/xbrl/companyconcept/CIK{cik_padded}/us-gaap/{fact['concept']}.json",
+            "url": sec_company_concept_url(cik_padded, fact['concept']),
             "sourceType": "sec_xbrl_10k" if fact["form"].startswith("10-K") else "sec_xbrl_10q",
             "publishedAt": None,
             "retrievedAt": retrieved_at,
@@ -714,11 +713,11 @@ async def extract_earnings_metrics(
         metrics[key] = value
         evidence_items.append(value["evidence"])
 
-    if src_url and src_url.startswith("https://www.sec.gov/Archives/"):
+    if src_url and src_url.startswith(SEC_ARCHIVES_PREFIX):
         html = await _edgar_get_html(src_url, max_bytes=5_000_000)
         text = _strip_html_blocks(_sanitize_sec_html(html or ""))
         period_info = _extract_earnings_period_from_text(text)
-    if not xbrl_metrics and src_url.startswith("https://www.sec.gov/Archives/"):
+    if not xbrl_metrics and src_url.startswith(SEC_ARCHIVES_PREFIX):
         hits = {key: _extract_release_text_metric(text, key) for key in ("revenue", "epsDiluted", "grossMargin", "operatingIncome", "freeCashFlow", "capex")}
 
         def _ev(excerpt: str | None) -> dict | None:
@@ -811,7 +810,7 @@ async def extract_guidance(ticker: str, period: str = "latest") -> str:
             "warnings": [{"code": code, "message": message, "severity": "warning"}],
         })
 
-    if not src_url.startswith("https://www.sec.gov/Archives/"):
+    if not src_url.startswith(SEC_ARCHIVES_PREFIX):
         return not_read("RELEASE_NOT_RESOLVED", "No SEC earnings release was resolved, so guidance was not read.", False)
     try:
         html = await _edgar_get_html(src_url, max_bytes=5_000_000)
@@ -919,7 +918,7 @@ async def extract_management_commentary(ticker: str, period: str = "latest", top
     content = await _resolve_earnings_content_source(src)
     src_url = content["url"]
     text = ""
-    if src_url.startswith("https://www.sec.gov/Archives/"):
+    if src_url.startswith(SEC_ARCHIVES_PREFIX):
         html = await _edgar_get_html(src_url, max_bytes=5_000_000)
         text = _strip_html_blocks(_sanitize_sec_html(html or ""))
     elif src_url:
@@ -1216,7 +1215,7 @@ async def get_sec_filing_exhibit_content(ticker: str, accessionNumber: str, file
         return _wrap_envelope_v2("get_sec_filing_exhibit_content", None, error=f"Could not resolve CIK for ticker '{ticker}'.", error_code=ErrorCode.TICKER_NOT_FOUND)
 
     accession_nodash = accessionNumber.replace("-", "")
-    doc_url = f"https://www.sec.gov/Archives/edgar/data/{cik}/{accession_nodash}/{fileName}"
+    doc_url = sec_archive_document_url(cik, accession_nodash, fileName)
     html = await _edgar_get_html(doc_url, max_bytes=5_000_000)
     if not html:
         # No filing index for (CIK, accession): the accession is not that company's filing (2.15.0, R4-ACC-EXHIBITS).
@@ -1316,7 +1315,7 @@ def _caller_url_refusal(url: str) -> str | None:
     if not ok:
         return reason
     kind = _url_policy.allowed_host_kind(url)
-    if kind == "sec" and url.startswith("https://www.sec.gov/Archives/"):
+    if kind == "sec" and url.startswith(SEC_ARCHIVES_PREFIX):
         return None
     if kind == "yahoo" and _yahoo_transcript_url_ticker(url) is not None:
         return None
@@ -2173,7 +2172,7 @@ async def get_earnings_call_transcript(
                     })
                     continue
                 doc_url = (
-                    f"https://www.sec.gov/Archives/edgar/data/{cik}/{accession.replace('-', '')}/{file_name}"
+                    sec_archive_document_url(cik, accession.replace('-', ''), file_name)
                 )
                 html = await _edgar_get_html(doc_url, max_bytes=5_000_000)
                 if not html:

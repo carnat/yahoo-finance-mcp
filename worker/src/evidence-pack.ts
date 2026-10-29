@@ -51,6 +51,7 @@ import {
   secFiscalYearNaming,
 } from "./yahoo-finance.js";
 import { yGet } from "./clients/yahoo.js";
+import { yahooChartUrl, yahooQuoteSummaryUrl } from "./clients/endpoints.js";
 
 type Rec = Record<string, unknown>;
 
@@ -80,7 +81,7 @@ function buildSha(): string | null {
  */
 async function splitHistory(symbol: string): Promise<SplitHistory> {
   try {
-    const d = (await yGet(`https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?range=2y&interval=1mo&events=split`, false)) as Rec;
+    const d = (await yGet(yahooChartUrl(encodeURIComponent(symbol), "range=2y&interval=1mo&events=split"), false)) as Rec;
     const result = ((d?.chart as Rec | undefined)?.result as Rec[] | undefined)?.[0];
     if (!result) return { status: "NO_DATA", splits: [], message: "Yahoo returned no chart result." };
     const events = ((result.events as Rec | undefined)?.splits ?? {}) as Record<string, Rec>;
@@ -136,7 +137,7 @@ async function consensusProviders(ticker: string): Promise<{ inputs: ProviderCon
   const symbol = ticker.toUpperCase();
   // Each provider runs in its own scope, so a fetch the subrequest budget refused is charged to it (2.11.0).
   const [{ result: yahoo, starved: yahooStarved }, { result: alphaRead, starved: alphaStarved }, splits] = await Promise.all([
-    withBudgetWatch(() => yGet(`https://query1.finance.yahoo.com/v10/finance/quoteSummary/${encodeURIComponent(symbol)}?modules=earningsTrend,financialData,price`)
+    withBudgetWatch(() => yGet(yahooQuoteSummaryUrl(encodeURIComponent(symbol), "earningsTrend,financialData,price"))
       .then((d) => ({ ok: true as const, d, at: new Date().toISOString() }), (e) => ({ ok: false as const, e, at: new Date().toISOString() }))),
     withBudgetWatch(() => alphaVantageEstimates(symbol)),
     splitHistory(symbol),

@@ -6,6 +6,7 @@ Extracted from server.py in Phase 1 of the refactoring plan.
 import json as _json
 import re as _re
 from pathlib import Path as _Path
+from yfmcp.clients.endpoints import SEC_ARCHIVES_PREFIX
 
 
 # ---------------------------------------------------------------------------
@@ -145,7 +146,7 @@ def validate_tool_args(name: str, args: dict) -> str | None:
 
 def _validate_sec_url(url: str) -> str | None:
     """Returns an error message if the SEC URL is not from sec.gov/Archives, else None."""
-    if not url.startswith("https://www.sec.gov/Archives/"):
+    if not url.startswith(SEC_ARCHIVES_PREFIX):
         return f"Invalid SEC URL: must start with 'https://www.sec.gov/Archives/'."
     return None
 
