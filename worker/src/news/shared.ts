@@ -4,24 +4,11 @@
  * Moved out of news.ts in 2.15.1 (pure restructure); providers never import news.ts.
  */
 
-import { stripHtmlTags, _str } from "../yahoo-finance.js";
+import { _str } from "../yahoo-finance.js";
 
-/** Parse a single HTML <table> into a list of rows (each row is a list of plain-text cells). */
-export function parseHtmlTable(tableHtml: string): string[][] {
-  const rows: string[][] = [];
-  const trRe = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
-  const tdRe = /<t[dh][^>]*>([\s\S]*?)<\/t[dh]>/gi;
-  let trMatch: RegExpExecArray | null;
-  while ((trMatch = trRe.exec(tableHtml)) !== null) {
-    const row: string[] = [];
-    let tdMatch: RegExpExecArray | null;
-    while ((tdMatch = tdRe.exec(trMatch[1])) !== null) {
-      row.push(stripHtmlTags(tdMatch[1]));
-    }
-    if (row.length > 0) rows.push(row);
-  }
-  return rows;
-}
+// Phase 4 unit 3: parseHtmlTable moved to clients/html.ts.
+export { parseHtmlTable } from "../clients/html.js";
+
 export function sourceDecisionUse(sourceType: unknown): string {
   const src = _str(sourceType);
   if (src === "sec_ex99_found") return "USE_OFFICIAL_EVIDENCE";
