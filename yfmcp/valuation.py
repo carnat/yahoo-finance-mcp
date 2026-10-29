@@ -67,15 +67,6 @@ def _text(value: Any) -> str | None:
     return value.strip() if isinstance(value, str) and value.strip() else None
 
 
-def empty_market_inputs(ticker: str) -> dict:
-    return {
-        "ticker": ticker.upper(), "name": None, "currency": None, "financialCurrency": None,
-        "price": None, "priceTime": None, "sharesOutstanding": None, "impliedSharesOutstanding": None, "marketCap": None,
-        "totalCash": None, "totalDebt": None, "ttmRevenue": None, "ttmEbitda": None,
-        "grossMarginPct": None, "trailingEps": None, "mostRecentQuarter": None, "estimates": [],
-    }
-
-
 def market_inputs_from_quote_summary(ticker: str, result: dict) -> dict:
     """Yahoo quoteSummary (price, financialData, defaultKeyStatistics, earningsTrend) as valuation inputs."""
     price = result.get("price") or {}
@@ -129,42 +120,6 @@ def _iso_time(epoch: float | None) -> str | None:
         return None
     moment = datetime.datetime.fromtimestamp(epoch, datetime.timezone.utc)
     return moment.strftime("%Y-%m-%dT%H:%M:%S.") + f"{moment.microsecond // 1000:03d}Z"
-
-
-def market_inputs_from_yfinance(ticker: str, info: dict, revenue_rows: list[dict], earnings_rows: list[dict]) -> dict:
-    """yfinance info plus revenue_estimate / earnings_estimate rows as valuation inputs."""
-    out = empty_market_inputs(ticker)
-    gross = _num(info.get("grossMargins"))
-    out.update({
-        "name": _text(info.get("longName")) or _text(info.get("shortName")),
-        "currency": _text(info.get("currency")),
-        "financialCurrency": _text(info.get("financialCurrency")),
-        "price": _num(info.get("currentPrice")) if _num(info.get("currentPrice")) is not None else _num(info.get("regularMarketPrice")),
-        "priceTime": _iso_time(_num(info.get("regularMarketTime"))),
-        "sharesOutstanding": _num(info.get("sharesOutstanding")),
-        "impliedSharesOutstanding": _num(info.get("impliedSharesOutstanding")),
-        "marketCap": _num(info.get("marketCap")),
-        "totalCash": _num(info.get("totalCash")),
-        "totalDebt": _num(info.get("totalDebt")),
-        "ttmRevenue": _num(info.get("totalRevenue")),
-        "ttmEbitda": _num(info.get("ebitda")),
-        "grossMarginPct": round_half_up(gross * 100, 2) if gross is not None else None,
-        "trailingEps": _num(info.get("trailingEps")),
-        "mostRecentQuarter": _iso_date(_num(info.get("mostRecentQuarter"))),
-    })
-    eps_by_period = {str(r.get("period")): r for r in earnings_rows if isinstance(r, dict)}
-    for row in revenue_rows:
-        if not isinstance(row, dict) or not isinstance(row.get("period"), str):
-            continue
-        eps = eps_by_period.get(row["period"], {})
-        out["estimates"].append({
-            "period": row["period"],
-            "revenueAvg": _num(row.get("avg")),
-            "revenueAnalysts": _num(row.get("numberOfAnalysts")),
-            "epsAvg": _num(eps.get("avg")),
-            "epsAnalysts": _num(eps.get("numberOfAnalysts")),
-        })
-    return out
 
 
 # Listings quoted in a minor unit, with the major currency their financials use.

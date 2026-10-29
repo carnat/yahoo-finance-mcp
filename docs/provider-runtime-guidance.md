@@ -3190,6 +3190,22 @@ F-024, F-026, F-029). Both runtimes change alike.
 - **Tests:** 21 new parity cases in `scripts/parity/cases_audit_2251.py`.
 - **Rollback:** redeploy 2.25.0.
 
+## One MarketInputs Source For Valuation (3.0.2)
+
+- **Why:** Phase 4 Q3g (brief §7 Q3g, V6): one `MarketInputs` contract, read by the Yahoo client, in both runtimes.
+  Release type: patch. Spec: `analysis/yahoo-finance-mcp/Q3G_SPEC.md`.
+- **Change (Python only; the Worker already read quoteSummary):** `get_valuation_snapshot`, `compare_peer_valuations`
+  and the ADR ratio in `get_historical_valuation_context` read Yahoo quoteSummary
+  (`price,financialData,defaultKeyStatistics,earningsTrend`) at the Worker's URL through yfinance's crumb-aware
+  session, and map it with the Worker's mapping. yfinance `.info` and the estimate DataFrames are no longer used here.
+- **Values that can change in Python:** the price is `regularMarketPrice` (was `currentPrice` first); estimate rows are
+  every `earningsTrend` period; an unknown symbol fails with the Worker's text,
+  `Yahoo quote summary failed for X: Yahoo Finance API error 404 for: <URL>` (was `No Yahoo quote summary for X`).
+  The message never carries the crumb. Peer errors keep `TICKER_NOT_FOUND` without a URL (F57).
+- **Unchanged:** no field, status, warning code or enum was added or removed.
+- **Removed (unused after the change):** `yfmcp.valuation.market_inputs_from_yfinance`, `empty_market_inputs` and the
+  `_estimate_rows` helper.
+
 ## Yahoo Client Module Move (3.0.1)
 
 - **Why:** internal restructuring only (Phase 4 unit 2). Release type: patch. No behaviour change.
