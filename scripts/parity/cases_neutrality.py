@@ -409,8 +409,12 @@ POSITION_ROUTES = {
 PY_COMPONENTS = {
     "get_analyst_upgrade_radar": {"netSentiment": 0, "upgrades": 0, "downgrades": 0, "initiations": 0},
     "get_analyst_consensus": {"dominantRating": "buy", "totalAnalysts": 7, "numberOfAnalysts": 7},
+    # 300 sessions cover the 1-year CAGR window only, so price stats carry two INSUFFICIENT_HISTORY rows (3.1.0).
     "get_price_stats": {"lastPrice": 129.9, "yearHigh": 129.9, "yearLow": 100, "pctFromYearHigh": 0, "pctFromYearLow": 29.9,
-                        "priceTimestamp": "2026-10-09T20:00:00Z"},
+                        "priceTimestamp": "2026-10-09T20:00:00Z",
+                        "_warnings": [{"code": "INSUFFICIENT_HISTORY", "ticker": "TST",
+                                       "message": f"Price history starts after the start of the {n}-year window, so cagr{n}y is null."}
+                                      for n in (3, 5)]},
     "get_earnings_momentum": {"beatRate": None, "currentBeatStreak": 0, "avgSurprisePct": None, "momentumFlag": "NO_HISTORY",
                               "preRevenue": True},
     "get_technical_indicators": {"rsi14": 100, "macd": 0.0, "macdHistogram": 0, "lastClose": 129.9, "dataDate": "2026-10-09"},
@@ -418,7 +422,8 @@ PY_COMPONENTS = {
 }
 
 
-def _position_case(name: str, select, *, ticker="TST", ids=("Q14-N3",), via: str = "envelope", components=None, **kw) -> Case:
+def _position_case(name: str, select, *, ticker="TST", ids=("Q14-N3",), via: str = "envelope", components=None,
+                   routes=None, **kw) -> Case:
     """analyze_position_signals through the V2 envelope in both runtimes (`via` "expanded" is the Worker's expanded-mode
     callToolResult, which is where a ticker list is accepted)."""
     payloads = {**PY_COMPONENTS, **(components or {})}
@@ -434,7 +439,7 @@ def _position_case(name: str, select, *, ticker="TST", ids=("Q14-N3",), via: str
     body = (f'const r = await m.tools.callToolResult("analyze_position_signals", {{ticker: {json.dumps(ticker)}}}); '
             "return r.value;")
     return Case(name=name, ids=list(ids), py=py, ts={"js": _ts_with_clock(GATE_NOW, _worker(body)), "isolate": True},
-                routes=POSITION_ROUTES, select=select, **kw)
+                routes=routes or POSITION_ROUTES, select=select, **kw)
 
 
 REMOVED_GROUPS = ("t1_inputs", "t2_inputs", "t4_inputs", "t5_inputs")
@@ -448,8 +453,10 @@ def _groups_view(v: dict) -> dict:
 
 
 CASES += [
-    _position_case("neutral.n3c.tier_numbered_groups_are_gone_and_there_is_no_notice", _groups_view,
-                   expect={"ok": True, "removedGroups": [], "groups": sorted(GROUPS), "warnings": []}),
+    # 3.2.0: the components' rows reach meta.warnings; there is no deprecation notice.
+    _position_case("neutral.n3c.tier_numbered_groups_are_gone_and_only_component_rows_are_warned", _groups_view,
+                   expect={"ok": True, "removedGroups": [], "groups": sorted(GROUPS),
+                           "warnings": PY_COMPONENTS["get_price_stats"]["_warnings"]}),
     # 3.0.0: analystInputs takes its 30-day counts from the radar's plain upgrades/downgrades/initiations.
     _position_case("neutral.n3c.twins_carry_the_source_group_key_sets_t1", lambda v: sorted(v["data"]["analystInputs"]),
                    expect=["analystCount", "analystNetSentiment", "dominantRating", "downgrades30d", "initiations30d", "upgrades30d"]),
@@ -459,53 +466,25 @@ CASES += [
                    expect=["avgSurprisePct", "beatRate", "currentBeatStreak", "momentumFlag", "preRevenue"]),
 ]
 
-# FINDING: asymmetries of the source groups, unchanged by RN. technicalInputs mirrors t5_inputs, so it inherits them.
+# Q3i calls 1 to 3 and G6 (3.2.0, R5-pricing part 3): the Worker gives Python's macd, six componentStatus keys with
+# failedComponents, and quoteTimestamp, and both take quoteDataDate from the quote behind currentPrice. Call 4: a
+# ticker list is refused (scripts/parity/cases_r5price3.py checks it at the MCP boundary).
 _POS_DECISION = "FINDING Q14-N3c: analyze_position_signals runtime asymmetry that RN leaves as it is"
 
 CASES += [
-    _position_case("neutral.n3c.finding_t5_macd_is_python_only",
+    _position_case("neutral.n3c.technical_inputs_carry_macd_in_both",
                    lambda v: {"technicalInputs": sorted(v["data"]["technicalInputs"])},
-                   mode="pinned", decision=_POS_DECISION,
-                   expect_py={"technicalInputs": ["lastClose", "maPosition", "macd", "macdHistogram", "pctFrom200dma", "pctFrom50dma", "rsi14"]},
-                   expect_ts={"technicalInputs": ["lastClose", "maPosition", "macdHistogram", "pctFrom200dma", "pctFrom50dma", "rsi14"]}),
-    _position_case("neutral.n3c.finding_component_status_keys_and_failed_components_differ",
+                   expect={"technicalInputs": ["lastClose", "maPosition", "macd", "macdHistogram", "pctFrom200dma", "pctFrom50dma", "rsi14"]}),
+    _position_case("neutral.n3c.component_status_has_six_keys_and_failed_components_in_both",
                    lambda v: {"componentStatusKeys": sorted(v["data"]["componentStatus"]),
-                              "hasFailedComponents": "failedComponents" in v["data"]},
-                   mode="pinned", decision=_POS_DECISION,
-                   expect_py={"componentStatusKeys": ["analystConsensus", "analystUpgrades", "earningsMomentum", "maPosition",
-                                                      "priceStats", "technicalIndicators"], "hasFailedComponents": True},
-                   expect_ts={"componentStatusKeys": ["movingAveragePosition", "pricePerformance", "technicalIndicators"],
-                              "hasFailedComponents": False}),
-    _position_case("neutral.n3c.finding_quote_timestamp_is_python_only_and_quote_data_date_comes_from_different_components",
-                   lambda v: {"hasQuoteTimestamp": "quoteTimestamp" in v["data"], "quoteDataDate": v["data"]["quoteDataDate"]},
-                   components={"get_price_stats": {**PY_COMPONENTS["get_price_stats"], "priceTimestamp": "2026-10-08T20:00:00Z"}},
-                   mode="pinned", decision=_POS_DECISION,
-                   expect_py={"hasQuoteTimestamp": True, "quoteDataDate": "2026-10-08"},
-                   expect_ts={"hasQuoteTimestamp": False, "quoteDataDate": "2026-10-09"}),
-    # A ticker list: the Worker's expanded-mode tool batches it into a result per ticker; the Python tool takes a
-    # string and passes a list straight through to its components, returning one object whose "ticker" is the list.
-    Case(name="neutral.n3c.finding_batch_tickers_are_accepted_by_the_worker_only", ids=["Q14-N3"],
-         py=lambda: _py_position_batch(["AAA", "BBB"]),
-         ts={"js": _ts_with_clock(GATE_NOW, _worker('const r = await m.tools.callToolResult("analyze_position_signals", '
-                                                    '{ticker: ["AAA", "BBB"]}); return r.value;')), "isolate": True},
-         routes=POSITION_ROUTES,
-         select=lambda v: {"ok": v["ok"], "dataKeys": sorted(v["data"]),
-                           "tickerIsList": isinstance(v["data"].get("ticker"), list)},
-         mode="pinned", decision=_POS_DECISION,
-         expect_py={"ok": True, "tickerIsList": True, "dataKeys": sorted([
-             "ticker", "status", "dataDate", "quoteDataDate", "quoteTimestamp", "completedBarDataDate", "analystInputs", "pricePositionInputs", "earningsInputs", "technicalInputs",
-             "componentStatus", "failedComponents", "limitedComponents", "recommendedNextAction"])},
-         expect_ts={"ok": True, "tickerIsList": False, "dataKeys": ["AAA", "BBB"]}),
+                              "failedComponents": v["data"].get("failedComponents")},
+                   expect={"componentStatusKeys": ["analystConsensus", "analystUpgrades", "earningsMomentum", "maPosition",
+                                                   "priceStats", "technicalIndicators"], "failedComponents": []}),
+    _position_case("neutral.n3c.quote_data_date_is_the_quote_date_in_both",
+                   lambda v: {"hasQuoteTimestamp": isinstance(v["data"].get("quoteTimestamp"), str),
+                              "quoteDataDate": v["data"]["quoteDataDate"]},
+                   expect={"hasQuoteTimestamp": True, "quoteDataDate": "2026-10-09"}),
 ]
-
-
-def _py_position_batch(tickers: list[str]) -> dict:
-    async def call():
-        stubs = {k: AsyncMock(return_value=json.dumps(v)) for k, v in PY_COMPONENTS.items()}
-        with patch.multiple(server, **stubs):
-            raw = await server.analyze_position_signals(tickers)
-        return _envelope_tool_result("analyze_position_signals", raw)
-    return asyncio.run(call())
 
 
 # analystCount source. Python reads consensus.totalAnalysts, the Worker reads consensus.numberOfAnalysts. Both name the

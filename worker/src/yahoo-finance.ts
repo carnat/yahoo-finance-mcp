@@ -184,6 +184,7 @@ import {
   freshnessNotices,
   insufficientHistoryNotice,
   takeNotices,
+  uniqueNotices,
   withNotices,
   zeroVolumeNotice,
 } from "./pricing-notices.js";
@@ -6425,12 +6426,18 @@ export async function getPriceTargetBracket(ticker: string, ioPt: number): Promi
 
 // ── get_position_score_inputs ─────────────────────────────────────────────────
 
+/** analyze_position_signals takes one ticker (Q3i call 4). */
+export const POSITION_SINGLE_TICKER_MESSAGE = "analyze_position_signals takes one ticker as a string, not a list.";
+
 export async function getPositionScoreInputs(ticker: string | string[]): Promise<string> {
+  // Q3i call 4 (3.2.0): one ticker, as the declared schema says; a list is refused, not batched.
   if (Array.isArray(ticker)) {
-    return runPartialBatch(ticker, (t) => getPositionScoreInputs(t));
+    return JSON.stringify({ error: true, code: "INPUT_VALIDATION_ERROR", message: POSITION_SINGLE_TICKER_MESSAGE });
   }
   try {
-    const [upgradeRaw, consensusRaw, priceRaw, earningsRaw, techRaw, maRaw] = await Promise.all([
+    // A component that throws is FAILED, as in Python's gather(return_exceptions=True) (Q3i call 1, 3.2.0); one
+    // provider outage no longer fails the whole tool.
+    const [upgradeRaw, consensusRaw, priceRaw, earningsRaw, techRaw, maRaw] = await Promise.allSettled([
       getAnalystUpgradeRadar(ticker, 30),
       getAnalystConsensus(ticker),
       getPriceStats(ticker),
@@ -6439,8 +6446,12 @@ export async function getPositionScoreInputs(ticker: string | string[]): Promise
       getMaPosition(ticker),
     ]);
 
-    const parse = (s: string): Record<string, unknown> => {
-      try { return JSON.parse(s) as Record<string, unknown>; } catch { return {}; }
+    const parse = (result: PromiseSettledResult<string>): Record<string, unknown> => {
+      if (result.status === "rejected") return {};
+      try {
+        const value = JSON.parse(result.value) as unknown;
+        return value != null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+      } catch { return {}; }
     };
 
     const upgrade = parse(upgradeRaw);
@@ -6477,38 +6488,58 @@ export async function getPositionScoreInputs(ticker: string | string[]): Promise
 
     const t5 = {
       rsi14: tech.rsi14 ?? null,
+      macd: tech.macd ?? null,
       macdHistogram: tech.macdHistogram ?? null,
       maPosition: ma.trend ?? null,
       pctFrom50dma: ma.pctVs50dma ?? null,
       pctFrom200dma: ma.pctVs200dma ?? null,
       lastClose: tech.lastClose ?? null,
     };
-    const componentStatus = {
-      pricePerformance: (price.status as string | null) ?? "OK",
-      technicalIndicators: (tech.status as string | null) ?? "OK",
-      movingAveragePosition: (ma.status as string | null) ?? "OK",
+    // Q3i call 1 (3.2.0): Python's six component keys; an empty or error payload is FAILED, STALE_BAR/PARTIAL limited.
+    const componentPayloads: Record<string, Record<string, unknown>> = {
+      analystUpgrades: upgrade,
+      analystConsensus: consensus,
+      priceStats: price,
+      earningsMomentum: earnings,
+      technicalIndicators: tech,
+      maPosition: ma,
     };
-    const limitedComponents = Object.entries(componentStatus)
-      .filter(([, status]) => status !== "OK")
-      .map(([name]) => name);
+    const componentStatus: Record<string, string> = {};
+    const failedComponents: string[] = [];
+    const limitedComponents: string[] = [];
+    for (const [name, payload] of Object.entries(componentPayloads)) {
+      if (Object.keys(payload).length === 0 || payload.error) {
+        componentStatus[name] = "FAILED";
+        failedComponents.push(name);
+      } else if (payload.status === "STALE_BAR" || payload.status === "PARTIAL") {
+        componentStatus[name] = payload.status;
+        limitedComponents.push(name);
+      } else {
+        componentStatus[name] = "OK";
+      }
+    }
+    const degraded = failedComponents.length > 0 || limitedComponents.length > 0;
+    // The components' notices (3.1.0) reach this tool's meta.warnings, once each.
+    const notices = uniqueNotices(Object.values(componentPayloads).flatMap((payload) => takeNotices(payload)));
+    // G6 / Q3d (3.2.0): the quote date is the date of the quote behind currentPrice; no date falls back to today.
+    const quoteTimestamp = typeof price.priceTimestamp === "string" && price.priceTimestamp ? price.priceTimestamp : null;
 
-    return JSON.stringify({
+    return JSON.stringify(withNotices({
       ticker,
-      status: limitedComponents.length > 0 ? "PARTIAL" : "OK",
-      dataDate:
-        (tech.dataDate as string | null)
-        ?? (ma.dataDate as string | null)
-        ?? new Date().toISOString().slice(0, 10),
-      quoteDataDate: (ma.dataDate as string | null) ?? null,
+      status: degraded ? "PARTIAL" : "OK",
+      dataDate: (tech.dataDate as string | null) ?? (ma.dataDate as string | null) ?? null,
+      quoteDataDate: quoteTimestamp ? quoteTimestamp.slice(0, 10) : null,
+      quoteTimestamp,
       completedBarDataDate: (tech.dataDate as string | null) ?? null,
-      componentStatus,
-      limitedComponents,
       analystInputs: t1,
       pricePositionInputs: t2,
       earningsInputs: t4,
       technicalInputs: t5,
-      recommendedNextAction: limitedComponents.length > 0 ? "RETRY" : "NONE",
-    });
+      componentStatus,
+      failedComponents,
+      limitedComponents,
+      recommendedNextAction: degraded ? "RETRY" : "NONE",
+    }, notices));
   } catch (e) {
     return JSON.stringify({ error: true, message: `${e instanceof Error ? e.message : String(e)}`, ticker });
   }
