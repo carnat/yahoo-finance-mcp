@@ -119,6 +119,7 @@ FILE_DOMAIN = {
     "worker/src/evidence-pack.ts": "evidence",
     "worker/src/sec-thailand.ts": "thai",
     "worker/src/clients/edgar.ts": "sec",
+    "worker/src/clients/yahoo.ts": "pricing", "worker/src/clients/provider-http.ts": "providers",
     "worker/src/news/shared.ts": "news", "worker/src/news/providers/types.ts": "news",
     "worker/src/news/providers/company-ir.ts": "news", "worker/src/news/providers/company-ir-page.ts": "news",
     "worker/src/news/providers/finnhub.ts": "news", "worker/src/news/providers/globenewswire.ts": "news",
