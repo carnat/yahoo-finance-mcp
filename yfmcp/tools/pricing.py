@@ -1,6 +1,7 @@
 import asyncio
 import datetime
 import json
+import math
 import re
 import sys
 from typing import Annotated, Literal, get_args
@@ -17,7 +18,7 @@ from yfmcp.deprecations import MIN_ADV_USD_DESCRIPTION, meets_minimum, parse_min
 from yfmcp.envelope import ErrorCode, _mcp_failure
 from yfmcp.validation import _validate_ticker
 from yfmcp.cache import _PRICE_TTL, _STMT_TTL, _tool_cache
-from yfmcp.util import _fetch_with_retry, get_last_trading_date
+from yfmcp.util import _add_years, _fetch_with_retry, _round_half_away_from_zero, get_last_trading_date
 from yfmcp.clients.yahoo import _safe_parse
 
 
@@ -513,10 +514,13 @@ async def get_price_stats(ticker: str | list[str]) -> str:
                 except Exception:
                     return None
 
-            completed_end = closes.index[-1]
+            # The horizon starts at the first bar on or after the same exchange-local date N years before the last
+            # completed bar (29 February -> 28 February), in both runtimes (R5-pricing-1, BR-PRC-021).
+            bar_dates = [_daily_bar_date(ts, prepared["timezoneName"]) for ts in closes.index]
+            end_date = bar_dates[-1]
             for years, label in [(1, "cagr1y"), (3, "cagr3y"), (5, "cagr5y")]:
-                cutoff = completed_end - pd.DateOffset(years=years)
-                subset = closes[closes.index >= cutoff]
+                cutoff_date = _add_years(end_date, -years) if end_date else None
+                subset = closes[[d is not None and cutoff_date is not None and d >= cutoff_date for d in bar_dates]]
                 stats[label] = _cagr(subset, years)
             stats["historicalPriceBasis"] = historical_price_basis
             stats["fallbackUsed"] = fallback_used
@@ -1041,6 +1045,23 @@ async def _load_completed_daily_history(
     return prepared
 
 
+_SLOPE_DAYS_MESSAGE = "days must be a whole number of sessions"
+
+
+def _session_count(value) -> int | float | None | str:
+    """A session count: None when absent, the number when one is given, digits parsed, "invalid" otherwise (the
+    Worker's sessionCount)."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return "invalid"
+    if isinstance(value, (int, float)):
+        return value if math.isfinite(value) else "invalid"
+    if isinstance(value, str) and re.fullmatch(r"\s*-?\d+\s*", value):
+        return int(value)
+    return "invalid"
+
+
 @yfinance_server.tool(
     name="get_price_slope",
     description="""Get completed-session N-day close-to-close price change and direction for one or more tickers. Pre-computed server-side.
@@ -1062,6 +1083,12 @@ Args:
 )
 async def get_price_slope(ticker: str | list[str], days: int = 5) -> str:
     """Return completed-session N-day price change for one or more tickers."""
+    # A whole number of sessions, as a number or digits; anything else is refused rather than raising, the same in
+    # both runtimes (R5-pricing-1, Q3b).
+    parsed_days = _session_count(days)
+    if parsed_days == "invalid":
+        return _mcp_failure("get_price_slope", ErrorCode.INPUT_VALIDATION_ERROR, _SLOPE_DAYS_MESSAGE)
+    days = 5 if parsed_days is None else parsed_days
     if isinstance(ticker, list):
         results = await _run_ticker_batch(ticker, lambda t: get_price_slope(t, days))
         return json.dumps({t: _safe_parse(r, t) for t, r in zip(ticker, results)})
@@ -1265,8 +1292,10 @@ async def get_volume_ratio(ticker: str | list[str], period: int = 10) -> str:
         else None
     )
 
-    ratio_10d = round(last_vol / avg_10d, 3) if last_vol and avg_10d else None
-    ratio_90d = round(last_vol / avg_90d, 3) if last_vol and avg_90d else None
+    # The ratio uses the unrounded average; only the published averages and ratios are rounded, half away from zero,
+    # as in the Worker (R5-pricing-1, Q3c/Q3d).
+    ratio_10d = _round_half_away_from_zero(last_vol / avg_10d, 3) if last_vol and avg_10d else None
+    ratio_90d = _round_half_away_from_zero(last_vol / avg_90d, 3) if last_vol and avg_90d else None
 
     ref_ratio = ratio_10d
     if ref_ratio is not None:
@@ -1283,8 +1312,8 @@ async def get_volume_ratio(ticker: str | list[str], period: int = 10) -> str:
         "ticker": ticker,
         "status": "OK",
         "lastVolume": last_vol,
-        "avgVolume10d": round(avg_10d) if avg_10d is not None else None,
-        "avgVolume90d": round(avg_90d) if avg_90d is not None else None,
+        "avgVolume10d": int(_round_half_away_from_zero(avg_10d, 0)) if avg_10d is not None else None,
+        "avgVolume90d": int(_round_half_away_from_zero(avg_90d, 0)) if avg_90d is not None else None,
         "ratio10d": ratio_10d,
         "ratio90d": ratio_90d,
         "volumeFlag": volume_flag,
@@ -1895,10 +1924,14 @@ async def get_market_snapshot(
 
     last_price = quote.get("lastPrice") if quote else None
     prev_close = quote.get("previousClose") if quote else None
+    # A true 0.0 from priceStats is kept, as the Worker's `??` does; only a missing one falls back to the quote
+    # (R5-pricing-1, BR-PRC-040).
+    stats_change_pct = price_stats.get("pctChangeTodayVsPrevClose") if price_stats else None
     change_pct = (
-        (price_stats.get("pctChangeTodayVsPrevClose") if price_stats else None)
-        or (
-            round((last_price - prev_close) / prev_close * 100, 2)
+        stats_change_pct
+        if stats_change_pct is not None
+        else (
+            _round_half_away_from_zero((last_price - prev_close) / prev_close * 100, 2)
             if last_price is not None and prev_close is not None and prev_close != 0
             else None
         )

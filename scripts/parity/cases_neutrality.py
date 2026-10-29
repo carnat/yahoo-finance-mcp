@@ -230,13 +230,11 @@ CASES += [
                   market_time=QUOTE_TIME, via="envelope",
                   select=lambda v: {"ok": v.get("ok"), "warnings": v["meta"]["warnings"]},
                   expect={"ok": False, "warnings": []}),
-    # Price 0: Python divides by it for distanceToTargetPct before the flag is reached and raises; the Worker computes
-    # Infinity -> null and reports the flag as null. The flag is null for any non-positive price in the Worker.
-    _bracket_case("neutral.n3a.finding_zero_price_python_raises_worker_reports_null_flag", ["BR-PRC-022", "Q14-N3"], 0.0, 100.0,
+    # Price 0 (R5-pricing-1, Q3i G1): no distance to the target and a null flag in both runtimes. Python used to divide
+    # by the price for distanceToTargetPct and raise.
+    _bracket_case("neutral.n3a.zero_price_has_no_distance_and_a_null_flag", ["BR-PRC-022", "Q14-N3"], 0.0, 100.0,
                   market_time=QUOTE_TIME, keys=("referenceTargetPct", "distanceToTargetPct", "priceAtOrAboveTarget"),
-                  mode="pinned", decision="FINDING Q14-N3: a zero lastPrice raises ZeroDivisionError in Python (distanceToTargetPct is computed first)",
-                  expect_py={"__error__": "ZeroDivisionError: float division by zero"},
-                  expect_ts={"referenceTargetPct": 0, "distanceToTargetPct": None, "priceAtOrAboveTarget": None}),
+                  expect={"referenceTargetPct": 0, "distanceToTargetPct": None, "priceAtOrAboveTarget": None}),
 ]
 
 

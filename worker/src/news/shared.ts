@@ -5,6 +5,8 @@
  */
 
 import { _str } from "../util.js";
+// Moved to util.ts in R5-pricing-1; re-exported for the news modules that import it from here.
+export { roundHalfAwayFromZero } from "../util.js";
 
 // Phase 4 unit 3: parseHtmlTable moved to clients/html.ts.
 export { parseHtmlTable } from "../clients/html.js";
@@ -106,18 +108,6 @@ export function makeDupGroupId(ticker: string, title: string | null, publishedAt
   const s = `${normTitle}|${day}|${entity}`;
   for (let i = 0; i < s.length; i++) h = ((h << 5) - h + s.charCodeAt(i)) | 0;
   return (h >>> 0).toString(16).padStart(8, "0");
-}
-/**
- * Round half away from zero to `digits` decimals, decimal-safe (2.17.0): the number's shortest decimal form is shifted,
- * so 1.005 rounds to 1.01 and -0.125 to -0.13, as Python's Decimal(str(x)).quantize(..., ROUND_HALF_UP) does.
- */
-export function roundHalfAwayFromZero(value: number, digits: number): number {
-  // Past 2^52 at this scale a double has no fraction left to round.
-  if (!Number.isFinite(value) || Math.abs(value) * 10 ** digits >= 2 ** 52) return value;
-  const [mantissa, exponent] = Math.abs(value).toExponential().split("e");
-  const shifted = Math.round(Number(`${mantissa}e${Number(exponent) + digits}`));
-  const rounded = shifted / 10 ** digits;
-  return value < 0 && rounded !== 0 ? -rounded : rounded;
 }
 export function withinDateWindow(publishedAt: string | null, startDate = "", endDate = "", lookbackDays?: number): boolean {
   if (!publishedAt) return false;

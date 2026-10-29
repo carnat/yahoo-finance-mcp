@@ -7,6 +7,7 @@ import asyncio
 import datetime
 import email.utils as _email_utils
 import json
+import decimal
 import math
 import re as _re
 from typing import Any
@@ -434,3 +435,15 @@ def _add_years(iso_date: str, years: int) -> str:
 def _utf16_length(text: str) -> int:
     """A string's length as JavaScript counts it (UTF-16 code units)."""
     return len(text.encode("utf-16-le", "surrogatepass")) // 2
+
+
+def _round_half_away_from_zero(value: float, digits: int) -> float:
+    """Round half away from zero to `digits` decimals, decimal-safe (2.17.0; moved here from yfmcp/news/shared.py in R5-pricing-1): the number's shortest decimal form is
+    rounded, so 1.005 gives 1.01 and -0.125 gives -0.13 (the Worker's roundHalfAwayFromZero). A result of zero is 0.0."""
+    value = float(value)
+    # Past 2^52 at this scale a double has no fraction left to round.
+    if not math.isfinite(value) or abs(value) * 10 ** digits >= 2 ** 52:
+        return value
+    quantum = decimal.Decimal(1).scaleb(-digits)
+    rounded = float(decimal.Decimal(repr(abs(value))).quantize(quantum, rounding=decimal.ROUND_HALF_UP))
+    return -rounded if value < 0 and rounded != 0 else rounded

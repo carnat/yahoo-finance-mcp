@@ -6,11 +6,12 @@ imports no provider and never imports yfmcp.tools.news.
 """
 
 import datetime
-import decimal as _decimal
 import hashlib
 import html as _html_module
-import math as _math
 import re as _re
+
+# Moved to yfmcp.util in R5-pricing-1; re-exported for the news modules that import it from here.
+from yfmcp.util import _round_half_away_from_zero  # noqa: F401
 
 
 _DEDUP_TITLE_MAX_LEN = 80
@@ -53,18 +54,6 @@ def _ticker_in_text(text: object, ticker: str) -> bool:
     if len(ticker_u) == 1:
         return _re.search(r"\b" + _re.escape(ticker_u) + r"\b", text_u, _re.ASCII) is not None
     return ticker_u in text_u
-
-
-def _round_half_away_from_zero(value: float, digits: int) -> float:
-    """Round half away from zero to `digits` decimals, decimal-safe (2.17.0): the number's shortest decimal form is
-    rounded, so 1.005 gives 1.01 and -0.125 gives -0.13 (the Worker's roundHalfAwayFromZero). A result of zero is 0.0."""
-    value = float(value)
-    # Past 2^52 at this scale a double has no fraction left to round.
-    if not _math.isfinite(value) or abs(value) * 10 ** digits >= 2 ** 52:
-        return value
-    quantum = _decimal.Decimal(1).scaleb(-digits)
-    rounded = float(_decimal.Decimal(repr(abs(value))).quantize(quantum, rounding=_decimal.ROUND_HALF_UP))
-    return -rounded if value < 0 and rounded != 0 else rounded
 
 
 def _normalized_event_title_stem(ticker: str, title: str | None) -> str:

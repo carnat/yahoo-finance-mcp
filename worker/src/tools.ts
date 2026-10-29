@@ -372,7 +372,7 @@ export const TOOLS: Tool[] = [
   {
     name: "search_ticker",
     description:
-      "Search for ticker symbols by company name, partial name, or ISIN. Returns matching quotes with symbol, short name, exchange, and type. Use this to resolve a company name to a ticker before calling other tools. Use exchange='US' to restrict to NMS (NASDAQ) + NYQ (NYSE) — recommended for small/mid-cap US equity searches to avoid foreign listings. Valid exchange values: 'US' (NMS+NYQ), 'NMS', 'NYQ', or null (all).",
+      "Search for ticker symbols by company name, partial name, or ISIN. Returns matching quotes with symbol, short name, exchange, and type. Use this to resolve a company name to a ticker before calling other tools. Use exchange='US' to restrict to US listings (NMS, NGM, NCM: Nasdaq; NYQ: NYSE; ASE: NYSE American; PCX: NYSE Arca) — recommended for small/mid-cap US equity searches to avoid foreign listings. Valid exchange values: 'US', a single exchange code such as 'NMS' or 'NYQ', or null (all).",
     inputSchema: {
       type: "object",
       properties: {
@@ -387,7 +387,7 @@ export const TOOLS: Tool[] = [
         },
         exchange: {
           type: "string",
-          description: "Optional exchange filter. 'US' for NMS+NYQ, or a specific code like 'NMS' or 'NYQ'. Omit to return all exchanges.",
+          description: "Optional exchange filter. 'US' for every US listing venue (NMS, NGM, NCM, NYQ, ASE, PCX), or a specific code like 'NMS' or 'NYQ'. Omit to return all exchanges.",
         },
       },
       required: ["query"],
@@ -1554,6 +1554,14 @@ export function listVisibleTools(): Tool[] {
 
 const str = (v: unknown, fallback = ""): string => (typeof v === "string" ? v : fallback);
 const num = (v: unknown, fallback: number): number => (typeof v === "number" ? v : fallback);
+const SLOPE_DAYS_MESSAGE = "days must be a whole number of sessions";
+/** A session count: null when absent, the number when one is given, digits parsed, "invalid" otherwise. */
+function sessionCount(v: unknown): number | null | "invalid" {
+  if (v == null) return null;
+  if (typeof v === "number") return Number.isFinite(v) ? v : "invalid";
+  if (typeof v === "string" && /^\s*-?\d+\s*$/.test(v)) return parseInt(v, 10);
+  return "invalid";
+}
 const tickerArg = (v: unknown): string | string[] =>
   Array.isArray(v) ? v.map(String) : str(v);
 
@@ -2220,8 +2228,13 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
       return getShortInterest(str(args.ticker));
     case "get_technical_indicators":
       return getTechnicalIndicators(tickerArg(args.ticker), str(args.period, "1y"));
-    case "get_price_slope":
-      return getPriceSlope(tickerArg(args.ticker), num(args.days, 5));
+    case "get_price_slope": {
+      // A whole number of sessions, as a number or digits; anything else is refused rather than read as 5, the same
+      // in both runtimes (R5-pricing-1, Q3b).
+      const days = sessionCount(args.days);
+      if (days === "invalid") return mcpFailure("get_price_slope", ErrorCode.INPUT_VALIDATION_ERROR, SLOPE_DAYS_MESSAGE);
+      return getPriceSlope(tickerArg(args.ticker), days ?? 5);
+    }
     case "analyze_volume_ratio":
       return getVolumeRatio(tickerArg(args.ticker), num(args.period, 10));
     case "analyze_moving_average_position":
