@@ -268,6 +268,12 @@ export function secObservations(companyfacts: unknown, metric: string, period: R
         { source: "SEC_XBRL_AS_FIRST_FILED", provider: "SEC", status: "FOUND", value: first.val - firstNci, unit, taxonomy, precision: 0, basis: "PARENT_DERIVED_FROM_PROFITLOSS", evidence: derived(first, firstNci) },
       ];
     }
+    // Without the NCI share for both rows, ProfitLoss includes the minority holders' share, so the parent's net
+    // income is not resolved; the ProfitLoss row stays as evidence (3.4.0, BR-VAL-025, owner 2026-10-30).
+    return [
+      { source: "SEC_XBRL_LATEST", provider: "SEC", status: "NOT_RESOLVED", value: null, unit, taxonomy, evidence: rowRef(last), filedValues: [...new Set(matching.map((r) => r.val))], otherConcepts: [] },
+      { source: "SEC_XBRL_AS_FIRST_FILED", provider: "SEC", status: "NOT_RESOLVED", value: null, unit, taxonomy, evidence: rowRef(first) },
+    ];
   }
   const distinct = [...new Set(matching.map((r) => r.val))];
   const otherConcepts = concepts

@@ -308,6 +308,14 @@ def sec_observations(companyfacts: Any, metric: str, period: dict) -> list[dict]
                 {"source": "SEC_XBRL_AS_FIRST_FILED", "provider": "SEC", "status": "FOUND", "value": first["val"] - first_nci, "unit": unit, "taxonomy": taxonomy, "precision": 0,
                  "basis": "PARENT_DERIVED_FROM_PROFITLOSS", "evidence": derived(first, first_nci)},
             ]
+        # Without the NCI share for both rows, ProfitLoss includes the minority holders' share, so the parent's net
+        # income is not resolved; the ProfitLoss row stays as evidence (3.4.0, BR-VAL-025, owner 2026-10-30).
+        return [
+            {"source": "SEC_XBRL_LATEST", "provider": "SEC", "status": "NOT_RESOLVED", "value": None, "unit": unit, "taxonomy": taxonomy,
+             "evidence": _row_ref(last), "filedValues": list(dict.fromkeys(r["val"] for r in matching)), "otherConcepts": []},
+            {"source": "SEC_XBRL_AS_FIRST_FILED", "provider": "SEC", "status": "NOT_RESOLVED", "value": None, "unit": unit, "taxonomy": taxonomy,
+             "evidence": _row_ref(first)},
+        ]
     distinct = list(dict.fromkeys(r["val"] for r in matching))
     other_concepts = [_row_ref(ordered(c)[-1]) for c in present if c != concept]
     return [

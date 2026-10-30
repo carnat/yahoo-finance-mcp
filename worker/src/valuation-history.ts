@@ -432,6 +432,14 @@ function balancesAt(tax: Rec | null, map: TaxonomyMap, currency: string, asOf: s
   for (const group of map.debtGroups) {
     const parts = group.map((c) => tagged([c])[0]).filter((f): f is Fact => f != null);
     if (parts.length === 0) continue;
+    // A group is complete only when every component the cash filing tags at any date is also tagged at the cash
+    // date. A component it tags only at another date (a comparative) means the balance-date debt is missing part of
+    // the group, so debt is withheld rather than understated (3.4.0, BR-VAL-006, owner 2026-10-30).
+    const missing = group.filter((c) => tagged([c])[0] == null && cash.accn && accessionTagsAny(tax, [c], cash.accn));
+    if (missing.length > 0) {
+      debt = { status: "INCOMPLETE", value: null, concepts: [...group], components: parts.map((f) => component(f)) };
+      break;
+    }
     const additions = map.debtAdditions.map((c) => tagged([c])[0]).filter((f): f is Fact => f != null);
     const all = [...parts, ...additions];
     debt = { status: "OK", value: all.reduce((s, f) => s + f.val, 0), components: all.map((f) => component(f)) };
@@ -625,6 +633,7 @@ export function valuationAtDate(input: ValuationHistoryInput, date: string, taxo
   const mcap = marketCap.status === "OK" ? (marketCap.value as number) : null;
   if (mcap == null) enterpriseValue = { status: "MARKET_CAP_NOT_AVAILABLE", value: null };
   else if (balances.status !== "OK") enterpriseValue = { status: "BALANCES_NOT_AVAILABLE", value: null };
+  else if (((balances.debt as Rec).status) === "INCOMPLETE") enterpriseValue = { status: "DEBT_INCOMPLETE", value: null };
   else if (((balances.debt as Rec).status) !== "OK") enterpriseValue = { status: "DEBT_NOT_TAGGED", value: null };
   else if (fxRate == null) enterpriseValue = { status: "FX_NOT_AVAILABLE", value: null };
   else {

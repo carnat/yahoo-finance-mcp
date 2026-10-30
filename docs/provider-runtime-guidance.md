@@ -3190,6 +3190,36 @@ F-024, F-026, F-029). Both runtimes change alike.
 - **Tests:** 21 new parity cases in `scripts/parity/cases_audit_2251.py`.
 - **Rollback:** redeploy 2.25.0.
 
+## Valuation: Withhold Partly Tagged Debt and Unresolved Parent Net Income (3.4.0)
+
+- **Why:** R5-valuation part 2, the scheduled repairs BR-VAL-006 and BR-VAL-025 (owner decision 2026-10-30,
+  "Withhold the figure"; `analysis/yahoo-finance-mcp/R5VALUATION2_SPEC.md`). Release type: minor, because two
+  status values are new: debt `INCOMPLETE` and enterprise value `DEBT_INCOMPLETE`. Both runtimes.
+- **Partly tagged debt (BR-VAL-006), `get_historical_valuation_context`:** debt still comes from the first debt
+  concept group with a component tagged at the cash balance date. The group is now complete only when every
+  component that the cash balance's filing tags at any date is also tagged at that date. If one is tagged only at
+  another date (a comparative column), debt is `{status: "INCOMPLETE", value: null}` with the group's `concepts` and
+  the tagged `components`, and enterprise value is `DEBT_INCOMPLETE` (null), so the EV multiples are null. Example: a
+  10-Q tags current debt 30M at 30 June and non-current debt 280M only at the prior year end. Before, debt read
+  30M and EV was understated by 280M. A component the filing never tags, or one tagged only by another filing,
+  leaves the group complete as before.
+- **Untagged NCI (BR-VAL-025), `reconcile_metric_sources` net income:** when ProfitLoss is the chosen US-GAAP
+  concept and either the first-filed or the latest row has no
+  `NetIncomeLossAttributableToNoncontrollingInterest` in the same filing, period and unit, both SEC rows are
+  `NOT_RESOLVED` with a null value. The ProfitLoss row stays as `evidence`, with `filedValues`. Before, raw ProfitLoss
+  was reported as net income, though it includes the minority holders' share. The reconciliation then reads as it
+  does without an SEC baseline (PARTIAL when another provider found the value). Matched NCI is unchanged
+  (`PARENT_DERIVED_FROM_PROFITLOSS`).
+- **Not changed:** IFRS ProfitLoss without the owners-of-parent concept is still reported as is (a recorded
+  finding, out of this decision's scope). `get_historical_valuation_context` P/E also still reads ProfitLoss as
+  is when `NetIncomeLoss` is untagged; that is a separate candidate finding.
+- **Unchanged:** no field or warning code was added. `schemaHash` and `manifestHash` stay the same.
+- **Tests:** in `scripts/parity/cases_valuation.py` the partial-group case and the four missing-NCI cases now
+  assert the new behaviour in both runtimes. Two new cases cover a group component the filing never tags and one
+  tagged only by another filing. `scripts/test_valuation_history_and_reconcile.py` now expects `NOT_RESOLVED` for the
+  BE fixtures without a matched NCI row.
+- **Rollback:** redeploy 3.3.1.
+
 ## Transcript Next Source: Suggest the Fix for What Failed (3.3.1)
 
 - **Why:** R5-earnings part 2, BR-ERN-009 (owner decision 2026-10-30, "Suggest the fix for what failed";
