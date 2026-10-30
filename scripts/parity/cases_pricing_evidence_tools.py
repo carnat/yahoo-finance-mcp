@@ -1708,30 +1708,42 @@ CASES += [
                  ("operationalEbitdaUsd", "netDebtToEbitda", "debtTier", "creditStressFlag"),
                  expect={"operationalEbitdaUsd": 0, "netDebtToEbitda": None, "debtTier": None, "creditStressFlag": None}),
 
-    # Q3i: a loss-maker with net debt gets a negative leverage ratio and the CLEAN tier; only the warning flags it.
-    _credit_case("fnd.credit.q3i_loss_maker_with_net_debt_is_tiered_clean", ["BR-FND-007"],
+    # R5-fundamentals (BR-FND-007): leverage needs a positive earnings base. A loss-maker with net debt no longer
+    # reads as a negative ratio and the CLEAN tier: leverage and stress flag are withheld, the tier names the state.
+    _credit_case("fnd.credit.loss_maker_with_net_debt_has_the_negative_earnings_base_tier", ["BR-FND-007"],
                  {"debt": [300 * M], "cash": [200 * M]}, {"op": [-10 * M] * 4, "da": [5 * M] * 4, "int": [2 * M] * 4},
-                 ("operationalEbitdaUsd", "netDebtToEbitda", "debtTier", "creditStressFlag", "warningCodes"),
-                 mode="pinned", decision="Q3i",
-                 expect={"operationalEbitdaUsd": -20 * M, "netDebtToEbitda": -5.0, "debtTier": "CLEAN", "creditStressFlag": False,
-                         "warningCodes": ["NEGATIVE_EARNINGS_BASE"]}),
-    # Q3i: three income quarters are summed as if they were a year. Python marks dataQuality PARTIAL; the Worker
-    # reports OK (it flags only missing components) -- the figures themselves are identical.
-    _credit_case("fnd.credit.q3i_three_quarter_ttm_python_partial_worker_ok", ["BR-FND-004", "BR-FND-006"],
+                 ("operationalEbitdaUsd", "netDebtToEbitda", "debtTier", "creditStressFlag", "interestCoverageEbit", "warningCodes"),
+                 expect={"operationalEbitdaUsd": -20 * M, "netDebtToEbitda": None, "debtTier": "NEGATIVE_EARNINGS_BASE",
+                         "creditStressFlag": None, "interestCoverageEbit": -5.0, "warningCodes": ["NEGATIVE_EARNINGS_BASE"]}),
+    _credit_case("fnd.credit.loss_maker_with_net_cash_has_the_negative_earnings_base_tier", ["BR-FND-007"],
+                 {"debt": [100 * M], "cash": [300 * M]}, {"op": [-10 * M] * 4, "da": [5 * M] * 4, "int": [2 * M] * 4},
+                 ("netDebtUsd", "netDebtToEbitda", "debtTier", "creditStressFlag", "unavailableMetrics"),
+                 expect={"netDebtUsd": -200 * M, "netDebtToEbitda": None, "debtTier": "NEGATIVE_EARNINGS_BASE", "creditStressFlag": None,
+                         "unavailableMetrics": ["netDebtToEbitda", "creditStressFlag"]}),
+    # R5-fundamentals (BR-FND-004/006): three income quarters are not a year. The TTM components are reported
+    # missing, so EBITDA, leverage and coverage are null and dataQuality is PARTIAL in both runtimes.
+    _credit_case("fnd.credit.three_quarters_are_not_a_ttm", ["BR-FND-004", "BR-FND-006"],
                  {"debt": [500 * M], "cash": [100 * M]},
                  {"op": [40 * M] * 3, "da": [10 * M] * 3, "int": [8 * M] * 3, "ebitda": [50 * M] * 3},
-                 ("operationalEbitdaUsd", "netDebtToEbitda", "interestCoverageEbit", "dataQuality"),
-                 mode="pinned", decision="Q3i",
-                 expect_py={"operationalEbitdaUsd": 150 * M, "netDebtToEbitda": 2.67, "interestCoverageEbit": 5.0, "dataQuality": "PARTIAL"},
-                 expect_ts={"operationalEbitdaUsd": 150 * M, "netDebtToEbitda": 2.67, "interestCoverageEbit": 5.0, "dataQuality": "OK"}),
-    # Python falls back to "Long Term Debt" (which omits current debt) when no total debt row exists; the Worker
-    # reads total debt only, so net debt is unavailable.
-    _credit_case("fnd.credit.q3i_long_term_debt_fallback_exists_only_in_python", ["BR-FND-004", "BR-FND-006"],
+                 ("operationalEbitdaUsd", "ebitUsd", "netDebtToEbitda", "interestCoverageEbit", "debtTier", "dataQuality", "missingComponents"),
+                 expect={"operationalEbitdaUsd": None, "ebitUsd": None, "netDebtToEbitda": None, "interestCoverageEbit": None,
+                         "debtTier": None, "dataQuality": "PARTIAL",
+                         "missingComponents": ["ebitdaUsd", "operationalEbitdaUsd", "ebitUsd", "interestExpenseUsd"]}),
+    # A gap inside the four quarters is the same: D&A missing for one quarter is not a TTM, so operational EBITDA
+    # falls back to the complete provider EBITDA (the existing fallback and its warning).
+    _credit_case("fnd.credit.a_quarter_gap_makes_that_component_incomplete", ["BR-FND-004", "BR-FND-006"],
+                 {"debt": [500 * M], "cash": [100 * M]},
+                 {"op": [40 * M] * 4, "da": [10 * M, None, 10 * M, 10 * M], "int": [8 * M] * 4, "ebitda": [50 * M] * 4},
+                 ("depreciationAmortizationUsd", "operationalEbitdaUsd", "operationalEbitdaSource", "netDebtToEbitda", "warningCodes"),
+                 expect={"depreciationAmortizationUsd": None, "operationalEbitdaUsd": 200 * M,
+                         "operationalEbitdaSource": "provider_ebitda_fallback", "netDebtToEbitda": 2.0,
+                         "warningCodes": ["OPERATIONAL_EBITDA_UNAVAILABLE"]}),
+    # R5-fundamentals (BR-FND-006): long-term debt alone leaves out current debt, so Python no longer reads it as
+    # total debt; both runtimes report total debt missing, as the Worker did.
+    _credit_case("fnd.credit.long_term_debt_alone_is_not_total_debt", ["BR-FND-004", "BR-FND-006"],
                  {"long_term_debt": [300 * M], "cash": [100 * M]}, {"op": [40 * M] * 4, "da": [10 * M] * 4, "int": [8 * M] * 4},
-                 ("totalDebtUsd", "netDebtUsd", "netDebtToEbitda"),
-                 mode="pinned", decision="Q3i",
-                 expect_py={"totalDebtUsd": 300 * M, "netDebtUsd": 200 * M, "netDebtToEbitda": 1.0},
-                 expect_ts={"totalDebtUsd": None, "netDebtUsd": None, "netDebtToEbitda": None}),
+                 ("totalDebtUsd", "netDebtUsd", "netDebtToEbitda", "debtTier"),
+                 expect={"totalDebtUsd": None, "netDebtUsd": None, "netDebtToEbitda": None, "debtTier": None}),
 ]
 
 
@@ -1741,15 +1753,20 @@ CASES += [
 # quoteSummary earningsHistory.
 # ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-def _momentum_case(name: str, ids: list[str], history: list | None, keys: tuple, **kw) -> Case:
-    """`history`: (epsActual, epsEstimate, surprisePercent) rows in provider order (None = missing)."""
+def _momentum_case(name: str, ids: list[str], history: list | None, keys: tuple, quarters: list | None = None, **kw) -> Case:
+    """`history`: (epsActual, epsEstimate, surprisePercent) rows in provider order (None = missing).
+
+    `quarters`: each row's quarter date (None = missing); by default oldest first, as Yahoo lists them.
+    """
+    quarters = quarters if quarters is not None else [f"2025-{3 * (i + 1):02d}-28" for i in range(len(history or []))]
+
     def py():
         frame = None
         if history:
             frame = pd.DataFrame(
                 {"epsActual": [r[0] for r in history], "epsEstimate": [r[1] for r in history],
                  "surprisePercent": [r[2] for r in history]},
-                index=pd.DatetimeIndex([f"2025-{3 * (i + 1):02d}-28" for i in range(len(history))], name="quarter"), dtype=object)
+                index=pd.DatetimeIndex(quarters, name="quarter"), dtype=object)
         company = SimpleNamespace(fast_info=SimpleNamespace(currency="USD"), eps_trend=None, earnings_history=frame)
         with patch.object(server.yf, "Ticker", lambda _t: company):
             return asyncio.run(server.get_earnings_momentum("TST"))
@@ -1757,7 +1774,11 @@ def _momentum_case(name: str, ids: list[str], history: list | None, keys: tuple,
     def cell(v):
         return None if v is None else {"raw": v, "fmt": str(v)}
 
-    hist_json = [{"epsActual": cell(a), "epsEstimate": cell(e), "surprisePercent": cell(s)} for a, e, s in (history or [])]
+    def quarter_cell(q):
+        return None if q is None else {"raw": int(pd.Timestamp(q, tz="UTC").timestamp()), "fmt": q}
+
+    hist_json = [{"quarter": quarter_cell(q), "epsActual": cell(a), "epsEstimate": cell(e), "surprisePercent": cell(s)}
+                 for (a, e, s), q in zip(history or [], quarters)]
     summary = {"quoteSummary": {"result": [{"earningsTrend": {"trend": []},
                                             "earningsHistory": {"history": hist_json} if hist_json else {}}], "error": None}}
     return Case(
@@ -1780,17 +1801,26 @@ CASES += [
     _momentum_case("shr.momentum.equal_actual_and_estimate_is_not_a_beat", ["BR-SHR-012"],
                    [(1.00, 1.00, 0.0), (1.00, 1.00, 0.0)], ("beatRate", "beatCount", "currentBeatStreak"),
                    expect={"beatRate": 0, "beatCount": 0, "currentBeatStreak": 0}),
+    # Rows oldest first (as Yahoo lists them): the newest quarter is a miss, so the streak is 0.
     _momentum_case("shr.momentum.rows_missing_actual_or_estimate_are_skipped", ["BR-SHR-010", "BR-SHR-012"],
                    [BEAT, (None, 1.00, None), BEAT, MISS], ("beatRate", "totalQuarters", "currentBeatStreak"),
-                   expect={"beatRate": 0.67, "totalQuarters": 3, "currentBeatStreak": 2}),
-    # Q3i (BR-SHR-010): the streak counts from the FIRST provider row. Rows beat, beat, miss, beat -> 2, although
-    # the most recent quarter (the last row, if the provider lists oldest first) gives 1.
-    _momentum_case("shr.momentum.q3i_beat_streak_counts_from_the_first_provider_row", ["BR-SHR-010", "BR-SHR-012"],
+                   expect={"beatRate": 0.67, "totalQuarters": 3, "currentBeatStreak": 0}),
+    # R5-fundamentals (BR-SHR-010): the streak counts from the most recent quarter by date. Rows beat, beat, miss,
+    # beat listed oldest first -> 1 (it was 2, counted from the oldest row).
+    _momentum_case("shr.momentum.beat_streak_counts_from_the_most_recent_quarter", ["BR-SHR-010", "BR-SHR-012"],
                    [BEAT, BEAT, MISS, BEAT], ("currentBeatStreak", "beatRate"),
-                   mode="pinned", decision="Q3i", expect={"currentBeatStreak": 2, "beatRate": 0.75}),
-    _momentum_case("shr.momentum.q3i_beat_streak_reversed_rows_give_a_different_streak", ["BR-SHR-010"],
+                   expect={"currentBeatStreak": 1, "beatRate": 0.75}),
+    _momentum_case("shr.momentum.beat_streak_of_the_two_newest_quarters", ["BR-SHR-010"],
                    [BEAT, MISS, BEAT, BEAT], ("currentBeatStreak", "beatRate"),
-                   mode="pinned", decision="Q3i", expect={"currentBeatStreak": 1, "beatRate": 0.75}),
+                   expect={"currentBeatStreak": 2, "beatRate": 0.75}),
+    # The order follows the quarter dates, not the provider's row order.
+    _momentum_case("shr.momentum.beat_streak_follows_dates_when_rows_are_newest_first", ["BR-SHR-010"],
+                   [BEAT, BEAT, MISS, BEAT], ("currentBeatStreak",),
+                   quarters=["2025-12-28", "2025-09-28", "2025-06-28", "2025-03-28"], expect={"currentBeatStreak": 2}),
+    # A counted row without a quarter date leaves the order unknown: the streak is withheld, beat rate still counts.
+    _momentum_case("shr.momentum.beat_streak_is_withheld_when_a_quarter_date_is_missing", ["BR-SHR-010"],
+                   [BEAT, BEAT, MISS, BEAT], ("currentBeatStreak", "beatRate"),
+                   quarters=["2025-03-28", None, "2025-09-28", "2025-12-28"], expect={"currentBeatStreak": None, "beatRate": 0.75}),
     # Pre-revenue rule: no history, or every actual EPS effectively zero (< 1e-9).
     _momentum_case("shr.momentum.no_history_is_pre_revenue", ["BR-SHR-012"], None, MOMENTUM_KEYS + ("warningCodes", "dataQuality"),
                    expect={"beatRate": None, "beatCount": 0, "totalQuarters": 0, "avgSurprisePct": None, "currentBeatStreak": 0,

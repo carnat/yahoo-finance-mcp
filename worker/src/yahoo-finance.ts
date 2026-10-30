@@ -3452,7 +3452,8 @@ export async function getCreditHealth(ticker: string | string[]): Promise<string
     // TTM: sum up to 4 most-recent quarterly income rows (newest first)
     const incRows = inc.slice(0, 4);
 
-    // Sum the first matching key across quarterly rows for TTM
+    // TTM sum of the first matching key. A trailing-twelve-month figure needs a value in each of the 4 newest
+    // quarters (R5-fundamentals): a key with fewer is not a year, so the value is null and the component missing.
     const ttmSum = (keys: string[]): { value: number | null; source: string | null; values: number[] } => {
       for (const key of keys) {
         const vals: number[] = [];
@@ -3461,6 +3462,7 @@ export async function getCreditHealth(ticker: string | string[]): Promise<string
           if (typeof v === "number" && Number.isFinite(v)) vals.push(v);
         }
         if (vals.length > 0) {
+          if (incRows.length < 4 || vals.length < incRows.length) return { value: null, source: null, values: vals };
           return { value: vals.reduce((a, b) => a + b, 0), source: key, values: vals };
         }
       }
@@ -3495,7 +3497,10 @@ export async function getCreditHealth(ticker: string | string[]): Promise<string
     }
     const interestAnnual = interest.value;
 
-    const netDebtToEbitda = netDebt != null && operationalEbitdaAnnual != null && operationalEbitdaAnnual !== 0
+    // Leverage needs a positive earnings base: over zero or negative EBITDA the ratio has no meaning (a loss-maker
+    // with net debt would read as a negative ratio and the CLEAN tier), so it is withheld with the tier and the
+    // stress flag; NEGATIVE_EARNINGS_BASE says why (R5-fundamentals).
+    const netDebtToEbitda = netDebt != null && operationalEbitdaAnnual != null && operationalEbitdaAnnual > 0
       ? +(netDebt / operationalEbitdaAnnual).toFixed(2) : null;
     const interestCoverageEbit = ebitAnnual != null && interestAnnual != null && interestAnnual !== 0
       ? +(ebitAnnual / Math.abs(interestAnnual)).toFixed(2) : null;
@@ -3514,6 +3519,9 @@ export async function getCreditHealth(ticker: string | string[]): Promise<string
       else if (netDebtToEbitda <= 2.5) debtTier = "MODERATE";
       else if (netDebtToEbitda <= 4) debtTier = "ELEVATED";
       else debtTier = "STRESSED";
+    } else if (netDebt != null && operationalEbitdaAnnual != null && operationalEbitdaAnnual < 0) {
+      // A loss-maker has no leverage tier: the state is named instead of reading as CLEAN (R5-fundamentals).
+      debtTier = "NEGATIVE_EARNINGS_BASE";
     }
 
     const missingComponents: string[] = [];
@@ -3694,6 +3702,19 @@ export async function getShortMomentum(ticker: string | string[]): Promise<strin
 
 // ── get_earnings_momentum ────────────────────────────────────────────────────
 
+/** A Yahoo earnings-history quarter as YYYY-MM-DD (from the date string or epoch seconds), or null. */
+function beatStreakQuarter(value: unknown): string | null {
+  if (typeof value === "string") {
+    const m = /^(\d{4}-\d{2}-\d{2})/.exec(value);
+    return m ? m[1] : null;
+  }
+  if (typeof value === "number" && Number.isFinite(value)) {
+    const d = new Date(value * 1000);
+    return Number.isNaN(d.getTime()) ? null : d.toISOString().slice(0, 10);
+  }
+  return null;
+}
+
 export async function getEarningsMomentum(ticker: string | string[]): Promise<string> {
   if (Array.isArray(ticker)) {
     return runPartialBatch(ticker, (t) => getEarningsMomentum(t), tickerCap("analyze_earnings_momentum"));
@@ -3750,7 +3771,7 @@ export async function getEarningsMomentum(ticker: string | string[]): Promise<st
     let beatCount = 0;
     let totalQuarters = 0;
     const surprises: number[] = [];
-    let beatStreak = 0;
+    let beatStreak: number | null = 0;
     const actualEpsValues: number[] = [];
 
     if (earningsHistory && earningsHistory.length > 0) {
@@ -3767,11 +3788,18 @@ export async function getEarningsMomentum(ticker: string | string[]): Promise<st
           if (surprise != null) surprises.push(surprise * 100);
         }
       }
-      for (const h of earningsHistory) {
-        const actual = h.epsActual as number | null;
-        const estimate = h.epsEstimate as number | null;
-        if (actual != null && estimate != null) {
-          if (actual > estimate) beatStreak++;
+      // Beat streak: consecutive beats counted from the most recent quarter. Yahoo lists quarters oldest first,
+      // so rows are ordered by their quarter date, newest first; when a counted row has no quarter date the
+      // order is unknown and the streak is withheld (R5-fundamentals, BR-SHR-010).
+      const dated = earningsHistory
+        .filter((h) => h.epsActual != null && h.epsEstimate != null)
+        .map((h) => ({ quarter: beatStreakQuarter(h.quarter), actual: h.epsActual as number, estimate: h.epsEstimate as number }));
+      if (dated.some((row) => row.quarter == null)) {
+        beatStreak = null;
+      } else {
+        dated.sort((a, b) => ((a.quarter as string) < (b.quarter as string) ? 1 : (a.quarter as string) > (b.quarter as string) ? -1 : 0));
+        for (const row of dated) {
+          if (row.actual > row.estimate) beatStreak++;
           else break;
         }
       }

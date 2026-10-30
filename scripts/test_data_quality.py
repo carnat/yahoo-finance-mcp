@@ -828,8 +828,9 @@ class TestPr2DataQuality(unittest.TestCase):
                 {col: [100.0, 20.0]},
                 index=["Total Debt", "Cash And Cash Equivalents"],
             )
+            # Four quarters make a TTM (R5-fundamentals): sums 40, 20 and -5.
             quarterly_income_stmt = pd.DataFrame(
-                {col: [40.0, 20.0, -5.0]},
+                {pd.Timestamp(d): [10.0, 5.0, -1.25] for d in ("2026-03-31", "2025-12-31", "2025-09-30", "2025-06-30")},
                 index=["EBITDA", "EBIT", "Interest Expense"],
             )
 

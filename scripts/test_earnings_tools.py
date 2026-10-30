@@ -527,8 +527,10 @@ class TestSemanticQualityFixes(unittest.TestCase):
                 self.quarterly_balance_sheet = srv.pd.DataFrame(
                     {col: {"Total Debt": 510.0, "Cash And Cash Equivalents": 10.0}}
                 )
+                # Four quarters make a TTM (R5-fundamentals).
                 self.quarterly_income_stmt = srv.pd.DataFrame(
-                    {col: {"EBITDA": 250.0, "EBIT": 200.0}}
+                    {srv.pd.Timestamp(d): {"EBITDA": 62.5, "EBIT": 50.0}
+                     for d in ("2026-03-31", "2025-12-31", "2025-09-30", "2025-06-30")}
                 )
 
         with patch("server.yf.Ticker", return_value=_Ticker()):

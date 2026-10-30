@@ -3540,7 +3540,11 @@ async def get_credit_health(ticker: str | list[str]) -> str:
         return None
 
     def _ttm_sum(df, cols, *row_names):
-        """Sum first matching row across quarterly cols for TTM. Returns (total, source_row, n_quarters_used)."""
+        """TTM sum of the first matching row. Returns (total, source_row, n_quarters_used).
+
+        A trailing-twelve-month figure needs a value in each of the 4 newest quarters (R5-fundamentals): a row
+        that has fewer is not a year, so the total is None and the component is reported missing.
+        """
         for name in row_names:
             try:
                 vals = []
@@ -3552,6 +3556,8 @@ async def get_credit_health(ticker: str | list[str]) -> str:
                     except (KeyError, TypeError):
                         pass
                 if vals:
+                    if len(cols) < 4 or len(vals) < len(cols):
+                        return None, None, len(vals)
                     return sum(vals), str(name), len(vals)
             except Exception:
                 continue
@@ -3576,7 +3582,8 @@ async def get_credit_health(ticker: str | list[str]) -> str:
         return []
 
     # Balance sheet values (point-in-time)
-    total_debt = _safe_get(bs, bs_col, "Total Debt", "TotalDebt", "Long Term Debt")
+    # Total debt only: long-term debt alone leaves out current debt and would understate it (R5-fundamentals).
+    total_debt = _safe_get(bs, bs_col, "Total Debt", "TotalDebt")
     cash = _safe_get(bs, bs_col, "Cash And Cash Equivalents", "CashAndCashEquivalents", "Cash")
 
     # Income statement: TTM sums (sum of up to 4 most-recent quarters)
@@ -3635,7 +3642,13 @@ async def get_credit_health(ticker: str | list[str]) -> str:
     if n_inc_quarters < 4:
         data_quality = "PARTIAL"
 
-    net_debt_to_ebitda = round(net_debt / operational_ebitda_annual, 2) if net_debt is not None and operational_ebitda_annual else None
+    # Leverage needs a positive earnings base: over zero or negative EBITDA the ratio has no meaning (a loss-maker
+    # with net debt would read as a negative ratio and the CLEAN tier), so it is withheld with the tier and the
+    # stress flag; NEGATIVE_EARNINGS_BASE says why (R5-fundamentals).
+    net_debt_to_ebitda = (
+        round(net_debt / operational_ebitda_annual, 2)
+        if net_debt is not None and operational_ebitda_annual is not None and operational_ebitda_annual > 0 else None
+    )
     interest_coverage_ebit = round(ebit_annual / abs(interest_annual), 2) if ebit_annual is not None and interest_annual and interest_annual != 0 else None
     interest_coverage_ebitda = round(operational_ebitda_annual / abs(interest_annual), 2) if operational_ebitda_annual is not None and interest_annual and interest_annual != 0 else None
     interest_coverage = interest_coverage_ebit
@@ -3653,6 +3666,9 @@ async def get_credit_health(ticker: str | list[str]) -> str:
             debt_tier = "ELEVATED"
         else:
             debt_tier = "STRESSED"
+    elif net_debt is not None and operational_ebitda_annual is not None and operational_ebitda_annual < 0:
+        # A loss-maker has no leverage tier: the state is named instead of reading as CLEAN (R5-fundamentals).
+        debt_tier = "NEGATIVE_EARNINGS_BASE"
     else:
         debt_tier = None
 
@@ -3780,6 +3796,17 @@ async def get_credit_health(ticker: str | list[str]) -> str:
 # ---------------------------------------------------------------------------
 # Tool: get_short_momentum
 # ---------------------------------------------------------------------------
+def _beat_streak_quarter(value) -> str | None:
+    """A Yahoo earnings-history quarter as YYYY-MM-DD, or None when it is missing or unreadable."""
+    if value is None:
+        return None
+    try:
+        stamp = pd.Timestamp(value)
+    except (TypeError, ValueError):
+        return None
+    return None if pd.isna(stamp) else stamp.strftime("%Y-%m-%d")
+
+
 async def get_earnings_momentum(ticker: str | list[str]) -> str:
     """Return earnings momentum for one or more tickers."""
     if isinstance(ticker, list):
@@ -3900,12 +3927,17 @@ async def get_earnings_momentum(ticker: str | list[str]) -> str:
                     # -233.7%); scaling only values under 1 turned ASTS's -117.5% into -27.0%.
                     surprises.append(float(surprise_pct) * 100)
 
-        # Beat streak (consecutive from most recent)
-        for row in earnings_history_records:
-            actual = row.get("epsActual")
-            estimate = row.get("epsEstimate")
-            if actual is not None and estimate is not None:
-                if actual > estimate:
+        # Beat streak: consecutive beats counted from the most recent quarter. Yahoo lists quarters oldest first,
+        # so rows are ordered by their quarter date, newest first; when a counted row has no quarter date the
+        # order is unknown and the streak is withheld (R5-fundamentals, BR-SHR-010).
+        counted = [row for row in earnings_history_records
+                   if row.get("epsActual") is not None and row.get("epsEstimate") is not None]
+        dated = [(_beat_streak_quarter(row.get("quarter")), row) for row in counted]
+        if any(d is None for d, _ in dated):
+            beat_streak = None
+        else:
+            for _, row in sorted(dated, key=lambda item: item[0], reverse=True):
+                if row["epsActual"] > row["epsEstimate"]:
                     beat_streak += 1
                 else:
                     break
