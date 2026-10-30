@@ -1875,6 +1875,20 @@ async def _attempt_yahoo_quartr_transcript(
 
 def _next_transcript_fallback(attempted_sources: list[dict]) -> dict | None:
     statuses = {str(a.get("sourceType")): str(a.get("status")) for a in attempted_sources}
+    reasons = {str(a.get("sourceType")): str(a.get("reasonCode") or "") for a in attempted_sources}
+    # A source the tool tried that failed for a reason the caller can fix comes first (3.4.0, BR-ERN-009):
+    # Yahoo matched another event, or Alpha Vantage was not queried only because the fiscal quarter was unknown.
+    if statuses.get("yahoo_quartr") == "YAHOO_METADATA_MISMATCH":
+        return {
+            "sourceType": "yahoo_quartr",
+            "action": "Retry with a validated Yahoo earnings-call source_url or event_id.",
+        }
+    alpha_configured = bool(os.environ.get("ALPHA_VANTAGE_API_KEY") or os.environ.get("ALPHAVANTAGE_API_KEY"))
+    if statuses.get("alpha_vantage") == "NOT_ELIGIBLE" and reasons.get("alpha_vantage") == "FISCAL_QUARTER_UNRESOLVED" and alpha_configured:
+        return {
+            "sourceType": "alpha_vantage",
+            "action": "Retry with fiscal_quarter as YYYYQn so Alpha Vantage can be queried for that quarter.",
+        }
     if statuses.get("company_ir") in {None, "SKIPPED"}:
         return {
             "sourceType": "company_ir",
