@@ -3190,6 +3190,40 @@ F-024, F-026, F-029). Both runtimes change alike.
 - **Tests:** 21 new parity cases in `scripts/parity/cases_audit_2251.py`.
 - **Rollback:** redeploy 2.25.0.
 
+## Fundamentals: Credit Health Needs a Full Year and a Positive Earnings Base; Beat Streak From the Newest Quarter (3.5.0)
+
+- **Why:** R5-fundamentals, the scheduled Q3i repairs BR-FND-004, BR-FND-006, BR-FND-007 and BR-SHR-010/012
+  (`analysis/yahoo-finance-mcp/R5FUNDAMENTALS1_SPEC.md`). Release type: minor, because published figures change
+  and `debtTier` has one new value, `NEGATIVE_EARNINGS_BASE` (owner card 2026-10-30). No field or warning code is
+  new. Both runtimes.
+- **TTM needs four quarters (BR-FND-004/006), `analyze_credit_health`:** a trailing-twelve-month sum (operating
+  income, D&A, provider EBITDA, interest) now needs a value in each of the 4 newest income quarters. A row with
+  fewer (a company with only 3 quarters, or a gap inside the 4) is not a year: that component is null and listed in
+  `missingComponents`, so the ratios built on it are null and `dataQuality` is PARTIAL. The row picked is the same
+  as before (the first in the existing order with any value). When D&A is incomplete and provider EBITDA is
+  complete, operational EBITDA uses the existing provider fallback and its `OPERATIONAL_EBITDA_UNAVAILABLE`
+  warning. Before, 3 quarters were summed and treated as a year, which understated EBITDA and coverage; the
+  Worker also reported `dataQuality` OK.
+- **Positive earnings base (BR-FND-007):** `netDebtToEbitda` is computed only when operational EBITDA is above 0.
+  Below 0 (with net debt known), `debtTier` is `NEGATIVE_EARNINGS_BASE`, leverage and `creditStressFlag` are null
+  (listed in `unavailableMetrics`), and the existing `NEGATIVE_EARNINGS_BASE` warning is kept. Exactly 0 gives a
+  null tier, as before. Before, a loss-maker with net debt read as a negative ratio and the CLEAN tier (RIVN, LCID
+  and PLUG on 3.4.0). Interest coverage is still reported, negative when EBIT is. Net cash with positive EBITDA
+  still gives a negative ratio and CLEAN.
+- **Total debt only (BR-FND-006):** Python no longer reads `Long Term Debt` as total debt when no total-debt row
+  exists, as the Worker already did. Long-term debt alone leaves out current debt. Total debt is then missing.
+- **Beat streak (BR-SHR-010/012), `analyze_earnings_momentum` and the snapshot that embeds it:** `currentBeatStreak`
+  counts consecutive beats from the most recent quarter, ordering the rows by their quarter date (Yahoo lists them
+  oldest first, and both runtimes counted from the oldest row). If a counted row has no quarter date, the order
+  is unknown and the streak is null. `beatRate`, `beatCount` and the average surprise are unchanged.
+- **Unchanged:** `schemaHash` and `manifestHash` (`debtTier` is a free string in the schema); every field already
+  allowed null.
+- **Tests:** in `scripts/parity/cases_pricing_evidence_tools.py` the three pinned credit cases and the two pinned
+  beat-streak cases now assert the repaired behaviour in both runtimes, and the case with a skipped row now
+  expects a streak of 0 (its newest quarter is a miss). New cases cover a loss-maker with net cash, a quarter
+  gap, newest-first rows and a missing quarter date. Two Python unit tests now use four-quarter fixtures.
+- **Rollback:** redeploy 3.4.0.
+
 ## Valuation: Withhold Partly Tagged Debt and Unresolved Parent Net Income (3.4.0)
 
 - **Why:** R5-valuation part 2, the scheduled repairs BR-VAL-006 and BR-VAL-025 (owner decision 2026-10-30,
