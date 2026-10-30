@@ -673,13 +673,28 @@ BAL_HIST_CASES = [
         expect={"balances.status": "OK", "balances.reason": None, "balanceDate": "2025-06-30", "debt.status": "OK", "debt.value": 0, "debt.basis": "NO_BORROWINGS_TAGGED",
                 "debt.concepts": [], "sti.status": "NOT_TAGGED", "marketCap.status": "OK", "ev.status": "OK", "ev.value": 1700 * M,
                 "warningCodes": ["NO_BORROWINGS_TAGGED", "SHORT_TERM_INVESTMENTS_NOT_TAGGED"]}),
-    # Q1 BR-VAL-006 (owner decision): debt is the FIRST group with at least one component tagged at the cash date, even when the group
-    # is only partly populated. Only LongTermDebtCurrent (30M) is tagged at 2025-06-30; LongTermDebtNoncurrent (280M) is tagged only
-    # at the prior year end, so debt reads 30M and EV is understated by the missing 280M.
-    _hv("val.hist.balances.pinned_partial_debt_group_uses_tagged_component_only", ["BR-VAL-006", "BR-VAL-008"],
+    # 3.4.0 (Q1 BR-VAL-006, owner 2026-10-30 "Withhold the figure"): only LongTermDebtCurrent (30M) is tagged at 2025-06-30;
+    # the same 10-Q tags LongTermDebtNoncurrent (280M) only at the prior year end, so the group is incomplete at the balance
+    # date. Debt is INCOMPLETE and EV is DEBT_INCOMPLETE. Before, debt read 30M and EV was understated by the missing 280M.
+    _hv("val.hist.balances.partial_debt_group_withholds_debt_and_ev", ["BR-VAL-006", "BR-VAL-008"],
         _inp(_facts(_us(CashAndCashEquivalentsAtCarryingValue=_cash(), LongTermDebtCurrent=[_f(None, "2025-06-30", 30 * M, *Q225)],
                         LongTermDebtNoncurrent=[_f(None, "2024-12-31", 280 * M, *Q225)]), _COVER())), select=_bsel,
-        mode="pinned", decision="Q1 BR-VAL-006",
+        decision="Q1 BR-VAL-006, owner 2026-10-30",
+        expect={"balances.status": "OK", "balances.reason": None, "balanceDate": "2025-06-30", "debt.status": "INCOMPLETE", "debt.value": None, "debt.basis": None,
+                "debt.concepts": ["LongTermDebtCurrent"], "sti.status": "NOT_TAGGED", "marketCap.status": "OK", "ev.status": "DEBT_INCOMPLETE",
+                "ev.value": None, "warningCodes": []}),
+    # A component the cash filing never tags (here LongTermDebtNoncurrent appears nowhere) does not make the group incomplete.
+    _hv("val.hist.balances.group_component_never_tagged_by_the_filing_is_complete", ["BR-VAL-006"],
+        _inp(_facts(_us(CashAndCashEquivalentsAtCarryingValue=_cash(), LongTermDebtCurrent=[_f(None, "2025-06-30", 30 * M, *Q225)]), _COVER())),
+        select=_bsel, decision="Q1 BR-VAL-006, owner 2026-10-30",
+        expect={"balances.status": "OK", "balances.reason": None, "balanceDate": "2025-06-30", "debt.status": "OK", "debt.value": 30 * M, "debt.basis": None,
+                "debt.concepts": ["LongTermDebtCurrent"], "sti.status": "NOT_TAGGED", "marketCap.status": "OK", "ev.status": "OK",
+                "ev.value": 2000 * M + (30 - 300) * M, "warningCodes": ["SHORT_TERM_INVESTMENTS_NOT_TAGGED"]}),
+    # A component tagged only by another filing (the 10-K) is not this balance sheet's: the group stays complete.
+    _hv("val.hist.balances.group_component_tagged_only_by_another_filing_is_complete", ["BR-VAL-006"],
+        _inp(_facts(_us(CashAndCashEquivalentsAtCarryingValue=_cash(), LongTermDebtCurrent=[_f(None, "2025-06-30", 30 * M, *Q225)],
+                        LongTermDebtNoncurrent=[_f(None, "2024-12-31", 280 * M, *K24)]), _COVER())),
+        select=_bsel, decision="Q1 BR-VAL-006, owner 2026-10-30",
         expect={"balances.status": "OK", "balances.reason": None, "balanceDate": "2025-06-30", "debt.status": "OK", "debt.value": 30 * M, "debt.basis": None,
                 "debt.concepts": ["LongTermDebtCurrent"], "sti.status": "NOT_TAGGED", "marketCap.status": "OK", "ev.status": "OK",
                 "ev.value": 2000 * M + (30 - 300) * M, "warningCodes": ["SHORT_TERM_INVESTMENTS_NOT_TAGGED"]}),
@@ -1388,7 +1403,14 @@ def _raw(concept, latest, first) -> list:
     return [["SEC_XBRL_LATEST", "FOUND", latest, None, concept, None, None, None], ["SEC_XBRL_AS_FIRST_FILED", "FOUND", first, None, concept, None, None, None]]
 
 
-_BE_PINNED = dict(mode="pinned", decision="Q1 BR-VAL-025")
+_BE_DECIDED = dict(decision="Q1 BR-VAL-025, owner 2026-10-30")
+
+
+def _unresolved() -> list:
+    """3.4.0: no matched NCI, so the parent's net income is NOT_RESOLVED; the ProfitLoss row stays as evidence."""
+    return [["SEC_XBRL_LATEST", "NOT_RESOLVED", None, None, "ProfitLoss", None, None, None],
+            ["SEC_XBRL_AS_FIRST_FILED", "NOT_RESOLVED", None, None, "ProfitLoss", None, None, None]]
+
 
 NET_INCOME_CASES = [
     # Card BR-VAL-025: ProfitLoss 120M is the chosen concept, NCI 5M in the same accession, period and unit -> 115M, PARENT_DERIVED_FROM_PROFITLOSS.
@@ -1407,20 +1429,20 @@ NET_INCOME_CASES = [
                       **{_NCI: [_ni_row(4 * M), _ni_row(5 * M, "10-K/A", "2026-03-15", "be26a")]}),
             [["SEC_XBRL_LATEST", "FOUND", 115 * M, "PARENT_DERIVED_FROM_PROFITLOSS", "ProfitLoss", 120 * M, 5 * M, _DERIVATION],
              ["SEC_XBRL_AS_FIRST_FILED", "FOUND", 114 * M, "PARENT_DERIVED_FROM_PROFITLOSS", "ProfitLoss", 118 * M, 4 * M, _DERIVATION]]),
-    # Q1 BR-VAL-025 (owner decision): with no NCI tagged, raw ProfitLoss (which includes the noncontrolling interest) is reported as net income,
-    # with no basis field. The repair returns an unresolved/limited parent net income instead.
-    _secobs("val.recon.net_income.pinned_missing_nci_reports_raw_profit_loss", ["BR-VAL-025", "BR-VAL-056"], _ni_facts(ProfitLoss=[_ni_row(120 * M)]),
-            _raw("ProfitLoss", 120 * M, 120 * M), **_BE_PINNED),
-    # Both the latest and the first-filed row need a matched NCI: here only the latest has one, so both stay raw.
-    _secobs("val.recon.net_income.pinned_nci_missing_for_first_filed_row_reports_raw", ["BR-VAL-025", "BR-VAL-056"],
+    # 3.4.0 (Q1 BR-VAL-025, owner 2026-10-30 "Withhold the figure"): with no NCI tagged, ProfitLoss includes the
+    # noncontrolling interest, so the parent's net income is NOT_RESOLVED in both rows. Before, raw ProfitLoss was reported.
+    _secobs("val.recon.net_income.missing_nci_leaves_parent_net_income_unresolved", ["BR-VAL-025", "BR-VAL-056"], _ni_facts(ProfitLoss=[_ni_row(120 * M)]),
+            _unresolved(), **_BE_DECIDED),
+    # Both the latest and the first-filed row need a matched NCI: here only the latest has one, so both are unresolved.
+    _secobs("val.recon.net_income.nci_missing_for_first_filed_row_leaves_both_unresolved", ["BR-VAL-025", "BR-VAL-056"],
             _ni_facts(ProfitLoss=[_ni_row(118 * M), _ni_row(120 * M, "10-K/A", "2026-03-15", "be26a")], **{_NCI: [_ni_row(5 * M, "10-K/A", "2026-03-15", "be26a")]}),
-            _raw("ProfitLoss", 120 * M, 118 * M), **_BE_PINNED),
+            _unresolved(), **_BE_DECIDED),
     # NCI must come from the same accession (a different filing's figure is not matched).
-    _secobs("val.recon.net_income.pinned_nci_from_other_filing_reports_raw", ["BR-VAL-025", "BR-VAL-056"],
-            _ni_facts(ProfitLoss=[_ni_row(120 * M)], **{_NCI: [_ni_row(5 * M, accn="other")]}), _raw("ProfitLoss", 120 * M, 120 * M), **_BE_PINNED),
+    _secobs("val.recon.net_income.nci_from_other_filing_leaves_parent_net_income_unresolved", ["BR-VAL-025", "BR-VAL-056"],
+            _ni_facts(ProfitLoss=[_ni_row(120 * M)], **{_NCI: [_ni_row(5 * M, accn="other")]}), _unresolved(), **_BE_DECIDED),
     # ... and for the same period start and end.
-    _secobs("val.recon.net_income.pinned_nci_for_other_period_reports_raw", ["BR-VAL-025", "BR-VAL-056"],
-            _ni_facts(ProfitLoss=[_ni_row(120 * M)], **{_NCI: [_ni_row(5 * M, end="2025-09-30")]}), _raw("ProfitLoss", 120 * M, 120 * M), **_BE_PINNED),
+    _secobs("val.recon.net_income.nci_for_other_period_leaves_parent_net_income_unresolved", ["BR-VAL-025", "BR-VAL-056"],
+            _ni_facts(ProfitLoss=[_ni_row(120 * M)], **{_NCI: [_ni_row(5 * M, end="2025-09-30")]}), _unresolved(), **_BE_DECIDED),
     # Finding (Phase 2, for Q3i triage): IFRS ProfitLoss (which includes non-controlling interests) is reported as net income without any
     # derivation when the owners-of-parent concept is not tagged; the derivation is US-GAAP only. Both runtimes agree; recorded as current behaviour.
     _secobs("val.recon.net_income.ifrs_profit_loss_is_not_derived", ["BR-VAL-025", "BR-VAL-056"],

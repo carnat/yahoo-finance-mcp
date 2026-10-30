@@ -433,6 +433,13 @@ def _balances_at(tax: dict | None, mapping: dict, currency: str, as_of: str) -> 
         parts = [f for f in (tagged(c) for c in group) if f is not None]
         if not parts:
             continue
+        # A group is complete only when every component the cash filing tags at any date is also tagged at the cash
+        # date. A component it tags only at another date (a comparative) means the balance-date debt is missing part of
+        # the group, so debt is withheld rather than understated (3.4.0, BR-VAL-006, owner 2026-10-30).
+        missing = [c for c in group if tagged(c) is None and cash.get("accn") and _accession_tags_any(tax, [c], cash["accn"])]
+        if missing:
+            debt = {"status": "INCOMPLETE", "value": None, "concepts": list(group), "components": [_component(f) for f in parts]}
+            break
         additions = [f for f in (tagged(c) for c in mapping["debtAdditions"]) if f is not None]
         all_parts = parts + additions
         debt = {"status": "OK", "value": sum_values(all_parts), "components": [_component(f) for f in all_parts]}
@@ -673,6 +680,8 @@ def valuation_at_date(inp: dict, date: str, taxonomy: str, currency: str) -> dic
         enterprise_value: dict = {"status": "MARKET_CAP_NOT_AVAILABLE", "value": None}
     elif balances["status"] != "OK":
         enterprise_value = {"status": "BALANCES_NOT_AVAILABLE", "value": None}
+    elif balances["debt"]["status"] == "INCOMPLETE":
+        enterprise_value = {"status": "DEBT_INCOMPLETE", "value": None}
     elif balances["debt"]["status"] != "OK":
         enterprise_value = {"status": "DEBT_NOT_TAGGED", "value": None}
     elif fx_rate is None:

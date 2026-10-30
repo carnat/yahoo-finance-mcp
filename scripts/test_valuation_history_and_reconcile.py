@@ -1044,9 +1044,11 @@ class TestReconciliation(unittest.TestCase):
                          {"concept": "ProfitLoss", "value": -88_434_000, "profitLoss": -87_140_000, "noncontrollingInterest": 1_294_000,
                           "derivation": "ProfitLoss - NetIncomeLossAttributableToNoncontrollingInterest"})
         self.assertEqual((latest["filedValues"], latest["otherConcepts"]), ([-87_140_000], []))
-        # Without the NCI share in the same accession, ProfitLoss stands as tagged and carries no basis.
+        # Without the NCI share in the same accession, the parent's net income is NOT_RESOLVED; the ProfitLoss row
+        # stays as evidence and carries no basis (3.4.0, BR-VAL-025).
         for plain in _python_outputs()["beSecObs"][2:]:
-            self.assertEqual(plain[0]["value"], -87_140_000)
+            self.assertEqual((plain[0]["status"], plain[0]["value"]), ("NOT_RESOLVED", None))
+            self.assertEqual(plain[0]["evidence"]["value"], -87_140_000)
             self.assertNotIn("basis", plain[0])
         # NetIncomeLoss, when tagged, is never adjusted (asserted by test_concept_precedence).
         recon = _python_outputs()["beRecon"]
