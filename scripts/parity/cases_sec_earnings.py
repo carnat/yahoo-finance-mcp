@@ -995,28 +995,43 @@ def _waterfall_view(v):
             "nextRecommendedFallback": nxt.get("sourceType") if isinstance(nxt, dict) else nxt}
 
 
-def _waterfall_case(name, tkr, cik, fiscal_quarter, expect):
+def _waterfall_case(name, tkr, cik, fiscal_quarter, expect, env=None):
     routes = _sec_routes(tkr, cik, [])
     routes[f"https://finance.yahoo.com/quote/{tkr}*"] = {"status": 404}
-    return Case(name=name, ids=["BR-ERN-009"], routes=routes, select=_waterfall_view, mode="pinned", decision="Q3i", expect=expect,
-                py=_run(lambda: _srv().get_earnings_call_transcript(tkr, "latest", None, fiscal_quarter)),
-                ts={"js": "m.response.setWorkerEnv({}); return m.yahooFinance.getEarningsCallTranscript(args[0], 'latest', null, args[1]);",
-                    "args": [tkr, fiscal_quarter], "isolate": True},
-                note="repair: _next_transcript_fallback treats SKIPPED as untried, so company_ir is always recommended")
+
+    async def call():
+        # _run resets the environment first, so the key is set inside the call.
+        with patch.dict(os.environ, env or {}):
+            return await _srv().get_earnings_call_transcript(tkr, "latest", None, fiscal_quarter)
+    return Case(name=name, ids=["BR-ERN-009"], routes=routes, select=_waterfall_view, decision="Q3i", expect=expect, py=_run(call),
+                ts={"js": "m.response.setWorkerEnv(args[2]); return m.yahooFinance.getEarningsCallTranscript(args[0], 'latest', null, args[1]);",
+                    "args": [tkr, fiscal_quarter, env or {}], "isolate": True})
 
 
-# company_ir is recorded as SKIPPED in every run, so the recommendation is always company_ir, whatever else was tried and failed.
+# 3.4.0 (BR-ERN-009, owner 2026-10-30): a source the tool tried that failed for a reason the caller can fix is suggested
+# first (Yahoo matched another event; Alpha Vantage not queried only because the fiscal quarter was unknown, with a key
+# configured). Otherwise company IR, then a public URL, as before. With no Alpha Vantage key, as here, nothing the
+# tool tried can be fixed by the caller, so company IR stays the suggestion.
 CASES += [
-    _waterfall_case("ern.transcript_waterfall.next_fallback_is_company_ir_when_nothing_found", "ZTA", 830001, None,
+    _waterfall_case("ern.transcript_waterfall.next_fallback_is_company_ir_when_no_tried_source_can_be_fixed", "ZTA", 830001, None,
                     {"status": "SEC_8K_NOT_FOUND", "fiscalQuarterStatus": "UNRESOLVED",
                      "attempts": {"sec_8k_exhibit": "NOT_FOUND", "company_ir": "SKIPPED", "yahoo_quartr": "NOT_FOUND", "public_transcript_url": "SKIPPED",
                                   "alpha_vantage": "NOT_ELIGIBLE"},
                      "attemptOrder": ["sec_8k_exhibit", "company_ir", "yahoo_quartr", "public_transcript_url", "alpha_vantage"],
                      "nextRecommendedFallback": "company_ir"}),
 ]
-CASES.append(_waterfall_case("ern.transcript_waterfall.next_fallback_is_company_ir_even_with_fiscal_quarter_and_alpha_vantage_tried", "ZTB", 830002, "2026Q2",
+CASES.append(_waterfall_case("ern.transcript_waterfall.next_fallback_is_company_ir_when_alpha_vantage_has_no_key", "ZTB", 830002, "2026Q2",
                              {"status": "SEC_8K_NOT_FOUND", "fiscalQuarterStatus": "EXPLICIT",
                               "attempts": {"sec_8k_exhibit": "NOT_FOUND", "company_ir": "SKIPPED", "yahoo_quartr": "NOT_FOUND", "public_transcript_url": "SKIPPED",
                                            "alpha_vantage": "SOURCE_UNCONFIGURED"},   # no ALPHA_VANTAGE_API_KEY in the harness environment
                               "attemptOrder": ["sec_8k_exhibit", "company_ir", "yahoo_quartr", "public_transcript_url", "alpha_vantage"],
                               "nextRecommendedFallback": "company_ir"}))
+# With a key configured and no fiscal quarter, Alpha Vantage was not queried only because the quarter was unknown:
+# the suggestion is to retry with fiscal_quarter.
+CASES.append(_waterfall_case("ern.transcript_waterfall.next_fallback_is_alpha_vantage_when_only_the_quarter_blocked_it", "ZTC", 830003, None,
+                             {"status": "SEC_8K_NOT_FOUND", "fiscalQuarterStatus": "UNRESOLVED",
+                              "attempts": {"sec_8k_exhibit": "NOT_FOUND", "company_ir": "SKIPPED", "yahoo_quartr": "NOT_FOUND", "public_transcript_url": "SKIPPED",
+                                           "alpha_vantage": "NOT_ELIGIBLE"},
+                              "attemptOrder": ["sec_8k_exhibit", "company_ir", "yahoo_quartr", "public_transcript_url", "alpha_vantage"],
+                              "nextRecommendedFallback": "alpha_vantage"},
+                             env={"ALPHA_VANTAGE_API_KEY": "parity-test-key"}))

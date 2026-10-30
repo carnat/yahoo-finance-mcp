@@ -9251,8 +9251,18 @@ function isSecTranscriptCandidate(exhibit: Record<string, unknown>): boolean {
     || ["TRANSCRIPT", "CONFERENCE CALL", "PROCEEDINGS", "EARNINGS CALL"].some((keyword) => description.includes(keyword));
 }
 
-function nextTranscriptFallback(attemptedSources: Record<string, unknown>[]): Record<string, unknown> | null {
+export function nextTranscriptFallback(attemptedSources: Record<string, unknown>[]): Record<string, unknown> | null {
   const statusBySource = new Map(attemptedSources.map((a) => [String(a.sourceType), String(a.status)]));
+  const reasonBySource = new Map(attemptedSources.map((a) => [String(a.sourceType), String(a.reasonCode ?? "")]));
+  // A source the tool tried that failed for a reason the caller can fix comes first (3.4.0, BR-ERN-009):
+  // Yahoo matched another event, or Alpha Vantage was not queried only because the fiscal quarter was unknown.
+  if (statusBySource.get("yahoo_quartr") === "YAHOO_METADATA_MISMATCH") {
+    return { sourceType: "yahoo_quartr", action: "Retry with a validated Yahoo earnings-call source_url or event_id." };
+  }
+  const alphaConfigured = Boolean(getWorkerVar("ALPHA_VANTAGE_API_KEY") ?? getWorkerVar("ALPHAVANTAGE_API_KEY"));
+  if (statusBySource.get("alpha_vantage") === "NOT_ELIGIBLE" && reasonBySource.get("alpha_vantage") === "FISCAL_QUARTER_UNRESOLVED" && alphaConfigured) {
+    return { sourceType: "alpha_vantage", action: "Retry with fiscal_quarter as YYYYQn so Alpha Vantage can be queried for that quarter." };
+  }
   if (!statusBySource.has("company_ir") || statusBySource.get("company_ir") === "SKIPPED") {
     return { sourceType: "company_ir", action: "Provide or discover a company IR earnings-call/transcript URL, then call parse_public_transcript." };
   }

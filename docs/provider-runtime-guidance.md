@@ -3190,6 +3190,28 @@ F-024, F-026, F-029). Both runtimes change alike.
 - **Tests:** 21 new parity cases in `scripts/parity/cases_audit_2251.py`.
 - **Rollback:** redeploy 2.25.0.
 
+## Transcript Next Source: Suggest the Fix for What Failed (3.3.1)
+
+- **Why:** R5-earnings part 2, BR-ERN-009 (owner decision 2026-10-30, "Suggest the fix for what failed";
+  `analysis/yahoo-finance-mcp/R5EARNINGS2_SPEC.md`). Release type: patch. Both runtimes.
+- **Rule:** when `get_earnings_call_transcript` finds no transcript, `nextRecommendedFallback` names first a source
+  the tool tried that failed for a reason the caller can fix:
+  - Yahoo returned another event (`YAHOO_METADATA_MISMATCH`): `yahoo_quartr`, retry with a validated `source_url`
+    or `event_id`.
+  - Alpha Vantage was not queried only because the fiscal quarter was unknown (`NOT_ELIGIBLE`,
+    `FISCAL_QUARTER_UNRESOLVED`) and an Alpha Vantage key is configured: `alpha_vantage`, retry with
+    `fiscal_quarter` as `YYYYQn`.
+  - Otherwise the order is unchanged: company IR, then a public transcript URL, then Yahoo, then Alpha Vantage,
+    each when not yet tried. An incomplete Yahoo preview still gives `alternate_transcript_source`.
+- **Before:** the suggestion was company IR in every run, because the tool records company IR as skipped and treated
+  skipped as untried.
+- **Unchanged:** no field, status, source type or enum value was added. `schemaHash` and `manifestHash` stay the
+  same. The deployment without an Alpha Vantage key still suggests company IR when nothing else can be fixed.
+- **Tests:** the two waterfall cases in `scripts/parity/cases_sec_earnings.py` now assert the same value in both
+  runtimes, and a third covers the configured-key case end to end. `scripts/parity/cases_r5ern2.py` covers the
+  suggestion rule on attempt lists.
+- **Rollback:** redeploy 3.3.0.
+
 ## Earnings Surprise: Release EPS, Dated Yahoo Rows, Zero Estimates, Rounding (3.3.0)
 
 - **Why:** R5-earnings part 1: source policy R3 (official release figure first), Q3i call 5, BR-ERN-031,
