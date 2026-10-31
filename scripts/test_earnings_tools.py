@@ -390,7 +390,7 @@ class TestCompareActualVsEstimate(unittest.TestCase):
             ],
         }
         with patch("yfmcp.tools.earnings.extract_earnings_metrics", new_callable=AsyncMock) as mocked_metrics, patch(
-            "server.get_earnings_analysis", new_callable=AsyncMock
+            "yfmcp.tools.fundamentals.get_earnings_analysis", new_callable=AsyncMock
         ) as mocked_ea:
             mocked_metrics.return_value = json.dumps(metrics_payload)
             mocked_ea.return_value = json.dumps(ea_payload)
@@ -412,7 +412,7 @@ class TestCompareActualVsEstimate(unittest.TestCase):
             "earningsHistory": [{"period": "FY2026 Q4", "quarter": "2026-05-31", "epsActual": 0.11, "epsEstimate": -0.0075}],
         }
         with patch("yfmcp.tools.earnings.extract_earnings_metrics", new_callable=AsyncMock) as mocked_metrics, patch(
-            "server.get_earnings_analysis", new_callable=AsyncMock
+            "yfmcp.tools.fundamentals.get_earnings_analysis", new_callable=AsyncMock
         ) as mocked_ea:
             mocked_metrics.return_value = json.dumps(metrics_payload)
             mocked_ea.return_value = json.dumps(ea_payload)
@@ -435,7 +435,7 @@ class TestCompareActualVsEstimate(unittest.TestCase):
             "earningsHistory": [{"quarter": "2026-05-31", "epsActual": 0.11, "epsEstimate": -0.0075}],
         }
         with patch("yfmcp.tools.earnings.extract_earnings_metrics", new_callable=AsyncMock) as mocked_metrics, patch(
-            "server.get_earnings_analysis", new_callable=AsyncMock
+            "yfmcp.tools.fundamentals.get_earnings_analysis", new_callable=AsyncMock
         ) as mocked_ea:
             mocked_metrics.return_value = json.dumps(metrics_payload)
             mocked_ea.return_value = json.dumps(ea_payload)
@@ -454,7 +454,7 @@ class TestCompareActualVsEstimate(unittest.TestCase):
 
     def test_no_reported_quarter_warning(self):
         with patch("yfmcp.tools.earnings.extract_earnings_metrics", new_callable=AsyncMock) as mocked_metrics, patch(
-            "server.get_earnings_analysis", new_callable=AsyncMock
+            "yfmcp.tools.fundamentals.get_earnings_analysis", new_callable=AsyncMock
         ) as mocked_ea:
             mocked_metrics.return_value = json.dumps({"period": None, "metrics": {"revenue": {"value": 100.0}, "epsDiluted": {"value": None}}})
             mocked_ea.return_value = json.dumps({"revenueEstimate": [{"period": "0q", "avg": 90.0}], "earningsHistory": [{"epsActual": None, "epsEstimate": 0.9}]})

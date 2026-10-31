@@ -924,7 +924,7 @@ class TestPr2DataQuality(unittest.TestCase):
             })
 
         with patch("yfmcp.tools.earnings.extract_earnings_metrics", new=fake_metrics), \
-             patch.object(srv, "get_earnings_analysis", new=fake_ea):
+             patch("yfmcp.tools.fundamentals.get_earnings_analysis", new=fake_ea):
             parsed = json.loads(_run(srv.compare_earnings_actual_vs_estimate("AAPL")))
         data = parsed["data"] if parsed.get("ok") else parsed
         self.assertEqual(data["reportedPeriod"], "FY2026 Q2")
@@ -941,7 +941,7 @@ class TestPr2DataQuality(unittest.TestCase):
             return json.dumps({"earningsHistory": [{"quarter": "2026-09-30", "epsActual": None, "epsEstimate": 1.2}]})
 
         with patch("yfmcp.tools.earnings.extract_earnings_metrics", new=fake_metrics), \
-             patch.object(srv, "get_earnings_analysis", new=fake_ea):
+             patch("yfmcp.tools.fundamentals.get_earnings_analysis", new=fake_ea):
             parsed = json.loads(_run(srv.compare_earnings_actual_vs_estimate("AAPL")))
         data = parsed["data"] if parsed.get("ok") else parsed
         warnings = (parsed.get("meta") or {}).get("warnings") or data.get("warnings") or []

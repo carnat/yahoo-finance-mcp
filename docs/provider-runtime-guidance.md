@@ -3190,6 +3190,23 @@ F-024, F-026, F-029). Both runtimes change alike.
 - **Tests:** 21 new parity cases in `scripts/parity/cases_audit_2251.py`.
 - **Rollback:** redeploy 2.25.0.
 
+## Earnings Module Move and No More Back-Calls Into server.py (3.6.6)
+
+- **Why:** internal restructuring only (Phase 5 unit 6, `analysis/yahoo-finance-mcp/PHASE5_EARNINGS_SPEC.md`).
+  Release type: patch. No behaviour change.
+- **What moved (Worker):** the latest earnings release and its SEC source, the release index, metrics, guidance,
+  management commentary, actual vs estimate, guidance history and the transcript chain, from
+  `worker/src/yahoo-finance.ts` to `worker/src/earnings.ts`: 57 functions and the constants and types only they use.
+- **What moved (Python):** `get_guidance_history` from `server.py` into `yfmcp/tools/earnings.py`.
+- **Back-calls removed:** `yfmcp/tools/earnings.py` no longer reaches into `server.py` by name at run time
+  (`_server_attr`). It reads the same five functions from the modules that define them, so the objects called are
+  the ones `server.py` re-exports. Tests that patched those functions on `server` now patch the defining module.
+- **Unchanged:** no tool name, input, output, schema, status, warning, cache key or ordering changed.
+- **Verification:** the moved Worker text keeps its line multiset (only import lines differ); the moved Python
+  function keeps its `ast.dump`, and the five edited call sites match once mapped back; tool listings (expanded and
+  grouped) are byte-identical; the parity harness passes with no expected value changed.
+- **Rollback:** redeploy 3.6.5.
+
 ## Provider Module Move and Provider Rule Cases (3.6.5)
 
 - **Why:** internal restructuring only (Phase 5 unit 5, `analysis/yahoo-finance-mcp/PHASE5_PROVIDERS_SPEC.md`).
