@@ -98,7 +98,7 @@ FILE_DOMAIN = {
     "yfmcp/valuation.py": "valuation", "yfmcp/valuation_history.py": "valuation",
     "yfmcp/metric_reconciliation.py": "valuation",
     "yfmcp/tools/earnings.py": "earnings", "yfmcp/clients/yahoo_transcripts.py": "earnings",
-    "yfmcp/tools/news.py": "news",
+    "yfmcp/tools/news.py": "news", "yfmcp/tools/sec.py": "sec",
     "yfmcp/news/__init__.py": "news", "yfmcp/news/shared.py": "news", "yfmcp/news/providers/__init__.py": "news",
     "yfmcp/news/providers/company_ir.py": "news", "yfmcp/news/providers/company_ir_page.py": "news",
     "yfmcp/news/providers/finnhub.py": "news", "yfmcp/news/providers/globenewswire.py": "news",

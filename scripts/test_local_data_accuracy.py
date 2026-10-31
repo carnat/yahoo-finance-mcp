@@ -21,6 +21,7 @@ import server as srv  # noqa: E402
 from yfmcp import envelope  # noqa: E402
 from yfmcp.tools import earnings  # noqa: E402
 from yfmcp.tools import news as news_tools  # noqa: E402
+from yfmcp.tools import sec as sec_tools  # noqa: E402
 
 
 def _run(coro):
@@ -81,7 +82,7 @@ class TestLocalDataAccuracy(unittest.TestCase):
             "primaryDocument": ["aapl-20260627.htm", "aapl-20260730.htm"],
             "acceptanceDateTime": ["", ""], "isXBRL": [1, 0], "isInlineXBRL": [1, 0],
         }}}
-        with patch.object(srv, "_get_submissions_for_ticker", AsyncMock(return_value=("0000320193", submissions))):
+        with patch.object(sec_tools, "_get_submissions_for_ticker", AsyncMock(return_value=("0000320193", submissions))):
             data = _data(_run(srv.list_sec_material_filings("AAPL", limit=5)))
         self.assertEqual([f["xbrl_available"] for f in data["filings"]], [True, False])
 

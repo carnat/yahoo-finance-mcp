@@ -220,8 +220,8 @@ def _run(coro):  # type: ignore[no-untyped-def]
 
 class TestPythonRegressions(unittest.TestCase):
     def test_failed_pin_names_the_requested_accession(self) -> None:
-        with patch("server._resolve_cik_for_ticker", new=AsyncMock(return_value="0001780312")), \
-                patch("server._edgar_get", new=AsyncMock(return_value=_CONCEPT)):
+        with patch("yfmcp.tools.sec._resolve_cik_for_ticker", new=AsyncMock(return_value="0001780312")), \
+                patch("yfmcp.tools.sec._edgar_get", new=AsyncMock(return_value=_CONCEPT)):
             data = json.loads(_run(srv.extract_sec_filing_fact("ASTS", fact="total_revenue", accession_number=REQUESTED)))
         if "data" in data and "ok" in data:
             data = data["data"]
@@ -233,8 +233,8 @@ class TestPythonRegressions(unittest.TestCase):
         cases = {"SEC_LOOKUP_UNAVAILABLE": {}, "NO_SEC_REGISTRANT": {"ASTS": 1780312}}
         statuses = {"SEC_LOOKUP_UNAVAILABLE": "PROVIDER_ERROR", "NO_SEC_REGISTRANT": "SEC_FACT_NOT_AVAILABLE"}
         for code, index in cases.items():
-            with patch("server._resolve_cik_for_ticker", new=AsyncMock(return_value=None)), \
-                    patch("server._load_edgar_tickers", new=AsyncMock(return_value=index)):
+            with patch("yfmcp.tools.sec._resolve_cik_for_ticker", new=AsyncMock(return_value=None)), \
+                    patch("yfmcp.tools.sec._load_edgar_tickers", new=AsyncMock(return_value=index)):
                 data = json.loads(_run(srv.extract_sec_filing_fact("ZZZZ", fact="total_revenue", accession_number=REQUESTED)))
             data = data.get("data", data) if "ok" in data else data
             self.assertEqual((data["code"], data["retryable"], data["status"], data["source"]), (code, code == "SEC_LOOKUP_UNAVAILABLE", statuses[code], "NONE"))

@@ -61,6 +61,7 @@ sys.path.insert(0, str(ROOT))
 
 
 import server as srv  # noqa: E402
+from yfmcp.tools import sec as sec_tools  # noqa: E402
 from scripts.source_text import definition_source  # noqa: E402
 from yfmcp.clients.edgar import EdgarError  # noqa: E402
 from yfmcp.parsing.extractors import extract_geo_revenue_from_html  # noqa: E402
@@ -525,15 +526,21 @@ def _python(name: str) -> dict:
     if case.get("call") == "parse_geo_html":
         return srv._js_json_numbers(extract_geo_revenue_from_html(case["html"], case["region"]))  # integral floats are ints in JSON, as the Worker's
     srv._tool_cache._store.clear()
-    srv._FILING_TEXT_CACHE.clear()
-    srv._FILING_TEXT_CACHE_CHARS = 0
+    sec_tools._FILING_TEXT_CACHE.clear()
+    sec_tools._FILING_TEXT_CACHE_CHARS = 0
     with patch("server._resolve_cik_for_ticker", new=AsyncMock(return_value=CIK if ticker == TICKER else None)), \
+            patch("yfmcp.tools.sec._resolve_cik_for_ticker", new=AsyncMock(return_value=CIK if ticker == TICKER else None)), \
             patch("server._load_edgar_tickers", new=tickers), \
+            patch("yfmcp.tools.sec._load_edgar_tickers", new=tickers), \
             patch("server._edgar_get", new=edgar_get), \
+            patch("yfmcp.tools.sec._edgar_get", new=edgar_get), \
             patch("server._edgar_get_html", new=edgar_html), \
+            patch("yfmcp.tools.sec._edgar_get_html", new=edgar_html), \
             patch("server._edgar_get_document", new=edgar_document), \
+            patch("yfmcp.tools.sec._edgar_get_document", new=edgar_document), \
             patch("yfmcp.clients.edgar._edgar_get", new=edgar_get), \
             patch("server._get_submissions_for_ticker", new=submissions), \
+            patch("yfmcp.tools.sec._get_submissions_for_ticker", new=submissions), \
             patch("yfmcp.clients.edgar._get_submissions_for_ticker", new=submissions):
         call = case.get("call", "total_revenue")
         period = case.get("period", "latest")

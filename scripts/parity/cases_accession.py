@@ -26,6 +26,7 @@ from scripts.parity.harness import Case
 
 import server  # noqa: E402
 from yfmcp.clients import edgar  # noqa: E402
+from yfmcp.tools import sec as sec_tools  # noqa: E402
 
 CASES: list[Case] = []
 
@@ -91,7 +92,7 @@ def _python_sec_state():
     """Empty SEC caches and no Yahoo, so Python resolves the CIK from the served ticker index, as the Worker does."""
     with contextlib.ExitStack() as stack:
         for cache in (edgar._FILING_CIK_CACHE, edgar._EDGAR_SUBS_CACHE, edgar._EDGAR_FACTS_CACHE, edgar._EDGAR_HTML_CACHE,
-                      server._FILING_TEXT_CACHE, server._tool_cache._store):
+                      sec_tools._FILING_TEXT_CACHE, server._tool_cache._store):
             stack.enter_context(patch.dict(cache, {}, clear=True))
         saved = (edgar._EDGAR_TICKERS, edgar._EDGAR_TICKERS_LOADED_AT)
         edgar._EDGAR_TICKERS, edgar._EDGAR_TICKERS_LOADED_AT = None, 0.0

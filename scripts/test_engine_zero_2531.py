@@ -128,7 +128,7 @@ def _python_cik(ticker_feed: str) -> tuple[str | None, list[str]]:
 def _python_material(forms: list[str], limit: int) -> dict:
     import server as srv
 
-    with patch("server._get_submissions_for_ticker", new=AsyncMock(return_value=(BLOOM_CIK, SUBS))):
+    with patch("yfmcp.tools.sec._get_submissions_for_ticker", new=AsyncMock(return_value=(BLOOM_CIK, SUBS))):
         return json.loads(asyncio.run(srv.list_sec_material_filings("BE", forms, limit)))
 
 
