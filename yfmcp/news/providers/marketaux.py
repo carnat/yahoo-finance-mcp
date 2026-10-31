@@ -108,7 +108,7 @@ async def _collect_marketaux_events(
     public_url = f"{_MARKETAUX_NEWS_API}?{_urlparse.urlencode({**safe_params, 'api_token': 'REDACTED'})}"
     request_url = f"{_MARKETAUX_NEWS_API}?{_urlparse.urlencode({**safe_params, 'api_token': api_token})}"
     diagnostics["providerUrl"] = public_url
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
 
     def _fetch() -> dict:
         req = _urlrequest.Request(request_url, headers={"User-Agent": _PROVIDER_USER_AGENT})

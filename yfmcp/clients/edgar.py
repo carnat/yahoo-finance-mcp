@@ -85,7 +85,7 @@ async def _load_edgar_tickers() -> dict[str, int]:
     now = time.monotonic()
     if _EDGAR_TICKERS and _EDGAR_TICKERS_LOADED_AT > 0.0 and (now - _EDGAR_TICKERS_LOADED_AT) < _EDGAR_TTL:
         return _EDGAR_TICKERS
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
 
     def _fetch() -> dict[str, int]:
         req = _urlreq.Request(
@@ -122,7 +122,7 @@ class EdgarError(Exception):
 
 async def _edgar_get(url: str) -> dict:
     """Fetch a JSON document from the SEC EDGAR API (runs in a thread executor)."""
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
 
     def _fetch() -> dict:
         req = _urlreq.Request(
@@ -444,7 +444,7 @@ async def _resolve_cik_for_ticker(ticker: str) -> str | None:
             sec_browse_edgar_atom_url(_urlparse.quote(ticker))
         ),
     ]
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
 
     def _fetch_atom() -> str | None:
         for atom_url in atom_urls:

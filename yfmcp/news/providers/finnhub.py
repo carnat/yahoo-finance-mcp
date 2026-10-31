@@ -75,7 +75,7 @@ async def _collect_finnhub_events(
         "to": to_day,
     })
     url = f"{_FINNHUB_NEWS_API}?{query}"
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
 
     def _fetch() -> list[dict]:
         req = _urlrequest.Request(

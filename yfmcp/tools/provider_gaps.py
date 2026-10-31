@@ -462,7 +462,7 @@ async def _companies_house_get(path: str, key: str) -> tuple[int, dict | None]:
         except _urlerror.HTTPError as exc:
             return exc.code, None
 
-    return await asyncio.get_event_loop().run_in_executor(None, _url_policy.in_context(fetch))
+    return await asyncio.get_running_loop().run_in_executor(None, _url_policy.in_context(fetch))
 
 
 def _companies_house_error(status: int, step: str) -> str:

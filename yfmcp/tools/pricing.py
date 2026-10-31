@@ -305,7 +305,7 @@ async def get_fast_info(ticker: str | list[str]) -> str:
         )
         data["marketState"] = info.get("marketState")
         data["lastTradeDate"] = (
-            datetime.datetime.utcfromtimestamp(reg_mkt_time).strftime('%Y-%m-%d')
+            datetime.datetime.fromtimestamp(reg_mkt_time, datetime.timezone.utc).strftime('%Y-%m-%d')
             if isinstance(reg_mkt_time, (int, float)) and reg_mkt_time
             else None
         )
@@ -1872,7 +1872,7 @@ async def get_market_snapshot(
             results[t] = parsed
         return json.dumps({"tickers": results})
 
-    retrieved_at = datetime.datetime.utcnow().isoformat() + "Z"
+    retrieved_at = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None).isoformat() + "Z"
 
     component_status: dict[str, str] = {}
     failed_components: list[str] = []
@@ -2610,7 +2610,7 @@ async def get_put_hedge_candidates(
     if expiry_after:
         qualifying_expiries = [e for e in expirations if e >= expiry_after]
     else:
-        default_after = (datetime.datetime.utcnow() + datetime.timedelta(days=7)).strftime("%Y-%m-%d")
+        default_after = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=7)).strftime("%Y-%m-%d")
         qualifying_expiries = [e for e in expirations if e >= default_after]
 
     # Select nearest 2

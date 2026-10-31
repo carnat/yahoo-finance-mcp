@@ -203,7 +203,7 @@ async def _collect_globenewswire_events(
             xml_content = cached_entry[0]
 
         if xml_content is None:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
 
             def _fetch_rss() -> str:
                 req = _urlrequest.Request(

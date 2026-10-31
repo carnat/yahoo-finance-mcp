@@ -379,7 +379,7 @@ from yfmcp.tools.evidence_pack import (  # re-export for compatibility, grouped 
 # ---------------------------------------------------------------------------
 # TOOL_MODE env var controls which interface is exposed:
 #   - "grouped" (default): 12 domain meta-tools with action routing
-#   - "expanded": all 79 individual tools (compatibility/debug mode)
+#   - "expanded": every individual tool (compatibility/debug mode)
 # ---------------------------------------------------------------------------
 _TOOL_MODE = os.environ.get("TOOL_MODE", "grouped").lower().strip()
 
@@ -396,7 +396,7 @@ def _build_grouped_server():
         instructions="""
 # Yahoo Finance MCP Server (Grouped Mode)
 
-Grouped mode is the default. Set TOOL_MODE=expanded to expose 79 individual tools.
+Grouped mode is the default. Set TOOL_MODE=expanded to expose every individual tool.
 
 This server provides financial market data via domain-grouped tools for token efficiency.
 Each tool covers a domain (pricing, fundamentals, options, etc.) and accepts an `action`
@@ -442,7 +442,7 @@ def get_server():
     """Return the appropriate server based on TOOL_MODE env var.
 
     - TOOL_MODE=grouped (default): 12 domain meta-tools
-    - TOOL_MODE=expanded: 79 individual tools
+    - TOOL_MODE=expanded: every individual tool
     """
     global _grouped_server
     if _TOOL_MODE == "grouped":

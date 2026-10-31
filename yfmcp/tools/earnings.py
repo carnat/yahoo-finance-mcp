@@ -1442,7 +1442,7 @@ async def parse_public_transcript(url: str = "", topics: list[str] | None = None
     if yahoo_text is not None:
         return _public_transcript_payload(url, yahoo_text, topics, [])
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
 
     def _fetch_page() -> tuple[str | None, str | None, int | None]:
         """Fetch page and return (html, error_detail, http_status)."""

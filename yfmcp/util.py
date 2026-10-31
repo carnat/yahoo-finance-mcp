@@ -53,7 +53,7 @@ def get_last_trading_date(df=None) -> str:
     """
     if df is not None and len(df) > 0:
         return df.index[-1].strftime('%Y-%m-%d')
-    d = datetime.datetime.utcnow().date()
+    d = datetime.datetime.now(datetime.timezone.utc).date()
     while d.weekday() >= 5:  # 5=Sat, 6=Sun
         d -= datetime.timedelta(days=1)
     return d.strftime('%Y-%m-%d')
@@ -123,7 +123,7 @@ def _compute_data_quality(
                         # ltdMs = ltd > 1e10 ? ltd : ltd * 1000
                         raw_ts = float(ltd)
                         ltd_seconds = raw_ts / 1000 if raw_ts > 1e10 else raw_ts
-                        ltd_date = datetime.datetime.utcfromtimestamp(ltd_seconds).date()
+                        ltd_date = datetime.datetime.fromtimestamp(ltd_seconds, datetime.timezone.utc).date()
                     if (data_date_obj - ltd_date).days > stale_days_threshold:
                         stale_trade += 1
                 except (ValueError, TypeError):
