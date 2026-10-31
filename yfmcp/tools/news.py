@@ -660,6 +660,218 @@ def _build_collection_status(items: list[dict], sources_used: list[str], warning
     return None
 
 
+def _yf_error_status(warn_msgs: list[str]) -> str | None:
+    if any("yahoo finance" in m.lower() for m in warn_msgs):
+        return "PROVIDER_ERROR"
+    return None
+
+
+def _yahoo_diagnostic_status(diagnostics: dict, source: str, source_items: list[dict]) -> dict | None:
+    diagnostic = diagnostics.get(source) if isinstance(diagnostics.get(source), dict) else None
+    if diagnostic is None:
+        return None
+    accepted_count = int(
+        diagnostic["acceptedCount"]
+        if diagnostic.get("acceptedCount") is not None
+        else diagnostic["filteredCount"]
+        if diagnostic.get("filteredCount") is not None
+        else len(source_items)
+    )
+    return {
+        "status": "PROVIDER_ERROR" if diagnostic.get("completed") is False else ("OK" if accepted_count > 0 else "EMPTY_RESULT"),
+        "rawCount": int(diagnostic.get("rawCount") or 0),
+        "retrievedCount": int(diagnostic.get("retrievedCount") or diagnostic.get("rawCount") or 0),
+        "filteredCount": int(diagnostic.get("filteredCount") or 0),
+        "acceptedCount": accepted_count,
+        "returnedCount": len(source_items),
+        "rejectedCount": int(diagnostic.get("rejectedCount") or 0),
+        "rejectionCounts": dict(diagnostic.get("rejectionCounts") or {}),
+        "identityStatus": diagnostic.get("identityStatus"),
+        "attempted": diagnostic.get("attempted") is not False,
+        **({"method": diagnostic["method"]} if diagnostic.get("method") else {}),
+    }
+
+
+def _sec_source_status(diagnostics: dict, sources_used: list[str], warning_msgs: list[str], sec_items: list[dict]) -> dict:
+    sec_diagnostic = diagnostics.get("sec") if isinstance(diagnostics.get("sec"), dict) else {}
+    if str(sec_diagnostic.get("status") or "") == "NOT_ELIGIBLE":
+        return {"status": "NOT_ELIGIBLE", "rawCount": 0, "filteredCount": 0, **sec_diagnostic}
+    elif "sec" in sources_used:
+        return {"status": "OK" if sec_items else "EMPTY_RESULT", "rawCount": len(sec_items), "filteredCount": len(sec_items)}
+    elif any("sec submissions" in m.lower() for m in warning_msgs):
+        return {"status": "PROVIDER_ERROR", "rawCount": 0, "filteredCount": 0}
+    else:
+        return {"status": "EMPTY_RESULT", "rawCount": 0, "filteredCount": 0}
+
+
+def _yahoo_source_status(
+    source: str,
+    source_items: list[dict],
+    diagnostics: dict,
+    sources_used: list[str],
+    warning_msgs: list[str],
+) -> dict:
+    err = _yf_error_status(warning_msgs)
+    diagnostic_status = _yahoo_diagnostic_status(diagnostics, source, source_items)
+    if diagnostic_status is not None:
+        return diagnostic_status
+    elif source in sources_used:
+        return {"status": "OK" if source_items else "EMPTY_RESULT", "rawCount": len(source_items), "filteredCount": len(source_items)}
+    elif err:
+        return {"status": err, "rawCount": 0, "filteredCount": 0}
+    else:
+        return {"status": "EMPTY_RESULT", "rawCount": 0, "filteredCount": 0}
+
+
+def _finnhub_source_status(
+    warnings: list[dict],
+    warning_msgs: list[str],
+    sources_used: list[str],
+    diagnostics: dict,
+    finnhub_items: list[dict],
+) -> dict:
+    ineligible_warning = next((w for w in warnings if isinstance(w, dict) and w.get("code") == "SOURCE_NOT_ELIGIBLE" and w.get("source") == "finnhub"), None)
+    if ineligible_warning:
+        return {
+            "status": "NOT_ELIGIBLE", "rawCount": 0, "filteredCount": 0,
+            "attempted": False, "reasonCode": ineligible_warning.get("reasonCode"),
+            "allowedAction": "use_yahoo_or_official_sources",
+        }
+    elif "finnhub" in sources_used:
+        diagnostic = diagnostics.get("finnhub") if isinstance(diagnostics.get("finnhub"), dict) else {}
+        accepted_count = int(diagnostic.get("acceptedCount") if diagnostic.get("acceptedCount") is not None else len(finnhub_items))
+        returned_count = len(finnhub_items)
+        truncated_count = max(0, accepted_count - returned_count)
+        return {
+            "status": "OK" if accepted_count else "EMPTY_RESULT",
+            "rawCount": int(diagnostic.get("rawCount") if diagnostic.get("rawCount") is not None else accepted_count),
+            "retrievedCount": int(diagnostic.get("retrievedCount") if diagnostic.get("retrievedCount") is not None else diagnostic.get("rawCount") or accepted_count),
+            "filteredCount": accepted_count,
+            "acceptedCount": accepted_count,
+            "collectedCount": int(diagnostic.get("collectedCount") if diagnostic.get("collectedCount") is not None else accepted_count),
+            "returnedCount": returned_count,
+            "rejectedCount": int(diagnostic.get("rejectedCount") or 0),
+            "rejectionCounts": dict(diagnostic.get("rejectionCounts") or {}),
+            "truncatedCount": truncated_count,
+            "hasMoreAccepted": truncated_count > 0,
+            "attempted": diagnostic.get("attempted") is not False,
+        }
+    elif any("finnhub company-news source is not configured" in m.lower() for m in warning_msgs):
+        return {"status": "UNCONFIGURED"}
+    elif any("finnhub auth error" in m.lower() for m in warning_msgs):
+        return {"status": "AUTH_ERROR", "rawCount": 0, "filteredCount": 0}
+    elif any("finnhub rate limited" in m.lower() for m in warning_msgs):
+        return {"status": "RATE_LIMITED", "rawCount": 0, "filteredCount": 0}
+    elif any("finnhub provider changed" in m.lower() for m in warning_msgs):
+        return {"status": "PROVIDER_CHANGED", "rawCount": 0, "filteredCount": 0}
+    elif any("finnhub" in m.lower() for m in warning_msgs):
+        return {"status": "PROVIDER_ERROR", "rawCount": 0, "filteredCount": 0}
+    else:
+        return {"status": "EMPTY_RESULT", "rawCount": 0, "filteredCount": 0}
+
+
+def _marketaux_source_status(diagnostics: dict, marketaux_items: list[dict]) -> dict:
+    diagnostic = diagnostics.get("marketaux") if isinstance(diagnostics.get("marketaux"), dict) else {}
+    diagnostic_status = str(diagnostic.get("status") or "")
+    accepted_count = int(diagnostic.get("acceptedCount") if diagnostic.get("acceptedCount") is not None else len(marketaux_items))
+    returned_count = len(marketaux_items)
+    status = diagnostic_status or ("OK" if accepted_count else "EMPTY_RESULT")
+    allowed_action = {
+        "NOT_NEEDED": "none",
+        "UNCONFIGURED": "configure_marketaux_api_token",
+        "AUTH_ERROR": "verify_marketaux_api_token",
+        "RATE_LIMITED": "retry_after_quota_reset",
+        "TIMEOUT": "retry_later",
+        "PROVIDER_CHANGED": "inspect_provider_contract",
+        "PROVIDER_ERROR": "retry_or_use_official_sources",
+    }.get(status, "check_official_releases" if accepted_count else "none")
+    return {
+        "status": status,
+        "rawCount": int(diagnostic.get("rawCount") or 0),
+        "retrievedCount": int(diagnostic.get("retrievedCount") or diagnostic.get("rawCount") or 0),
+        "filteredCount": accepted_count,
+        "acceptedCount": accepted_count,
+        "returnedCount": returned_count,
+        "rejectedCount": int(diagnostic.get("rejectedCount") or 0),
+        "rejectionCounts": dict(diagnostic.get("rejectionCounts") or {}),
+        "attempted": diagnostic.get("attempted") is not False,
+        "reasonCode": diagnostic.get("reasonCode"),
+        "fallbackReason": diagnostic.get("fallbackReason"),
+        "quotaPolicy": diagnostic.get("quotaPolicy"),
+        "domains": diagnostic.get("domains"),
+        "allowedAction": allowed_action,
+    }
+
+
+def _company_ir_source_status(
+    diagnostics: dict,
+    sources_used: list[str],
+    warning_msgs: list[str],
+    company_ir_items: list[dict],
+) -> dict:
+    # Registry-only since 2.19.0 (Worker 2.10.0): the collector's diagnostics carry the registry state (NOT_REGISTERED
+    # without an approved entry) and override the item-count status, as the Worker's spread does.
+    company_ir_diagnostic = diagnostics.get("company_ir") if isinstance(diagnostics.get("company_ir"), dict) else {}
+    company_ir_status = "EMPTY_RESULT"
+    if "company_ir" in sources_used:
+        company_ir_status = "OK" if company_ir_items else "EMPTY_RESULT"
+    elif _yf_error_status(warning_msgs):
+        company_ir_status = "PROVIDER_ERROR"
+    return {"status": company_ir_status, "rawCount": len(company_ir_items), "filteredCount": len(company_ir_items), **company_ir_diagnostic}
+
+
+def _company_ir_page_source_status(
+    warnings: list[dict],
+    warning_codes: set,
+    diagnostics: dict,
+    sources_used: list[str],
+    company_ir_page_items: list[dict],
+) -> dict:
+    page_warning = next((w for w in warnings if isinstance(w, dict) and str(w.get("code", "")).startswith("COMPANY_IR_PAGE_")), {})
+    status = "EMPTY_RESULT"
+    if "company_ir_page" in sources_used:
+        status = "APPROVED_SOURCE_OK" if company_ir_page_items else "EMPTY_RESULT"
+    elif "COMPANY_IR_PAGE_CANDIDATE_AVAILABLE" in warning_codes:
+        status = "CANDIDATE_AVAILABLE"
+    elif "COMPANY_IR_PAGE_DISABLED" in warning_codes:
+        status = "DISABLED"
+    elif "COMPANY_IR_PAGE_REVALIDATION_DUE" in warning_codes:
+        status = "REVALIDATION_DUE"
+    elif "COMPANY_IR_PAGE_VALIDATION_FAILED" in warning_codes:
+        status = "SOURCE_VALIDATION_FAILED"
+    else:
+        status = "NOT_REGISTERED"
+    # The registry metadata comes from the entry itself, so a clean approved fetch carries it too (2.19.0, row g).
+    page_diagnostic = diagnostics.get("company_ir_page") if isinstance(diagnostics.get("company_ir_page"), dict) else {}
+    registry_fields = page_diagnostic if page_diagnostic.get("approvalStatus") is not None else page_warning
+    # A fetched page answers fetch_configured_source whether or not it had items in the window (2.19.0, row f).
+    fetched = status == "APPROVED_SOURCE_OK" or (status == "EMPTY_RESULT" and "company_ir_page" in sources_used)
+    row = {
+        "status": status,
+        "rawCount": len(company_ir_page_items),
+        "filteredCount": len(company_ir_page_items),
+        "registryVersion": registry_fields.get("registryVersion"),
+        "registrySchemaVersion": registry_fields.get("registrySchemaVersion"),
+        "canonicalUrl": registry_fields.get("canonicalUrl"),
+        "approvalStatus": registry_fields.get("approvalStatus"),
+        "allowedAction": "fetch_configured_source" if fetched else (
+            "review_and_promote" if status == "CANDIDATE_AVAILABLE" else "registry_review_required"
+        ),
+    }
+    if isinstance(page_warning.get("candidate"), dict):
+        row["candidates"] = [page_warning["candidate"]]
+    return row
+
+
+def _newswire_source_status(sources_used: list[str], warning_msgs: list[str], newswire_items: list[dict]) -> dict:
+    if "newswire" in sources_used:
+        return {"status": "OK" if newswire_items else "EMPTY_RESULT", "rawCount": len(newswire_items), "filteredCount": len(newswire_items)}
+    elif any("globenewswire" in m.lower() for m in warning_msgs):
+        return {"status": "PROVIDER_ERROR", "rawCount": 0, "filteredCount": 0}
+    else:
+        return {"status": "EMPTY_RESULT", "rawCount": 0, "filteredCount": 0}
+
+
 def _compute_source_status(
     sources_used: list[str],
     warnings: list[dict],
@@ -719,210 +931,34 @@ def _compute_source_status(
     marketaux_items = [it for it in items if str(it.get("source", "")) == "marketaux"]
     diagnostics = source_diagnostics or {}
 
-    def _yf_error_status(warn_msgs: list[str]) -> str | None:
-        if any("yahoo finance" in m.lower() for m in warn_msgs):
-            return "PROVIDER_ERROR"
-        return None
-
     result: dict = {}
     identity_diagnostic = diagnostics.get("yahoo_finance_identity") if isinstance(diagnostics.get("yahoo_finance_identity"), dict) else None
     if identity_diagnostic and identity_diagnostic.get("status") == "IDENTITY_UNAVAILABLE":
         result["yahoo_finance_identity"] = dict(identity_diagnostic)
 
-    def _yahoo_status(source: str, source_items: list[dict]) -> dict | None:
-        diagnostic = diagnostics.get(source) if isinstance(diagnostics.get(source), dict) else None
-        if diagnostic is None:
-            return None
-        accepted_count = int(
-            diagnostic["acceptedCount"]
-            if diagnostic.get("acceptedCount") is not None
-            else diagnostic["filteredCount"]
-            if diagnostic.get("filteredCount") is not None
-            else len(source_items)
-        )
-        return {
-            "status": "PROVIDER_ERROR" if diagnostic.get("completed") is False else ("OK" if accepted_count > 0 else "EMPTY_RESULT"),
-            "rawCount": int(diagnostic.get("rawCount") or 0),
-            "retrievedCount": int(diagnostic.get("retrievedCount") or diagnostic.get("rawCount") or 0),
-            "filteredCount": int(diagnostic.get("filteredCount") or 0),
-            "acceptedCount": accepted_count,
-            "returnedCount": len(source_items),
-            "rejectedCount": int(diagnostic.get("rejectedCount") or 0),
-            "rejectionCounts": dict(diagnostic.get("rejectionCounts") or {}),
-            "identityStatus": diagnostic.get("identityStatus"),
-            "attempted": diagnostic.get("attempted") is not False,
-            **({"method": diagnostic["method"]} if diagnostic.get("method") else {}),
-        }
-
     if "sec" in sources:
-        sec_diagnostic = diagnostics.get("sec") if isinstance(diagnostics.get("sec"), dict) else {}
-        if str(sec_diagnostic.get("status") or "") == "NOT_ELIGIBLE":
-            result["sec"] = {"status": "NOT_ELIGIBLE", "rawCount": 0, "filteredCount": 0, **sec_diagnostic}
-        elif "sec" in sources_used:
-            result["sec"] = {"status": "OK" if sec_items else "EMPTY_RESULT", "rawCount": len(sec_items), "filteredCount": len(sec_items)}
-        elif any("sec submissions" in m.lower() for m in warning_msgs):
-            result["sec"] = {"status": "PROVIDER_ERROR", "rawCount": 0, "filteredCount": 0}
-        else:
-            result["sec"] = {"status": "EMPTY_RESULT", "rawCount": 0, "filteredCount": 0}
+        result["sec"] = _sec_source_status(diagnostics, sources_used, warning_msgs, sec_items)
 
     # Fine-grained Yahoo Finance sources
     if "yahoo_finance_news" in sources:
-        err = _yf_error_status(warning_msgs)
-        diagnostic_status = _yahoo_status("yahoo_finance_news", yf_news_items)
-        if diagnostic_status is not None:
-            result["yahoo_finance_news"] = diagnostic_status
-        elif "yahoo_finance_news" in sources_used:
-            result["yahoo_finance_news"] = {"status": "OK" if yf_news_items else "EMPTY_RESULT", "rawCount": len(yf_news_items), "filteredCount": len(yf_news_items)}
-        elif err:
-            result["yahoo_finance_news"] = {"status": err, "rawCount": 0, "filteredCount": 0}
-        else:
-            result["yahoo_finance_news"] = {"status": "EMPTY_RESULT", "rawCount": 0, "filteredCount": 0}
+        result["yahoo_finance_news"] = _yahoo_source_status("yahoo_finance_news", yf_news_items, diagnostics, sources_used, warning_msgs)
     if "yahoo_finance_press_releases" in sources:
-        err = _yf_error_status(warning_msgs)
-        diagnostic_status = _yahoo_status("yahoo_finance_press_releases", yf_pr_items)
-        if diagnostic_status is not None:
-            result["yahoo_finance_press_releases"] = diagnostic_status
-        elif "yahoo_finance_press_releases" in sources_used:
-            result["yahoo_finance_press_releases"] = {"status": "OK" if yf_pr_items else "EMPTY_RESULT", "rawCount": len(yf_pr_items), "filteredCount": len(yf_pr_items)}
-        elif err:
-            result["yahoo_finance_press_releases"] = {"status": err, "rawCount": 0, "filteredCount": 0}
-        else:
-            result["yahoo_finance_press_releases"] = {"status": "EMPTY_RESULT", "rawCount": 0, "filteredCount": 0}
+        result["yahoo_finance_press_releases"] = _yahoo_source_status("yahoo_finance_press_releases", yf_pr_items, diagnostics, sources_used, warning_msgs)
 
     # Legacy yahoo_finance aggregate source
     if "yahoo_finance" in sources:
-        err = _yf_error_status(warning_msgs)
-        diagnostic_status = _yahoo_status("yahoo_finance", yf_legacy_items)
-        if diagnostic_status is not None:
-            result["yahoo_finance"] = diagnostic_status
-        elif "yahoo_finance" in sources_used:
-            result["yahoo_finance"] = {"status": "OK" if yf_legacy_items else "EMPTY_RESULT", "rawCount": len(yf_legacy_items), "filteredCount": len(yf_legacy_items)}
-        elif err:
-            result["yahoo_finance"] = {"status": err, "rawCount": 0, "filteredCount": 0}
-        else:
-            result["yahoo_finance"] = {"status": "EMPTY_RESULT", "rawCount": 0, "filteredCount": 0}
+        result["yahoo_finance"] = _yahoo_source_status("yahoo_finance", yf_legacy_items, diagnostics, sources_used, warning_msgs)
 
     if "finnhub" in sources:
-        ineligible_warning = next((w for w in warnings if isinstance(w, dict) and w.get("code") == "SOURCE_NOT_ELIGIBLE" and w.get("source") == "finnhub"), None)
-        if ineligible_warning:
-            result["finnhub"] = {
-                "status": "NOT_ELIGIBLE", "rawCount": 0, "filteredCount": 0,
-                "attempted": False, "reasonCode": ineligible_warning.get("reasonCode"),
-                "allowedAction": "use_yahoo_or_official_sources",
-            }
-        elif "finnhub" in sources_used:
-            diagnostic = diagnostics.get("finnhub") if isinstance(diagnostics.get("finnhub"), dict) else {}
-            accepted_count = int(diagnostic.get("acceptedCount") if diagnostic.get("acceptedCount") is not None else len(finnhub_items))
-            returned_count = len(finnhub_items)
-            truncated_count = max(0, accepted_count - returned_count)
-            result["finnhub"] = {
-                "status": "OK" if accepted_count else "EMPTY_RESULT",
-                "rawCount": int(diagnostic.get("rawCount") if diagnostic.get("rawCount") is not None else accepted_count),
-                "retrievedCount": int(diagnostic.get("retrievedCount") if diagnostic.get("retrievedCount") is not None else diagnostic.get("rawCount") or accepted_count),
-                "filteredCount": accepted_count,
-                "acceptedCount": accepted_count,
-                "collectedCount": int(diagnostic.get("collectedCount") if diagnostic.get("collectedCount") is not None else accepted_count),
-                "returnedCount": returned_count,
-                "rejectedCount": int(diagnostic.get("rejectedCount") or 0),
-                "rejectionCounts": dict(diagnostic.get("rejectionCounts") or {}),
-                "truncatedCount": truncated_count,
-                "hasMoreAccepted": truncated_count > 0,
-                "attempted": diagnostic.get("attempted") is not False,
-            }
-        elif any("finnhub company-news source is not configured" in m.lower() for m in warning_msgs):
-            result["finnhub"] = {"status": "UNCONFIGURED"}
-        elif any("finnhub auth error" in m.lower() for m in warning_msgs):
-            result["finnhub"] = {"status": "AUTH_ERROR", "rawCount": 0, "filteredCount": 0}
-        elif any("finnhub rate limited" in m.lower() for m in warning_msgs):
-            result["finnhub"] = {"status": "RATE_LIMITED", "rawCount": 0, "filteredCount": 0}
-        elif any("finnhub provider changed" in m.lower() for m in warning_msgs):
-            result["finnhub"] = {"status": "PROVIDER_CHANGED", "rawCount": 0, "filteredCount": 0}
-        elif any("finnhub" in m.lower() for m in warning_msgs):
-            result["finnhub"] = {"status": "PROVIDER_ERROR", "rawCount": 0, "filteredCount": 0}
-        else:
-            result["finnhub"] = {"status": "EMPTY_RESULT", "rawCount": 0, "filteredCount": 0}
+        result["finnhub"] = _finnhub_source_status(warnings, warning_msgs, sources_used, diagnostics, finnhub_items)
     if "marketaux" in sources:
-        diagnostic = diagnostics.get("marketaux") if isinstance(diagnostics.get("marketaux"), dict) else {}
-        diagnostic_status = str(diagnostic.get("status") or "")
-        accepted_count = int(diagnostic.get("acceptedCount") if diagnostic.get("acceptedCount") is not None else len(marketaux_items))
-        returned_count = len(marketaux_items)
-        status = diagnostic_status or ("OK" if accepted_count else "EMPTY_RESULT")
-        allowed_action = {
-            "NOT_NEEDED": "none",
-            "UNCONFIGURED": "configure_marketaux_api_token",
-            "AUTH_ERROR": "verify_marketaux_api_token",
-            "RATE_LIMITED": "retry_after_quota_reset",
-            "TIMEOUT": "retry_later",
-            "PROVIDER_CHANGED": "inspect_provider_contract",
-            "PROVIDER_ERROR": "retry_or_use_official_sources",
-        }.get(status, "check_official_releases" if accepted_count else "none")
-        result["marketaux"] = {
-            "status": status,
-            "rawCount": int(diagnostic.get("rawCount") or 0),
-            "retrievedCount": int(diagnostic.get("retrievedCount") or diagnostic.get("rawCount") or 0),
-            "filteredCount": accepted_count,
-            "acceptedCount": accepted_count,
-            "returnedCount": returned_count,
-            "rejectedCount": int(diagnostic.get("rejectedCount") or 0),
-            "rejectionCounts": dict(diagnostic.get("rejectionCounts") or {}),
-            "attempted": diagnostic.get("attempted") is not False,
-            "reasonCode": diagnostic.get("reasonCode"),
-            "fallbackReason": diagnostic.get("fallbackReason"),
-            "quotaPolicy": diagnostic.get("quotaPolicy"),
-            "domains": diagnostic.get("domains"),
-            "allowedAction": allowed_action,
-        }
+        result["marketaux"] = _marketaux_source_status(diagnostics, marketaux_items)
     if "company_ir" in sources:
-        # Registry-only since 2.19.0 (Worker 2.10.0): the collector's diagnostics carry the registry state (NOT_REGISTERED
-        # without an approved entry) and override the item-count status, as the Worker's spread does.
-        company_ir_diagnostic = diagnostics.get("company_ir") if isinstance(diagnostics.get("company_ir"), dict) else {}
-        company_ir_status = "EMPTY_RESULT"
-        if "company_ir" in sources_used:
-            company_ir_status = "OK" if company_ir_items else "EMPTY_RESULT"
-        elif _yf_error_status(warning_msgs):
-            company_ir_status = "PROVIDER_ERROR"
-        result["company_ir"] = {"status": company_ir_status, "rawCount": len(company_ir_items), "filteredCount": len(company_ir_items), **company_ir_diagnostic}
+        result["company_ir"] = _company_ir_source_status(diagnostics, sources_used, warning_msgs, company_ir_items)
     if "company_ir_page" in sources:
-        page_warning = next((w for w in warnings if isinstance(w, dict) and str(w.get("code", "")).startswith("COMPANY_IR_PAGE_")), {})
-        status = "EMPTY_RESULT"
-        if "company_ir_page" in sources_used:
-            status = "APPROVED_SOURCE_OK" if company_ir_page_items else "EMPTY_RESULT"
-        elif "COMPANY_IR_PAGE_CANDIDATE_AVAILABLE" in warning_codes:
-            status = "CANDIDATE_AVAILABLE"
-        elif "COMPANY_IR_PAGE_DISABLED" in warning_codes:
-            status = "DISABLED"
-        elif "COMPANY_IR_PAGE_REVALIDATION_DUE" in warning_codes:
-            status = "REVALIDATION_DUE"
-        elif "COMPANY_IR_PAGE_VALIDATION_FAILED" in warning_codes:
-            status = "SOURCE_VALIDATION_FAILED"
-        else:
-            status = "NOT_REGISTERED"
-        # The registry metadata comes from the entry itself, so a clean approved fetch carries it too (2.19.0, row g).
-        page_diagnostic = diagnostics.get("company_ir_page") if isinstance(diagnostics.get("company_ir_page"), dict) else {}
-        registry_fields = page_diagnostic if page_diagnostic.get("approvalStatus") is not None else page_warning
-        # A fetched page answers fetch_configured_source whether or not it had items in the window (2.19.0, row f).
-        fetched = status == "APPROVED_SOURCE_OK" or (status == "EMPTY_RESULT" and "company_ir_page" in sources_used)
-        result["company_ir_page"] = {
-            "status": status,
-            "rawCount": len(company_ir_page_items),
-            "filteredCount": len(company_ir_page_items),
-            "registryVersion": registry_fields.get("registryVersion"),
-            "registrySchemaVersion": registry_fields.get("registrySchemaVersion"),
-            "canonicalUrl": registry_fields.get("canonicalUrl"),
-            "approvalStatus": registry_fields.get("approvalStatus"),
-            "allowedAction": "fetch_configured_source" if fetched else (
-                "review_and_promote" if status == "CANDIDATE_AVAILABLE" else "registry_review_required"
-            ),
-        }
-        if isinstance(page_warning.get("candidate"), dict):
-            result["company_ir_page"]["candidates"] = [page_warning["candidate"]]
+        result["company_ir_page"] = _company_ir_page_source_status(warnings, warning_codes, diagnostics, sources_used, company_ir_page_items)
     if "newswire" in sources:
-        if "newswire" in sources_used:
-            result["newswire"] = {"status": "OK" if newswire_items else "EMPTY_RESULT", "rawCount": len(newswire_items), "filteredCount": len(newswire_items)}
-        elif any("globenewswire" in m.lower() for m in warning_msgs):
-            result["newswire"] = {"status": "PROVIDER_ERROR", "rawCount": 0, "filteredCount": 0}
-        else:
-            result["newswire"] = {"status": "EMPTY_RESULT", "rawCount": 0, "filteredCount": 0}
+        result["newswire"] = _newswire_source_status(sources_used, warning_msgs, newswire_items)
     if budget_starved_sources is None:
         budget_starved_sources = list(getattr(source_diagnostics, "budget_starved", None) or [])
     if disabled_sources is None:
