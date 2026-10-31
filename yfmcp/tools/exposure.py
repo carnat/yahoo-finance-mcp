@@ -16,6 +16,8 @@ import json
 import math
 import re as _re
 import time
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from typing import Any, Literal
 
 from yfmcp import capital_structure as _cs
@@ -1722,6 +1724,238 @@ def _index_tables_name_region(index_payload: dict, region: str) -> bool | None:
         f"{t.get('title') or ''} {words(t.get('headers'))} {words(t.get('rowLabels'))}", region) for t in tables)
 
 
+@dataclass
+class _SecIndexContext:
+    ticker: str
+    filing_type: str
+    period: str
+    accession_number: str | None
+    detail: str
+    routed_params: dict
+    warnings: list
+    shape_evidence: Callable[[dict], dict]
+    result: Callable[..., str]
+    missing_param: Callable[[str], str]
+    accession_miss: Callable[[], Awaitable[str | None]]
+
+
+def _sec_index_evidence_required(status: str, evidence: list, warnings: list) -> str:
+    if status == "ANSWERED" and not evidence:
+        warnings.append({"code": "EVIDENCE_REQUIRED", "message": "ANSWERED responses require evidence."})
+        return "NOT_FOUND"
+    return status
+
+
+async def _sec_index_geographic_revenue_share(ctx: _SecIndexContext) -> str:
+    region = str(ctx.routed_params.get("region") or "").strip()
+    if not region:
+        return ctx.missing_param("region")
+    geo = _safe_json_loads(await extract_geographic_revenue(
+        ticker=ctx.ticker,
+        region=region,
+        filing_type=ctx.filing_type,
+        period=ctx.period,
+        accession_number=ctx.accession_number,
+        detailLevel=ctx.detail,
+    ))
+    # An explicit accession that is not among the company's recent filings fails closed here too (2.15.0, R4-ACC-QUERY).
+    if geo.get("ok") is False and _is_accession_not_found(geo.get("error")):
+        return _accession_not_found_envelope(geo["error"])
+    evidence_obj = geo.get("evidence") if isinstance(geo.get("evidence"), dict) else {}
+    evidence = [ctx.shape_evidence(evidence_obj)] if evidence_obj else []
+    status = "ANSWERED" if geo.get("value") is not None else _as_status(geo)
+    status = _sec_index_evidence_required(status, evidence, ctx.warnings)
+    answer = {
+        "region": region,
+        "value": geo.get("value"),
+        "denominator": geo.get("denominator"),
+        "valueRatio": geo.get("valueRatio"),
+        "valuePct": geo.get("valuePct"),
+        "unit": geo.get("unit", "USD"),
+    }
+    confidence = str(_nn(geo.get("confidence"), "LOW" if status == "ANSWERED" else "NOT_DISCLOSED"))
+    if status == "NOT_FOUND":
+        confidence = "NOT_DISCLOSED" if str(geo.get("confidence") or "").upper() == "NOT_DISCLOSED" else "LOW"
+    return ctx.result(status, answer, confidence, evidence, ctx.warnings)
+
+
+async def _sec_index_revenue_exposure(ctx: _SecIndexContext) -> str:
+    exposure_query = str(ctx.routed_params.get("exposure_query") or "").strip()
+    if not exposure_query:
+        return ctx.missing_param("exposure_query")
+    rex = _safe_json_loads(await _extract_revenue_exposure(
+        ticker=ctx.ticker,
+        exposure_query=exposure_query,
+        filing_type=ctx.filing_type,
+        period=ctx.period,
+        detailLevel=ctx.detail,
+        accession_number=ctx.accession_number,
+    ))
+    matches = rex.get("matches") if isinstance(rex.get("matches"), list) else []
+    first = matches[0] if matches and isinstance(matches[0], dict) else {}
+    evidence_obj = first.get("evidence") if isinstance(first.get("evidence"), dict) else {}
+    evidence = [ctx.shape_evidence(evidence_obj)] if evidence_obj else []
+    status = "ANSWERED" if bool(matches) and str(rex.get("status")) == "FOUND_REVENUE_EXPOSURE" else str(rex.get("status") or "NOT_FOUND")
+    status = _sec_index_evidence_required(status, evidence, ctx.warnings)
+    answer = {
+        "exposureQuery": exposure_query,
+        "value": first.get("value"),
+        "denominator": first.get("denominator"),
+        "valueRatio": first.get("valueRatio"),
+        "valuePct": first.get("valuePct"),
+        "period": first.get("period"),
+    }
+    confidence = str(_nn(first.get("confidence"), "LOW" if status == "ANSWERED" else "NOT_DISCLOSED"))
+    return ctx.result(status, answer, confidence, evidence, ctx.warnings)
+
+
+async def _sec_index_china_exposure(ctx: _SecIndexContext) -> str:
+    china = _safe_json_loads(await extract_china_exposure(
+        ticker=ctx.ticker,
+        filing_type=ctx.filing_type,
+        period=ctx.period,
+        accession_number=ctx.accession_number,
+        detailLevel=ctx.detail,
+    ))
+    overall = str(china.get("overallStatus") or "NOT_FOUND")
+    answer = {
+        "revenueExposure": china.get("revenueExposure"),
+        "manufacturingExposure": china.get("manufacturingExposure"),
+        "entityExposure": china.get("entityExposure"),
+        "bankExposure": china.get("bankExposure"),
+        "riskFactorExposure": china.get("riskFactorExposure"),
+        "overallStatus": overall,
+    }
+    evidence: list[dict] = []
+    for key in ("revenueExposure", "manufacturingExposure", "entityExposure", "bankExposure", "riskFactorExposure"):
+        block = china.get(key)
+        if not isinstance(block, dict):
+            continue
+        ev = block.get("evidence")
+        if isinstance(ev, dict):
+            evidence.append(ctx.shape_evidence(ev))
+        elif isinstance(ev, list):
+            for item in ev:
+                if isinstance(item, dict):
+                    evidence.append(ctx.shape_evidence(item))
+    status = "ANSWERED" if overall in {"FOUND_REVENUE_EXPOSURE", "FOUND_NON_REVENUE_EXPOSURE"} else overall
+    status = _sec_index_evidence_required(status, evidence, ctx.warnings)
+    confidence = "HIGH" if status == "ANSWERED" else ("NOT_DISCLOSED" if overall == "NOT_DISCLOSED" else "LOW")
+    return ctx.result(status, answer, confidence, evidence, ctx.warnings)
+
+
+async def _sec_index_risk_factor_mentions(ctx: _SecIndexContext) -> str:
+    terms = ctx.routed_params.get("terms")
+    terms_list = [str(t) for t in terms] if isinstance(terms, list) else []
+    if not terms_list:
+        return ctx.missing_param("terms")
+    risk_miss = await ctx.accession_miss()
+    if risk_miss:
+        return risk_miss
+    risk = _safe_json_loads(await _extract_risk_factor_mentions(
+        ticker=ctx.ticker,
+        terms=terms_list,
+        filing_type=ctx.filing_type,
+        period=ctx.period,
+        detailLevel=ctx.detail,
+        accession_number=ctx.accession_number,
+    ))
+    matches = [m for m in (risk.get("matches") if isinstance(risk.get("matches"), list) else []) if isinstance(m, dict)]
+    evidence = [ctx.shape_evidence(m.get("evidence")) for m in matches if isinstance(m.get("evidence"), dict)]
+    status = "ANSWERED" if matches else str(risk.get("status") or "NOT_FOUND")
+    status = _sec_index_evidence_required(status, evidence, ctx.warnings)
+    return ctx.result(
+        status,
+        {"terms": terms_list, "matches": matches},
+        "MEDIUM" if status == "ANSWERED" else "LOW",
+        evidence,
+        ctx.warnings,
+    )
+
+
+async def _sec_index_customer_concentration(ctx: _SecIndexContext) -> str:
+    customer_label = str(ctx.routed_params.get("customer_label") or "").strip()
+    cust_miss = await ctx.accession_miss()
+    if cust_miss:
+        return cust_miss
+    cust = _safe_json_loads(await _extract_customer_concentration(
+        ticker=ctx.ticker,
+        filing_type=ctx.filing_type,
+        period=ctx.period,
+        detailLevel=ctx.detail,
+        accession_number=ctx.accession_number,
+    ))
+    customers = [c for c in (cust.get("customers") if isinstance(cust.get("customers"), list) else []) if isinstance(c, dict)]
+    if customer_label:
+        customers = [c for c in customers if str(c.get("label") or "").lower() == customer_label.lower()]
+    evidence = [ctx.shape_evidence(c.get("evidence")) for c in customers if isinstance(c.get("evidence"), dict)]
+    status = "ANSWERED" if customers else str(cust.get("status") or "NOT_FOUND")
+    status = _sec_index_evidence_required(status, evidence, ctx.warnings)
+    return ctx.result(
+        status,
+        {"customerLabel": customer_label or None, "customers": customers},
+        "HIGH" if status == "ANSWERED" else ("NOT_DISCLOSED" if status == "NOT_DISCLOSED" else "LOW"),
+        evidence,
+        ctx.warnings,
+    )
+
+
+async def _sec_index_total_revenue(ctx: _SecIndexContext) -> str:
+    total_miss = await ctx.accession_miss()
+    if total_miss:
+        return total_miss
+    total = _safe_json_loads(await _extract_total_revenue(
+        ticker=ctx.ticker,
+        filing_type=ctx.filing_type,
+        period=ctx.period,
+        accession_number=ctx.accession_number,
+    ))
+    evidence_obj = total.get("evidence") if isinstance(total.get("evidence"), dict) else {}
+    evidence = [ctx.shape_evidence(evidence_obj)] if evidence_obj else []
+    status = "ANSWERED" if total.get("value") is not None else str(total.get("status") or "NOT_FOUND")
+    status = _sec_index_evidence_required(status, evidence, ctx.warnings)
+    return ctx.result(
+        status,
+        {"value": total.get("value"), "period": total.get("period"), "unit": "USD"},
+        str(_nn(total.get("confidence"), "LOW" if status == "ANSWERED" else "NOT_DISCLOSED")),
+        evidence,
+        ctx.warnings,
+    )
+
+
+async def _sec_index_segment_revenue(ctx: _SecIndexContext) -> str:
+    segment_name = str(ctx.routed_params.get("segment") or "").strip()
+    seg_miss = await ctx.accession_miss()
+    if seg_miss:
+        return seg_miss
+    seg = _safe_json_loads(await _extract_segment_revenue(
+        ticker=ctx.ticker,
+        filing_type=ctx.filing_type,
+        period=ctx.period,
+        detailLevel=ctx.detail,
+        accession_number=ctx.accession_number,
+    ))
+    segments = [s for s in (seg.get("segments") if isinstance(seg.get("segments"), list) else []) if isinstance(s, dict)]
+    if segment_name:
+        segments = [s for s in segments if str(s.get("label") or "").lower() == segment_name.lower()]
+    evidence = [ctx.shape_evidence(s.get("evidence")) for s in segments if isinstance(s.get("evidence"), dict)]
+    status = "ANSWERED" if segments else ("NOT_FOUND" if segment_name else str(seg.get("status") or "NOT_FOUND"))
+    status = _sec_index_evidence_required(status, evidence, ctx.warnings)
+    # The table fallback's rows carry their own confidence (MEDIUM, or LOW when the scale was assumed), as the Worker reads it.
+    segment_confidence = str(segments[0].get("confidence") or "LOW") if segments else None
+    confidence = (segment_confidence or "LOW") if status == "ANSWERED" else ("NOT_DISCLOSED" if status == "NOT_DISCLOSED" else "LOW")
+    # The extractor's warnings (POSSIBLE_20F_FILER, ...) go with the answer, as in the Worker (2.26.4, F23).
+    if isinstance(seg.get("warnings"), list):
+        ctx.warnings.extend(w for w in seg["warnings"] if isinstance(w, dict))
+    return ctx.result(
+        status,
+        {"segment": segment_name or None, "segments": segments},
+        confidence,
+        evidence,
+        ctx.warnings,
+    )
+
+
 @yfinance_server.tool(
     name="query_sec_filing_index",
     description="Deterministically route supported SEC filing index query types to extractor tools.",
@@ -1839,107 +2073,6 @@ async def query_sec_filing_index(
 
     warnings: list[dict] = []
 
-    if query == "geographic_revenue_share":
-        region = str(routed_params.get("region") or "").strip()
-        if not region:
-            return _missing_param("region")
-        geo = _safe_json_loads(await extract_geographic_revenue(
-            ticker=ticker,
-            region=region,
-            filing_type=filing_type,
-            period=period,
-            accession_number=accession_number,
-            detailLevel=detail,
-        ))
-        # An explicit accession that is not among the company's recent filings fails closed here too (2.15.0, R4-ACC-QUERY).
-        if geo.get("ok") is False and _is_accession_not_found(geo.get("error")):
-            return _accession_not_found_envelope(geo["error"])
-        evidence_obj = geo.get("evidence") if isinstance(geo.get("evidence"), dict) else {}
-        evidence = [_shape_evidence(evidence_obj)] if evidence_obj else []
-        status = "ANSWERED" if geo.get("value") is not None else _as_status(geo)
-        if status == "ANSWERED" and not evidence:
-            status = "NOT_FOUND"
-            warnings.append({"code": "EVIDENCE_REQUIRED", "message": "ANSWERED responses require evidence."})
-        answer = {
-            "region": region,
-            "value": geo.get("value"),
-            "denominator": geo.get("denominator"),
-            "valueRatio": geo.get("valueRatio"),
-            "valuePct": geo.get("valuePct"),
-            "unit": geo.get("unit", "USD"),
-        }
-        confidence = str(_nn(geo.get("confidence"), "LOW" if status == "ANSWERED" else "NOT_DISCLOSED"))
-        if status == "NOT_FOUND":
-            confidence = "NOT_DISCLOSED" if str(geo.get("confidence") or "").upper() == "NOT_DISCLOSED" else "LOW"
-        return _result(status, answer, confidence, evidence, warnings)
-
-    if query == "revenue_exposure":
-        exposure_query = str(routed_params.get("exposure_query") or "").strip()
-        if not exposure_query:
-            return _missing_param("exposure_query")
-        rex = _safe_json_loads(await _extract_revenue_exposure(
-            ticker=ticker,
-            exposure_query=exposure_query,
-            filing_type=filing_type,
-            period=period,
-            detailLevel=detail,
-            accession_number=accession_number,
-        ))
-        matches = rex.get("matches") if isinstance(rex.get("matches"), list) else []
-        first = matches[0] if matches and isinstance(matches[0], dict) else {}
-        evidence_obj = first.get("evidence") if isinstance(first.get("evidence"), dict) else {}
-        evidence = [_shape_evidence(evidence_obj)] if evidence_obj else []
-        status = "ANSWERED" if bool(matches) and str(rex.get("status")) == "FOUND_REVENUE_EXPOSURE" else str(rex.get("status") or "NOT_FOUND")
-        if status == "ANSWERED" and not evidence:
-            status = "NOT_FOUND"
-            warnings.append({"code": "EVIDENCE_REQUIRED", "message": "ANSWERED responses require evidence."})
-        answer = {
-            "exposureQuery": exposure_query,
-            "value": first.get("value"),
-            "denominator": first.get("denominator"),
-            "valueRatio": first.get("valueRatio"),
-            "valuePct": first.get("valuePct"),
-            "period": first.get("period"),
-        }
-        confidence = str(_nn(first.get("confidence"), "LOW" if status == "ANSWERED" else "NOT_DISCLOSED"))
-        return _result(status, answer, confidence, evidence, warnings)
-
-    if query == "china_exposure":
-        china = _safe_json_loads(await extract_china_exposure(
-            ticker=ticker,
-            filing_type=filing_type,
-            period=period,
-            accession_number=accession_number,
-            detailLevel=detail,
-        ))
-        overall = str(china.get("overallStatus") or "NOT_FOUND")
-        answer = {
-            "revenueExposure": china.get("revenueExposure"),
-            "manufacturingExposure": china.get("manufacturingExposure"),
-            "entityExposure": china.get("entityExposure"),
-            "bankExposure": china.get("bankExposure"),
-            "riskFactorExposure": china.get("riskFactorExposure"),
-            "overallStatus": overall,
-        }
-        evidence: list[dict] = []
-        for key in ("revenueExposure", "manufacturingExposure", "entityExposure", "bankExposure", "riskFactorExposure"):
-            block = china.get(key)
-            if not isinstance(block, dict):
-                continue
-            ev = block.get("evidence")
-            if isinstance(ev, dict):
-                evidence.append(_shape_evidence(ev))
-            elif isinstance(ev, list):
-                for item in ev:
-                    if isinstance(item, dict):
-                        evidence.append(_shape_evidence(item))
-        status = "ANSWERED" if overall in {"FOUND_REVENUE_EXPOSURE", "FOUND_NON_REVENUE_EXPOSURE"} else overall
-        if status == "ANSWERED" and not evidence:
-            status = "NOT_FOUND"
-            warnings.append({"code": "EVIDENCE_REQUIRED", "message": "ANSWERED responses require evidence."})
-        confidence = "HIGH" if status == "ANSWERED" else ("NOT_DISCLOSED" if overall == "NOT_DISCLOSED" else "LOW")
-        return _result(status, answer, confidence, evidence, warnings)
-
     # An explicit accession that is not among the company's filings fails closed for the pinned reads too, as
     # geographic_revenue_share does; checked after each query's own params (2.24.0, F21).
     async def _accession_miss() -> str | None:
@@ -1948,117 +2081,29 @@ async def query_sec_filing_index(
         _resolved, resolve_error = await _resolve_sec_filing(ticker, filing_type, str(accession_number).strip())
         return _accession_not_found_envelope(resolve_error) if _resolved is None and _is_accession_not_found(resolve_error) else None
 
-    if query == "risk_factor_mentions":
-        terms = routed_params.get("terms")
-        terms_list = [str(t) for t in terms] if isinstance(terms, list) else []
-        if not terms_list:
-            return _missing_param("terms")
-        risk_miss = await _accession_miss()
-        if risk_miss:
-            return risk_miss
-        risk = _safe_json_loads(await _extract_risk_factor_mentions(
-            ticker=ticker,
-            terms=terms_list,
-            filing_type=filing_type,
-            period=period,
-            detailLevel=detail,
-            accession_number=accession_number,
-        ))
-        matches = [m for m in (risk.get("matches") if isinstance(risk.get("matches"), list) else []) if isinstance(m, dict)]
-        evidence = [_shape_evidence(m.get("evidence")) for m in matches if isinstance(m.get("evidence"), dict)]
-        status = "ANSWERED" if matches else str(risk.get("status") or "NOT_FOUND")
-        if status == "ANSWERED" and not evidence:
-            status = "NOT_FOUND"
-            warnings.append({"code": "EVIDENCE_REQUIRED", "message": "ANSWERED responses require evidence."})
-        return _result(
-            status,
-            {"terms": terms_list, "matches": matches},
-            "MEDIUM" if status == "ANSWERED" else "LOW",
-            evidence,
-            warnings,
-        )
-
-    if query == "customer_concentration":
-        customer_label = str(routed_params.get("customer_label") or "").strip()
-        cust_miss = await _accession_miss()
-        if cust_miss:
-            return cust_miss
-        cust = _safe_json_loads(await _extract_customer_concentration(
-            ticker=ticker,
-            filing_type=filing_type,
-            period=period,
-            detailLevel=detail,
-            accession_number=accession_number,
-        ))
-        customers = [c for c in (cust.get("customers") if isinstance(cust.get("customers"), list) else []) if isinstance(c, dict)]
-        if customer_label:
-            customers = [c for c in customers if str(c.get("label") or "").lower() == customer_label.lower()]
-        evidence = [_shape_evidence(c.get("evidence")) for c in customers if isinstance(c.get("evidence"), dict)]
-        status = "ANSWERED" if customers else str(cust.get("status") or "NOT_FOUND")
-        if status == "ANSWERED" and not evidence:
-            status = "NOT_FOUND"
-            warnings.append({"code": "EVIDENCE_REQUIRED", "message": "ANSWERED responses require evidence."})
-        return _result(
-            status,
-            {"customerLabel": customer_label or None, "customers": customers},
-            "HIGH" if status == "ANSWERED" else ("NOT_DISCLOSED" if status == "NOT_DISCLOSED" else "LOW"),
-            evidence,
-            warnings,
-        )
-
-    if query == "total_revenue":
-        total_miss = await _accession_miss()
-        if total_miss:
-            return total_miss
-        total = _safe_json_loads(await _extract_total_revenue(
-            ticker=ticker,
-            filing_type=filing_type,
-            period=period,
-            accession_number=accession_number,
-        ))
-        evidence_obj = total.get("evidence") if isinstance(total.get("evidence"), dict) else {}
-        evidence = [_shape_evidence(evidence_obj)] if evidence_obj else []
-        status = "ANSWERED" if total.get("value") is not None else str(total.get("status") or "NOT_FOUND")
-        if status == "ANSWERED" and not evidence:
-            status = "NOT_FOUND"
-            warnings.append({"code": "EVIDENCE_REQUIRED", "message": "ANSWERED responses require evidence."})
-        return _result(
-            status,
-            {"value": total.get("value"), "period": total.get("period"), "unit": "USD"},
-            str(_nn(total.get("confidence"), "LOW" if status == "ANSWERED" else "NOT_DISCLOSED")),
-            evidence,
-            warnings,
-        )
-
-    segment_name = str(routed_params.get("segment") or "").strip()
-    seg_miss = await _accession_miss()
-    if seg_miss:
-        return seg_miss
-    seg = _safe_json_loads(await _extract_segment_revenue(
+    ctx = _SecIndexContext(
         ticker=ticker,
         filing_type=filing_type,
         period=period,
-        detailLevel=detail,
         accession_number=accession_number,
-    ))
-    segments = [s for s in (seg.get("segments") if isinstance(seg.get("segments"), list) else []) if isinstance(s, dict)]
-    if segment_name:
-        segments = [s for s in segments if str(s.get("label") or "").lower() == segment_name.lower()]
-    evidence = [_shape_evidence(s.get("evidence")) for s in segments if isinstance(s.get("evidence"), dict)]
-    status = "ANSWERED" if segments else ("NOT_FOUND" if segment_name else str(seg.get("status") or "NOT_FOUND"))
-    if status == "ANSWERED" and not evidence:
-        status = "NOT_FOUND"
-        warnings.append({"code": "EVIDENCE_REQUIRED", "message": "ANSWERED responses require evidence."})
-    # The table fallback's rows carry their own confidence (MEDIUM, or LOW when the scale was assumed), as the Worker reads it.
-    segment_confidence = str(segments[0].get("confidence") or "LOW") if segments else None
-    confidence = (segment_confidence or "LOW") if status == "ANSWERED" else ("NOT_DISCLOSED" if status == "NOT_DISCLOSED" else "LOW")
-    # The extractor's warnings (POSSIBLE_20F_FILER, ...) go with the answer, as in the Worker (2.26.4, F23).
-    if isinstance(seg.get("warnings"), list):
-        warnings.extend(w for w in seg["warnings"] if isinstance(w, dict))
-    return _result(
-        status,
-        {"segment": segment_name or None, "segments": segments},
-        confidence,
-        evidence,
-        warnings,
+        detail=detail,
+        routed_params=routed_params,
+        warnings=warnings,
+        shape_evidence=_shape_evidence,
+        result=_result,
+        missing_param=_missing_param,
+        accession_miss=_accession_miss,
     )
+    if query == "geographic_revenue_share":
+        return await _sec_index_geographic_revenue_share(ctx)
+    if query == "revenue_exposure":
+        return await _sec_index_revenue_exposure(ctx)
+    if query == "china_exposure":
+        return await _sec_index_china_exposure(ctx)
+    if query == "risk_factor_mentions":
+        return await _sec_index_risk_factor_mentions(ctx)
+    if query == "customer_concentration":
+        return await _sec_index_customer_concentration(ctx)
+    if query == "total_revenue":
+        return await _sec_index_total_revenue(ctx)
+    return await _sec_index_segment_revenue(ctx)

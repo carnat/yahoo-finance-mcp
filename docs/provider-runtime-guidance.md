@@ -3190,6 +3190,17 @@ F-024, F-026, F-029). Both runtimes change alike.
 - **Tests:** 21 new parity cases in `scripts/parity/cases_audit_2251.py`.
 - **Rollback:** redeploy 2.25.0.
 
+## SEC Filing Index and Geographic Revenue Split Into Helpers (3.6.9)
+
+- **Why:** Phase 5 exit criterion "no function has CCN >= 100" (`analysis/yahoo-finance-mcp/PHASE5_CCN1_SPEC.md`).
+  Release type: patch. No behaviour change.
+- **What changed:** `querySecFilingIndex` (Worker, CCN 125 → 18) and `query_sec_filing_index` (Python, 119 → 16)
+  now dispatch to one helper per query type, split along the same seams in both runtimes.
+  `extractGeographicRevenue` (Worker, 111 → 23) builds its payload, evidence block and 20-F retry in helpers.
+- **Unchanged:** outputs, key order, statuses, warnings, messages, fetch order and error paths; the parity harness
+  passes with no expected value changed.
+- **Rollback:** redeploy 3.6.8.
+
 ## Tool Handler Table and schemas.ts (3.6.8)
 
 - **Why:** internal restructuring only (Phase 5 unit 8, `analysis/yahoo-finance-mcp/PHASE5_ROUTER_SCHEMAS_SPEC.md`).

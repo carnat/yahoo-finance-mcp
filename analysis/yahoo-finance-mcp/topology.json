@@ -466,7 +466,7 @@
       "name": "sec.ts",
       "kind": "module",
       "language": "typescript",
-      "loc": 3032,
+      "loc": 3062,
       "file": "worker/src/sec.ts"
      },
      {
@@ -561,7 +561,7 @@
       "name": "exposure.ts",
       "kind": "module",
       "language": "typescript",
-      "loc": 1866,
+      "loc": 1891,
       "file": "worker/src/exposure.ts"
      },
      {
@@ -649,7 +649,7 @@
       "name": "exposure.py",
       "kind": "module",
       "language": "python",
-      "loc": 1908,
+      "loc": 1941,
       "file": "yfmcp/tools/exposure.py"
      }
     ]
