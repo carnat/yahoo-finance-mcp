@@ -219,20 +219,8 @@ def _comparable_currency(market: dict) -> bool:
     return not market["financialCurrency"] or not quote or market["financialCurrency"] == quote
 
 
-def valuation_snapshot(ticker: str, market: dict, supplied_price: float | None, bridge: dict | None, capital: dict | None,
-                       sec_warnings: list[dict]) -> dict:
-    """Price, diluted shares, disclosed balances and multiples for one ticker."""
-    warnings = list(sec_warnings)
-    quote = supplied_price if supplied_price is not None else market["price"]
-    if quote is None:
-        return {"ticker": ticker, "status": "PRICE_UNAVAILABLE", "code": "PRICE_UNAVAILABLE", "message": "No price was supplied and Yahoo returned none.", "warnings": warnings}
-    major, major_currency = _major_price(quote, market["currency"])
-    comparable = _comparable_currency(market)
-    bridge_core = (bridge or {}).get("bridge") if bridge else None
-    bridge_basic = (bridge or {}).get("basicShares") if bridge else None
-    sec_basic = _num((bridge_basic or {}).get("shares"))
-    quoted_shares, quoted_basis = _yahoo_shares(market)
-    # SEC counts ordinary shares; the quote may be for depositary shares.
+def _share_ratio_and_usability(bridge_basic: dict | None, sec_basic: float | None, quoted_shares: float | None,
+                               warnings: list[dict]) -> tuple[float | None, bool]:
     ratio = None
     sec_usable = sec_basic is not None
     # Only foreign issuers (20-F, 40-F) have depositary shares; a domestic
@@ -248,15 +236,10 @@ def valuation_snapshot(ticker: str, market: dict, supplied_price: float | None, 
         elif r > _SHARE_BASIS_MAX_RATIO or r < 1 / _SHARE_BASIS_MAX_RATIO:
             sec_usable = False
             warnings.append({"code": "SHARE_BASIS_MISMATCH", "message": f"The filing's {_js_number(sec_basic)} shares and Yahoo's {_js_number(quoted_shares)} differ by more than 1.5x without a whole-number ratio, so Yahoo's count is used.", "severity": "warning"})
+    return ratio, sec_usable
 
-    def per_quoted(shares: float | None) -> float | None:
-        return round_half_up(shares / ratio) if shares is not None and ratio is not None else shares
 
-    basic = per_quoted(sec_basic) if sec_usable else (quoted_shares if quoted_shares is not None else market["sharesOutstanding"])
-    diluted = per_quoted(_num((bridge_core or {}).get("dilutedSharesAtPrice"))) if sec_usable else None
-    share_basis = "sec_cover_page" if sec_usable else (quoted_basis if quoted_shares is not None else None)
-    value_shares = diluted if diluted is not None else basic
-
+def _resolve_balances(market: dict, capital: dict | None, major_currency: str | None, warnings: list[dict]) -> tuple[dict | None, bool, str | None]:
     # Balances: the filing's period-end values when read, else Yahoo's totals.
     balances = (capital or {}).get("balances") if capital else None
     sec_balances = balances is not None and _num(balances.get("totalDebt")) is not None and _num(balances.get("cashAndEquivalents")) is not None
@@ -274,25 +257,11 @@ def valuation_snapshot(ticker: str, market: dict, supplied_price: float | None, 
             warnings.append({"code": "SEC_BALANCES_STALE", "message": f"The filing's balances are from {sec_period_end}; Yahoo has {market['mostRecentQuarter']}, so Yahoo's newer cash and debt are used (its debt can include leases).", "severity": "warning", "secPeriodEnd": sec_period_end, "yahooMostRecentQuarter": market["mostRecentQuarter"]})
         else:
             warnings.append({"code": "SEC_BALANCES_STALE", "message": f"The filing's balances are from {sec_period_end}, older than Yahoo's latest quarter {market['mostRecentQuarter']}, and Yahoo has no newer cash and debt; enterprise value uses the older balances.", "severity": "warning", "secPeriodEnd": sec_period_end, "yahooMostRecentQuarter": market["mostRecentQuarter"]})
-    # Share claims the filing states but the bridge leaves out of its count (2.5.9).
-    claims = (bridge or {}).get("unquantifiedShareClaims")
-    open_claims = [c for c in (claims if isinstance(claims, list) else []) if isinstance(c, dict) and c.get("status") in ("UNQUANTIFIED", "REPORTED_NOT_MODELED")]
-    if sec_usable and open_claims:
-        warnings.append({"code": "UNQUANTIFIED_SHARE_CLAIMS", "message": (
-            f"The diluted share count leaves out {len(open_claims)} share claim(s) the filing states ({', '.join(c['kind'] for c in open_claims)}); "
-            "see extract_dilution_bridge unquantifiedShareClaims."), "severity": "warning"})
-    # The capital structure's own warnings (rounded note figures, restated cash,
-    # no borrowings) explain the balances used, so they travel with them.
-    if sec_balances:
-        for w in (capital or {}).get("warnings") or []:
-            warnings.append({**w, "source": "extract_capital_structure"})
-    cash = _num(balances["cashAndEquivalents"]) if sec_balances else market["totalCash"]
-    short_term = (_num(balances.get("shortTermInvestments")) or 0) if sec_balances else 0
-    debt = _num(balances["totalDebt"]) if sec_balances else market["totalDebt"]
-    balance_basis = "sec_filing_period_end" if sec_balances else ("yahoo_financial_data" if market["totalDebt"] is not None else None)
-    if not sec_balances:
-        warnings.append({"code": "YAHOO_BALANCES", "message": "Cash and debt are Yahoo's totals (debt can include leases), not the filing's period-end balances.", "severity": "info"})
+    return balances, sec_balances, sec_period_end
 
+
+def _cash_mismatch_warnings(market: dict, sec_balances: bool, sec_period_end: str | None, cash: float | None, short_term: float, comparable: bool,
+                            warnings: list[dict]) -> None:
     # Yahoo's total cash includes short-term investments. When the filing's cash
     # alone matches it but cash plus investments runs well above it, the
     # investments are probably part of cash already (ASTS, 2.4.2). Flagged, not overridden.
@@ -322,6 +291,8 @@ def valuation_snapshot(ticker: str, market: dict, supplied_price: float | None, 
             "yahooTotalCash": yahoo_cash,
         })
 
+
+def _convertible_adjustment(bridge: dict | None, diluted: float | None, debt: float | None) -> float:
     # Convertibles counted as shares leave the debt, so they are not counted twice. Only when the bridge's diluted count
     # is the share count used: with Yahoo's or the basic count the conversion shares are not in equity, so the
     # principal stays in debt (Q3i, BR-VAL-046/074/082, 3.2.1).
@@ -332,6 +303,10 @@ def valuation_snapshot(ticker: str, market: dict, supplied_price: float | None, 
             convertible_adjustment += _num(inst.get("principal")) or 0
     if debt is not None:
         convertible_adjustment = min(convertible_adjustment, debt)
+    return convertible_adjustment
+
+
+def _preferred_adjustment(bridge: dict | None, sec_usable: bool, warnings: list[dict]) -> float:
     # Convertible preferred the bridge does not count as shares at this price is a senior claim: its
     # tagged liquidation preference joins enterprise value; without one it is left out and said so (2.5.10).
     preferred_adjustment = 0
@@ -346,18 +321,81 @@ def valuation_snapshot(ticker: str, market: dict, supplied_price: float | None, 
             warnings.append({"code": "PREFERRED_NOT_IN_ENTERPRISE_VALUE", "message": (
                 f"Convertible preferred ({_js_number(inst.get('preferredSharesOutstanding'))} shares) is not counted as shares at this price and no "
                 "liquidation preference is tagged, so enterprise value leaves it out."), "severity": "warning"})
+    return preferred_adjustment
 
-    equity_value = major * value_shares if value_shares is not None else None
-    # Yahoo's balances are in the financial currency; never add them to equity in another.
-    balances_comparable = sec_balances or comparable
-    enterprise_value = (equity_value + debt - convertible_adjustment + preferred_adjustment - cash - short_term
-                        if equity_value is not None and debt is not None and cash is not None and balances_comparable else None)
+
+
+def _open_share_claims(bridge: dict | None, sec_usable: bool, warnings: list[dict]) -> list[dict]:
+    # Share claims the filing states but the bridge leaves out of its count (2.5.9).
+    claims = (bridge or {}).get("unquantifiedShareClaims")
+    open_claims = [c for c in (claims if isinstance(claims, list) else []) if isinstance(c, dict) and c.get("status") in ("UNQUANTIFIED", "REPORTED_NOT_MODELED")]
+    if sec_usable and open_claims:
+        warnings.append({"code": "UNQUANTIFIED_SHARE_CLAIMS", "message": (
+            f"The diluted share count leaves out {len(open_claims)} share claim(s) the filing states ({', '.join(c['kind'] for c in open_claims)}); "
+            "see extract_dilution_bridge unquantifiedShareClaims."), "severity": "warning"})
+    return open_claims
+
+
+def _enterprise_value_warnings(market: dict, major_currency: str | None, comparable: bool, balances_comparable: bool, enterprise_value: float | None,
+                              warnings: list[dict]) -> None:
     if not balances_comparable:
         warnings.append({"code": "ENTERPRISE_VALUE_CURRENCY_MISMATCH", "message": f"Cash and debt are in {market['financialCurrency']} and the quote is in {major_currency}; enterprise value is not computed without an exchange rate.", "severity": "warning"})
     elif enterprise_value is None:
         warnings.append({"code": "ENTERPRISE_VALUE_INCOMPLETE", "message": "Shares, cash or debt were unavailable, so enterprise value was not computed.", "severity": "warning"})
     if not comparable:
         warnings.append({"code": "FINANCIAL_CURRENCY_MISMATCH", "message": f"Financials are in {market['financialCurrency']}; the quote is in {market['currency']}.", "severity": "warning"})
+
+
+def valuation_snapshot(ticker: str, market: dict, supplied_price: float | None, bridge: dict | None, capital: dict | None,
+                       sec_warnings: list[dict]) -> dict:
+    """Price, diluted shares, disclosed balances and multiples for one ticker."""
+    warnings = list(sec_warnings)
+    quote = supplied_price if supplied_price is not None else market["price"]
+    if quote is None:
+        return {"ticker": ticker, "status": "PRICE_UNAVAILABLE", "code": "PRICE_UNAVAILABLE", "message": "No price was supplied and Yahoo returned none.", "warnings": warnings}
+    major, major_currency = _major_price(quote, market["currency"])
+    comparable = _comparable_currency(market)
+    bridge_core = (bridge or {}).get("bridge") if bridge else None
+    bridge_basic = (bridge or {}).get("basicShares") if bridge else None
+    sec_basic = _num((bridge_basic or {}).get("shares"))
+    quoted_shares, quoted_basis = _yahoo_shares(market)
+    # SEC counts ordinary shares; the quote may be for depositary shares.
+    ratio, sec_usable = _share_ratio_and_usability(bridge_basic, sec_basic, quoted_shares, warnings)
+
+    def per_quoted(shares: float | None) -> float | None:
+        return round_half_up(shares / ratio) if shares is not None and ratio is not None else shares
+
+    basic = per_quoted(sec_basic) if sec_usable else (quoted_shares if quoted_shares is not None else market["sharesOutstanding"])
+    diluted = per_quoted(_num((bridge_core or {}).get("dilutedSharesAtPrice"))) if sec_usable else None
+    share_basis = "sec_cover_page" if sec_usable else (quoted_basis if quoted_shares is not None else None)
+    value_shares = diluted if diluted is not None else basic
+
+    # Balances: the filing's period-end values when read, else Yahoo's totals.
+    balances, sec_balances, sec_period_end = _resolve_balances(market, capital, major_currency, warnings)
+    open_claims = _open_share_claims(bridge, sec_usable, warnings)
+    # The capital structure's own warnings (rounded note figures, restated cash,
+    # no borrowings) explain the balances used, so they travel with them.
+    if sec_balances:
+        for w in (capital or {}).get("warnings") or []:
+            warnings.append({**w, "source": "extract_capital_structure"})
+    cash = _num(balances["cashAndEquivalents"]) if sec_balances else market["totalCash"]
+    short_term = (_num(balances.get("shortTermInvestments")) or 0) if sec_balances else 0
+    debt = _num(balances["totalDebt"]) if sec_balances else market["totalDebt"]
+    balance_basis = "sec_filing_period_end" if sec_balances else ("yahoo_financial_data" if market["totalDebt"] is not None else None)
+    if not sec_balances:
+        warnings.append({"code": "YAHOO_BALANCES", "message": "Cash and debt are Yahoo's totals (debt can include leases), not the filing's period-end balances.", "severity": "info"})
+
+    _cash_mismatch_warnings(market, sec_balances, sec_period_end, cash, short_term, comparable, warnings)
+
+    convertible_adjustment = _convertible_adjustment(bridge, diluted, debt)
+    preferred_adjustment = _preferred_adjustment(bridge, sec_usable, warnings)
+
+    equity_value = major * value_shares if value_shares is not None else None
+    # Yahoo's balances are in the financial currency; never add them to equity in another.
+    balances_comparable = sec_balances or comparable
+    enterprise_value = (equity_value + debt - convertible_adjustment + preferred_adjustment - cash - short_term
+                        if equity_value is not None and debt is not None and cash is not None and balances_comparable else None)
+    _enterprise_value_warnings(market, major_currency, comparable, balances_comparable, enterprise_value, warnings)
 
     atm = (bridge or {}).get("atmProgram") if bridge else None
     yahoo = _yahoo_basis(market, quote)
