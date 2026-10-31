@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Exchange holiday calendar data checks (BR-PRC-002, 3.1.0).
 
-worker/src/exchange-calendars.json names the previous session for the open-session freshness fallback. These checks
+yfmcp/data/exchange-calendars.json names the previous session for the open-session freshness fallback. These checks
 keep the file well formed and fail 90 days before the last covered year ends, so the next year's closures are added
 while there is time. Without them, a listing would read UNKNOWN freshness from 1 January of the first uncovered year.
 The rule-by-rule match of the closures against the NYSE holiday rules is the parity case module
@@ -19,7 +19,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-CALENDAR_PATH = ROOT / "worker" / "src" / "exchange-calendars.json"
+CALENDAR_PATH = ROOT / "yfmcp" / "data" / "exchange-calendars.json"
 RENEWAL_DAYS = 90
 
 

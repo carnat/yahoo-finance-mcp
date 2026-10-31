@@ -16,3 +16,6 @@ exclude = ["assets*", "worker*", "scripts*", "docs*"]
 [tool.setuptools.dynamic]
 version = {attr = "yfmcp.version.RELEASE_VERSION"}
 
+
+[tool.setuptools.package-data]
+yfmcp = ["data/*.json"]

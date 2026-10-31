@@ -13,7 +13,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 DISCOVERY_SCRIPT = ROOT / "scripts" / "discover_ir_page_candidates.py"
 SCOPE_PATH = ROOT / "scripts" / "ir_page_scope.json"
-REGISTRY_PATH = ROOT / "worker" / "src" / "company-ir-page-registry.json"
+REGISTRY_PATH = ROOT / "yfmcp" / "data" / "company-ir-page-registry.json"
 ARSENAL_TICKERS = {
     "FN", "VRT", "MU", "ANET", "TSM", "COHR", "LITE", "TSEM", "ASTS", "SIVE.ST",
     "MRVL", "SNDK", "FLNC", "LPK.DE", "BE", "NBIS", "3363.TWO", "IQE.L", "AAOI", "AEHR",

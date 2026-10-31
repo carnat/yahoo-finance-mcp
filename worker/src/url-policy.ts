@@ -12,7 +12,7 @@
  * a DNS-based bypass needs a host we already trust.
  */
 
-import registryManifest from "./company-ir-page-registry.json";
+import registryManifest from "../../yfmcp/data/company-ir-page-registry.json";
 
 export type FetchUrlCheck = { ok: true; url: URL } | { ok: false; reason: string };
 

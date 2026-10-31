@@ -29,7 +29,8 @@ import threading
 import urllib.error
 import urllib.parse
 import urllib.request
-from pathlib import Path
+
+from yfmcp.data import DATA_DIR
 
 MAX_REDIRECT_HOPS = 5
 
@@ -207,7 +208,7 @@ PROVIDER_HOSTS: tuple[str, ...] = (
 )
 _BLOCKED_SUFFIXES = (".localhost", ".local", ".internal", ".invalid")
 
-_REGISTRY_PATH = Path(__file__).resolve().parents[1] / "worker" / "src" / "company-ir-page-registry.json"
+_REGISTRY_PATH = DATA_DIR / "company-ir-page-registry.json"
 
 
 def _normalize_host(host: str) -> str:

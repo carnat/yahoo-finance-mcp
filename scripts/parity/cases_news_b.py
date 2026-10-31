@@ -2133,7 +2133,7 @@ IR_ENTRY = {"ticker": "IQE.L", "issuerName": "IQE plc", "status": "approved", "a
             "allowedHosts": ["www.iqep.com"], "allowedPathPrefixes": ["/investors/"], "candidateReason": None,
             "discoveredAt": "2026-09-25T12:00:00Z", "reviewedBy": "reviewer", "reviewedAt": "2026-10-01T00:00:00Z", "revalidateAfter": None}
 _IR_WORKER_FIELDS = ("status", "adapter", "canonicalUrl", "allowedHosts", "allowedPathPrefixes", "revalidateAfter", "issuerName")
-_SHIPPED_IR_REGISTRY = json.loads((Path(__file__).resolve().parents[2] / "worker" / "src" / "company-ir-page-registry.json").read_text(encoding="utf-8"))
+_SHIPPED_IR_REGISTRY = json.loads((Path(__file__).resolve().parents[2] / "yfmcp" / "data" / "company-ir-page-registry.json").read_text(encoding="utf-8"))
 
 
 def _worker_ir_registry(worker_entry: dict) -> dict:
@@ -2842,10 +2842,10 @@ CASES += [
 
 # ═══════════════════════════════════════════════════════════════════════════════════════════════
 # News source registry and the default sources (2.16.0, RNEWS2 §1 / §4.1 / §6)
-# worker/src/news-source-registry.json holds defaultSources; both runtimes read it.
+# yfmcp/data/news-source-registry.json holds defaultSources; both runtimes read it.
 # ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-_NEWS_SOURCE_REGISTRY = json.loads((WORKER / "src" / "news-source-registry.json").read_text(encoding="utf-8"))
+_NEWS_SOURCE_REGISTRY = json.loads((Path(__file__).resolve().parents[2] / "yfmcp" / "data" / "news-source-registry.json").read_text(encoding="utf-8"))
 _DEFAULTS_2160 = ["yahoo_finance_news", "yahoo_finance_press_releases", "sec", "finnhub", "marketaux"]
 
 

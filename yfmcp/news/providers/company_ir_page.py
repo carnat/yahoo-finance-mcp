@@ -11,12 +11,12 @@ import asyncio
 import datetime
 import html as _html_module
 import json
-from pathlib import Path
 import re as _re
 import urllib.parse as _urlparse
 import urllib.request as _urlrequest
 
 from yfmcp import url_policy as _url_policy
+from yfmcp.data import DATA_DIR
 from yfmcp.util import _to_iso_utc
 from yfmcp.parsing.html import _strip_html_tags
 from yfmcp.news.shared import (
@@ -27,7 +27,7 @@ from yfmcp.news.shared import (
 )
 
 
-_COMPANY_IR_PAGE_REGISTRY_PATH = Path(__file__).resolve().parents[3] / "worker" / "src" / "company-ir-page-registry.json"
+_COMPANY_IR_PAGE_REGISTRY_PATH = DATA_DIR / "company-ir-page-registry.json"
 
 
 _COMPANY_IR_PAGE_MAX_BYTES = 750 * 1024

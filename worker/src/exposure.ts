@@ -60,7 +60,7 @@ import {
   xbrlSourceEvidence,
   isDecisionGradeXbrlFact,
 } from "./sec.js";
-import exposurePresets from "./exposure-presets.json";
+import exposurePresets from "../../yfmcp/data/exposure-presets.json";
 import { earningsReleasePicks, readReleaseText } from "./earnings.js";
 
 /** The China exposure preset (Q5): the terms extractChinaExposure and extractExposure search, shared with Python. */

@@ -3,7 +3,7 @@
  * (yfmcp/exchange_calendars.py), so both runtimes name the same previous session. An exchange without a calendar, or a
  * date outside the covered years, has no known previous session.
  */
-import exchangeCalendars from "./exchange-calendars.json";
+import exchangeCalendars from "../../yfmcp/data/exchange-calendars.json";
 
 interface ExchangeCalendar {
   exchanges: string[];

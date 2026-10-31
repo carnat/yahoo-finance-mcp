@@ -8,7 +8,7 @@ import { setBounded } from "../cache.js";
 import { resolveCikForTicker } from "../clients/edgar.js";
 import { yahooQuoteSummaryUrl } from "../clients/endpoints.js";
 import { enc, yGet } from "../clients/yahoo.js";
-import newsSourceCapabilities from "../news-source-capabilities.json";
+import newsSourceCapabilities from "../../../yfmcp/data/news-source-capabilities.json";
 import { blockedCompanyWebsiteHost, hostWithoutWww } from "../news.js";
 import { _str } from "../util.js";
 

@@ -210,6 +210,14 @@
       "file": "yfmcp/cache.py"
      },
      {
+      "id": "yfmcp/data/__init__.py",
+      "name": "__init__.py",
+      "kind": "module",
+      "language": "python",
+      "loc": 3,
+      "file": "yfmcp/data/__init__.py"
+     },
+     {
       "id": "yfmcp/deprecations.py",
       "name": "deprecations.py",
       "kind": "module",
@@ -3375,9 +3383,19 @@
    "kind": "read"
   },
   {
+   "source": "yfmcp/exchange_calendars.py",
+   "target": "yfmcp/data/__init__.py",
+   "kind": "call"
+  },
+  {
    "source": "yfmcp/exposure_presets.py",
    "target": "ds:exposure_presets",
    "kind": "read"
+  },
+  {
+   "source": "yfmcp/exposure_presets.py",
+   "target": "yfmcp/data/__init__.py",
+   "kind": "call"
   },
   {
    "source": "yfmcp/funding_schedule.py",
@@ -3443,6 +3461,11 @@
    "source": "yfmcp/news/providers/company_ir_page.py",
    "target": "ds:ir_registry",
    "kind": "read"
+  },
+  {
+   "source": "yfmcp/news/providers/company_ir_page.py",
+   "target": "yfmcp/data/__init__.py",
+   "kind": "call"
   },
   {
    "source": "yfmcp/news/providers/company_ir_page.py",
@@ -4026,6 +4049,11 @@
   },
   {
    "source": "yfmcp/tools/news.py",
+   "target": "yfmcp/data/__init__.py",
+   "kind": "call"
+  },
+  {
+   "source": "yfmcp/tools/news.py",
    "target": "yfmcp/deprecations.py",
    "kind": "call"
   },
@@ -4202,6 +4230,11 @@
   {
    "source": "yfmcp/tools/provider_gaps.py",
    "target": "yfmcp/clients/market_providers.py",
+   "kind": "call"
+  },
+  {
+   "source": "yfmcp/tools/provider_gaps.py",
+   "target": "yfmcp/data/__init__.py",
    "kind": "call"
   },
   {
@@ -4430,6 +4463,11 @@
    "kind": "read"
   },
   {
+   "source": "yfmcp/url_policy.py",
+   "target": "yfmcp/data/__init__.py",
+   "kind": "call"
+  },
+  {
    "source": "yfmcp/util.py",
    "target": "ds:yahoo-finance",
    "kind": "read"
@@ -4524,7 +4562,6 @@
   "Both god files are hubs, not layers: their 'shared' regions (server.py 0 NLOC, yahoo-finance.ts 0 NLOC) are helpers reached from 2+ domains (Yahoo client, EDGAR fetch, HTML/table parsing). Extract these first \u2014 every domain module split out later will otherwise import back into the god file.",
   "SEC EDGAR is read from 7 separate nodes across both runtimes (direct URL use, not through one client). It is the single most important upstream and a single point of failure; consolidating behind yfmcp/clients/edgar.py and one TS edgar module would make fair-access/User-Agent policy enforceable in one place.",
   "Open-fetch surface: 2 nodes fetch caller- or registry-supplied URLs (worker/src/earnings.ts, yfmcp/tools/earnings.py). These are the S-01/S-04 SSRF paths from ASSESSMENT.md and should sit behind one allow-listed fetcher per runtime.",
-  "The Python runtime reads the Worker's JSON registries (company-ir-page-registry.json, news-source-capabilities.json, exposure-presets.json, exchange-calendars.json) from worker/src at run time, so Python packaging depends on the Worker tree; the IR registry has a second writer (the daily ir-source-discovery job).",
   "Extraction candidates (cleanest seams): News & public events (one region per god file, ~3.3k lines each, no dedicated module either side) and the Thai SEC funds pair (already isolated in both runtimes, only touched by the router)."
  ],
  "flows": [

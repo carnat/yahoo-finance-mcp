@@ -3,7 +3,7 @@
 The monetary loss-sign repair (BR-EXT-015) is covered in cases_extraction_rules.py.
 
 extract_china_exposure and extract_exposure used to carry their China term lists inline, in both runtimes. They now read
-worker/src/exposure-presets.json: the Worker compiles it in and Python reads the file. This case pins the lists each
+yfmcp/data/exposure-presets.json: the Worker compiles it in and Python reads the file. This case pins the lists each
 runtime ends up with to the lists the code held before the move, in the same order (the first matching term is the
 one reported), so an edit to the data file shows up here as a deliberate change.
 """

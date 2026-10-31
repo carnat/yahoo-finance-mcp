@@ -31,13 +31,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if git diff --quiet -- worker/src/company-ir-page-registry.json; then
+          if git diff --quiet -- yfmcp/data/company-ir-page-registry.json; then
             exit 0
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git switch -C automation/ir-source-review
-          git add worker/src/company-ir-page-registry.json
+          git add yfmcp/data/company-ir-page-registry.json
           git commit -m "chore: refresh IR source review queue"
           git push --force origin automation/ir-source-review
           if gh pr view automation/ir-source-review --json number --jq .number >/dev/null 2>&1; then

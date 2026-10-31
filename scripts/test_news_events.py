@@ -2507,9 +2507,9 @@ class TestGlobeNewswireRSS(unittest.TestCase):
 
 
 class TestNewsSourceRegistry(unittest.TestCase):
-    """2.16.0 (RNEWS2 §1): worker/src/news-source-registry.json is shared data both runtimes read."""
+    """2.16.0 (RNEWS2 §1): yfmcp/data/news-source-registry.json is shared data both runtimes read."""
 
-    REGISTRY_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "worker", "src", "news-source-registry.json")
+    REGISTRY_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "yfmcp", "data", "news-source-registry.json")
     OFFICIAL = {"sec", "company_ir", "company_ir_page", "newswire"}
     AGGREGATOR = {"yahoo_finance", "yahoo_finance_news", "yahoo_finance_press_releases", "finnhub", "marketaux"}
 
@@ -2561,7 +2561,7 @@ class TestNewsSourceRegistry(unittest.TestCase):
         self.assertTrue(set(self.registry["defaultSources"]) <= set(self.registry["sources"]))
 
     def test_worker_defaults_are_read_from_the_registry(self):
-        self.assertIn('from "./news-source-registry.json"', worker_runtime_source())
+        self.assertIn('from "../../yfmcp/data/news-source-registry.json"', worker_runtime_source())
         self.assertIn("newsSourceRegistry.defaultSources", definition_source("worker", "DEFAULT_NEWS_SOURCES"))
 
     def test_python_defaults_equal_the_registry(self):
