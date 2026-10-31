@@ -2,21 +2,32 @@
 
 from __future__ import annotations
 
+import asyncio
 import datetime
 import json
+import os
+import re as _re
+import urllib.error as _urlerror
+import urllib.parse as _urlparse
+import urllib.request as _urlrequest
 from pathlib import Path
 from typing import Annotated, Any
 
+import yfinance as yf
 from pydantic import Field
 
+from yfmcp import capital_structure as _cs
+from yfmcp import url_policy as _url_policy
 from yfmcp.app import yfinance_server
 from yfmcp.clients.market_providers import (
+    _PROVIDER_USER_AGENT,
     ProviderJsonResult,
     fetch_alpha_vantage_json,
     fetch_finnhub_json,
 )
 from yfmcp.envelope import ErrorCode, _mcp_failure, _mcp_success
 from yfmcp.schemas import _TOOL_OUTPUT_SCHEMAS
+from yfmcp.util import _clamp_int
 from yfmcp.validation import _validate_ticker
 
 
@@ -426,3 +437,164 @@ async def get_expanded_institutional_ownership(
         data_date=data_date,
         cache_hit=result.cache_status != "MISS",
     )
+
+
+_COMPANIES_HOUSE_API = "https://api.company-information.service.gov.uk"
+_COMPANIES_HOUSE_CATEGORIES = [
+    "accounts", "capital", "mortgage", "confirmation-statement", "resolution", "incorporation", "officers",
+    "persons-with-significant-control", "address", "annotation", "change-of-name", "miscellaneous",
+]
+
+
+async def _companies_house_get(path: str, key: str) -> tuple[int, dict | None]:
+    import base64
+
+    token = base64.b64encode(f"{key}:".encode()).decode()
+
+    def fetch() -> tuple[int, dict | None]:
+        req = _urlrequest.Request(
+            f"{_COMPANIES_HOUSE_API}{path}",
+            headers={"Authorization": f"Basic {token}", "Accept": "application/json", "User-Agent": _PROVIDER_USER_AGENT},
+        )
+        try:
+            with _url_policy.urlopen(req, timeout=15) as resp:  # noqa: S310
+                return resp.status, json.loads(resp.read().decode("utf-8", errors="replace"))
+        except _urlerror.HTTPError as exc:
+            return exc.code, None
+
+    return await asyncio.get_event_loop().run_in_executor(None, _url_policy.in_context(fetch))
+
+
+def _companies_house_error(status: int, step: str) -> str:
+    if status == 429:
+        return json.dumps({"error": True, "message": f"Companies House {step}: HTTP 429 rate limited (600 requests per 5 minutes)."})
+    if status in (401, 403):
+        return json.dumps({"error": True, "code": "PROVIDER_ERROR", "status": "AUTH_ERROR", "message": f"Companies House {step}: HTTP {status}; check COMPANIES_HOUSE_API_KEY."})
+    return json.dumps({"error": True, "code": "PROVIDER_ERROR", "message": f"Companies House {step}: HTTP {status}."})
+
+
+def _charge_rows(payload: dict) -> list[dict]:
+    out = []
+    for c in payload.get("items") if isinstance(payload.get("items"), list) else []:
+        classification = c.get("classification") if isinstance(c.get("classification"), dict) else {}
+        particulars = c.get("particulars") if isinstance(c.get("particulars"), dict) else {}
+        persons = c.get("persons_entitled") if isinstance(c.get("persons_entitled"), list) else []
+        out.append({
+            "chargeCode": c.get("charge_code"),
+            "status": c.get("status"),
+            "createdOn": c.get("created_on"),
+            "deliveredOn": c.get("delivered_on"),
+            "satisfiedOn": c.get("satisfied_on"),
+            "classification": classification.get("description"),
+            "personsEntitled": [str(p.get("name") or "") for p in persons if isinstance(p, dict) and p.get("name")],
+            "particulars": particulars["description"][:400] if isinstance(particulars.get("description"), str) else None,
+        })
+    return out
+
+
+async def _issuer_name(ticker: str) -> str | None:
+    try:
+        info = await asyncio.to_thread(lambda: yf.Ticker(ticker).info)
+    except Exception:
+        return None
+    info = info if isinstance(info, dict) else {}
+    return str(info.get("longName") or info.get("shortName") or "").strip() or None
+
+
+@yfinance_server.tool(
+    name="get_uk_company_filings",
+    description="UK Companies House filing history for a UK-registered issuer (e.g. IQE.L): accounts, share allotments (SH01), charges (MR01, secured lending) and resolutions, with document links; include_charges adds the charge register. Resolves by company_number, company_name, or the ticker's issuer name. Official statutory filings; RNS market announcements are not held here. Needs the COMPANIES_HOUSE_API_KEY secret.",
+    after="reconcile_metric_sources",  # listing is resolved in registration order: extract_analyst_valuation_methods then settles after this anchor, ahead of this tool
+)
+async def get_uk_company_filings(
+    ticker: str | None = None,
+    company_number: str | None = None,
+    company_name: str | None = None,
+    category: str | None = None,
+    limit: int = 25,
+    include_charges: bool = False,
+) -> str:
+    key = (os.environ.get("COMPANIES_HOUSE_API_KEY") or "").strip()
+    base = {"source": "companies_house", "sourceType": "uk_companies_house"}
+    if not key:
+        return json.dumps({
+            **base, "ticker": ticker, "status": "SOURCE_UNCONFIGURED", "code": "SOURCE_UNCONFIGURED",
+            "message": "Companies House is not configured; set the COMPANIES_HOUSE_API_KEY secret (a free key from the Companies House developer hub).",
+            "filings": [],
+        })
+    cat = category.strip().lower() if category else None
+    if cat and cat not in _COMPANIES_HOUSE_CATEGORIES:
+        return json.dumps({"error": True, "code": "INPUT_VALIDATION_ERROR", "message": f"category must be one of: {', '.join(_COMPANIES_HOUSE_CATEGORIES)}."})
+    size = _clamp_int(limit, 25, 1, 100)
+    warnings: list[dict] = []
+    number = company_number.strip().upper() if company_number else None
+    if number and _re.fullmatch(r"[0-9]{1,8}", number):
+        number = number.zfill(8)
+    if number and not _re.fullmatch(r"[A-Z0-9]{8}", number):
+        return json.dumps({"error": True, "code": "INPUT_VALIDATION_ERROR", "message": "company_number must be an 8-character Companies House number, e.g. 01234567 or SC123456."})
+    matched_by = "company_number"
+    company: dict | None = None
+    try:
+        if not number:
+            name = (company_name or "").strip() or None
+            matched_by = "company_name"
+            if not name and ticker:
+                name = await _issuer_name(ticker)
+                matched_by = "ticker_issuer_name"
+                if not _re.search(r"\.(?:L|IL)$", ticker, _re.IGNORECASE):
+                    warnings.append({"code": "NON_UK_LISTING", "message": f"{ticker} is not a London listing; the match is by issuer name only.", "severity": "info"})
+            if not name:
+                return json.dumps({"error": True, "code": "INPUT_VALIDATION_ERROR", "message": "Provide company_number, company_name, or a ticker whose issuer name can be resolved."})
+            status, body = await _companies_house_get(f"/search/companies?q={_urlparse.quote(name, safe='')}&items_per_page=20", key)
+            if body is None:
+                return _companies_house_error(status, "company search")
+            match = _cs.pick_companies_house_match(name, body)
+            if match is None:
+                items = body.get("items") if isinstance(body.get("items"), list) else []
+                return json.dumps({
+                    **base, "ticker": ticker, "status": "COMPANY_NOT_MATCHED", "searchedName": name,
+                    "candidates": [{"companyNumber": i.get("company_number"), "title": i.get("title"), "companyStatus": i.get("company_status"), "addressSnippet": i.get("address_snippet")} for i in items[:5]],
+                    "message": "No registered company name matched the issuer exactly; pass company_number from the candidates.",
+                    "filings": [], "warnings": warnings,
+                })
+            number = str(match.get("company_number") or "")
+            company = {"companyNumber": number, "name": match.get("title"), "status": match.get("company_status")}
+        if company is None:
+            status, body = await _companies_house_get(f"/company/{number}", key)
+            if status == 404:
+                return json.dumps({**base, "ticker": ticker, "status": "COMPANY_NOT_FOUND", "companyNumber": number, "filings": []})
+            if body is None:
+                return _companies_house_error(status, "company profile")
+            company = {"companyNumber": number, "name": body.get("company_name"), "status": body.get("company_status")}
+        status, history = await _companies_house_get(f"/company/{number}/filing-history?items_per_page={size}{f'&category={cat}' if cat else ''}", key)
+        if history is None:
+            return _companies_house_error(status, "filing history")
+        total = history.get("total_count")
+        out: dict = {
+            **base, "ticker": ticker, "status": "OK", "decisionUse": "USE_OFFICIAL_EVIDENCE",
+            "company": {**company, "matchedBy": matched_by},
+            "category": cat,
+            "filings": _cs.companies_house_filings(str(number), history),
+            "totalFilings": total if isinstance(total, (int, float)) and not isinstance(total, bool) else None,
+            "filingHistoryUrl": f"https://find-and-update.company-information.service.gov.uk/company/{number}/filing-history",
+            "notes": [
+                "Companies House holds statutory filings: accounts, share allotments (SH01), charges (MR01), resolutions and confirmation statements.",
+                "Market announcements (RNS) such as results, loan-note terms and trading updates are not filed here; read them on the company's investor site.",
+                "Documents are PDFs; documentContentUrl needs the same API key, viewerUrl opens the public viewer.",
+            ],
+            "warnings": warnings,
+        }
+        if include_charges:
+            status, charges = await _companies_house_get(f"/company/{number}/charges", key)
+            if charges is not None:
+                out["charges"] = _charge_rows(charges)
+            elif status == 404:
+                out["charges"] = []
+            else:
+                warnings.append({"code": "CHARGES_UNAVAILABLE", "message": f"Companies House charges: HTTP {status}.", "severity": "warning"})
+        return json.dumps(out)
+    except Exception as exc:
+        message = str(exc)
+        if "timed out" in message.lower():
+            return json.dumps({"error": True, "message": "Companies House request timed out."})
+        return json.dumps({"error": True, "code": "PROVIDER_ERROR", "message": f"Companies House request failed: {message}"})

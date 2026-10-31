@@ -1835,6 +1835,7 @@ def _worker_e2e() -> dict:
 def _python_e2e() -> dict:
     import server as srv
     from yfmcp.tools import exposure as exposure_tools
+    from yfmcp.tools import provider_gaps as provider_gap_tools
     from yfmcp.tools import sec as sec_tools
 
     sec_tools._FILING_TEXT_CACHE.clear()
@@ -1862,7 +1863,7 @@ def _python_e2e() -> dict:
             patch.object(srv, "_edgar_get_html", fake_html), \
             patch.object(sec_tools, "_edgar_get_html", fake_html), \
             patch.object(exposure_tools, "_edgar_get_html", fake_html), \
-            patch.object(srv, "_companies_house_get", fake_ch):
+            patch.object(provider_gap_tools, "_companies_house_get", fake_ch):
         with patch.dict(os.environ, {"COMPANIES_HOUSE_API_KEY": CH_KEY}):
             for name, (_, action, params) in CALLS.items():
                 raw = json.loads(asyncio.run(tools[action](**params)))
