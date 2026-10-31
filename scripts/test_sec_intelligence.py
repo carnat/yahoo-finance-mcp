@@ -20,6 +20,7 @@ from unittest.mock import AsyncMock, patch, MagicMock
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import server as srv
+from yfmcp.tools import sec as sec_tools
 
 
 # ---------------------------------------------------------------------------
@@ -111,7 +112,7 @@ class TestListSecMaterialFilings(unittest.TestCase):
     def _run(self, coro):
         return asyncio.run(coro)
 
-    @patch.object(srv, "_get_submissions_for_ticker", new_callable=AsyncMock)
+    @patch.object(sec_tools, "_get_submissions_for_ticker", new_callable=AsyncMock)
     def test_filters_noisy_forms(self, mock_subs):
         mock_subs.return_value = (MOCK_CIK, MOCK_SUBMISSIONS)
         result = self._run(srv.list_sec_material_filings("AAPL"))
@@ -127,7 +128,7 @@ class TestListSecMaterialFilings(unittest.TestCase):
         self.assertIn("8-K", filing_types)
         self.assertIn("DEF 14A", filing_types)
 
-    @patch.object(srv, "_get_submissions_for_ticker", new_callable=AsyncMock)
+    @patch.object(sec_tools, "_get_submissions_for_ticker", new_callable=AsyncMock)
     def test_custom_forms_filter(self, mock_subs):
         mock_subs.return_value = (MOCK_CIK, MOCK_SUBMISSIONS)
         result = self._run(srv.list_sec_material_filings("AAPL", forms=["10-K"]))
@@ -136,14 +137,14 @@ class TestListSecMaterialFilings(unittest.TestCase):
         for ft in filing_types:
             self.assertEqual(ft, "10-K")
 
-    @patch.object(srv, "_get_submissions_for_ticker", new_callable=AsyncMock)
+    @patch.object(sec_tools, "_get_submissions_for_ticker", new_callable=AsyncMock)
     def test_limit_respected(self, mock_subs):
         mock_subs.return_value = (MOCK_CIK, MOCK_SUBMISSIONS)
         result = self._run(srv.list_sec_material_filings("AAPL", limit=2))
         data = json.loads(result)
         self.assertLessEqual(len(data["filings"]), 2)
 
-    @patch.object(srv, "_get_submissions_for_ticker", new_callable=AsyncMock)
+    @patch.object(sec_tools, "_get_submissions_for_ticker", new_callable=AsyncMock)
     def test_ticker_not_found(self, mock_subs):
         mock_subs.return_value = (None, None)
         result = self._run(srv.list_sec_material_filings("FAKE"))
@@ -161,7 +162,7 @@ class TestListSecMaterialFilings(unittest.TestCase):
             data.get("error") is not None or data.get("ok") is False,
         )
 
-    @patch.object(srv, "_get_submissions_for_ticker", new_callable=AsyncMock)
+    @patch.object(sec_tools, "_get_submissions_for_ticker", new_callable=AsyncMock)
     def test_output_shape(self, mock_subs):
         mock_subs.return_value = (MOCK_CIK, MOCK_SUBMISSIONS)
         result = self._run(srv.list_sec_material_filings("AAPL"))
@@ -186,9 +187,9 @@ class TestGetSecFilingIntelligence(unittest.TestCase):
     def _run(self, coro):
         return asyncio.run(coro)
 
-    @patch.object(srv, "_get_sec_filing_index_impl", new_callable=AsyncMock)
-    @patch.object(srv, "_edgar_get_company_facts", new_callable=AsyncMock)
-    @patch.object(srv, "_get_submissions_for_ticker", new_callable=AsyncMock)
+    @patch.object(sec_tools, "_get_sec_filing_index_impl", new_callable=AsyncMock)
+    @patch.object(sec_tools, "_edgar_get_company_facts", new_callable=AsyncMock)
+    @patch.object(sec_tools, "_get_submissions_for_ticker", new_callable=AsyncMock)
     def test_returns_intelligence_map(self, mock_subs, mock_facts, mock_index):
         mock_subs.return_value = (MOCK_CIK, MOCK_SUBMISSIONS)
         mock_facts.return_value = MOCK_COMPANY_FACTS
@@ -222,9 +223,9 @@ class TestGetSecFilingIntelligence(unittest.TestCase):
         self.assertEqual(data["status"]["xbrl"], "OK")
         self.assertEqual(data["status"]["index"], "OK")
 
-    @patch.object(srv, "_get_sec_filing_index_impl", new_callable=AsyncMock)
-    @patch.object(srv, "_edgar_get_company_facts", new_callable=AsyncMock)
-    @patch.object(srv, "_get_submissions_for_ticker", new_callable=AsyncMock)
+    @patch.object(sec_tools, "_get_sec_filing_index_impl", new_callable=AsyncMock)
+    @patch.object(sec_tools, "_edgar_get_company_facts", new_callable=AsyncMock)
+    @patch.object(sec_tools, "_get_submissions_for_ticker", new_callable=AsyncMock)
     def test_filing_index_parameter(self, mock_subs, mock_facts, mock_index):
         mock_subs.return_value = (MOCK_CIK, MOCK_SUBMISSIONS)
         mock_facts.return_value = None
@@ -235,7 +236,7 @@ class TestGetSecFilingIntelligence(unittest.TestCase):
         self.assertEqual(data["filing"]["accessionNumber"], "0000320193-23-000006")
         self.assertFalse(data["xbrl_available"])
 
-    @patch.object(srv, "_get_submissions_for_ticker", new_callable=AsyncMock)
+    @patch.object(sec_tools, "_get_submissions_for_ticker", new_callable=AsyncMock)
     def test_filing_not_found(self, mock_subs):
         mock_subs.return_value = (MOCK_CIK, MOCK_SUBMISSIONS)
         result = self._run(srv.get_sec_filing_intelligence("AAPL", filing_type="S-1"))
@@ -251,8 +252,8 @@ class TestGetSecFilingSectionMarkdown(unittest.TestCase):
     def _run(self, coro):
         return asyncio.run(coro)
 
-    @patch.object(srv, "_edgar_get_html", new_callable=AsyncMock)
-    @patch.object(srv, "_get_submissions_for_ticker", new_callable=AsyncMock)
+    @patch.object(sec_tools, "_edgar_get_html", new_callable=AsyncMock)
+    @patch.object(sec_tools, "_get_submissions_for_ticker", new_callable=AsyncMock)
     def test_extracts_section_as_markdown(self, mock_subs, mock_html):
         mock_subs.return_value = (MOCK_CIK, MOCK_SUBMISSIONS)
         mock_html.return_value = MOCK_HTML_WITH_SECTIONS
@@ -267,8 +268,8 @@ class TestGetSecFilingSectionMarkdown(unittest.TestCase):
         # Should contain table content in markdown format
         self.assertIn("Supply Chain", data["markdown"])
 
-    @patch.object(srv, "_edgar_get_html", new_callable=AsyncMock)
-    @patch.object(srv, "_get_submissions_for_ticker", new_callable=AsyncMock)
+    @patch.object(sec_tools, "_edgar_get_html", new_callable=AsyncMock)
+    @patch.object(sec_tools, "_get_submissions_for_ticker", new_callable=AsyncMock)
     def test_section_not_found(self, mock_subs, mock_html):
         mock_subs.return_value = (MOCK_CIK, MOCK_SUBMISSIONS)
         mock_html.return_value = MOCK_HTML_WITH_SECTIONS
@@ -276,8 +277,8 @@ class TestGetSecFilingSectionMarkdown(unittest.TestCase):
         data = json.loads(result)
         self.assertTrue(data.get("error") is not None or data.get("ok") is False)
 
-    @patch.object(srv, "_edgar_get_html", new_callable=AsyncMock)
-    @patch.object(srv, "_get_submissions_for_ticker", new_callable=AsyncMock)
+    @patch.object(sec_tools, "_edgar_get_html", new_callable=AsyncMock)
+    @patch.object(sec_tools, "_get_submissions_for_ticker", new_callable=AsyncMock)
     def test_truncation(self, mock_subs, mock_html):
         mock_subs.return_value = (MOCK_CIK, MOCK_SUBMISSIONS)
         mock_html.return_value = MOCK_HTML_WITH_SECTIONS
@@ -286,8 +287,8 @@ class TestGetSecFilingSectionMarkdown(unittest.TestCase):
         # Content is short enough to not truncate with 1000 char limit here
         self.assertIn("markdown", data)
 
-    @patch.object(srv, "_edgar_get_html", new_callable=AsyncMock)
-    @patch.object(srv, "_get_submissions_for_ticker", new_callable=AsyncMock)
+    @patch.object(sec_tools, "_edgar_get_html", new_callable=AsyncMock)
+    @patch.object(sec_tools, "_get_submissions_for_ticker", new_callable=AsyncMock)
     def test_mu_sec_filing_section_toc_skip(self, mock_subs, mock_html):
         mock_subs.return_value = (MOCK_CIK, MOCK_SUBMISSIONS)
         mu_html = """
@@ -352,7 +353,7 @@ class TestExtractSecFilingFactEnhancements(unittest.TestCase):
         suggestions = srv._suggest_alternative_queries("total_revenue", None, payload)
         self.assertEqual(len(suggestions), 0)
 
-    @patch("server.get_filing_data", new_callable=AsyncMock)
+    @patch("yfmcp.tools.sec.get_filing_data", new_callable=AsyncMock)
     def test_response_includes_retrieval_path(self, mock_filing_data):
         mock_filing_data.return_value = json.dumps({
             "value": "391,035",

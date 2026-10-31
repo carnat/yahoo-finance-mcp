@@ -433,9 +433,10 @@ def _worker_e2e() -> dict:
 def _python_e2e() -> dict:
     import server as srv
     from yfmcp.envelope import normalize_status_confidence
+    from yfmcp.tools import sec as sec_tools
 
-    srv._FILING_TEXT_CACHE.clear()
-    srv._FILING_TEXT_CACHE_CHARS = 0
+    sec_tools._FILING_TEXT_CACHE.clear()
+    sec_tools._FILING_TEXT_CACHE_CHARS = 0
     fetches: list[str] = []
 
     async def fake_html(url: str, max_bytes: int = 5_000_000) -> str | None:
@@ -448,9 +449,9 @@ def _python_e2e() -> dict:
         {"sequence": "3", "description": "EX-99.2", "document": "ex992.htm", "type": "EX-99.2", "size": "5000"},
     ]
     out = {}
-    with patch.object(srv, "_get_submissions_for_ticker", AsyncMock(return_value=(f"{CIK:010d}", copy.deepcopy(SUBMISSIONS)))), \
-            patch.object(srv, "_edgar_get_html", fake_html), \
-            patch.object(srv, "_edgar_list_exhibits_from_index", AsyncMock(return_value=exhibits)):
+    with patch.object(sec_tools, "_get_submissions_for_ticker", AsyncMock(return_value=(f"{CIK:010d}", copy.deepcopy(SUBMISSIONS)))), \
+            patch.object(sec_tools, "_edgar_get_html", fake_html), \
+            patch.object(sec_tools, "_edgar_list_exhibits_from_index", AsyncMock(return_value=exhibits)):
         for name, params in CALLS.items():
             before = len([u for u in fetches if u in DOCUMENTS])
             raw = json.loads(asyncio.run(srv.search_sec_filing_text(**params)))
