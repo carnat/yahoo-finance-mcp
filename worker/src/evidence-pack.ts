@@ -45,11 +45,11 @@ import {
   extractCapitalStructure,
   extractDilutionBridge,
   extractGuidance,
-  fetchAlphaVantageJson,
   getSubmissionsForTicker,
   listSecMaterialFilings,
   secFiscalYearNaming,
 } from "./yahoo-finance.js";
+import { fetchAlphaVantageJson } from "./providers.js";
 import { yGet } from "./clients/yahoo.js";
 import { yahooChartUrl, yahooQuoteSummaryUrl } from "./clients/endpoints.js";
 

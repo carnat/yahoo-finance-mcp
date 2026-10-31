@@ -359,14 +359,6 @@
     "kind": "domain",
     "children": [
      {
-      "id": "server.py#providers",
-      "name": "server.py \u00b7 Third-party fallbacks",
-      "kind": "module",
-      "language": "python",
-      "loc": 136,
-      "file": "server.py"
-     },
-     {
       "id": "worker/src/clients/provider-http.ts",
       "name": "provider-http.ts",
       "kind": "module",
@@ -375,12 +367,12 @@
       "file": "worker/src/clients/provider-http.ts"
      },
      {
-      "id": "worker/src/yahoo-finance.ts#providers",
-      "name": "yahoo-finance.ts \u00b7 Third-party fallbacks",
+      "id": "worker/src/providers.ts",
+      "name": "providers.ts",
       "kind": "module",
       "language": "typescript",
-      "loc": 624,
-      "file": "worker/src/yahoo-finance.ts"
+      "loc": 589,
+      "file": "worker/src/providers.ts"
      },
      {
       "id": "yfmcp/clients/market_providers.py",
@@ -395,7 +387,7 @@
       "name": "provider_gaps.py",
       "kind": "module",
       "language": "python",
-      "loc": 392,
+      "loc": 549,
       "file": "yfmcp/tools/provider_gaps.py"
      }
     ]
@@ -696,7 +688,7 @@
       "name": "yahoo-finance.ts \u00b7 Valuation & reconciliation",
       "kind": "module",
       "language": "typescript",
-      "loc": 260,
+      "loc": 259,
       "file": "worker/src/yahoo-finance.ts"
      },
      {
@@ -1488,36 +1480,6 @@
    "kind": "call"
   },
   {
-   "source": "server.py#providers",
-   "target": "ds:uk-companies-house",
-   "kind": "read"
-  },
-  {
-   "source": "server.py#providers",
-   "target": "ds:yahoo-finance",
-   "kind": "read"
-  },
-  {
-   "source": "server.py#providers",
-   "target": "yfmcp/capital_structure.py",
-   "kind": "call"
-  },
-  {
-   "source": "server.py#providers",
-   "target": "yfmcp/clients/market_providers.py",
-   "kind": "call"
-  },
-  {
-   "source": "server.py#providers",
-   "target": "yfmcp/url_policy.py",
-   "kind": "call"
-  },
-  {
-   "source": "server.py#providers",
-   "target": "yfmcp/util.py",
-   "kind": "call"
-  },
-  {
    "source": "server.py#transport",
    "target": "tool_groups.py",
    "kind": "call"
@@ -1659,17 +1621,7 @@
   },
   {
    "source": "tool:news_events",
-   "target": "server.py#providers",
-   "kind": "dispatch"
-  },
-  {
-   "source": "tool:news_events",
    "target": "worker/src/tools.ts",
-   "kind": "dispatch"
-  },
-  {
-   "source": "tool:news_events",
-   "target": "worker/src/yahoo-finance.ts#providers",
    "kind": "dispatch"
   },
   {
@@ -1678,13 +1630,13 @@
    "kind": "dispatch"
   },
   {
-   "source": "tool:options_analysis",
-   "target": "worker/src/tools.ts",
+   "source": "tool:news_events",
+   "target": "yfmcp/tools/provider_gaps.py",
    "kind": "dispatch"
   },
   {
    "source": "tool:options_analysis",
-   "target": "worker/src/yahoo-finance.ts#providers",
+   "target": "worker/src/tools.ts",
    "kind": "dispatch"
   },
   {
@@ -1750,11 +1702,6 @@
   {
    "source": "tool:stock_fundamentals",
    "target": "worker/src/tools.ts",
-   "kind": "dispatch"
-  },
-  {
-   "source": "tool:stock_fundamentals",
-   "target": "worker/src/yahoo-finance.ts#providers",
    "kind": "dispatch"
   },
   {
@@ -2084,6 +2031,11 @@
   },
   {
    "source": "worker/src/evidence-pack.ts",
+   "target": "worker/src/providers.ts",
+   "kind": "call"
+  },
+  {
+   "source": "worker/src/evidence-pack.ts",
    "target": "worker/src/request-context.ts",
    "kind": "call"
   },
@@ -2105,11 +2057,6 @@
   {
    "source": "worker/src/evidence-pack.ts",
    "target": "worker/src/yahoo-finance.ts#earnings",
-   "kind": "call"
-  },
-  {
-   "source": "worker/src/evidence-pack.ts",
-   "target": "worker/src/yahoo-finance.ts#providers",
    "kind": "call"
   },
   {
@@ -2788,6 +2735,56 @@
    "kind": "call"
   },
   {
+   "source": "worker/src/providers.ts",
+   "target": "ds:alpha-vantage",
+   "kind": "read"
+  },
+  {
+   "source": "worker/src/providers.ts",
+   "target": "ds:finnhub",
+   "kind": "read"
+  },
+  {
+   "source": "worker/src/providers.ts",
+   "target": "ds:uk-companies-house",
+   "kind": "read"
+  },
+  {
+   "source": "worker/src/providers.ts",
+   "target": "worker/src/cache.ts",
+   "kind": "call"
+  },
+  {
+   "source": "worker/src/providers.ts",
+   "target": "worker/src/capital-structure.ts",
+   "kind": "call"
+  },
+  {
+   "source": "worker/src/providers.ts",
+   "target": "worker/src/clients/provider-http.ts",
+   "kind": "call"
+  },
+  {
+   "source": "worker/src/providers.ts",
+   "target": "worker/src/news/identity.ts",
+   "kind": "call"
+  },
+  {
+   "source": "worker/src/providers.ts",
+   "target": "worker/src/request-context.ts",
+   "kind": "call"
+  },
+  {
+   "source": "worker/src/providers.ts",
+   "target": "worker/src/response.ts",
+   "kind": "call"
+  },
+  {
+   "source": "worker/src/providers.ts",
+   "target": "worker/src/util.ts",
+   "kind": "call"
+  },
+  {
    "source": "worker/src/request-context.ts",
    "target": "worker/src/url-policy.ts",
    "kind": "call"
@@ -3034,11 +3031,6 @@
   },
   {
    "source": "worker/src/tools.ts",
-   "target": "worker/src/yahoo-finance.ts#providers",
-   "kind": "call"
-  },
-  {
-   "source": "worker/src/tools.ts",
    "target": "worker/src/yahoo-finance.ts#valuation",
    "kind": "call"
   },
@@ -3139,6 +3131,11 @@
   },
   {
    "source": "worker/src/yahoo-finance.ts#earnings",
+   "target": "worker/src/providers.ts",
+   "kind": "call"
+  },
+  {
+   "source": "worker/src/yahoo-finance.ts#earnings",
    "target": "worker/src/request-context.ts",
    "kind": "call"
   },
@@ -3171,61 +3168,6 @@
    "source": "worker/src/yahoo-finance.ts#earnings",
    "target": "worker/src/util.ts",
    "kind": "call"
-  },
-  {
-   "source": "worker/src/yahoo-finance.ts#earnings",
-   "target": "worker/src/yahoo-finance.ts#providers",
-   "kind": "call"
-  },
-  {
-   "source": "worker/src/yahoo-finance.ts#providers",
-   "target": "ds:alpha-vantage",
-   "kind": "read"
-  },
-  {
-   "source": "worker/src/yahoo-finance.ts#providers",
-   "target": "ds:finnhub",
-   "kind": "read"
-  },
-  {
-   "source": "worker/src/yahoo-finance.ts#providers",
-   "target": "ds:uk-companies-house",
-   "kind": "read"
-  },
-  {
-   "source": "worker/src/yahoo-finance.ts#providers",
-   "target": "worker/src/capital-structure.ts",
-   "kind": "call"
-  },
-  {
-   "source": "worker/src/yahoo-finance.ts#providers",
-   "target": "worker/src/clients/provider-http.ts",
-   "kind": "call"
-  },
-  {
-   "source": "worker/src/yahoo-finance.ts#providers",
-   "target": "worker/src/news/identity.ts",
-   "kind": "call"
-  },
-  {
-   "source": "worker/src/yahoo-finance.ts#providers",
-   "target": "worker/src/request-context.ts",
-   "kind": "call"
-  },
-  {
-   "source": "worker/src/yahoo-finance.ts#providers",
-   "target": "worker/src/response.ts",
-   "kind": "call"
-  },
-  {
-   "source": "worker/src/yahoo-finance.ts#providers",
-   "target": "worker/src/util.ts",
-   "kind": "call"
-  },
-  {
-   "source": "worker/src/yahoo-finance.ts#valuation",
-   "target": "ds:uk-companies-house",
-   "kind": "read"
   },
   {
    "source": "worker/src/yahoo-finance.ts#valuation",
@@ -4194,7 +4136,22 @@
   },
   {
    "source": "yfmcp/tools/provider_gaps.py",
+   "target": "ds:uk-companies-house",
+   "kind": "read"
+  },
+  {
+   "source": "yfmcp/tools/provider_gaps.py",
+   "target": "ds:yahoo-finance",
+   "kind": "read"
+  },
+  {
+   "source": "yfmcp/tools/provider_gaps.py",
    "target": "yfmcp/app.py",
+   "kind": "call"
+  },
+  {
+   "source": "yfmcp/tools/provider_gaps.py",
+   "target": "yfmcp/capital_structure.py",
    "kind": "call"
   },
   {
@@ -4210,6 +4167,16 @@
   {
    "source": "yfmcp/tools/provider_gaps.py",
    "target": "yfmcp/schemas.py",
+   "kind": "call"
+  },
+  {
+   "source": "yfmcp/tools/provider_gaps.py",
+   "target": "yfmcp/url_policy.py",
+   "kind": "call"
+  },
+  {
+   "source": "yfmcp/tools/provider_gaps.py",
+   "target": "yfmcp/util.py",
    "kind": "call"
   },
   {
@@ -4523,7 +4490,6 @@
     {
      "label": "Add analyst consensus and estimates",
      "nodes": [
-      "worker/src/yahoo-finance.ts#providers",
       "ds:yahoo-finance",
       "ds:alpha-vantage"
      ]
