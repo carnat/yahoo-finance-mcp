@@ -327,13 +327,8 @@ def evaluate(case: Case, py_result: dict, ts_result: dict) -> list[str]:
     return problems
 
 
-# removed in 3.7.0 part B
-_PINNED_FINDING_ALLOW_LIST: frozenset[str] = frozenset({
-    "neutral.n3c.finding_analyst_count_source_totalanalysts_in_python_numberofanalysts_in_the_worker",  # D6
-    "major300.meta.press_releases_status_table_order_without_doctrine_use_or_decision_grade",  # D7
-    "major300.meta.extract_sec_filing_fact_status_table_order_without_doctrine_use_or_decision_grade",  # D7
-    "major300.meta.section_markdown_status_table_order_without_doctrine_use_or_decision_grade",  # D7
-})
+# Pinned non-INTENTIONAL cases allowed during a release in progress; empty since 3.7.0.
+_PINNED_FINDING_ALLOW_LIST: frozenset[str] = frozenset()
 
 
 def pinned_decision_problems(cases: list[Case], allow: frozenset[str] | None = None) -> list[str]:

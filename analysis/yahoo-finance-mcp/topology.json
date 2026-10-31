@@ -222,7 +222,7 @@
       "name": "deprecations.py",
       "kind": "module",
       "language": "python",
-      "loc": 32,
+      "loc": 56,
       "file": "yfmcp/deprecations.py"
      },
      {
@@ -230,7 +230,7 @@
       "name": "envelope.py",
       "kind": "module",
       "language": "python",
-      "loc": 600,
+      "loc": 599,
       "file": "yfmcp/envelope.py"
      },
      {
@@ -364,7 +364,7 @@
       "name": "fundamentals.py",
       "kind": "module",
       "language": "python",
-      "loc": 2213,
+      "loc": 2212,
       "file": "yfmcp/tools/fundamentals.py"
      }
     ]
@@ -387,7 +387,7 @@
       "name": "providers.ts",
       "kind": "module",
       "language": "typescript",
-      "loc": 589,
+      "loc": 605,
       "file": "worker/src/providers.ts"
      },
      {
@@ -395,7 +395,7 @@
       "name": "market_providers.py",
       "kind": "module",
       "language": "python",
-      "loc": 247,
+      "loc": 256,
       "file": "yfmcp/clients/market_providers.py"
      },
      {
@@ -403,7 +403,7 @@
       "name": "provider_gaps.py",
       "kind": "module",
       "language": "python",
-      "loc": 549,
+      "loc": 560,
       "file": "yfmcp/tools/provider_gaps.py"
      }
     ]
@@ -672,7 +672,7 @@
       "name": "metric-reconciliation.ts",
       "kind": "module",
       "language": "typescript",
-      "loc": 570,
+      "loc": 575,
       "file": "worker/src/metric-reconciliation.ts"
      },
      {
@@ -680,7 +680,7 @@
       "name": "valuation-history.ts",
       "kind": "module",
       "language": "typescript",
-      "loc": 797,
+      "loc": 829,
       "file": "worker/src/valuation-history.ts"
      },
      {
@@ -704,7 +704,7 @@
       "name": "metric_reconciliation.py",
       "kind": "module",
       "language": "python",
-      "loc": 571,
+      "loc": 576,
       "file": "yfmcp/metric_reconciliation.py"
      },
      {
@@ -728,7 +728,7 @@
       "name": "valuation_history.py",
       "kind": "module",
       "language": "python",
-      "loc": 796,
+      "loc": 821,
       "file": "yfmcp/valuation_history.py"
      }
     ]
@@ -870,7 +870,7 @@
       "name": "sec.ts",
       "kind": "module",
       "language": "typescript",
-      "loc": 306,
+      "loc": 312,
       "file": "worker/src/news/providers/sec.ts"
      },
      {
@@ -958,7 +958,7 @@
       "name": "sec.py",
       "kind": "module",
       "language": "python",
-      "loc": 368,
+      "loc": 375,
       "file": "yfmcp/news/providers/sec.py"
      },
      {
