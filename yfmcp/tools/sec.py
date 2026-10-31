@@ -648,333 +648,347 @@ async def get_filing_data(
     return json.dumps(_js_json_numbers(payload))
 
 
-async def _get_filing_data_unchecked(
-    ticker: str,
-    fact_type: FilingFactType,
-    region: str | None = None,
-    filing_type: str = "10-K",
-    period: str = "latest",
-    period_mode: str = "auto",
-    accession_number: str | None = None,
-) -> str:
-    FLOATING_POINT_EPSILON = 1e-9
-    PCT_MULTIPLIER = 100
+_FD_FLOATING_POINT_EPSILON = 1e-9
+_FD_PCT_MULTIPLIER = 100
 
-    def _format_raw_number(n: float | int | None) -> str | None:
-        if n is None:
-            return None
-        try:
-            f = float(n)
-            if abs(f - round(f)) < FLOATING_POINT_EPSILON:
-                return f"{int(round(f)):,}"
-            return f"{f:,.2f}"
-        except Exception:
-            return None
 
-    # Warnings raised while reading SEC facts, carried on every result (2.5.15).
-    read_warnings: list[dict] = []
+class _FilingDataState:
+    """The inputs and the per-call state `_get_filing_data_unchecked` and its phase helpers share."""
 
-    def _geo_shape(payload: dict, *, warn_denominator: bool = False, add_read_warnings: bool = True) -> str:
-        """The Worker's withGeoShape: the geographic_revenue payload, with every key it carries, in its order."""
-        if read_warnings and add_read_warnings:
-            payload = {**payload, "warnings": [*(payload["warnings"] if isinstance(payload.get("warnings"), list) else []), *read_warnings]}
-        if fact_type != FilingFactType.geographic_revenue:
-            return json.dumps(_js_json_numbers(payload))
+    def __init__(
+        self,
+        ticker: str,
+        fact_type: FilingFactType,
+        region: str | None,
+        filing_type: str,
+        period: str,
+        accession_number: str | None,
+    ) -> None:
+        self.ticker = ticker
+        self.fact_type = fact_type
+        self.region = region
+        self.filing_type = filing_type
+        self.period = period
+        self.accession_number = accession_number
+        self.cik_padded: str | None = None
+        self.companyfacts_url: str | None = None
+        self.candidate_names: list[str] = []
+        # Warnings raised while reading SEC facts, carried on every result (2.5.15).
+        self.read_warnings: list[dict] = []
+        # A read that failed (not a 404) leaves a fact's absence unproven: the result is SEC_READ_FAILED, never
+        # "no facts" (2.5.17). Mirrors the Worker's readSecJson.
+        self.failed_reads: list[dict] = []
+        # SEC's companyconcept endpoint has served a concept's USD facts as an empty object instead of a list (BE,
+        # 2026-09): those facts are read from companyfacts, which carries them (2.5.15). Fetched at most once.
+        self.malformed_concepts: list[str] = []
+        self.companyfacts_read: list[dict | None] = []
 
-        def _field(key: str, default: object = None) -> object:
-            # JavaScript's `payload.key ?? default`: only null/missing falls back, never "" or 0.
-            value = payload.get(key)
-            return default if value is None else value
 
-        warnings = list(payload["warnings"]) if isinstance(payload.get("warnings"), list) else []
-        has_denominator = payload.get("denominator") is not None
-        shaped: dict = {
-            "ticker": _field("ticker", ticker),
-            "factType": _field("factType", FilingFactType.geographic_revenue.value),
-            "region": _field("region", region),
-            "period": _field("period"),
-            "rawValue": _field("rawValue"),
-            "rawDenominator": _field("rawDenominator"),
-            "unit": _field("unit", "USD"),
-            "unitScale": _field("unitScale", "actual"),
-            # How a parsed table's scale was known (2.5.21); null for XBRL facts and when nothing was parsed.
-            "unitScaleSource": _field("unitScaleSource"),
-            "value": _field("value"),
-            "denominator": _field("denominator"),
-            "valueRatio": _field("valueRatio") if has_denominator else None,
-            "valuePct": _field("valuePct") if has_denominator else None,
-            "extractionMethod": _field("extractionMethod", "NONE"),
-            "source": _field("source", "NOT_DISCLOSED"),
-            "confidence": _field("confidence", "NOT_DISCLOSED"),
-            "filingType": _field("filingType", filing_type),
-            "filingDate": _field("filingDate"),
-            "accessionNumber": _field("accessionNumber"),
-            "documentUrl": _field("documentUrl"),
-            "indexUrl": _field("indexUrl"),
-            "primaryDocumentUrl": _field("primaryDocumentUrl"),
-            "evidence": _field("evidence", {}),
-            "calculation": _field("calculation"),
-            "scanCoverage": _field("scanCoverage"),
-            "searchedTerms": _field("searchedTerms", []),
-            "notDisclosedBasis": _field("notDisclosedBasis"),
-            "status": _field("status", "FOUND" if payload.get("value") is not None else _field("confidence", "NOT_DISCLOSED")),
-            "code": _field("code"),
-            **({"retryable": payload["retryable"]} if isinstance(payload.get("retryable"), bool) else {}),
-            "xbrlContext": _field("xbrlContext"),
-            "warnings": warnings,
-        }
-        if (
-            shaped["value"] is not None
-            and shaped["extractionMethod"] == "XBRL"
-            and shaped["xbrlContext"] is None
-            and not any(isinstance(w, dict) and w.get("code") == "XBRL_CONTEXT_METADATA_UNAVAILABLE" for w in warnings)
-        ):
-            warnings.append({
-                "code": "XBRL_CONTEXT_METADATA_UNAVAILABLE",
-                "message": "XBRL fact value was found, but SEC context metadata was unavailable.",
-                "severity": "warning",
-            })
-        if warn_denominator and shaped["value"] is not None and shaped["denominator"] is None:
-            warnings.append({
-                "code": "DENOMINATOR_NOT_FOUND",
-                "message": "Could not compute geographic revenue percentage due to missing denominator.",
-                "severity": "warning",
-            })
-        return json.dumps(_js_json_numbers(shaped))
-
-    async def _resolve_filing_urls_for_accession(accn: str) -> tuple[str | None, str | None]:
-        if not accn:
-            return None, None
-        if not cik_padded:
-            return None, None
-        index_url, primary_url = _edgar_build_filing_urls(int(cik_padded), accn, None)
-        _, subs = await _get_submissions_for_ticker(ticker)
-        if not subs:
-            return index_url, primary_url
-        recent = subs.get("filings", {}).get("recent", {})
-        accessions: list[str] = recent.get("accessionNumber", [])
-        primary_docs: list[str] = recent.get("primaryDocument", [])
-        try:
-            idx = accessions.index(accn)
-            primary_doc = primary_docs[idx] if idx < len(primary_docs) else None
-            if primary_doc:
-                _, primary_url = _edgar_build_filing_urls(int(cik_padded), accn, primary_doc)
-        except Exception:
-            pass
-        return index_url, primary_url
-
-    concept_primary, concept_fallback = _FILING_FACT_CONCEPTS[fact_type]
-    # A period this reader cannot resolve is refused, never answered with an arbitrary fact (2.5.16).
-    named_period = _sf.parse_filing_period(period)
-    if named_period is None:
-        return json.dumps({
-            "ticker": ticker, "factType": fact_type.value, "value": None, "unit": None, "period": None, "filingType": filing_type,
-            "extractionMethod": "NONE", "source": "INPUT", "confidence": "NOT_DECISION_GRADE",
-            "status": "INVALID_PERIOD", "code": "INVALID_PERIOD", "decisionGrade": False, "requestedPeriod": period,
-            "warnings": [{"code": "INVALID_PERIOD", "message": _sf.FILING_PERIOD_HELP, "severity": "error"}],
-        })
-    if fact_type == FilingFactType.geographic_revenue and not region:
-        return json.dumps({"error": True, "message": "region is required for fact_type='geographic_revenue'"})
-
-    cik_padded = await _resolve_cik_for_ticker(ticker)
-    if not cik_padded:
-        # No CIK is a lookup outcome, not a disclosure: say whether SEC's ticker
-        # index was unreachable (retry) or has no such registrant, and keep the
-        # accession a caller pinned.
-        ticker_index = await _load_edgar_tickers()
-        code = "NO_SEC_REGISTRANT" if ticker_index else "SEC_LOOKUP_UNAVAILABLE"
-        requested = accession_number.strip() if accession_number and accession_number.strip() else None
-        message = (
-            f"SEC has no registrant CIK for ticker {ticker.upper()}." if ticker_index
-            else f"SEC's ticker index could not be read, so {ticker.upper()} was not resolved to a CIK; retry."
-        )
-        return _geo_shape({
-            "ticker": ticker,
-            "factType": fact_type.value,
-            "value": None,
-            "denominator": None,
-            "valueRatio": None,
-            "valuePct": None,
-            "filingType": filing_type,
-            "accessionNumber": requested,
-            **({"requestedAccession": requested} if requested else {}),
-            "extractionMethod": "NONE",
-            "source": "NONE",
-            "confidence": "NOT_DECISION_GRADE",
-            # An unreadable ticker index is a failed read, like SEC_READ_FAILED, not a missing fact (2.5.18).
-            "status": "PROVIDER_ERROR" if code == "SEC_LOOKUP_UNAVAILABLE" else "SEC_FACT_NOT_AVAILABLE",
-            "code": code,
-            "retryable": code == "SEC_LOOKUP_UNAVAILABLE",
-            "evidence": None,
-            "warnings": [{"code": code, "message": message, "severity": "warning"}],
-            "_manualLookup": _manual_lookup_payload(
-                ticker, None, filing_type, "Fact not XBRL-tagged. Use search_filing_text instead."
-            ),
-        })
-
-    # A read that failed (not a 404) leaves a fact's absence unproven: the result is SEC_READ_FAILED, never
-    # "no facts" (2.5.17). Mirrors the Worker's readSecJson.
-    failed_reads: list[dict] = []
-
-    async def _read_sec_json(url: str, endpoint: str, concept_name: str | None) -> dict | None:
-        read = await _edgar_read_json(url)
-        if read["ok"]:
-            return read["json"]
-        failed_reads.append({"endpoint": endpoint, "concept": concept_name, "httpStatus": read["httpStatus"]})
+def _fd_format_raw_number(n: float | int | None) -> str | None:
+    if n is None:
+        return None
+    try:
+        f = float(n)
+        if abs(f - round(f)) < _FD_FLOATING_POINT_EPSILON:
+            return f"{int(round(f)):,}"
+        return f"{f:,.2f}"
+    except Exception:
         return None
 
-    companyfacts_url = sec_company_facts_url(cik_padded)
 
-    async def _concept_json(concept_name: str) -> dict | None:
-        return await _read_sec_json(
-            sec_company_concept_url(cik_padded, concept_name),
-            "companyconcept",
-            concept_name,
-        )
-
-    # Every equivalent concept is read; the one with the newest filing of this
-    # form wins, so a filer that switched concepts is not read from its old one.
-    candidate_names = [concept_primary, *_FILING_FACT_ALTERNATES.get(fact_type, []), *([concept_fallback] if concept_fallback else [])]
-    # SEC's companyconcept endpoint has served a concept's USD facts as an empty object instead of a list (BE,
-    # 2026-09): those facts are read from companyfacts, which carries them (2.5.15). Fetched at most once.
-    malformed_concepts: list[str] = []
-    companyfacts_read: list[dict | None] = []
-
-    async def _concept_rows(name: str) -> list:
-        data = await _concept_json(name)
-        units = data.get("units") if isinstance(data, dict) else None
-        usd = units.get("USD") if isinstance(units, dict) else None
-        if usd is None or isinstance(usd, list):
-            return usd or []
-        malformed_concepts.append(name)
-        if not companyfacts_read:
-            companyfacts_read.append(await _read_sec_json(companyfacts_url, "companyfacts", None))
-        cf = companyfacts_read[0]
-        facts = cf.get("facts") if isinstance(cf, dict) else None
-        us_gaap = facts.get("us-gaap") if isinstance(facts, dict) else None
-        entry = us_gaap.get(name) if isinstance(us_gaap, dict) else None
-        entry_units = entry.get("units") if isinstance(entry, dict) else None
-        rows = entry_units.get("USD") if isinstance(entry_units, dict) else None
-        return rows if isinstance(rows, list) else []
-
-    async def _unavailable_structured_fact(
-        code: str,
-        message: str,
-        concept_name: str | None,
-        requested_accession: str | None = None,
-        extra: dict | None = None,
-    ) -> str:
-        """The Worker's unavailableStructuredFact: no fact, why, and the latest filing of the form it looked in (2.5.16).
-
-        A pinned accession is echoed as requestedAccession and no other filing is looked up. `extra` is applied last,
-        as the Worker spreads it at the end of the payload: an existing key keeps its position, a new one is appended.
-        """
-        filing: dict | None = None
-        filing_warnings: list[dict] = []
-        resolved: list = []
-        if not requested_accession:
-            try:
-                resolved, _error = await _resolve_periodic_filings(ticker, filing_type, None)
-            except Exception:
-                resolved = []
-        if resolved:
-            filing = resolved[0][1]
-            if (filing_type or "").upper() == "10-K" and str(filing.get("filingType") or "").upper() == "20-F":
-                filing_warnings.append({
-                    "code": "AUTO_20F_FALLBACK",
-                    "message": "Filing type automatically adapted from 10-K to 20-F (foreign private issuer detected).",
-                    "severity": "info",
-                })
-        payload: dict = {
-            "ticker": ticker,
-            "factType": fact_type.value,
-            "concept": concept_name,
-            "value": None,
-            "denominator": None,
-            "valueRatio": None,
-            "valuePct": None,
-            "rawValue": None,
-            "rawDenominator": None,
-            "unit": "USD",
-            "unitScale": "actual",
-            "period": None,
-            "filingType": filing["filingType"] if filing else filing_type,
-            "filingDate": filing.get("filingDate") if filing else None,
-            "accessionNumber": requested_accession or (filing.get("accessionNumber") if filing else None),
-            **({"requestedAccession": requested_accession} if requested_accession else {}),
-            "documentUrl": filing.get("documentUrl") if filing else None,
-            "indexUrl": None,
-            "primaryDocumentUrl": filing.get("documentUrl") if filing else None,
-            "extractionMethod": "NONE",
-            "source": "SEC_COMPANYCONCEPT",
-            "confidence": "NOT_DECISION_GRADE",
-            "status": "SEC_FACT_NOT_AVAILABLE",
-            "code": code,
-            "decisionGrade": False,
-            "evidence": {
-                "sourceType": "sec_filing",
-                "filingType": filing["filingType"],
-                "filingDate": filing.get("filingDate"),
-                "accessionNumber": filing.get("accessionNumber"),
-                "documentUrl": filing.get("documentUrl"),
-            } if filing else {},
-            "xbrlContext": None,
-            "calculation": None,
-            "warnings": [*filing_warnings, *read_warnings, {"code": code, "message": message, "severity": "warning"}],
-            "_manualLookup": _manual_lookup_payload(ticker, cik_padded, filing_type, "Fact not XBRL-tagged. Use search_filing_text instead."),
-        }
-        payload.update(extra or {})
-        # Unshaped, as the Worker's unavailableStructuredFact: the geographic_revenue shape (_geo_shape) would drop status/code.
+def _fd_geo_shape(st: _FilingDataState, payload: dict, *, warn_denominator: bool = False, add_read_warnings: bool = True) -> str:
+    ticker, fact_type, region, filing_type, read_warnings = st.ticker, st.fact_type, st.region, st.filing_type, st.read_warnings
+    """The Worker's withGeoShape: the geographic_revenue payload, with every key it carries, in its order."""
+    if read_warnings and add_read_warnings:
+        payload = {**payload, "warnings": [*(payload["warnings"] if isinstance(payload.get("warnings"), list) else []), *read_warnings]}
+    if fact_type != FilingFactType.geographic_revenue:
         return json.dumps(_js_json_numbers(payload))
 
-    async def _sec_read_failed(concept_name: str | None) -> str:
-        """The Worker's secReadFailed (2.5.17): a failed SEC read is not a missing fact; retry."""
-        # Reads finish in network order; list them in candidate order, companyfacts last, so the result is stable.
-        def _rank(r: dict) -> int:
-            if r["endpoint"] != "companyconcept":
-                return len(candidate_names)
-            return candidate_names.index(r["concept"] or "") if (r["concept"] or "") in candidate_names else -1
+    def _field(key: str, default: object = None) -> object:
+        # JavaScript's `payload.key ?? default`: only null/missing falls back, never "" or 0.
+        value = payload.get(key)
+        return default if value is None else value
 
-        failed_reads.sort(key=_rank)
-        reads = ", ".join(
-            f"{r['endpoint']}{' ' + r['concept'] if r['concept'] else ''} ({'HTTP ' + str(r['httpStatus']) if r['httpStatus'] is not None else 'no response'})"
-            for r in failed_reads
-        )
-        return await _unavailable_structured_fact(
-            "SEC_READ_FAILED",
-            f"SEC could not be read for {ticker.upper()}: {reads}. Whether the fact exists is unknown; retry.",
-            concept_name,
-            accession_number.strip() if accession_number and accession_number.strip() else None,
-            {"status": "PROVIDER_ERROR", "retryable": True, "failedReads": list(failed_reads)},
-        )
+    warnings = list(payload["warnings"]) if isinstance(payload.get("warnings"), list) else []
+    has_denominator = payload.get("denominator") is not None
+    shaped: dict = {
+        "ticker": _field("ticker", ticker),
+        "factType": _field("factType", FilingFactType.geographic_revenue.value),
+        "region": _field("region", region),
+        "period": _field("period"),
+        "rawValue": _field("rawValue"),
+        "rawDenominator": _field("rawDenominator"),
+        "unit": _field("unit", "USD"),
+        "unitScale": _field("unitScale", "actual"),
+        # How a parsed table's scale was known (2.5.21); null for XBRL facts and when nothing was parsed.
+        "unitScaleSource": _field("unitScaleSource"),
+        "value": _field("value"),
+        "denominator": _field("denominator"),
+        "valueRatio": _field("valueRatio") if has_denominator else None,
+        "valuePct": _field("valuePct") if has_denominator else None,
+        "extractionMethod": _field("extractionMethod", "NONE"),
+        "source": _field("source", "NOT_DISCLOSED"),
+        "confidence": _field("confidence", "NOT_DISCLOSED"),
+        "filingType": _field("filingType", filing_type),
+        "filingDate": _field("filingDate"),
+        "accessionNumber": _field("accessionNumber"),
+        "documentUrl": _field("documentUrl"),
+        "indexUrl": _field("indexUrl"),
+        "primaryDocumentUrl": _field("primaryDocumentUrl"),
+        "evidence": _field("evidence", {}),
+        "calculation": _field("calculation"),
+        "scanCoverage": _field("scanCoverage"),
+        "searchedTerms": _field("searchedTerms", []),
+        "notDisclosedBasis": _field("notDisclosedBasis"),
+        "status": _field("status", "FOUND" if payload.get("value") is not None else _field("confidence", "NOT_DISCLOSED")),
+        "code": _field("code"),
+        **({"retryable": payload["retryable"]} if isinstance(payload.get("retryable"), bool) else {}),
+        "xbrlContext": _field("xbrlContext"),
+        "warnings": warnings,
+    }
+    if (
+        shaped["value"] is not None
+        and shaped["extractionMethod"] == "XBRL"
+        and shaped["xbrlContext"] is None
+        and not any(isinstance(w, dict) and w.get("code") == "XBRL_CONTEXT_METADATA_UNAVAILABLE" for w in warnings)
+    ):
+        warnings.append({
+            "code": "XBRL_CONTEXT_METADATA_UNAVAILABLE",
+            "message": "XBRL fact value was found, but SEC context metadata was unavailable.",
+            "severity": "warning",
+        })
+    if warn_denominator and shaped["value"] is not None and shaped["denominator"] is None:
+        warnings.append({
+            "code": "DENOMINATOR_NOT_FOUND",
+            "message": "Could not compute geographic revenue percentage due to missing denominator.",
+            "severity": "warning",
+        })
+    return json.dumps(_js_json_numbers(shaped))
 
+
+async def _fd_resolve_filing_urls(st: _FilingDataState, accn: str) -> tuple[str | None, str | None]:
+    ticker, cik_padded = st.ticker, st.cik_padded
+    if not accn:
+        return None, None
+    if not cik_padded:
+        return None, None
+    index_url, primary_url = _edgar_build_filing_urls(int(cik_padded), accn, None)
+    _, subs = await _get_submissions_for_ticker(ticker)
+    if not subs:
+        return index_url, primary_url
+    recent = subs.get("filings", {}).get("recent", {})
+    accessions: list[str] = recent.get("accessionNumber", [])
+    primary_docs: list[str] = recent.get("primaryDocument", [])
+    try:
+        idx = accessions.index(accn)
+        primary_doc = primary_docs[idx] if idx < len(primary_docs) else None
+        if primary_doc:
+            _, primary_url = _edgar_build_filing_urls(int(cik_padded), accn, primary_doc)
+    except Exception:
+        pass
+    return index_url, primary_url
+
+
+async def _fd_read_sec_json(st: _FilingDataState, url: str, endpoint: str, concept_name: str | None) -> dict | None:
+    failed_reads = st.failed_reads
+    read = await _edgar_read_json(url)
+    if read["ok"]:
+        return read["json"]
+    failed_reads.append({"endpoint": endpoint, "concept": concept_name, "httpStatus": read["httpStatus"]})
+    return None
+
+
+async def _fd_concept_json(st: _FilingDataState, concept_name: str) -> dict | None:
+    return await _fd_read_sec_json(
+        st,
+        sec_company_concept_url(st.cik_padded, concept_name),
+        "companyconcept",
+        concept_name,
+    )
+
+
+async def _fd_concept_rows(st: _FilingDataState, name: str) -> list:
+    malformed_concepts, companyfacts_read, companyfacts_url = st.malformed_concepts, st.companyfacts_read, st.companyfacts_url
+    data = await _fd_concept_json(st, name)
+    units = data.get("units") if isinstance(data, dict) else None
+    usd = units.get("USD") if isinstance(units, dict) else None
+    if usd is None or isinstance(usd, list):
+        return usd or []
+    malformed_concepts.append(name)
+    if not companyfacts_read:
+        companyfacts_read.append(await _fd_read_sec_json(st, companyfacts_url, "companyfacts", None))
+    cf = companyfacts_read[0]
+    facts = cf.get("facts") if isinstance(cf, dict) else None
+    us_gaap = facts.get("us-gaap") if isinstance(facts, dict) else None
+    entry = us_gaap.get(name) if isinstance(us_gaap, dict) else None
+    entry_units = entry.get("units") if isinstance(entry, dict) else None
+    rows = entry_units.get("USD") if isinstance(entry_units, dict) else None
+    return rows if isinstance(rows, list) else []
+
+
+async def _fd_unavailable_structured_fact(
+    st: _FilingDataState,
+    code: str,
+    message: str,
+    concept_name: str | None,
+    requested_accession: str | None = None,
+    extra: dict | None = None,
+) -> str:
+    ticker, fact_type, filing_type, read_warnings, cik_padded = st.ticker, st.fact_type, st.filing_type, st.read_warnings, st.cik_padded
+    """The Worker's unavailableStructuredFact: no fact, why, and the latest filing of the form it looked in (2.5.16).
+
+    A pinned accession is echoed as requestedAccession and no other filing is looked up. `extra` is applied last,
+    as the Worker spreads it at the end of the payload: an existing key keeps its position, a new one is appended.
+    """
+    filing: dict | None = None
+    filing_warnings: list[dict] = []
+    resolved: list = []
+    if not requested_accession:
+        try:
+            resolved, _error = await _resolve_periodic_filings(ticker, filing_type, None)
+        except Exception:
+            resolved = []
+    if resolved:
+        filing = resolved[0][1]
+        if (filing_type or "").upper() == "10-K" and str(filing.get("filingType") or "").upper() == "20-F":
+            filing_warnings.append({
+                "code": "AUTO_20F_FALLBACK",
+                "message": "Filing type automatically adapted from 10-K to 20-F (foreign private issuer detected).",
+                "severity": "info",
+            })
+    payload: dict = {
+        "ticker": ticker,
+        "factType": fact_type.value,
+        "concept": concept_name,
+        "value": None,
+        "denominator": None,
+        "valueRatio": None,
+        "valuePct": None,
+        "rawValue": None,
+        "rawDenominator": None,
+        "unit": "USD",
+        "unitScale": "actual",
+        "period": None,
+        "filingType": filing["filingType"] if filing else filing_type,
+        "filingDate": filing.get("filingDate") if filing else None,
+        "accessionNumber": requested_accession or (filing.get("accessionNumber") if filing else None),
+        **({"requestedAccession": requested_accession} if requested_accession else {}),
+        "documentUrl": filing.get("documentUrl") if filing else None,
+        "indexUrl": None,
+        "primaryDocumentUrl": filing.get("documentUrl") if filing else None,
+        "extractionMethod": "NONE",
+        "source": "SEC_COMPANYCONCEPT",
+        "confidence": "NOT_DECISION_GRADE",
+        "status": "SEC_FACT_NOT_AVAILABLE",
+        "code": code,
+        "decisionGrade": False,
+        "evidence": {
+            "sourceType": "sec_filing",
+            "filingType": filing["filingType"],
+            "filingDate": filing.get("filingDate"),
+            "accessionNumber": filing.get("accessionNumber"),
+            "documentUrl": filing.get("documentUrl"),
+        } if filing else {},
+        "xbrlContext": None,
+        "calculation": None,
+        "warnings": [*filing_warnings, *read_warnings, {"code": code, "message": message, "severity": "warning"}],
+        "_manualLookup": _manual_lookup_payload(ticker, cik_padded, filing_type, "Fact not XBRL-tagged. Use search_filing_text instead."),
+    }
+    payload.update(extra or {})
+    # Unshaped, as the Worker's unavailableStructuredFact: the geographic_revenue shape (_geo_shape) would drop status/code.
+    return json.dumps(_js_json_numbers(payload))
+
+
+async def _fd_sec_read_failed(st: _FilingDataState, concept_name: str | None) -> str:
+    ticker, candidate_names, failed_reads, accession_number = st.ticker, st.candidate_names, st.failed_reads, st.accession_number
+    """The Worker's secReadFailed (2.5.17): a failed SEC read is not a missing fact; retry."""
+    # Reads finish in network order; list them in candidate order, companyfacts last, so the result is stable.
+    def _rank(r: dict) -> int:
+        if r["endpoint"] != "companyconcept":
+            return len(candidate_names)
+        return candidate_names.index(r["concept"] or "") if (r["concept"] or "") in candidate_names else -1
+
+    failed_reads.sort(key=_rank)
+    reads = ", ".join(
+        f"{r['endpoint']}{' ' + r['concept'] if r['concept'] else ''} ({'HTTP ' + str(r['httpStatus']) if r['httpStatus'] is not None else 'no response'})"
+        for r in failed_reads
+    )
+    return await _fd_unavailable_structured_fact(
+        st,
+        "SEC_READ_FAILED",
+        f"SEC could not be read for {ticker.upper()}: {reads}. Whether the fact exists is unknown; retry.",
+        concept_name,
+        accession_number.strip() if accession_number and accession_number.strip() else None,
+        {"status": "PROVIDER_ERROR", "retryable": True, "failedReads": list(failed_reads)},
+    )
+
+
+async def _fd_no_registrant_result(st: _FilingDataState) -> str:
+    ticker, fact_type, filing_type, accession_number = st.ticker, st.fact_type, st.filing_type, st.accession_number
+    # No CIK is a lookup outcome, not a disclosure: say whether SEC's ticker
+    # index was unreachable (retry) or has no such registrant, and keep the
+    # accession a caller pinned.
+    ticker_index = await _load_edgar_tickers()
+    code = "NO_SEC_REGISTRANT" if ticker_index else "SEC_LOOKUP_UNAVAILABLE"
+    requested = accession_number.strip() if accession_number and accession_number.strip() else None
+    message = (
+        f"SEC has no registrant CIK for ticker {ticker.upper()}." if ticker_index
+        else f"SEC's ticker index could not be read, so {ticker.upper()} was not resolved to a CIK; retry."
+    )
+    return _fd_geo_shape(st, {
+        "ticker": ticker,
+        "factType": fact_type.value,
+        "value": None,
+        "denominator": None,
+        "valueRatio": None,
+        "valuePct": None,
+        "filingType": filing_type,
+        "accessionNumber": requested,
+        **({"requestedAccession": requested} if requested else {}),
+        "extractionMethod": "NONE",
+        "source": "NONE",
+        "confidence": "NOT_DECISION_GRADE",
+        # An unreadable ticker index is a failed read, like SEC_READ_FAILED, not a missing fact (2.5.18).
+        "status": "PROVIDER_ERROR" if code == "SEC_LOOKUP_UNAVAILABLE" else "SEC_FACT_NOT_AVAILABLE",
+        "code": code,
+        "retryable": code == "SEC_LOOKUP_UNAVAILABLE",
+        "evidence": None,
+        "warnings": [{"code": code, "message": message, "severity": "warning"}],
+        "_manualLookup": _manual_lookup_payload(
+            ticker, None, filing_type, "Fact not XBRL-tagged. Use search_filing_text instead."
+        ),
+    })
+
+
+async def _fd_fetch_concepts(st: _FilingDataState) -> list[dict]:
+    candidate_names, malformed_concepts, read_warnings = st.candidate_names, st.malformed_concepts, st.read_warnings
     fetched_concepts = []
     for name in candidate_names:
-        fetched_concepts.append({"concept": name, "facts": await _concept_rows(name)})
+        fetched_concepts.append({"concept": name, "facts": await _fd_concept_rows(st, name)})
     if malformed_concepts:
         read_warnings.append({
             "code": "SEC_COMPANYCONCEPT_MALFORMED",
             "message": f"SEC companyconcept returned no fact list for {', '.join(malformed_concepts)}; those facts were read from companyfacts.",
             "severity": "info",
         })
-    if failed_reads:
-        return await _sec_read_failed(concept_primary)
-    pinned_accession = accession_number.strip() if accession_number and accession_number.strip() else None
-    chosen = _sf.pick_concept_facts(fetched_concepts, filing_type, pinned_accession, "larger" if fact_type == FilingFactType.total_revenue else "first")
-    concept_used = chosen["concept"] if chosen else concept_primary
-    filtered = list(chosen["facts"]) if chosen else []
-    # A pinned geographic read with no XBRL fact reads that filing's own table below, as the unpinned read does (2.23.0, F4).
+    return fetched_concepts
+
+
+async def _fd_missing_fact_result(st: _FilingDataState, filtered: list, concept_used: str, pinned_accession: str | None) -> str | None:
+    """The result for a read that found no usable XBRL fact, or None to carry on (a geographic read falls through)."""
+    ticker, fact_type, filing_type, candidate_names, companyfacts_read, companyfacts_url, failed_reads = st.ticker, st.fact_type, st.filing_type, st.candidate_names, st.companyfacts_read, st.companyfacts_url, st.failed_reads
     if not filtered and pinned_accession and fact_type != FilingFactType.geographic_revenue:
         # A pinned IFRS filing was searched for us-gaap concepts only: say IFRS was not read, not that the
         # filing has no such fact (2.5.30, F-018).
         if not companyfacts_read:
-            companyfacts_read.append(await _read_sec_json(companyfacts_url, "companyfacts", None))
+            companyfacts_read.append(await _fd_read_sec_json(st, companyfacts_url, "companyfacts", None))
         cf = companyfacts_read[0]
         taxonomies = cf.get("facts") if isinstance(cf, dict) else None
         if failed_reads:
-            return await _sec_read_failed(concept_used)
+            return await _fd_sec_read_failed(st, concept_used)
         if isinstance(taxonomies, dict) and taxonomies.get("ifrs-full") and not taxonomies.get("us-gaap"):
-            return await _unavailable_structured_fact(
+            return await _fd_unavailable_structured_fact(
+                st,
                 "SEC_FACTS_IFRS_ONLY",
                 f"{ticker.upper()} reports its SEC facts under IFRS (ifrs-full), which this action does not read, so accession "
                 f"{pinned_accession} was searched for {' / '.join(candidate_names)} (us-gaap) only and its IFRS facts were not searched; "
@@ -983,7 +997,8 @@ async def _get_filing_data_unchecked(
                 pinned_accession,
             )
         # A failed pin names the filing that was asked for, never the latest one (the Worker's unavailableStructuredFact).
-        return await _unavailable_structured_fact(
+        return await _fd_unavailable_structured_fact(
+            st,
             "NO_FACT_FOR_ACCESSION",
             f"SEC companyconcept has no {' / '.join(candidate_names)} fact in accession {pinned_accession} ({filing_type}).",
             concept_used,
@@ -994,13 +1009,14 @@ async def _get_filing_data_unchecked(
             # An IFRS filer (TSM's 20-F) tags ifrs-full, never us-gaap: say so rather than report the fact
             # missing (2.5.15). Same code, status and warnings as the Worker's unavailableStructuredFact.
             if not companyfacts_read:
-                companyfacts_read.append(await _read_sec_json(companyfacts_url, "companyfacts", None))
+                companyfacts_read.append(await _fd_read_sec_json(st, companyfacts_url, "companyfacts", None))
             cf = companyfacts_read[0]
             taxonomies = cf.get("facts") if isinstance(cf, dict) else None
             if failed_reads:
-                return await _sec_read_failed(concept_used)
+                return await _fd_sec_read_failed(st, concept_used)
             if isinstance(taxonomies, dict) and taxonomies.get("ifrs-full") and not taxonomies.get("us-gaap"):
-                return await _unavailable_structured_fact(
+                return await _fd_unavailable_structured_fact(
+                    st,
                     "SEC_FACTS_IFRS_ONLY",
                     f"{ticker.upper()} reports its SEC facts under IFRS (ifrs-full), which this action does not read; "
                     "reconcile_metric_sources reads IFRS facts in the reporting currency.",
@@ -1008,23 +1024,17 @@ async def _get_filing_data_unchecked(
                 )
             # No fact for the form is a lookup outcome, not a non-disclosure: the Worker's payload, with the
             # latest filing of the form it looked in (2.5.16; was NOT_DISCLOSED with no code).
-            return await _unavailable_structured_fact(
+            return await _fd_unavailable_structured_fact(
+                st,
                 "NO_COMPANYCONCEPT_FACT_FOR_FORM",
                 f"SEC companyconcept has no {concept_used} facts for filing type {filing_type}.",
                 concept_used,
             )
         # For geographic_revenue, fall through to HTML fallback below (picked remains None)
+    return None
 
-    if filtered and named_period["kind"] == "latest" and not pinned_accession:
-        latest_filed = max(str(f.get("filed", "")) for f in filtered)
-        filtered = [f for f in filtered if str(f.get("filed", "")) == latest_filed]
 
-    # ── period_mode filtering ─────────────────────────────────────────────
-    # XBRL facts include both quarterly and YTD figures for the same filing.
-    # Filter by duration to avoid returning 6-month revenue as quarterly.
-    resolved_mode = period_mode.lower().strip() if period_mode else "auto"
-    if resolved_mode == "auto":
-        resolved_mode = "quarter" if filing_type.upper() == "10-Q" else "annual"
+def _fd_filter_by_period_mode(filtered: list, resolved_mode: str) -> list:
     if resolved_mode in ("quarter", "annual", "ytd") and filtered:
         def _duration_days(f: dict) -> int | None:
             """Compute duration in days from XBRL start/end dates."""
@@ -1065,60 +1075,77 @@ async def _get_filing_data_unchecked(
             mode_filtered = [f for f, d in dur_tagged if d is None or (340 <= d <= 400)]
         if mode_filtered:
             filtered = mode_filtered
-    # A named fiscal year is an annual period: the rows for the period the issuer calls that year (2.5.16).
+    return filtered
+
+
+async def _fd_select_named_year(
+    st: _FilingDataState,
+    filtered: list,
+    resolved_mode: str,
+    named_period: dict,
+    concept_used: str,
+) -> tuple[str | None, list, str | None]:
+    """The rows of a named fiscal year, or the refusal (first item) when the year cannot be read."""
+    period = st.period
     named_year_label: str | None = None
     if named_period["kind"] == "fiscalYear":
         if resolved_mode != "annual":
-            return await _unavailable_structured_fact(
+            refusal = await _fd_unavailable_structured_fact(
+                st,
                 "INVALID_PERIOD",
                 f"period {period} names a fiscal year, an annual period; request filing_type 10-K or 20-F (or period_mode annual).",
                 concept_used,
             )
+            return refusal, filtered, None
         selected = _sf.select_fiscal_year_rows(filtered, named_period["year"])
         if not selected["rows"]:
             years_found = ", ".join(str(y) for y in selected["fiscalYears"][-6:]) or "none"
-            return await _unavailable_structured_fact(
+            refusal = await _fd_unavailable_structured_fact(
+                st,
                 "PERIOD_NOT_FOUND",
                 f"No annual {concept_used} fact is fiscal year {named_period['year']} (the issuer's stated fiscal year, else the year the period ends); fiscal years found: {years_found}.",
                 concept_used,
             )
+            return refusal, filtered, None
         filtered = selected["rows"]
         named_year_label = f"FY{named_period['year']}"
-    # A filing reports prior-year comparatives too: the newest period end comes
-    # first, as in the Worker (ASTS's Q2 2026 10-Q also carries Q2 2025).
-    if named_period["kind"] == "latest" and filtered:
-        filtered = sorted(filtered, key=lambda f: (str(f.get("end") or ""), _fy_number(f.get("fy")), str(f.get("filed") or "")), reverse=True)
+    return None, filtered, named_year_label
 
-    if fact_type == FilingFactType.segment_revenue:
-        seg_rows = []
-        for f in filtered:
-            seg_label = _normalize_segment_label(f.get("segment"))
-            if not seg_label:
-                continue
-            seg_rows.append({
-                "segmentLabel": seg_label,
-                "value": f.get("val"),
-                "fiscalYear": str(f.get("fy") or ""),
-                "fiscalPeriod": str(f.get("fp") or ""),
-                "filingDate": str(f.get("filed") or ""),
-                "accessionNumber": str(f.get("accn") or ""),
-            })
-        return json.dumps(_js_json_numbers({
-            "ticker": ticker,
-            "factType": fact_type.value,
-            "concept": concept_used,
-            "value": seg_rows[0]["value"] if seg_rows else None,
-            "fiscalYear": seg_rows[0]["fiscalYear"] if seg_rows else "",
-            "fiscalPeriod": seg_rows[0]["fiscalPeriod"] if seg_rows else "",
-            "filingType": filing_type,
-            "filingDate": seg_rows[0]["filingDate"] if seg_rows else "",
-            "accessionNumber": seg_rows[0]["accessionNumber"] if seg_rows else "",
-            "extractionMethod": "XBRL",
-            "source": "XBRL",
-            "confidence": "HIGH",
-            "allSegments": seg_rows,
-        }))
 
+def _fd_segment_revenue_result(st: _FilingDataState, filtered: list, concept_used: str) -> str:
+    ticker, fact_type, filing_type = st.ticker, st.fact_type, st.filing_type
+    seg_rows = []
+    for f in filtered:
+        seg_label = _normalize_segment_label(f.get("segment"))
+        if not seg_label:
+            continue
+        seg_rows.append({
+            "segmentLabel": seg_label,
+            "value": f.get("val"),
+            "fiscalYear": str(f.get("fy") or ""),
+            "fiscalPeriod": str(f.get("fp") or ""),
+            "filingDate": str(f.get("filed") or ""),
+            "accessionNumber": str(f.get("accn") or ""),
+        })
+    return json.dumps(_js_json_numbers({
+        "ticker": ticker,
+        "factType": fact_type.value,
+        "concept": concept_used,
+        "value": seg_rows[0]["value"] if seg_rows else None,
+        "fiscalYear": seg_rows[0]["fiscalYear"] if seg_rows else "",
+        "fiscalPeriod": seg_rows[0]["fiscalPeriod"] if seg_rows else "",
+        "filingType": filing_type,
+        "filingDate": seg_rows[0]["filingDate"] if seg_rows else "",
+        "accessionNumber": seg_rows[0]["accessionNumber"] if seg_rows else "",
+        "extractionMethod": "XBRL",
+        "source": "XBRL",
+        "confidence": "HIGH",
+        "allSegments": seg_rows,
+    }))
+
+
+def _fd_pick_fact(st: _FilingDataState, filtered: list) -> tuple[dict | None, float | None, float | None, float | None, str | None]:
+    fact_type, region = st.fact_type, st.region
     picked: dict | None = None
     value_ratio: float | None = None
     value_pct: float | None = None
@@ -1155,199 +1182,187 @@ async def _get_filing_data_unchecked(
                     denominator = float(total_fact.get("val", 0))
                     # JavaScript's Math.round (halves up), as the Worker's ratio and ratioToPct.
                     value_ratio = _js_round((float(picked_val) / denominator) * 10000) / 10000
-                    value_pct = _js_round(value_ratio * PCT_MULTIPLIER * 100) / 100
+                    value_pct = _js_round(value_ratio * _FD_PCT_MULTIPLIER * 100) / 100
             except Exception:
                 denominator = None
                 value_ratio = None
                 value_pct = None
     else:
         picked = next((f for f in filtered if not f.get("segment")), filtered[0] if filtered else None)
+    return picked, value_ratio, value_pct, denominator, segment_label
 
-    if picked is None:
-        # ── HTML fallback for geographic_revenue ──────────────────────────────
-        # Some companies (e.g. GLW) do not XBRL-tag geographic-revenue segments.
-        # Fall through to the same HTML-parsing path used by search_filing_text.
-        if fact_type == FilingFactType.geographic_revenue:
-            # The Worker's path: the filing (the pinned one, else the latest of the form, a 10-K falling to the latest
-            # 20-F), its primary HTML, then the table, or why there is none (2.5.18).
-            filing, resolve_error = await _resolve_sec_filing(ticker, filing_type, pinned_accession)
-            if filing is None:
-                resolve_error = resolve_error or {}
-                if _is_accession_not_found(resolve_error):
-                    # Not an action 2.13.0 fails closed on a miss: the structured fact path reads as before.
-                    resolve_error = await _legacy_accession_miss_payload(ticker, filing_type)
-                return _geo_shape({
-                    **resolve_error,
-                    "factType": fact_type.value,
-                    "region": region,
-                    "value": None,
-                    "denominator": None,
-                    "valueRatio": None,
-                    "valuePct": None,
-                    "extractionMethod": "NONE",
-                    "source": resolve_error.get("code"),
-                    "confidence": resolve_error.get("code"),
-                    "filingType": filing_type,
-                    "evidence": {},
-                })
-            html_text = await _edgar_get_html(filing["documentUrl"], max_bytes=_SEC_DOCUMENT_READ_MAX_CHARS + 1)
-            # The read is bounded in UTF-16 code units, as the Worker's string length.
-            html_length = _utf16_length(html_text) if html_text else 0
-            if html_length > _SEC_DOCUMENT_READ_MAX_CHARS:
-                html_text = html_text.encode("utf-16-le", "surrogatepass")[: 2 * _SEC_DOCUMENT_READ_MAX_CHARS].decode("utf-16-le", "ignore")
-                html_length = _utf16_length(html_text)
-            filing_evidence = {
-                "sourceType": "sec_filing",
-                "filingType": filing["filingType"],
-                "filingDate": filing["filingDate"],
-                "accessionNumber": filing["accessionNumber"],
-                "documentUrl": filing["documentUrl"],
+
+def _fd_parsed_table_result(
+    st: _FilingDataState,
+    filing: dict,
+    html_text: str,
+    geo_ratio: object,
+    geo_usd: object,
+    geo_denominator: object,
+    geo_heading: object,
+    geo_evidence: object,
+) -> str:
+    ticker, fact_type, region = st.ticker, st.fact_type, st.region
+    geo_evidence = geo_evidence if isinstance(geo_evidence, dict) else {}
+    # A quarterly report's table is a quarter or year-to-date, never a fiscal year: its own column
+    # header says which ("Three Months Ended August 1, 2026"), not the filing date (2.5.9, MRVL). An
+    # annual report's year is its period of report's fiscal year, not its filing date's (2.5.11).
+    annual = bool(_re.match(r"(?:10-K|20-F|40-F)", str(filing["filingType"] or ""), _re.IGNORECASE))
+    # The fiscal year the filing states for itself wins over the period-end rule (DG's year ending
+    # January 2026 is its FY2025) (2.5.13).
+    if annual:
+        fiscal_year = filing_fiscal_year_label(document_fiscal_year_focus(html_text), filing.get("reportDate")) or ""
+    else:
+        headers = geo_evidence.get("sourceColumns")
+        # A column header with no year ("Three Months Ended" alone, the date in a row below) names no
+        # period, so the label is null rather than the header (2.26.5, F60).
+        quarter_column = str(headers[0]) if headers else ""
+        fiscal_year = quarter_column if _re.search(r"\b\d{4}\b", quarter_column) else ""
+    raw_value = geo_evidence.get("rawValue") if geo_evidence.get("rawValue") is not None else _fd_format_raw_number(geo_usd)
+    raw_den = geo_evidence.get("rawDenominator") if geo_evidence.get("rawDenominator") is not None else _fd_format_raw_number(geo_denominator)
+    source_cols = geo_evidence.get("sourceColumns") or [fiscal_year]
+    warnings = []
+    if geo_denominator is None and geo_usd is not None:
+        warnings.append({
+            "code": "DENOMINATOR_NOT_FOUND",
+            "message": "Could not compute geographic revenue percentage due to missing denominator.",
+            "severity": "warning",
+        })
+    scale_assumed = geo_evidence.get("unitScaleSource") == "ASSUMED_MILLIONS"
+    if scale_assumed:
+        warnings.append(dict(_UNIT_SCALE_ASSUMED_WARNING))
+    return _fd_geo_shape(st, {
+        "ticker": ticker,
+        "factType": fact_type.value,
+        "region": region,
+        "period": fiscal_year or None,
+        "rawValue": raw_value,
+        "rawDenominator": raw_den,
+        "unit": "USD",
+        "unitScale": geo_evidence.get("unitScale"),
+        "unitScaleSource": geo_evidence.get("unitScaleSource"),
+        "value": geo_usd,
+        "denominator": geo_denominator,
+        "valueRatio": geo_ratio,
+        "valuePct": _js_round(geo_ratio * _FD_PCT_MULTIPLIER * 100) / 100 if geo_denominator is not None else None,
+        "extractionMethod": "PARSED_TABLE",
+        "source": "PARSED_TABLE",
+        # An assumed scale leaves the amounts unproven, not the share (2.5.21).
+        "confidence": "LOW" if geo_denominator is None else "MEDIUM" if scale_assumed else "HIGH",
+        "filingType": filing["filingType"],
+        "filingDate": filing["filingDate"],
+        "accessionNumber": filing["accessionNumber"],
+        "documentUrl": filing["documentUrl"],
+        "indexUrl": None,
+        "primaryDocumentUrl": filing["documentUrl"],
+        "evidence": {
+            "sectionHeading": geo_heading or None,
+            "tableTitle": None,
+            "sourceTableId": 1,
+            "sourceRows": geo_evidence.get("sourceRows"),
+            "sourceColumns": source_cols,
+            # The filing the table came from, so the standardised evidence row names its document (2.14.0).
+            "documentUrl": filing["documentUrl"],
+            "filingType": filing["filingType"],
+            "accessionNumber": filing["accessionNumber"],
+            "filingDate": filing["filingDate"],
+        },
+        "calculation": (
+            {
+                "formula": "value / denominator * 100",
+                "valueSource": "sourceRows[0]",
+                "denominatorSource": "sourceRows[1]",
+                "resultPct": _js_round(geo_ratio * _FD_PCT_MULTIPLIER * 100) / 100,
             }
-            if html_text:
-                geo_ratio, geo_usd, geo_denominator, geo_heading, geo_evidence = _extract_geo_revenue_from_html(html_text, region or "")
-                if geo_usd is not None:
-                    geo_evidence = geo_evidence if isinstance(geo_evidence, dict) else {}
-                    # A quarterly report's table is a quarter or year-to-date, never a fiscal year: its own column
-                    # header says which ("Three Months Ended August 1, 2026"), not the filing date (2.5.9, MRVL). An
-                    # annual report's year is its period of report's fiscal year, not its filing date's (2.5.11).
-                    annual = bool(_re.match(r"(?:10-K|20-F|40-F)", str(filing["filingType"] or ""), _re.IGNORECASE))
-                    # The fiscal year the filing states for itself wins over the period-end rule (DG's year ending
-                    # January 2026 is its FY2025) (2.5.13).
-                    if annual:
-                        fiscal_year = filing_fiscal_year_label(document_fiscal_year_focus(html_text), filing.get("reportDate")) or ""
-                    else:
-                        headers = geo_evidence.get("sourceColumns")
-                        # A column header with no year ("Three Months Ended" alone, the date in a row below) names no
-                        # period, so the label is null rather than the header (2.26.5, F60).
-                        quarter_column = str(headers[0]) if headers else ""
-                        fiscal_year = quarter_column if _re.search(r"\b\d{4}\b", quarter_column) else ""
-                    raw_value = geo_evidence.get("rawValue") if geo_evidence.get("rawValue") is not None else _format_raw_number(geo_usd)
-                    raw_den = geo_evidence.get("rawDenominator") if geo_evidence.get("rawDenominator") is not None else _format_raw_number(geo_denominator)
-                    source_cols = geo_evidence.get("sourceColumns") or [fiscal_year]
-                    warnings = []
-                    if geo_denominator is None and geo_usd is not None:
-                        warnings.append({
-                            "code": "DENOMINATOR_NOT_FOUND",
-                            "message": "Could not compute geographic revenue percentage due to missing denominator.",
-                            "severity": "warning",
-                        })
-                    scale_assumed = geo_evidence.get("unitScaleSource") == "ASSUMED_MILLIONS"
-                    if scale_assumed:
-                        warnings.append(dict(_UNIT_SCALE_ASSUMED_WARNING))
-                    return _geo_shape({
-                        "ticker": ticker,
-                        "factType": fact_type.value,
-                        "region": region,
-                        "period": fiscal_year or None,
-                        "rawValue": raw_value,
-                        "rawDenominator": raw_den,
-                        "unit": "USD",
-                        "unitScale": geo_evidence.get("unitScale"),
-                        "unitScaleSource": geo_evidence.get("unitScaleSource"),
-                        "value": geo_usd,
-                        "denominator": geo_denominator,
-                        "valueRatio": geo_ratio,
-                        "valuePct": _js_round(geo_ratio * PCT_MULTIPLIER * 100) / 100 if geo_denominator is not None else None,
-                        "extractionMethod": "PARSED_TABLE",
-                        "source": "PARSED_TABLE",
-                        # An assumed scale leaves the amounts unproven, not the share (2.5.21).
-                        "confidence": "LOW" if geo_denominator is None else "MEDIUM" if scale_assumed else "HIGH",
-                        "filingType": filing["filingType"],
-                        "filingDate": filing["filingDate"],
-                        "accessionNumber": filing["accessionNumber"],
-                        "documentUrl": filing["documentUrl"],
-                        "indexUrl": None,
-                        "primaryDocumentUrl": filing["documentUrl"],
-                        "evidence": {
-                            "sectionHeading": geo_heading or None,
-                            "tableTitle": None,
-                            "sourceTableId": 1,
-                            "sourceRows": geo_evidence.get("sourceRows"),
-                            "sourceColumns": source_cols,
-                            # The filing the table came from, so the standardised evidence row names its document (2.14.0).
-                            "documentUrl": filing["documentUrl"],
-                            "filingType": filing["filingType"],
-                            "accessionNumber": filing["accessionNumber"],
-                            "filingDate": filing["filingDate"],
-                        },
-                        "calculation": (
-                            {
-                                "formula": "value / denominator * 100",
-                                "valueSource": "sourceRows[0]",
-                                "denominatorSource": "sourceRows[1]",
-                                "resultPct": _js_round(geo_ratio * PCT_MULTIPLIER * 100) / 100,
-                            }
-                            if geo_denominator is not None else None
-                        ),
-                        "warnings": [*warnings, *filing["warnings"]],
-                    })
-                region_text = str(region or "")
-                searched_terms = _geo_region_aliases(region_text)
-                relevant_geo_text = _filing_has_relevant_geo_text(html_text, region_text)
-                read_truncated = html_length >= _SEC_DOCUMENT_READ_MAX_CHARS
-                scan_coverage = {
-                    "sourceType": "sec_primary_html",
-                    "documentUrl": filing["documentUrl"],
-                    "charsScanned": html_length,
-                    "maxCharsRequested": _SEC_DOCUMENT_READ_MAX_CHARS,
-                    "filingReadTruncated": read_truncated,
-                    "relevantGeoTextFound": relevant_geo_text,
-                    "searchedTerms": searched_terms,
-                }
-                if relevant_geo_text or read_truncated:
-                    extraction_warnings = list(filing["warnings"])
-                    if relevant_geo_text:
-                        extraction_warnings.append({"code": "TABLE_NOT_PARSED", "message": "Relevant filing text exists, but no geographic revenue table was parsed.", "severity": "warning"})
-                    if read_truncated:
-                        extraction_warnings.append({"code": "FILING_READ_TRUNCATED", "message": "Geographic revenue scan read only the bounded filing prefix; relevant tables may appear later in the filing.", "severity": "warning"})
-                    return _geo_shape({
-                        "ticker": ticker,
-                        "factType": fact_type.value,
-                        "region": region,
-                        "value": None,
-                        "denominator": None,
-                        "valueRatio": None,
-                        "valuePct": None,
-                        "extractionMethod": "NONE",
-                        "source": "EXTRACTION_FAILED",
-                        "confidence": "EXTRACTION_FAILED",
-                        "status": "EXTRACTION_FAILED",
-                        "code": "EXTRACTION_FAILED",
-                        "filingType": filing["filingType"],
-                        "filingDate": filing["filingDate"],
-                        "accessionNumber": filing["accessionNumber"],
-                        "documentUrl": filing["documentUrl"],
-                        "primaryDocumentUrl": filing["documentUrl"],
-                        "evidence": filing_evidence,
-                        "scanCoverage": scan_coverage,
-                        "searchedTerms": searched_terms,
-                        "warnings": extraction_warnings,
-                    })
-                return _geo_shape({
-                    "ticker": ticker,
-                    "factType": fact_type.value,
-                    "region": region,
-                    "value": None,
-                    "denominator": None,
-                    "valueRatio": None,
-                    "valuePct": None,
-                    "extractionMethod": "NONE",
-                    "source": "NOT_DISCLOSED",
-                    "confidence": "NOT_DISCLOSED",
-                    "status": "NOT_DISCLOSED",
-                    "filingType": filing["filingType"],
-                    "filingDate": filing["filingDate"],
-                    "accessionNumber": filing["accessionNumber"],
-                    "documentUrl": filing["documentUrl"],
-                    "primaryDocumentUrl": filing["documentUrl"],
-                    "evidence": filing_evidence,
-                    "scanCoverage": scan_coverage,
-                    "searchedTerms": searched_terms,
-                    "notDisclosedBasis": "Resolved and scanned the primary SEC filing HTML; no matching geographic revenue disclosure text or parseable table was found for the requested region.",
-                    "warnings": list(filing["warnings"]),
-                })
-            return _geo_shape({
-                "ticker": ticker,
+            if geo_denominator is not None else None
+        ),
+        "warnings": [*warnings, *filing["warnings"]],
+    })
+
+
+def _fd_geo_text_scan_result(st: _FilingDataState, filing: dict, html_text: str, html_length: int, filing_evidence: dict) -> str:
+    ticker, fact_type, region = st.ticker, st.fact_type, st.region
+    region_text = str(region or "")
+    searched_terms = _geo_region_aliases(region_text)
+    relevant_geo_text = _filing_has_relevant_geo_text(html_text, region_text)
+    read_truncated = html_length >= _SEC_DOCUMENT_READ_MAX_CHARS
+    scan_coverage = {
+        "sourceType": "sec_primary_html",
+        "documentUrl": filing["documentUrl"],
+        "charsScanned": html_length,
+        "maxCharsRequested": _SEC_DOCUMENT_READ_MAX_CHARS,
+        "filingReadTruncated": read_truncated,
+        "relevantGeoTextFound": relevant_geo_text,
+        "searchedTerms": searched_terms,
+    }
+    if relevant_geo_text or read_truncated:
+        extraction_warnings = list(filing["warnings"])
+        if relevant_geo_text:
+            extraction_warnings.append({"code": "TABLE_NOT_PARSED", "message": "Relevant filing text exists, but no geographic revenue table was parsed.", "severity": "warning"})
+        if read_truncated:
+            extraction_warnings.append({"code": "FILING_READ_TRUNCATED", "message": "Geographic revenue scan read only the bounded filing prefix; relevant tables may appear later in the filing.", "severity": "warning"})
+        return _fd_geo_shape(st, {
+            "ticker": ticker,
+            "factType": fact_type.value,
+            "region": region,
+            "value": None,
+            "denominator": None,
+            "valueRatio": None,
+            "valuePct": None,
+            "extractionMethod": "NONE",
+            "source": "EXTRACTION_FAILED",
+            "confidence": "EXTRACTION_FAILED",
+            "status": "EXTRACTION_FAILED",
+            "code": "EXTRACTION_FAILED",
+            "filingType": filing["filingType"],
+            "filingDate": filing["filingDate"],
+            "accessionNumber": filing["accessionNumber"],
+            "documentUrl": filing["documentUrl"],
+            "primaryDocumentUrl": filing["documentUrl"],
+            "evidence": filing_evidence,
+            "scanCoverage": scan_coverage,
+            "searchedTerms": searched_terms,
+            "warnings": extraction_warnings,
+        })
+    return _fd_geo_shape(st, {
+        "ticker": ticker,
+        "factType": fact_type.value,
+        "region": region,
+        "value": None,
+        "denominator": None,
+        "valueRatio": None,
+        "valuePct": None,
+        "extractionMethod": "NONE",
+        "source": "NOT_DISCLOSED",
+        "confidence": "NOT_DISCLOSED",
+        "status": "NOT_DISCLOSED",
+        "filingType": filing["filingType"],
+        "filingDate": filing["filingDate"],
+        "accessionNumber": filing["accessionNumber"],
+        "documentUrl": filing["documentUrl"],
+        "primaryDocumentUrl": filing["documentUrl"],
+        "evidence": filing_evidence,
+        "scanCoverage": scan_coverage,
+        "searchedTerms": searched_terms,
+        "notDisclosedBasis": "Resolved and scanned the primary SEC filing HTML; no matching geographic revenue disclosure text or parseable table was found for the requested region.",
+        "warnings": list(filing["warnings"]),
+    })
+
+
+async def _fd_unpicked_result(st: _FilingDataState, pinned_accession: str | None) -> str:
+    """The result when no XBRL fact was picked: the filing's own geographic table, or why there is none."""
+    ticker, fact_type, region, filing_type, cik_padded = st.ticker, st.fact_type, st.region, st.filing_type, st.cik_padded
+    if fact_type == FilingFactType.geographic_revenue:
+        # The Worker's path: the filing (the pinned one, else the latest of the form, a 10-K falling to the latest
+        # 20-F), its primary HTML, then the table, or why there is none (2.5.18).
+        filing, resolve_error = await _resolve_sec_filing(ticker, filing_type, pinned_accession)
+        if filing is None:
+            resolve_error = resolve_error or {}
+            if _is_accession_not_found(resolve_error):
+                # Not an action 2.13.0 fails closed on a miss: the structured fact path reads as before.
+                resolve_error = await _legacy_accession_miss_payload(ticker, filing_type)
+            return _fd_geo_shape(st, {
+                **resolve_error,
                 "factType": fact_type.value,
                 "region": region,
                 "value": None,
@@ -1355,54 +1370,72 @@ async def _get_filing_data_unchecked(
                 "valueRatio": None,
                 "valuePct": None,
                 "extractionMethod": "NONE",
-                "source": "EXTRACTION_FAILED",
-                "confidence": "EXTRACTION_FAILED",
-                "status": "EXTRACTION_FAILED",
-                "code": "FILING_TEXT_NOT_AVAILABLE",
-                "filingType": filing["filingType"],
-                "filingDate": filing["filingDate"],
-                "accessionNumber": filing["accessionNumber"],
-                "documentUrl": filing["documentUrl"],
-                "primaryDocumentUrl": filing["documentUrl"],
-                "evidence": filing_evidence,
-                "warnings": [
-                    *filing["warnings"],
-                    {"code": "FILING_TEXT_NOT_AVAILABLE", "message": "Resolved SEC filing, but primary HTML text could not be fetched for geographic revenue scan.", "severity": "warning"},
-                ],
+                "source": resolve_error.get("code"),
+                "confidence": resolve_error.get("code"),
+                "filingType": filing_type,
+                "evidence": {},
             })
-        return _geo_shape({
+        html_text = await _edgar_get_html(filing["documentUrl"], max_bytes=_SEC_DOCUMENT_READ_MAX_CHARS + 1)
+        # The read is bounded in UTF-16 code units, as the Worker's string length.
+        html_length = _utf16_length(html_text) if html_text else 0
+        if html_length > _SEC_DOCUMENT_READ_MAX_CHARS:
+            html_text = html_text.encode("utf-16-le", "surrogatepass")[: 2 * _SEC_DOCUMENT_READ_MAX_CHARS].decode("utf-16-le", "ignore")
+            html_length = _utf16_length(html_text)
+        filing_evidence = {
+            "sourceType": "sec_filing",
+            "filingType": filing["filingType"],
+            "filingDate": filing["filingDate"],
+            "accessionNumber": filing["accessionNumber"],
+            "documentUrl": filing["documentUrl"],
+        }
+        if html_text:
+            geo_ratio, geo_usd, geo_denominator, geo_heading, geo_evidence = _extract_geo_revenue_from_html(html_text, region or "")
+            if geo_usd is not None:
+                return _fd_parsed_table_result(st, filing, html_text, geo_ratio, geo_usd, geo_denominator, geo_heading, geo_evidence)
+            return _fd_geo_text_scan_result(st, filing, html_text, html_length, filing_evidence)
+        return _fd_geo_shape(st, {
             "ticker": ticker,
             "factType": fact_type.value,
+            "region": region,
             "value": None,
             "denominator": None,
             "valueRatio": None,
             "valuePct": None,
             "extractionMethod": "NONE",
-            "source": "NOT_DISCLOSED",
-            "confidence": "NOT_DISCLOSED",
-            "evidence": {},
-            "warnings": [],
-            "_manualLookup": _manual_lookup_payload(
-                ticker, cik_padded, filing_type, "Fact not XBRL-tagged. Use search_filing_text instead."
-            ),
+            "source": "EXTRACTION_FAILED",
+            "confidence": "EXTRACTION_FAILED",
+            "status": "EXTRACTION_FAILED",
+            "code": "FILING_TEXT_NOT_AVAILABLE",
+            "filingType": filing["filingType"],
+            "filingDate": filing["filingDate"],
+            "accessionNumber": filing["accessionNumber"],
+            "documentUrl": filing["documentUrl"],
+            "primaryDocumentUrl": filing["documentUrl"],
+            "evidence": filing_evidence,
+            "warnings": [
+                *filing["warnings"],
+                {"code": "FILING_TEXT_NOT_AVAILABLE", "message": "Resolved SEC filing, but primary HTML text could not be fetched for geographic revenue scan.", "severity": "warning"},
+            ],
         })
+    return _fd_geo_shape(st, {
+        "ticker": ticker,
+        "factType": fact_type.value,
+        "value": None,
+        "denominator": None,
+        "valueRatio": None,
+        "valuePct": None,
+        "extractionMethod": "NONE",
+        "source": "NOT_DISCLOSED",
+        "confidence": "NOT_DISCLOSED",
+        "evidence": {},
+        "warnings": [],
+        "_manualLookup": _manual_lookup_payload(
+            ticker, cik_padded, filing_type, "Fact not XBRL-tagged. Use search_filing_text instead."
+        ),
+    })
 
-    accession_number = str(picked.get("accn") or "")
-    index_url, primary_document_url = await _resolve_filing_urls_for_accession(accession_number)
-    document_url = primary_document_url or index_url
-    value_num = float(picked.get("val", 0)) if picked.get("val") is not None else None
-    raw_value = _format_raw_number(value_num)
-    raw_denominator = _format_raw_number(denominator)
-    period_label = str(picked.get("fy") or "")
-    if period_label and not period_label.startswith("FY"):
-        period_label = f"FY{period_label}"
-    # A named year is labelled as the period it selected, not by the fy of the filing that carried it (2.5.16).
-    if named_year_label:
-        period_label = named_year_label
 
-    # ── XBRL context metadata ─────────────────────────────────────────────
-    # The Worker's full context (2.5.16): without concept and taxonomy, a found fact failed the decision-grade
-    # check (ANET's FY2025 revenue read decisionGrade false in Python, true in the Worker).
+def _fd_build_xbrl_context(picked: dict, concept_used: str, resolved_mode: str, segment_label: str | None) -> dict:
     xbrl_context: dict = {
         "concept": concept_used,
         "taxonomy": "us-gaap",
@@ -1430,6 +1463,35 @@ async def _get_filing_data_unchecked(
             xbrl_context["durationDays"] = (d1 - d0).days
         except (ValueError, TypeError):
             pass
+    return xbrl_context
+
+
+async def _fd_found_fact_result(
+    st: _FilingDataState,
+    picked: dict,
+    concept_used: str,
+    resolved_mode: str,
+    named_year_label: str | None,
+    denominator: float | None,
+    value_ratio: float | None,
+    value_pct: float | None,
+    segment_label: str | None,
+) -> str:
+    ticker, fact_type, region, filing_type = st.ticker, st.fact_type, st.region, st.filing_type
+    accession_number = str(picked.get("accn") or "")
+    index_url, primary_document_url = await _fd_resolve_filing_urls(st, accession_number)
+    document_url = primary_document_url or index_url
+    value_num = float(picked.get("val", 0)) if picked.get("val") is not None else None
+    raw_value = _fd_format_raw_number(value_num)
+    raw_denominator = _fd_format_raw_number(denominator)
+    period_label = str(picked.get("fy") or "")
+    if period_label and not period_label.startswith("FY"):
+        period_label = f"FY{period_label}"
+    # A named year is labelled as the period it selected, not by the fy of the filing that carried it (2.5.16).
+    if named_year_label:
+        period_label = named_year_label
+
+    xbrl_context = _fd_build_xbrl_context(picked, concept_used, resolved_mode, segment_label)
 
     result_warnings: list[dict] = []
     # Warn if period_mode filtering was requested but couldn't narrow results
@@ -1440,7 +1502,7 @@ async def _get_filing_data_unchecked(
             "severity": "warning",
         })
 
-    return _geo_shape({
+    return _fd_geo_shape(st, {
         "ticker": ticker,
         "factType": fact_type.value,
         "region": region,
@@ -1484,6 +1546,79 @@ async def _get_filing_data_unchecked(
         ),
         "warnings": result_warnings,
     }, warn_denominator=(fact_type == FilingFactType.geographic_revenue and denominator is None))
+
+
+async def _get_filing_data_unchecked(
+    ticker: str,
+    fact_type: FilingFactType,
+    region: str | None = None,
+    filing_type: str = "10-K",
+    period: str = "latest",
+    period_mode: str = "auto",
+    accession_number: str | None = None,
+) -> str:
+    st = _FilingDataState(ticker, fact_type, region, filing_type, period, accession_number)
+    concept_primary, concept_fallback = _FILING_FACT_CONCEPTS[fact_type]
+    # A period this reader cannot resolve is refused, never answered with an arbitrary fact (2.5.16).
+    named_period = _sf.parse_filing_period(period)
+    if named_period is None:
+        return json.dumps({
+            "ticker": ticker, "factType": fact_type.value, "value": None, "unit": None, "period": None, "filingType": filing_type,
+            "extractionMethod": "NONE", "source": "INPUT", "confidence": "NOT_DECISION_GRADE",
+            "status": "INVALID_PERIOD", "code": "INVALID_PERIOD", "decisionGrade": False, "requestedPeriod": period,
+            "warnings": [{"code": "INVALID_PERIOD", "message": _sf.FILING_PERIOD_HELP, "severity": "error"}],
+        })
+    if fact_type == FilingFactType.geographic_revenue and not region:
+        return json.dumps({"error": True, "message": "region is required for fact_type='geographic_revenue'"})
+
+    cik_padded = await _resolve_cik_for_ticker(ticker)
+    if not cik_padded:
+        return await _fd_no_registrant_result(st)
+    st.cik_padded = cik_padded
+    st.companyfacts_url = sec_company_facts_url(cik_padded)
+    # Every equivalent concept is read; the one with the newest filing of this
+    # form wins, so a filer that switched concepts is not read from its old one.
+    st.candidate_names = [concept_primary, *_FILING_FACT_ALTERNATES.get(fact_type, []), *([concept_fallback] if concept_fallback else [])]
+    fetched_concepts = await _fd_fetch_concepts(st)
+    if st.failed_reads:
+        return await _fd_sec_read_failed(st, concept_primary)
+    pinned_accession = accession_number.strip() if accession_number and accession_number.strip() else None
+    chosen = _sf.pick_concept_facts(fetched_concepts, filing_type, pinned_accession, "larger" if fact_type == FilingFactType.total_revenue else "first")
+    concept_used = chosen["concept"] if chosen else concept_primary
+    filtered = list(chosen["facts"]) if chosen else []
+    missing_fact = await _fd_missing_fact_result(st, filtered, concept_used, pinned_accession)
+    if missing_fact is not None:
+        return missing_fact
+
+    if filtered and named_period["kind"] == "latest" and not pinned_accession:
+        latest_filed = max(str(f.get("filed", "")) for f in filtered)
+        filtered = [f for f in filtered if str(f.get("filed", "")) == latest_filed]
+
+    # ── period_mode filtering ─────────────────────────────────────────────
+    # XBRL facts include both quarterly and YTD figures for the same filing.
+    # Filter by duration to avoid returning 6-month revenue as quarterly.
+    resolved_mode = period_mode.lower().strip() if period_mode else "auto"
+    if resolved_mode == "auto":
+        resolved_mode = "quarter" if filing_type.upper() == "10-Q" else "annual"
+    filtered = _fd_filter_by_period_mode(filtered, resolved_mode)
+    year_refusal, filtered, named_year_label = await _fd_select_named_year(st, filtered, resolved_mode, named_period, concept_used)
+    if year_refusal is not None:
+        return year_refusal
+    # A filing reports prior-year comparatives too: the newest period end comes
+    # first, as in the Worker (ASTS's Q2 2026 10-Q also carries Q2 2025).
+    if named_period["kind"] == "latest" and filtered:
+        filtered = sorted(filtered, key=lambda f: (str(f.get("end") or ""), _fy_number(f.get("fy")), str(f.get("filed") or "")), reverse=True)
+
+    if fact_type == FilingFactType.segment_revenue:
+        return _fd_segment_revenue_result(st, filtered, concept_used)
+
+    picked, value_ratio, value_pct, denominator, segment_label = _fd_pick_fact(st, filtered)
+    if picked is None:
+        return await _fd_unpicked_result(st, pinned_accession)
+
+    return await _fd_found_fact_result(
+        st, picked, concept_used, resolved_mode, named_year_label, denominator, value_ratio, value_pct, segment_label
+    )
 
 
 # ── search_sec_filing_text ────────────────────────────────────────────────────
@@ -1590,28 +1725,39 @@ async def _exhibit_targets(cik_int: int, accession: str, filing_date: str | None
     return out
 
 
-async def search_filing_text(
-    ticker: str,
-    search_terms: list[str] | None = None,
-    section_hint: str | None = None,
-    filing_type: str = "10-K",
-    accession_number: str | None = None,
-    context_chars: int = 1500,
-    return_tables: bool = False,
-    document_url: str | None = None,
-    *,
-    search_query: str | None = None,
-    exclude_terms: list[str] | None = None,
-    near: list[dict] | None = None,
-    match: str | None = None,
-    order: str | None = None,
-    max_matches: int = 10,
-    cursor: str | None = None,
-    filing_count: int = 1,
-    since: str | None = None,
-    include_exhibits: bool = False,
-) -> str:
-    warnings: list[dict] = []
+class _FilingSearchRun:
+    """What the per-document search accumulates across the filings searched."""
+
+    def __init__(self) -> None:
+        self.all_matches: list = []
+        self.term_stats: dict[str, list] = {}
+        self.documents_searched: list[dict] = []
+        self.filing_summaries: list[dict] = []
+        self.doc_order: dict[str, int] = {}
+        self.excluded_hit_count = 0
+        self.section_scope: str | None = None
+        self.hint_missing = False
+        self.truncated_documents = 0
+        # Per filing: reset as each group starts.
+        self.filing_matches: list = []
+        self.filing_term_hits: dict[str, int] = {}
+        self.primary_focus: int | None = None
+
+
+def _sft_search_params(
+    search_terms: list[str] | None,
+    search_query: str | None,
+    exclude_terms: list[str] | None,
+    near: list[dict] | None,
+    match: str | None,
+    order: str | None,
+    context_chars: int,
+    max_matches: int,
+    cursor: str | None,
+    filing_count: int,
+    since: str | None,
+) -> tuple:
+    """The normalised search arguments: mode, ordering, budget, page size, start, spec, filing count and since date."""
     mode = "substring" if match == "substring" else "word"
     ordering = "document" if order == "document" else "relevance"
     try:
@@ -1639,16 +1785,17 @@ async def search_filing_text(
     except (TypeError, ValueError):
         count = 1
     since_date = since if since and _re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", since) else None
+    return mode, ordering, budget, page_size, start_at, spec, count, since_date
 
-    def empty_result(**fields) -> str:
-        return json.dumps({
-            "ticker": ticker, "accessionNumber": accession_number, "documentUrl": None, "fiscalYear": None,
-            "filingType": filing_type, "filingDate": None, "documentKind": "unavailable",
-            "matches": [], "matchCount": 0, **fields,
-        })
 
-    # ── Documents to search ──
-    filings: list[dict] = []
+def _sft_explicit_target(
+    document_url: str | None,
+    accession_number: str | None,
+    filing_type: str,
+    warnings: list[dict],
+    empty_result,
+) -> dict | str | None:
+    """The explicit document to search, None when the filings are resolved from EDGAR, or the finished result (a str)."""
     explicit_target: dict | None = None
     if document_url:
         explicit_url = _safe_sec_url(document_url)
@@ -1667,88 +1814,93 @@ async def search_filing_text(
                 "key": explicit_url, "url": explicit_url, "documentType": "primary", "defaultSection": None,
                 "primary": True, "accessionNumber": accession_number, "filingDate": None, "filingType": filing_type,
             }
-    if explicit_target is None:
-        cik_padded, subs = await _get_submissions_for_ticker(ticker)
-        if not cik_padded or not subs:
-            return empty_result(status="TICKER_NOT_FOUND", code="TICKER_NOT_FOUND", confidence="TICKER_NOT_FOUND",
-                                message=f"Could not resolve EDGAR submissions for ticker '{ticker}'")
-        recent = subs.get("filings", {}).get("recent", {})
-        forms = [str(f) for f in recent.get("form", [])]
-        accessions = recent.get("accessionNumber", [])
-        primary_docs = recent.get("primaryDocument", [])
-        filing_dates = recent.get("filingDate", [])
-        report_dates = recent.get("reportDate", [])
-        cik_int = int(cik_padded)
-        requested = (filing_type or "10-K").upper()
-        wanted = requested
-        if not accession_number and requested == "10-K" and "10-K" not in (f.upper() for f in forms) and "20-F" in (f.upper() for f in forms):
-            wanted = "20-F"
-            warnings.append({"code": "AUTO_20F_FALLBACK", "message": "Filing type automatically adapted from 10-K to 20-F (foreign private issuer detected).", "severity": "info"})
+    return explicit_target
 
-        def filing_at(i: int) -> dict | None:
-            primary = primary_docs[i] if i < len(primary_docs) else None
-            if not primary or i >= len(accessions):
-                return None
-            _, url = _edgar_build_filing_urls(cik_int, accessions[i], primary)
-            if not url or _is_likely_xbrl_document_url(url):
-                return None
-            return {
-                "accessionNumber": accessions[i], "filingType": forms[i], "cikInt": cik_int, "documentUrl": url,
-                "filingDate": filing_dates[i] if i < len(filing_dates) else None,
-                "reportDate": report_dates[i] if i < len(report_dates) else None,
-            }
 
-        if accession_number:
-            index = next((i for i, acc in enumerate(accessions) if acc == accession_number), None)
-            if index is None:
-                # An explicit accession missing from recent filings fails closed (2.13.0, R4 Q3a).
-                return _accession_not_found_envelope(_accession_not_found_error(ticker, accession_number))
-            first = filing_at(index)
-            if first and (count > 1 or since_date):
-                warnings.append({"code": "FILING_COUNT_IGNORED", "message": "accession_number selects one filing; filing_count and since were ignored.", "severity": "info"})
-            filings = [first] if first else []
-        else:
-            limit = _FILING_SEARCH_MAX_FILINGS if since_date and count <= 1 else count
-            capped = False
-            for i, form in enumerate(forms):
-                if form.upper() != wanted:
-                    continue
-                if since_date and str(filing_dates[i] if i < len(filing_dates) else "") < since_date:
-                    continue
-                filing = filing_at(i)
-                if filing is None:
-                    continue
-                if len(filings) >= limit:
-                    capped = since_date is not None
-                    break
-                filings.append(filing)
-            if capped:
-                warnings.append({"code": "FILINGS_CAPPED", "message": f"Searched the latest {len(filings)} matching filings; older ones were not searched.", "severity": "info"})
-        if not filings:
-            return empty_result(
-                status="FILING_NOT_FOUND_TRY_OTHER_TYPE", code="FILING_NOT_FOUND_TRY_OTHER_TYPE",
-                confidence="FILING_NOT_FOUND_TRY_OTHER_TYPE", requestedFilingType=requested,
-                availableFilingTypes=list(dict.fromkeys(forms))[:12],
-            )
+async def _sft_select_filings(
+    ticker: str,
+    filing_type: str,
+    accession_number: str | None,
+    count: int,
+    since_date: str | None,
+    warnings: list[dict],
+    empty_result,
+) -> list[dict] | str:
+    """The filings to search, or the finished result (a str) when none can be resolved."""
+    filings: list[dict] = []
+    cik_padded, subs = await _get_submissions_for_ticker(ticker)
+    if not cik_padded or not subs:
+        return empty_result(status="TICKER_NOT_FOUND", code="TICKER_NOT_FOUND", confidence="TICKER_NOT_FOUND",
+                            message=f"Could not resolve EDGAR submissions for ticker '{ticker}'")
+    recent = subs.get("filings", {}).get("recent", {})
+    forms = [str(f) for f in recent.get("form", [])]
+    accessions = recent.get("accessionNumber", [])
+    primary_docs = recent.get("primaryDocument", [])
+    filing_dates = recent.get("filingDate", [])
+    report_dates = recent.get("reportDate", [])
+    cik_int = int(cik_padded)
+    requested = (filing_type or "10-K").upper()
+    wanted = requested
+    if not accession_number and requested == "10-K" and "10-K" not in (f.upper() for f in forms) and "20-F" in (f.upper() for f in forms):
+        wanted = "20-F"
+        warnings.append({"code": "AUTO_20F_FALLBACK", "message": "Filing type automatically adapted from 10-K to 20-F (foreign private issuer detected).", "severity": "info"})
 
-    first = filings[0] if filings else None
-    primary_url = explicit_target["url"] if explicit_target else first["documentUrl"]
-    base = {
-        "ticker": ticker,
-        "accessionNumber": first["accessionNumber"] if first else accession_number,
-        "documentUrl": primary_url,
-        "fiscalYear": _fiscal_year_of(first.get("reportDate")) if first else None,
-        "filingType": first["filingType"] if first else filing_type,
-        "filingDate": first["filingDate"] if first else None,
-    }
-    if not spec.terms and not spec.near and not section_hint:
-        # Nothing to look for: the resolved filing alone, without reading it.
-        return json.dumps({
-            **base, "documentKind": "primary_html", "matches": [], "matchCount": 0, "totalMatches": 0,
-            "confidence": "NOT_DISCLOSED",
-            "warnings": [*warnings, {"code": "NO_SEARCH_TERMS", "message": "Pass search_terms, search_query or near to search the filing text.", "severity": "warning"}],
-        })
+    def filing_at(i: int) -> dict | None:
+        primary = primary_docs[i] if i < len(primary_docs) else None
+        if not primary or i >= len(accessions):
+            return None
+        _, url = _edgar_build_filing_urls(cik_int, accessions[i], primary)
+        if not url or _is_likely_xbrl_document_url(url):
+            return None
+        return {
+            "accessionNumber": accessions[i], "filingType": forms[i], "cikInt": cik_int, "documentUrl": url,
+            "filingDate": filing_dates[i] if i < len(filing_dates) else None,
+            "reportDate": report_dates[i] if i < len(report_dates) else None,
+        }
 
+    if accession_number:
+        index = next((i for i, acc in enumerate(accessions) if acc == accession_number), None)
+        if index is None:
+            # An explicit accession missing from recent filings fails closed (2.13.0, R4 Q3a).
+            return _accession_not_found_envelope(_accession_not_found_error(ticker, accession_number))
+        first = filing_at(index)
+        if first and (count > 1 or since_date):
+            warnings.append({"code": "FILING_COUNT_IGNORED", "message": "accession_number selects one filing; filing_count and since were ignored.", "severity": "info"})
+        filings = [first] if first else []
+    else:
+        limit = _FILING_SEARCH_MAX_FILINGS if since_date and count <= 1 else count
+        capped = False
+        for i, form in enumerate(forms):
+            if form.upper() != wanted:
+                continue
+            if since_date and str(filing_dates[i] if i < len(filing_dates) else "") < since_date:
+                continue
+            filing = filing_at(i)
+            if filing is None:
+                continue
+            if len(filings) >= limit:
+                capped = since_date is not None
+                break
+            filings.append(filing)
+        if capped:
+            warnings.append({"code": "FILINGS_CAPPED", "message": f"Searched the latest {len(filings)} matching filings; older ones were not searched.", "severity": "info"})
+    if not filings:
+        return empty_result(
+            status="FILING_NOT_FOUND_TRY_OTHER_TYPE", code="FILING_NOT_FOUND_TRY_OTHER_TYPE",
+            confidence="FILING_NOT_FOUND_TRY_OTHER_TYPE", requestedFilingType=requested,
+            availableFilingTypes=list(dict.fromkeys(forms))[:12],
+        )
+    return filings
+
+
+async def _sft_build_groups(
+    explicit_target: dict | None,
+    filings: list[dict],
+    include_exhibits: bool,
+    primary_url: str | None,
+    accession_number: str | None,
+    filing_type: str,
+) -> list[dict]:
     groups: list[dict] = (
         [{"filing": None, "targets": [explicit_target]}] if explicit_target else [
             {"filing": f, "targets": [{
@@ -1769,93 +1921,91 @@ async def search_filing_text(
                 cik_value, acc, group["filing"]["filingDate"] if group["filing"] else None,
                 group["filing"]["filingType"] if group["filing"] else filing_type, group["targets"][0]["url"],
             ))
+    return groups
 
-    # ── Search each document in turn ──
-    all_matches: list = []
-    term_stats: dict[str, list] = {}
-    documents_searched: list[dict] = []
-    filing_summaries: list[dict] = []
-    doc_order: dict[str, int] = {}
-    excluded_hit_count = 0
-    section_scope: str | None = None
-    hint_missing = False
-    truncated_documents = 0
-    for group in groups:
-        filing_matches: list = []
-        filing_term_hits: dict[str, int] = {}
-        primary_focus: int | None = None
-        for target in group["targets"]:
-            doc = await _projected_filing_document(target["url"])
-            if doc is None:
-                if target["primary"] and group is groups[0]:
-                    return empty_result(
-                        **base, documentKind="primary_html", status="FILING_TEXT_NOT_AVAILABLE",
-                        code="FILING_TEXT_NOT_AVAILABLE", confidence="FILING_TEXT_NOT_AVAILABLE",
-                        warnings=[*warnings, {"code": "FILING_TEXT_NOT_AVAILABLE", "message": "Unable to fetch primary filing HTML.", "severity": "error"}],
-                    )
-                documents_searched.append({"documentUrl": target["url"], "documentType": target["documentType"], "accessionNumber": target["accessionNumber"], "filingDate": target["filingDate"], "status": "FETCH_FAILED"})
-                continue
-            if doc["truncated"]:
-                truncated_documents += 1
-            if target["primary"]:
-                primary_focus = doc["fiscalYearFocus"]
-                # The resolved (first) filing's label follows the year its document tags for itself.
-                if group is groups[0] and group["filing"] is first:
-                    base["fiscalYear"] = _fiscal_year_of(first.get("reportDate") if first else None, primary_focus)
-            projection = doc["projection"]
-            scope_start, scope_end = 0, len(projection.text)
-            scope = None
-            if target["primary"] and section_hint:
-                scope = _fs.section_hint_scope(projection, section_hint)
-                if scope:
-                    scope_start, scope_end = scope[0], scope[1]
-                    section_scope = section_scope or scope[2]
-                else:
-                    hint_missing = True
-            doc_order[target["key"]] = len(doc_order)
-            search_doc = _fs.SearchDocument(target["key"], target["documentType"], target["defaultSection"], projection, scope_start, scope_end)
-            result = _fs.search_document(search_doc, spec)
-            if not spec.terms and not spec.near and scope:
-                # A section hint alone returns the start of that section.
-                result.matches.append(_fs.SearchMatch(
-                    search_doc, [section_hint], 1, scope[0],
-                    _fs.match_context(projection, scope[0], scope[0] + 1, budget), scope[2],
-                ))
-            excluded_hit_count += result.excluded_count
-            doc_hits = 0
-            for label, (hits, capped) in result.term_hits.items():
-                prior = term_stats.get(label, [0, False])
-                term_stats[label] = [prior[0] + hits, prior[1] or capped]
-                filing_term_hits[label] = filing_term_hits.get(label, 0) + hits
-                doc_hits += hits
-            filing_matches.extend(result.matches)
-            entry = {
-                "documentUrl": target["url"], "documentType": target["documentType"],
-                "accessionNumber": target["accessionNumber"], "filingDate": target["filingDate"],
-                "hitCount": doc_hits, "matchCount": len(result.matches), "textChars": len(projection.text),
-                "truncated": doc["truncated"],
-            }
-            if scope:
-                entry["sectionScope"] = scope[2]
-            documents_searched.append(entry)
-        all_matches.extend(filing_matches)
-        if group["filing"]:
-            f = group["filing"]
-            filing_summaries.append({
-                "accessionNumber": f["accessionNumber"], "filingDate": f["filingDate"], "filingType": f["filingType"],
-                "fiscalYear": _fiscal_year_of(f.get("reportDate"), primary_focus), "documentUrl": f["documentUrl"],
-                "totalMatches": len(filing_matches), "termHits": filing_term_hits,
-                "hitsBySection": _fs.hits_by_section(filing_matches),
-            })
-    if hint_missing:
-        warnings.append({"code": "SECTION_HINT_NOT_FOUND", "message": f"No heading matched section_hint '{section_hint}'; the whole document was searched.", "severity": "warning"})
-    if truncated_documents:
-        warnings.append({"code": "FILING_READ_TRUNCATED", "message": f"{truncated_documents} document(s) exceeded {_SEC_DOCUMENT_READ_MAX_CHARS} characters; text past that point was not searched.", "severity": "warning"})
 
-    # ── Order, page and describe ──
-    ordered = _fs.order_matches(all_matches, ordering, doc_order)
+async def _sft_search_target(
+    run: _FilingSearchRun,
+    target: dict,
+    group: dict,
+    groups: list[dict],
+    first: dict | None,
+    base: dict,
+    warnings: list[dict],
+    spec,
+    section_hint: str | None,
+    budget: int,
+    empty_result,
+) -> str | None:
+    """Search one document into `run`; returns the finished result (a str) when the primary document cannot be read."""
+    doc = await _projected_filing_document(target["url"])
+    if doc is None:
+        if target["primary"] and group is groups[0]:
+            return empty_result(
+                **base, documentKind="primary_html", status="FILING_TEXT_NOT_AVAILABLE",
+                code="FILING_TEXT_NOT_AVAILABLE", confidence="FILING_TEXT_NOT_AVAILABLE",
+                warnings=[*warnings, {"code": "FILING_TEXT_NOT_AVAILABLE", "message": "Unable to fetch primary filing HTML.", "severity": "error"}],
+            )
+        run.documents_searched.append({"documentUrl": target["url"], "documentType": target["documentType"], "accessionNumber": target["accessionNumber"], "filingDate": target["filingDate"], "status": "FETCH_FAILED"})
+        return None
+    if doc["truncated"]:
+        run.truncated_documents += 1
+    if target["primary"]:
+        run.primary_focus = doc["fiscalYearFocus"]
+        # The resolved (first) filing's label follows the year its document tags for itself.
+        if group is groups[0] and group["filing"] is first:
+            base["fiscalYear"] = _fiscal_year_of(first.get("reportDate") if first else None, run.primary_focus)
+    projection = doc["projection"]
+    scope_start, scope_end = 0, len(projection.text)
+    scope = None
+    if target["primary"] and section_hint:
+        scope = _fs.section_hint_scope(projection, section_hint)
+        if scope:
+            scope_start, scope_end = scope[0], scope[1]
+            run.section_scope = run.section_scope or scope[2]
+        else:
+            run.hint_missing = True
+    run.doc_order[target["key"]] = len(run.doc_order)
+    search_doc = _fs.SearchDocument(target["key"], target["documentType"], target["defaultSection"], projection, scope_start, scope_end)
+    result = _fs.search_document(search_doc, spec)
+    if not spec.terms and not spec.near and scope:
+        # A section hint alone returns the start of that section.
+        result.matches.append(_fs.SearchMatch(
+            search_doc, [section_hint], 1, scope[0],
+            _fs.match_context(projection, scope[0], scope[0] + 1, budget), scope[2],
+        ))
+    run.excluded_hit_count += result.excluded_count
+    doc_hits = 0
+    for label, (hits, capped) in result.term_hits.items():
+        prior = run.term_stats.get(label, [0, False])
+        run.term_stats[label] = [prior[0] + hits, prior[1] or capped]
+        run.filing_term_hits[label] = run.filing_term_hits.get(label, 0) + hits
+        doc_hits += hits
+    run.filing_matches.extend(result.matches)
+    entry = {
+        "documentUrl": target["url"], "documentType": target["documentType"],
+        "accessionNumber": target["accessionNumber"], "filingDate": target["filingDate"],
+        "hitCount": doc_hits, "matchCount": len(result.matches), "textChars": len(projection.text),
+        "truncated": doc["truncated"],
+    }
+    if scope:
+        entry["sectionScope"] = scope[2]
+    run.documents_searched.append(entry)
+    return None
+
+
+async def _sft_page_payloads(
+    run: _FilingSearchRun,
+    groups: list[dict],
+    ordering: str,
+    start_at: int,
+    page_size: int,
+    return_tables: bool,
+) -> tuple[list, list, list[dict]]:
+    """The ordered matches, the requested page of them and the page's payloads."""
+    ordered = _fs.order_matches(run.all_matches, ordering, run.doc_order)
     page = ordered[start_at:start_at + page_size]
-    multi_document = len(documents_searched) > 1
+    multi_document = len(run.documents_searched) > 1
     target_by_key = {t["key"]: t for g in groups for t in g["targets"]}
     payloads: list[dict] = []
     for m in page:
@@ -1874,19 +2024,36 @@ async def search_filing_text(
                     table_parsed.append({"tableIndex": table.table_index, "rows": rows, "rowsTruncated": len(rows) >= _FILING_SEARCH_TABLE_ROWS})
             payload["tableParsed"] = table_parsed
         payloads.append(payload)
+    return ordered, page, payloads
+
+
+def _sft_build_output(
+    run: _FilingSearchRun,
+    base: dict,
+    spec,
+    mode: str,
+    ordering: str,
+    section_hint: str | None,
+    ordered: list,
+    page: list,
+    payloads: list[dict],
+    start_at: int,
+    page_size: int,
+    warnings: list[dict],
+) -> str:
     stats = [
         {
             "term": label, "hitCount": value[0], "hitCountCapped": value[1],
-            "matchCount": sum(1 for m in all_matches if label in m.terms),
+            "matchCount": sum(1 for m in run.all_matches if label in m.terms),
             "returnedCount": sum(1 for m in page if label in m.terms),
         }
-        for label, value in term_stats.items()
+        for label, value in run.term_stats.items()
     ]
     next_cursor = str(start_at + len(page)) if start_at + len(page) < len(ordered) else None
     out = {
         **base,
         "documentKind": "primary_html",
-        **({"sectionScope": section_scope} if section_hint else {}),
+        **({"sectionScope": run.section_scope} if section_hint else {}),
         "query": {
             "terms": [_fs.term_label(t) for t in spec.terms],
             "near": [f"{_fs.term_label(n.a)} NEAR/{n.within_words} {_fs.term_label(n.b)}" for n in spec.near],
@@ -1897,20 +2064,116 @@ async def search_filing_text(
         "matches": payloads,
         "matchCount": len(payloads),
         "totalMatches": len(ordered),
-        "excludedHitCount": excluded_hit_count,
+        "excludedHitCount": run.excluded_hit_count,
         "termStats": stats,
     }
-    if len(filing_summaries) > 1:
-        out["filings"] = filing_summaries
+    if len(run.filing_summaries) > 1:
+        out["filings"] = run.filing_summaries
     else:
-        out["hitsBySection"] = _fs.hits_by_section(all_matches)
+        out["hitsBySection"] = _fs.hits_by_section(run.all_matches)
     out.update({
-        "documentsSearched": documents_searched,
+        "documentsSearched": run.documents_searched,
         "pagination": {"cursor": str(start_at), "nextCursor": next_cursor, "limit": page_size, "returned": len(payloads), "hasMore": next_cursor is not None},
         "confidence": "NOT_DISCLOSED" if not payloads else "MEDIUM",
         "warnings": [*warnings, *([{"code": "RAW_FILING_TEXT", "message": "Returned text is sanitized filing context, not structured fact extraction.", "severity": "info"}] if payloads else [])],
     })
     return json.dumps(out)
+
+
+async def search_filing_text(
+    ticker: str,
+    search_terms: list[str] | None = None,
+    section_hint: str | None = None,
+    filing_type: str = "10-K",
+    accession_number: str | None = None,
+    context_chars: int = 1500,
+    return_tables: bool = False,
+    document_url: str | None = None,
+    *,
+    search_query: str | None = None,
+    exclude_terms: list[str] | None = None,
+    near: list[dict] | None = None,
+    match: str | None = None,
+    order: str | None = None,
+    max_matches: int = 10,
+    cursor: str | None = None,
+    filing_count: int = 1,
+    since: str | None = None,
+    include_exhibits: bool = False,
+) -> str:
+    warnings: list[dict] = []
+    (mode, ordering, budget, page_size, start_at, spec, count, since_date) = _sft_search_params(
+        search_terms, search_query, exclude_terms, near, match, order, context_chars, max_matches, cursor, filing_count, since
+    )
+
+    def empty_result(**fields) -> str:
+        return json.dumps({
+            "ticker": ticker, "accessionNumber": accession_number, "documentUrl": None, "fiscalYear": None,
+            "filingType": filing_type, "filingDate": None, "documentKind": "unavailable",
+            "matches": [], "matchCount": 0, **fields,
+        })
+
+    # ── Documents to search ──
+    filings: list[dict] = []
+    explicit_target: dict | None = None
+    if document_url:
+        explicit = _sft_explicit_target(document_url, accession_number, filing_type, warnings, empty_result)
+        if isinstance(explicit, str):
+            return explicit
+        explicit_target = explicit
+    if explicit_target is None:
+        selected = await _sft_select_filings(ticker, filing_type, accession_number, count, since_date, warnings, empty_result)
+        if isinstance(selected, str):
+            return selected
+        filings = selected
+
+    first = filings[0] if filings else None
+    primary_url = explicit_target["url"] if explicit_target else first["documentUrl"]
+    base = {
+        "ticker": ticker,
+        "accessionNumber": first["accessionNumber"] if first else accession_number,
+        "documentUrl": primary_url,
+        "fiscalYear": _fiscal_year_of(first.get("reportDate")) if first else None,
+        "filingType": first["filingType"] if first else filing_type,
+        "filingDate": first["filingDate"] if first else None,
+    }
+    if not spec.terms and not spec.near and not section_hint:
+        # Nothing to look for: the resolved filing alone, without reading it.
+        return json.dumps({
+            **base, "documentKind": "primary_html", "matches": [], "matchCount": 0, "totalMatches": 0,
+            "confidence": "NOT_DISCLOSED",
+            "warnings": [*warnings, {"code": "NO_SEARCH_TERMS", "message": "Pass search_terms, search_query or near to search the filing text.", "severity": "warning"}],
+        })
+
+    groups = await _sft_build_groups(explicit_target, filings, include_exhibits, primary_url, accession_number, filing_type)
+
+    # ── Search each document in turn ──
+    run = _FilingSearchRun()
+    for group in groups:
+        run.filing_matches = []
+        run.filing_term_hits = {}
+        run.primary_focus = None
+        for target in group["targets"]:
+            finished = await _sft_search_target(run, target, group, groups, first, base, warnings, spec, section_hint, budget, empty_result)
+            if finished is not None:
+                return finished
+        run.all_matches.extend(run.filing_matches)
+        if group["filing"]:
+            f = group["filing"]
+            run.filing_summaries.append({
+                "accessionNumber": f["accessionNumber"], "filingDate": f["filingDate"], "filingType": f["filingType"],
+                "fiscalYear": _fiscal_year_of(f.get("reportDate"), run.primary_focus), "documentUrl": f["documentUrl"],
+                "totalMatches": len(run.filing_matches), "termHits": run.filing_term_hits,
+                "hitsBySection": _fs.hits_by_section(run.filing_matches),
+            })
+    if run.hint_missing:
+        warnings.append({"code": "SECTION_HINT_NOT_FOUND", "message": f"No heading matched section_hint '{section_hint}'; the whole document was searched.", "severity": "warning"})
+    if run.truncated_documents:
+        warnings.append({"code": "FILING_READ_TRUNCATED", "message": f"{run.truncated_documents} document(s) exceeded {_SEC_DOCUMENT_READ_MAX_CHARS} characters; text past that point was not searched.", "severity": "warning"})
+
+    # ── Order, page and describe ──
+    ordered, page, payloads = await _sft_page_payloads(run, groups, ordering, start_at, page_size, return_tables)
+    return _sft_build_output(run, base, spec, mode, ordering, section_hint, ordered, page, payloads, start_at, page_size, warnings)
 
 
 @yfinance_server.tool(name="list_sec_company_filings", description="""List SEC filings for a company from EDGAR submissions.
