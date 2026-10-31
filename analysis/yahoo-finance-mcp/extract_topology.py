@@ -118,7 +118,7 @@ FILE_DOMAIN = {
     "worker/src/sec.ts": "sec",
     "worker/src/extraction-rules.ts": "extractors", "worker/src/capital-structure.ts": "extractors",
     "worker/src/share-scenarios.ts": "extractors", "worker/src/funding-schedule.ts": "extractors",
-    "worker/src/driver-ledger.ts": "extractors",
+    "worker/src/driver-ledger.ts": "extractors", "worker/src/exposure.ts": "extractors",
     "worker/src/valuation.ts": "valuation", "worker/src/valuation-history.ts": "valuation",
     "worker/src/metric-reconciliation.ts": "valuation",
     "worker/src/guidance-history.ts": "earnings", "worker/src/earnings-period.ts": "earnings",
@@ -360,7 +360,7 @@ DOMAIN_OVERRIDES: dict[str, dict[str, str]] = {
         "_earnings_release_picks": "earnings", "_read_release_text": "earnings",
     },
     "worker/src/yahoo-finance.ts": {
-        "extractGeoRevenueFromHtml": "extractors", "geoRegionAliases": "extractors", "normalizeStatus": "extractors",
+        # The SEC extractor seeds left with their code for worker/src/exposure.ts (Phase 5 unit 2).
         "earningsReleasePicks": "earnings", "readReleaseText": "earnings",
         "fetchAlphaVantageJson": "providers",
         "snapshotComponentMessage": "pricing",

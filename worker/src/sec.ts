@@ -76,9 +76,8 @@ import {
   filterParagraphsByTopics,
 } from "./clients/html.js";
 import { parseObjectJson } from "./util.js";
+import { FILING_INDEX_CACHE_MAX, FILING_INDEX_TTL_MS, filingIndexCache } from "./yahoo-finance.js";
 import {
-  FILING_INDEX_CACHE_MAX,
-  FILING_INDEX_TTL_MS,
   type ResolvedSecFiling,
   extractChinaExposure,
   extractCustomerConcentration,
@@ -88,10 +87,9 @@ import {
   extractRiskFactorMentions,
   extractSegmentRevenue,
   extractTotalRevenue,
-  filingIndexCache,
   geoRegionAliases,
   normalizeStatus,
-} from "./yahoo-finance.js";
+} from "./exposure.js";
 
 // Equivalent concepts are all read; the one filed most recently wins (sec-facts.ts).
 const FILING_FACT_CONCEPTS: Record<string, { primary: string; fallback?: string; alternates?: string[] }> = {
