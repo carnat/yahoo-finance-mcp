@@ -313,11 +313,11 @@ def _python_outputs() -> dict:
     store = es.MemoryStore()
     with patch("yfmcp.tools.fundamentals._yahoo_consensus_snapshot", return_value=(yahoo, quote)), \
             patch("yfmcp.tools.fundamentals._fetch_alpha_vantage_json", new=AsyncMock(return_value=ProviderJsonResult(av, "OK", "https://www.alphavantage.co/query", True, "MISS", fetched_at=retrieved))), \
-            patch("server._get_submissions_for_ticker", new=AsyncMock(return_value=("0001780312", subs))), \
-            patch("server.extract_capital_structure", new=AsyncMock(return_value=failed)), \
-            patch("server.extract_dilution_bridge", new=AsyncMock(return_value=failed)), \
-            patch("server.extract_guidance", new=AsyncMock(return_value=json.dumps({"ticker": "ASTS", "revenue": {"status": "NOT_DISCLOSED"}}))), \
-            patch("server.list_sec_material_filings", new=AsyncMock(return_value=json.dumps({"ticker": "ASTS", "filings": []}))):
+            patch("yfmcp.tools.evidence_pack._get_submissions_for_ticker", new=AsyncMock(return_value=("0001780312", subs))), \
+            patch("yfmcp.tools.evidence_pack.extract_capital_structure", new=AsyncMock(return_value=failed)), \
+            patch("yfmcp.tools.evidence_pack.extract_dilution_bridge", new=AsyncMock(return_value=failed)), \
+            patch("yfmcp.tools.evidence_pack.extract_guidance", new=AsyncMock(return_value=json.dumps({"ticker": "ASTS", "revenue": {"status": "NOT_DISCLOSED"}}))), \
+            patch("yfmcp.tools.evidence_pack.list_sec_material_filings", new=AsyncMock(return_value=json.dumps({"ticker": "ASTS", "filings": []}))):
         es.set_store_for_tests(store)
         try:
             out["curve1"] = run(srv.get_consensus_forecast_curve("ASTS"))

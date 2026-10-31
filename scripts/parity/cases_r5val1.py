@@ -50,11 +50,12 @@ from unittest.mock import AsyncMock, patch  # noqa: E402
 import server  # noqa: E402
 from scripts.parity.cases_audit_2265 import YAHOO_AUTH_ROUTES  # noqa: E402
 from yfmcp.envelope import _envelope_tool_result  # noqa: E402
+from yfmcp.tools import valuation as valuation_tools  # noqa: E402
 
 
 def _py_snapshot(message: str):
     def run():
-        with patch.object(server, "_valuation_market_inputs", AsyncMock(side_effect=RuntimeError(message))):
+        with patch.object(valuation_tools, "_valuation_market_inputs", AsyncMock(side_effect=RuntimeError(message))):
             return _envelope_tool_result("get_valuation_snapshot", asyncio.run(server.get_valuation_snapshot("zzzzqq")))
     return run
 

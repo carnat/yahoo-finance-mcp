@@ -457,6 +457,7 @@ def _python_e2e() -> dict:
     from yfmcp.tools import exposure as exposure_tools
     from yfmcp.tools import fundamentals as fundamentals_tools
     from yfmcp.tools import sec as sec_tools
+    from yfmcp.tools import valuation as valuation_tools
 
     sec_tools._FILING_TEXT_CACHE.clear()
     sec_tools._FILING_TEXT_CACHE_CHARS = 0
@@ -473,13 +474,13 @@ def _python_e2e() -> dict:
 
     tools = {"get_valuation_snapshot": srv.get_valuation_snapshot, "compare_peer_valuations": srv.compare_peer_valuations}
     out = {}
-    with patch.object(srv, "_get_submissions_for_ticker", AsyncMock(return_value=(f"{csfx.CIK:010d}", copy.deepcopy(csfx.SUBMISSIONS)))), \
+    with patch.object(valuation_tools, "_get_submissions_for_ticker", AsyncMock(return_value=(f"{csfx.CIK:010d}", copy.deepcopy(csfx.SUBMISSIONS)))), \
             patch.object(sec_tools, "_get_submissions_for_ticker", AsyncMock(return_value=(f"{csfx.CIK:010d}", copy.deepcopy(csfx.SUBMISSIONS)))), \
             patch.object(exposure_tools, "_get_submissions_for_ticker", AsyncMock(return_value=(f"{csfx.CIK:010d}", copy.deepcopy(csfx.SUBMISSIONS)))), \
-            patch.object(srv, "_edgar_get_html", fake_html), \
+            patch.object(valuation_tools, "_edgar_get_html", fake_html), \
             patch.object(sec_tools, "_edgar_get_html", fake_html), \
             patch.object(exposure_tools, "_edgar_get_html", fake_html), \
-            patch.object(srv, "_valuation_market_inputs", fake_market), \
+            patch.object(valuation_tools, "_valuation_market_inputs", fake_market), \
             patch.object(fundamentals_tools, "_valuation_market_inputs", fake_market):
         for name, (_, action, params) in CALLS.items():
             raw = json.loads(asyncio.run(tools[action](**params)))
