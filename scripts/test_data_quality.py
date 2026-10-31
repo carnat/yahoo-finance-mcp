@@ -15,7 +15,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import server as srv  # noqa: E402
 from scripts import test_deployed_canaries as deployed_canaries  # noqa: E402
-from yfmcp.tools import exposure, pricing  # noqa: E402
+from yfmcp.tools import exposure, fundamentals, pricing  # noqa: E402
 
 _SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
 if _SCRIPTS_DIR not in sys.path:
@@ -986,29 +986,29 @@ class TestPr2DataQuality(unittest.TestCase):
             return json.dumps({})
 
         originals = (
-            srv.get_analyst_upgrade_radar,
-            srv.get_analyst_consensus,
-            srv.get_price_stats,
-            srv.get_earnings_momentum,
-            srv.get_technical_indicators,
-            srv.get_ma_position,
+            fundamentals.get_analyst_upgrade_radar,
+            fundamentals.get_analyst_consensus,
+            fundamentals.get_price_stats,
+            fundamentals.get_earnings_momentum,
+            fundamentals.get_technical_indicators,
+            fundamentals.get_ma_position,
         )
         try:
-            srv.get_analyst_upgrade_radar = fake_radar
-            srv.get_analyst_consensus = fake_consensus
-            srv.get_price_stats = fake_price
-            srv.get_earnings_momentum = fake_earnings
-            srv.get_technical_indicators = fake_tech
-            srv.get_ma_position = fake_ma
+            fundamentals.get_analyst_upgrade_radar = fake_radar
+            fundamentals.get_analyst_consensus = fake_consensus
+            fundamentals.get_price_stats = fake_price
+            fundamentals.get_earnings_momentum = fake_earnings
+            fundamentals.get_technical_indicators = fake_tech
+            fundamentals.get_ma_position = fake_ma
             position = json.loads(_run(srv.analyze_position_signals("TST")))
         finally:
             (
-                srv.get_analyst_upgrade_radar,
-                srv.get_analyst_consensus,
-                srv.get_price_stats,
-                srv.get_earnings_momentum,
-                srv.get_technical_indicators,
-                srv.get_ma_position,
+                fundamentals.get_analyst_upgrade_radar,
+                fundamentals.get_analyst_consensus,
+                fundamentals.get_price_stats,
+                fundamentals.get_earnings_momentum,
+                fundamentals.get_technical_indicators,
+                fundamentals.get_ma_position,
             ) = originals
         self.assertEqual(position["analystInputs"]["upgrades30d"], 1)
         self.assertEqual(position["analystInputs"]["downgrades30d"], 1)

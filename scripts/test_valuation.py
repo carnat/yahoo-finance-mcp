@@ -455,6 +455,7 @@ def _worker_e2e() -> dict:
 def _python_e2e() -> dict:
     import server as srv
     from yfmcp.tools import exposure as exposure_tools
+    from yfmcp.tools import fundamentals as fundamentals_tools
     from yfmcp.tools import sec as sec_tools
 
     sec_tools._FILING_TEXT_CACHE.clear()
@@ -478,7 +479,8 @@ def _python_e2e() -> dict:
             patch.object(srv, "_edgar_get_html", fake_html), \
             patch.object(sec_tools, "_edgar_get_html", fake_html), \
             patch.object(exposure_tools, "_edgar_get_html", fake_html), \
-            patch.object(srv, "_valuation_market_inputs", fake_market):
+            patch.object(srv, "_valuation_market_inputs", fake_market), \
+            patch.object(fundamentals_tools, "_valuation_market_inputs", fake_market):
         for name, (_, action, params) in CALLS.items():
             raw = json.loads(asyncio.run(tools[action](**params)))
             out[name] = {"data": raw["data"] if isinstance(raw, dict) and "ok" in raw else raw}

@@ -31,6 +31,7 @@ from scripts.parity.harness import Case
 
 import server  # noqa: F401,E402
 from yfmcp.envelope import _envelope_tool_result  # noqa: E402
+from yfmcp.tools import fundamentals as fundamentals_tools  # noqa: E402
 from yfmcp.tools import news as news_tools  # noqa: E402
 from yfmcp.news.providers import yahoo as yahoo_provider  # noqa: E402
 
@@ -431,7 +432,7 @@ def _position_case(name: str, select, *, ticker="TST", ids=("Q14-N3",), via: str
     def py():
         async def call():
             stubs = {k: AsyncMock(return_value=json.dumps(v)) for k, v in payloads.items()}
-            with patch.multiple(server, **stubs):
+            with patch.multiple(fundamentals_tools, **stubs):
                 raw = await server.analyze_position_signals(ticker)
             return _envelope_tool_result("analyze_position_signals", raw)
         return asyncio.run(call())
@@ -499,7 +500,7 @@ def _py_consensus() -> dict:
     company = SimpleNamespace(
         fast_info=SimpleNamespace(last_price=129.9), analyst_price_targets={"mean": 150.0, "low": 100.0, "high": 200.0, "median": 150.0},
         upgrades_downgrades=pd.DataFrame(), recommendations_summary=trend, info={"numberOfAnalystOpinions": 3})
-    with patch.object(server.yf, "Ticker", lambda _t: company), patch.object(server, "_target_analyst_count", lambda _c: 3):
+    with patch.object(server.yf, "Ticker", lambda _t: company), patch.object(fundamentals_tools, "_target_analyst_count", lambda _c: 3):
         return asyncio.run(server.get_analyst_consensus("CNSNS"))
 
 

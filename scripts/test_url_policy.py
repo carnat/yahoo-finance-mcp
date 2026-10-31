@@ -836,6 +836,7 @@ class TestPythonUrlPolicy(unittest.TestCase):
     def test_evidence_tools_validate_the_ticker_first(self) -> None:
         import asyncio
         import server
+        from yfmcp.tools import fundamentals as fundamentals_tools
 
         class _SpyStore(es.MemoryStore):
             listed: list[str] = []
@@ -847,7 +848,7 @@ class TestPythonUrlPolicy(unittest.TestCase):
         store = _SpyStore()
         es.set_store_for_tests(store)
         try:
-            with patch.object(server, "_consensus_providers", side_effect=AssertionError("providers must not be called")):
+            with patch.object(fundamentals_tools, "_consensus_providers", side_effect=AssertionError("providers must not be called")):
                 results = [
                     json.loads(asyncio.run(server.get_eps_revisions("BAD/TICKER"))),
                     json.loads(asyncio.run(server.list_evidence_cuts("../ETC"))),

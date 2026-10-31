@@ -109,12 +109,13 @@ SERVER_BATCH_TOOLS = [
 class TestServerBatchConcurrency(unittest.TestCase):
     def test_server_batch_tools_run_three_tickers_at_a_time(self) -> None:
         import server
+        from yfmcp.tools import fundamentals as fundamentals_tools
 
         for name, extra in SERVER_BATCH_TOOLS:
             with self.subTest(tool=name):
                 original = getattr(server, name)
                 probe = _Probe()
-                with patch.object(server, name, probe.stub()):
+                with patch.object(fundamentals_tools, name, probe.stub()):
                     started = time.monotonic()
                     result = json.loads(asyncio.run(original(TICKERS, *extra)))
                     elapsed = time.monotonic() - started

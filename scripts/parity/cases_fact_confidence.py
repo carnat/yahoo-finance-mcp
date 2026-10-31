@@ -32,6 +32,7 @@ from scripts.parity.harness import Case
 import server  # noqa: E402
 from yfmcp import capital_structure as cs  # noqa: E402
 from yfmcp.envelope import _envelope_tool_result  # noqa: E402
+from yfmcp.tools import fundamentals as fundamentals_tools  # noqa: E402
 
 CASES: list[Case] = []
 
@@ -107,7 +108,7 @@ def _py_consensus_envelope() -> str:
         fast_info=SimpleNamespace(last_price=120.0),
         analyst_price_targets={"mean": 150.0, "low": 100.0, "high": 200.0, "median": 150.0},
         upgrades_downgrades=pd.DataFrame(), recommendations_summary=trend, info={"numberOfAnalystOpinions": 3})
-    with patch.object(server.yf, "Ticker", lambda _t: company), patch.object(server, "_target_analyst_count", lambda _c: 3):
+    with patch.object(server.yf, "Ticker", lambda _t: company), patch.object(fundamentals_tools, "_target_analyst_count", lambda _c: 3):
         raw = asyncio.run(server.get_analyst_consensus(_TICKER_A))
     return _envelope_tool_result("get_analyst_consensus", raw)
 

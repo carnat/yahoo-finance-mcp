@@ -311,8 +311,8 @@ def _python_outputs() -> dict:
         return json.loads(asyncio.run(coro))
 
     store = es.MemoryStore()
-    with patch("server._yahoo_consensus_snapshot", return_value=(yahoo, quote)), \
-            patch("server._fetch_alpha_vantage_json", new=AsyncMock(return_value=ProviderJsonResult(av, "OK", "https://www.alphavantage.co/query", True, "MISS", fetched_at=retrieved))), \
+    with patch("yfmcp.tools.fundamentals._yahoo_consensus_snapshot", return_value=(yahoo, quote)), \
+            patch("yfmcp.tools.fundamentals._fetch_alpha_vantage_json", new=AsyncMock(return_value=ProviderJsonResult(av, "OK", "https://www.alphavantage.co/query", True, "MISS", fetched_at=retrieved))), \
             patch("server._get_submissions_for_ticker", new=AsyncMock(return_value=("0001780312", subs))), \
             patch("server.extract_capital_structure", new=AsyncMock(return_value=failed)), \
             patch("server.extract_dilution_bridge", new=AsyncMock(return_value=failed)), \
