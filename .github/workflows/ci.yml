@@ -216,6 +216,9 @@ jobs:
       - name: Behaviour-contract parity harness (Python ↔ Worker)
         run: python scripts/test_parity_harness.py -v
 
+      - name: Python-only news tooling tests
+        run: python scripts/test_python_only_news_tooling.py -v
+
       - name: Historical prices contract tests (Worker and local)
         run: python scripts/test_historical_prices_contract.py -v
 

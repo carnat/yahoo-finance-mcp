@@ -131,18 +131,22 @@ async def _request_json(
             return json.loads(raw.decode("utf-8", errors="replace")), None, None, None
         except urllib.error.HTTPError as error:
             try:
-                raw = error.read(1_000_000)
-                body = raw.decode("utf-8", errors="replace")
+                body = error.read(1_000_000).decode("utf-8", errors="replace")
+            except Exception:
+                body = ""
+            message = body or str(error)
+            try:
                 parsed = json.loads(body)
+            except ValueError:
+                parsed = None
+            if isinstance(parsed, dict):
                 message = str(
                     parsed.get("error")
                     or parsed.get("message")
                     or parsed.get("Information")
                     or parsed.get("Note")
                     or body
-                ) if isinstance(parsed, dict) else body
-            except Exception:
-                message = str(error)
+                )
             retry_after = error.headers.get("Retry-After") if error.headers else None
             return None, error.code, message, retry_after
         except (TimeoutError, socket.timeout):
@@ -264,6 +268,11 @@ async def fetch_finnhub_json(
     )
     if result.status != "OK":
         return result
+    if not isinstance(result.payload, dict):
+        return ProviderJsonResult(
+            None, "PROVIDER_ERROR", public_url, result.provider_attempted, result.cache_status,
+            message="Finnhub returned a non-object payload.",
+        )
     fetched_at = result.fetched_at or _utc_now_iso()
     _store_result(
         key,

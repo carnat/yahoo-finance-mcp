@@ -327,6 +327,25 @@ def evaluate(case: Case, py_result: dict, ts_result: dict) -> list[str]:
     return problems
 
 
+# removed in 3.7.0 part B
+_PINNED_FINDING_ALLOW_LIST: frozenset[str] = frozenset({
+    "neutral.n3c.finding_analyst_count_source_totalanalysts_in_python_numberofanalysts_in_the_worker",  # D6
+    "major300.meta.press_releases_status_table_order_without_doctrine_use_or_decision_grade",  # D7
+    "major300.meta.extract_sec_filing_fact_status_table_order_without_doctrine_use_or_decision_grade",  # D7
+    "major300.meta.section_markdown_status_table_order_without_doctrine_use_or_decision_grade",  # D7
+})
+
+
+def pinned_decision_problems(cases: list[Case], allow: frozenset[str] | None = None) -> list[str]:
+    """Names of pinned cases with separate expect_py/expect_ts whose decision does not start with "INTENTIONAL"."""
+    allowed = _PINNED_FINDING_ALLOW_LIST if allow is None else allow
+    return [
+        c.name for c in cases
+        if c.mode == "pinned" and c.expect is _UNSET and c.name not in allowed
+        and not (c.decision or "").startswith("INTENTIONAL")
+    ]
+
+
 def load_cases() -> list[Case]:
     """Every CASES list in scripts/parity/cases_*.py, with names checked unique."""
     cases: list[Case] = []
@@ -339,6 +358,10 @@ def load_cases() -> list[Case]:
     dupes = {n for n in names if names.count(n) > 1}
     if dupes:
         raise ValueError(f"duplicate parity case names: {sorted(dupes)}")
+    unlabelled = pinned_decision_problems(cases)
+    if unlabelled:
+        raise ValueError("pinned cases with separate expect_py/expect_ts must have a decision starting with "
+                         f"'INTENTIONAL': {sorted(unlabelled)}")
     return cases
 
 

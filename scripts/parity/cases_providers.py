@@ -6,8 +6,8 @@ Every case runs the real tool code in both runtimes against routed fake upstream
   - expanded institutional ownership: provider_gaps.get_expanded_institutional_ownership / getExpandedInstitutionalOwnership
   - historical put/call ratio:         provider_gaps.get_historical_put_call_ratio / getHistoricalPutCallRatio
   - Companies House filings:           server.get_uk_company_filings / getUkCompanyFilings
-The cases pin today's output. Where the runtimes differ the case is `pinned` with `expect_py` / `expect_ts` and a
-`FINDING` decision note; nothing here is a repair.
+The cases pin today's output. A case where the runtimes intentionally differ is `pinned` with `expect_py` / `expect_ts`
+and an `INTENTIONAL` decision note. The D8-D14 provider divergences were aligned in 3.7.0 and are `equal` cases.
 
 Harness limits noticed while writing these (not production findings): the Python stub raises HTTPError with empty headers,
 so a `Retry-After` response header cannot reach `retryAfter` in Python; the cases leave retryAfter out. Both runtimes
@@ -117,9 +117,11 @@ def _code(v: dict):
     return err["code"] if err else _data(v).get("status")
 
 
-def _add(name, ids, py, ts, select, routes=None, expect=None, expect_py=None, expect_ts=None, finding=None, note=""):
+def _add(name, ids, py, ts, select, routes=None, expect=None, expect_py=None, expect_ts=None, finding=None, intentional=None, note=""):
     kw = {}
-    if finding:
+    if intentional:
+        kw.update(mode="pinned", decision="INTENTIONAL (3.7.0): " + intentional, expect_py=expect_py, expect_ts=expect_ts)
+    elif finding:
         kw.update(mode="pinned", decision="FINDING: " + finding, expect_py=expect_py, expect_ts=expect_ts)
     elif expect is not None:
         kw["expect"] = expect
@@ -244,9 +246,15 @@ _own("prv.ownership.data_key_is_read_when_it_is_the_first_list", ["BR-PRV-001"],
 _own("prv.ownership.zero_valued_finnhub_fields", ["BR-PRV-001"],
      routes={FH_OWN.format(sym="AAPL", limit=50): _fh([{"name": "Zero Holder", "share": 0, "shares": 7, "change": 0, "changePercent": 0, "filingDate": "2025-03-31"}])},
      select=lambda v: _view(holders=True)(v)["holders"],
-     finding="Finnhub row fields equal to 0: Python's `or` chain skips a 0 (share 0 falls through to shares=7; change 0 and changePercent 0 are dropped); the Worker's `??` keeps the 0",
-     expect_py=[{"holderName": "Zero Holder", "sharesHeld": 7, "reportDate": "2025-03-31"}],
-     expect_ts=[{"holderName": "Zero Holder", "sharesHeld": 0, "sharesChanged": 0, "sharesChangedPct": 0, "reportDate": "2025-03-31"}])
+     expect=[{"holderName": "Zero Holder", "sharesHeld": 0, "sharesChanged": 0, "sharesChangedPct": 0, "reportDate": "2025-03-31"}])
+_own("prv.ownership.null_share_falls_through_to_shares", ["BR-PRV-001"],
+     routes={FH_OWN.format(sym="AAPL", limit=50): _fh([{"name": "Null Holder", "share": None, "shares": 7, "change": None, "sharesChanged": 3, "filingDate": "2025-03-31"}])},
+     select=lambda v: _view(holders=True)(v)["holders"],
+     expect=[{"holderName": "Null Holder", "sharesHeld": 7, "sharesChanged": 3, "reportDate": "2025-03-31"}])
+_own("prv.ownership.blank_string_finnhub_numbers_are_dropped", ["BR-PRV-001"],
+     routes={FH_OWN.format(sym="AAPL", limit=50): _fh([{"name": "Blank Holder", "share": " ", "change": "", "changePercent": "0", "filingDate": "2025-03-31"}])},
+     select=lambda v: _view(holders=True)(v)["holders"],
+     expect=[{"holderName": "Blank Holder", "sharesChangedPct": 0, "reportDate": "2025-03-31"}])
 _own("prv.ownership.max_holders_zero_is_rejected", ["BR-PRV-001"], max_holders=0, select=_view(),
      expect={"error": True, "code": "INPUT_VALIDATION_ERROR", "message": "max_holders must be an integer from 1 through 100."})
 
@@ -297,35 +305,19 @@ _own("prv.status.not_eligible_next_action", ["BR-PRV-007", "BR-PRV-011"], ticker
 _own("prv.status.finnhub_non_json_200_body", ["BR-PRV-005"], routes={FH50: {"body": "<html>"}}, select=_brief,
      expect=["PROVIDER_ERROR", "RETRY_OR_USE_PRIMARY_PROVIDER", [["finnhub", "PROVIDER_ERROR", True, None]]])
 
-# FINDINGs: Python reads the error body only when it is JSON; the Worker uses the raw body text.
+# Error bodies: a JSON object reports its error text, any other body is used as the message (aligned in 3.7.0).
 _own("prv.status.finnhub_json_error_body_message", ["BR-PRV-005"], routes={FH50: _err(403, NO_ACCESS)}, select=_view(detail=True),
-     finding="Finnhub JSON error body: Python reports the parsed error text as the attempt message, the Worker the raw JSON text",
-     expect_py={"status": "ENTITLEMENT_REQUIRED", "source": None, "providerGapFilled": False, "capacityClass": "ENTITLEMENT_DEPENDENT", "decisionGrade": False,
+     expect={"status": "ENTITLEMENT_REQUIRED", "source": None, "providerGapFilled": False, "capacityClass": "ENTITLEMENT_DEPENDENT", "decisionGrade": False,
                 "evidenceClass": "CONTEXTUAL_PROVIDER_DATA", "alphaFallbackAllowed": False, "recommendedNextAction": "USE_ALPHA_VANTAGE_EXPLICITLY",
                 "attempts": [{"provider": "finnhub", "status": "ENTITLEMENT_REQUIRED", "attempted": True, "httpStatus": 403, "cacheStatus": "MISS",
-                              "url": "https://finnhub.io/api/v1/stock/ownership?symbol=AAPL&limit=50", "message": NO_ACCESS}]},
-     expect_ts={"status": "ENTITLEMENT_REQUIRED", "source": None, "providerGapFilled": False, "capacityClass": "ENTITLEMENT_DEPENDENT", "decisionGrade": False,
-                "evidenceClass": "CONTEXTUAL_PROVIDER_DATA", "alphaFallbackAllowed": False, "recommendedNextAction": "USE_ALPHA_VANTAGE_EXPLICITLY",
-                "attempts": [{"provider": "finnhub", "status": "ENTITLEMENT_REQUIRED", "attempted": True, "httpStatus": 403, "cacheStatus": "MISS",
-                              "url": "https://finnhub.io/api/v1/stock/ownership?symbol=AAPL&limit=50", "message": {"error": NO_ACCESS}}]})
+                              "url": "https://finnhub.io/api/v1/stock/ownership?symbol=AAPL&limit=50", "message": NO_ACCESS}]})
 _own("prv.status.finnhub_plain_text_403_no_access", ["BR-PRV-005", "BR-PRV-007"], routes={FH50: {"status": 403, "body": NO_ACCESS}}, select=_view(detail=True),
-     finding="Plain-text HTTP error body: Python replaces the body with the HTTP reason phrase before mapping the status, so the card's 403 'access to this resource' is AUTH_ERROR "
-             "(CHECK_PROVIDER_CREDENTIALS) in Python and ENTITLEMENT_REQUIRED (USE_ALPHA_VANTAGE_EXPLICITLY) in the Worker",
-     expect_py={"status": "AUTH_ERROR", "source": None, "providerGapFilled": False, "capacityClass": "ENTITLEMENT_DEPENDENT", "decisionGrade": False,
-                "evidenceClass": "CONTEXTUAL_PROVIDER_DATA", "alphaFallbackAllowed": False, "recommendedNextAction": "CHECK_PROVIDER_CREDENTIALS",
-                "attempts": [{"provider": "finnhub", "status": "AUTH_ERROR", "attempted": True, "httpStatus": 403, "cacheStatus": "MISS",
-                              "url": "https://finnhub.io/api/v1/stock/ownership?symbol=AAPL&limit=50", "message": "HTTP Error 403: stubbed"}]},
-     expect_ts={"status": "ENTITLEMENT_REQUIRED", "source": None, "providerGapFilled": False, "capacityClass": "ENTITLEMENT_DEPENDENT", "decisionGrade": False,
+     expect={"status": "ENTITLEMENT_REQUIRED", "source": None, "providerGapFilled": False, "capacityClass": "ENTITLEMENT_DEPENDENT", "decisionGrade": False,
                 "evidenceClass": "CONTEXTUAL_PROVIDER_DATA", "alphaFallbackAllowed": False, "recommendedNextAction": "USE_ALPHA_VANTAGE_EXPLICITLY",
                 "attempts": [{"provider": "finnhub", "status": "ENTITLEMENT_REQUIRED", "attempted": True, "httpStatus": 403, "cacheStatus": "MISS",
                               "url": "https://finnhub.io/api/v1/stock/ownership?symbol=AAPL&limit=50", "message": NO_ACCESS}]})
 _own("prv.status.finnhub_non_object_payload", ["BR-PRV-005"], routes={FH50: {"json": []}}, select=_view(detail=True),
-     finding="Finnhub 200 with a non-object JSON body: Python reports status OK on the attempt and NOT_FOUND overall; the Worker reports PROVIDER_ERROR with a message",
-     expect_py={"status": "NOT_FOUND", "source": None, "providerGapFilled": False, "capacityClass": "ENTITLEMENT_DEPENDENT", "decisionGrade": False,
-                "evidenceClass": "CONTEXTUAL_PROVIDER_DATA", "alphaFallbackAllowed": False, "recommendedNextAction": "VERIFY_SEC_13F_OR_ENABLE_SCARCE_FALLBACK",
-                "attempts": [{"provider": "finnhub", "status": "OK", "attempted": True, "cacheStatus": "MISS",
-                              "url": "https://finnhub.io/api/v1/stock/ownership?symbol=AAPL&limit=50"}]},
-     expect_ts={"status": "PROVIDER_ERROR", "source": None, "providerGapFilled": False, "capacityClass": "ENTITLEMENT_DEPENDENT", "decisionGrade": False,
+     expect={"status": "PROVIDER_ERROR", "source": None, "providerGapFilled": False, "capacityClass": "ENTITLEMENT_DEPENDENT", "decisionGrade": False,
                 "evidenceClass": "CONTEXTUAL_PROVIDER_DATA", "alphaFallbackAllowed": False, "recommendedNextAction": "RETRY_OR_USE_PRIMARY_PROVIDER",
                 "attempts": [{"provider": "finnhub", "status": "PROVIDER_ERROR", "attempted": True, "cacheStatus": "MISS",
                               "url": "https://finnhub.io/api/v1/stock/ownership?symbol=AAPL&limit=50", "message": "Finnhub returned a non-object payload."}]})
@@ -338,7 +330,7 @@ def _repeat(v):
 
 _own("prv.status.repeat_call_after_entitlement_refusal", ["BR-PRV-005"], ticker=["AAPL", "MSFT"],
      routes={"https://finnhub.io/api/v1/stock/ownership?*": _err(403, NO_ACCESS)}, select=_repeat,
-     finding="Entitlement refusals: the Worker remembers a Finnhub 403 per endpoint (6 h) and answers the next symbol without a request (attempted false, HIT_PROCESS); Python asks again",
+     intentional="the Worker remembers a Finnhub 403 per endpoint (6 h) and answers the next symbol without a request, protecting the shared key quota; Python asks again",
      expect_py=[{"status": "ENTITLEMENT_REQUIRED", "action": "USE_ALPHA_VANTAGE_EXPLICITLY", "attempt": [True, "MISS"]},
                 {"status": "ENTITLEMENT_REQUIRED", "action": "USE_ALPHA_VANTAGE_EXPLICITLY", "attempt": [True, "MISS"]}],
      expect_ts=[{"status": "ENTITLEMENT_REQUIRED", "action": "USE_ALPHA_VANTAGE_EXPLICITLY", "attempt": [True, "MISS"]},
@@ -425,24 +417,21 @@ _pc("prv.putcall.empty_ticker_is_rejected", ["BR-PRV-004"], ticker="", env={}, s
 _pc("prv.putcall.day_after_the_floor_is_accepted", ["BR-PRV-010"], date="2008-01-02", routes={AV_PC.format(sym="AAPL", date="2008-01-02"): {"json": {"put_call_ratio_full_chain": "0.7"}}},
     select=lambda v: [_data(v)["status"], _data(v)["dataDate"]], expect=["OK", "2008-01-02"])
 
-_pc("prv.putcall.date_before_floor_message", ["BR-PRV-010"], date="2007-12-31", env={}, select=lambda v: _error(v),
-    finding="Date window error text: Python 'date must be later than 2008-01-01. Use summarize_options_flow ...' for a floor miss; the Worker one combined text 'date must be a valid YYYY-MM-DD after 2008-01-01 and not in the future. ...' for every date fault",
-    expect_py={"error": True, "code": "INPUT_VALIDATION_ERROR",
-               "message": "date must be later than 2008-01-01. Use summarize_options_flow for a current Yahoo options snapshot."},
-    expect_ts={"error": True, "code": "INPUT_VALIDATION_ERROR",
-               "message": "date must be a valid YYYY-MM-DD after 2008-01-01 and not in the future. Use summarize_options_flow for a current Yahoo options snapshot."})
-_pc("prv.putcall.compact_iso_date", ["BR-PRV-004", "BR-PRV-010"], date="20240315", routes={PC: {"json": PC_OK}},
-    select=lambda v: _error(v) or [_data(v)["status"], _data(v)["dataDate"]],
-    finding="Date format: Python (3.11 date.fromisoformat) accepts '20240315' as 2024-03-15 and calls Alpha; the Worker requires dashes and rejects it with INPUT_VALIDATION_ERROR",
-    expect_py=["OK", "2024-03-15"],
-    expect_ts={"error": True, "code": "INPUT_VALIDATION_ERROR",
-               "message": "date must be a valid YYYY-MM-DD after 2008-01-01 and not in the future. Use summarize_options_flow for a current Yahoo options snapshot."})
+_DATE_ERROR = {"error": True, "code": "INPUT_VALIDATION_ERROR",
+               "message": "date must be a valid YYYY-MM-DD after 2008-01-01 and not in the future. Use summarize_options_flow for a current Yahoo options snapshot."}
+_pc("prv.putcall.date_before_floor_message", ["BR-PRV-010"], date="2007-12-31", env={}, select=lambda v: _error(v), expect=_DATE_ERROR)
+_pc("prv.putcall.future_date_message", ["BR-PRV-010"], date="2999-01-01", env={}, select=lambda v: _error(v), expect=_DATE_ERROR)
+_pc("prv.putcall.bad_format_message", ["BR-PRV-010"], date="yesterday", env={}, select=lambda v: _error(v), expect=_DATE_ERROR)
+_pc("prv.putcall.compact_iso_date", ["BR-PRV-004", "BR-PRV-010"], date="20240315", routes={PC: {"json": PC_OK}}, select=lambda v: _error(v), expect=_DATE_ERROR)
+_pc("prv.putcall.unpadded_month_day_date_is_refused", ["BR-PRV-010"], date="2024-3-15", env={}, select=lambda v: _error(v), expect=_DATE_ERROR)
 _pc("prv.putcall.blank_string_ratio", ["BR-PRV-004"],
     routes={PC: {"json": {"symbol": "AAPL", "date": "2024-03-15", "put_call_ratio_full_chain": "", "put_call_ratio_by_expiration": [{"date": "2024-03-22", "value": " "}]}}},
     select=lambda v: [_data(v)["status"], _data(v).get("putCallRatioFullChain"), _data(v).get("byExpiration")],
-    finding="Blank numeric strings: Python treats '' / ' ' as no number (full chain null; row dropped; empty result is PROVIDER_ERROR); the Worker's Number('') is 0, so it reports status OK with ratio 0 and a 0 row",
-    expect_py=["PROVIDER_ERROR", None, None],
-    expect_ts=["OK", 0, [{"expirationDate": "2024-03-22", "putCallRatio": 0}]])
+    expect=["PROVIDER_ERROR", None, None])
+_pc("prv.putcall.zero_string_ratio_is_zero", ["BR-PRV-004"],
+    routes={PC: {"json": {"symbol": "AAPL", "date": "2024-03-15", "put_call_ratio_full_chain": "0", "put_call_ratio_by_expiration": [{"date": "2024-03-22", "value": "0"}]}}},
+    select=lambda v: [_data(v)["status"], _data(v).get("putCallRatioFullChain"), _data(v).get("byExpiration")],
+    expect=["OK", 0, [{"expirationDate": "2024-03-22", "putCallRatio": 0}]])
 
 # BR-PRV-005 / 007 / 011: Alpha Vantage failure mapping through the put/call tool
 for _n, _route, _ids, _exp, _act, _http in [
