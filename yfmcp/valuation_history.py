@@ -35,6 +35,8 @@ US_GAAP: dict = {
     "revenue": list(REVENUE_CONCEPTS),
     "operatingIncome": ["OperatingIncomeLoss"],
     "netIncome": ["NetIncomeLoss", "ProfitLoss"],
+    # ProfitLoss includes the noncontrolling interests; this concept is taken off it (3.7.0, C2).
+    "netIncomeNci": "NetIncomeLossAttributableToNoncontrollingInterest",
     "depreciationAmortization": [["DepreciationDepletionAndAmortization"], ["DepreciationAndAmortization"], ["DepreciationAmortizationAndAccretionNet"],
                                  ["Depreciation", "AmortizationOfIntangibleAssets"]],
     "cash": ["CashAndCashEquivalentsAtCarryingValue", "Cash"],
@@ -54,6 +56,7 @@ IFRS: dict = {
     "revenue": ["Revenue", "RevenueFromContractsWithCustomers"],
     "operatingIncome": ["ProfitLossFromOperatingActivities"],
     "netIncome": ["ProfitLossAttributableToOwnersOfParent", "ProfitLoss"],
+    "netIncomeNci": "ProfitLossAttributableToNonControllingInterests",
     "depreciationAmortization": [["DepreciationAndAmortisationExpense"], ["DepreciationExpense", "AmortisationExpense"]],
     "cash": ["CashAndCashEquivalents"],
     "shortTermInvestments": [],
@@ -165,8 +168,34 @@ def _facts_for(tax: dict | None, concepts: list[str], unit: str, as_of: str) -> 
 
 
 def _component(f: dict, sign: int = 1) -> dict:
-    return {"concept": f["concept"], "periodStart": f["start"], "periodEnd": f["end"], "value": f["val"], "sign": sign, "form": f["form"],
-            "filed": f["filed"], "accessionNumber": f["accn"]}
+    return {"concept": f["concept"], "periodStart": f["start"], "periodEnd": f["end"], "value": f.get("profitLoss", f["val"]), "sign": sign,
+            "form": f["form"], "filed": f["filed"], "accessionNumber": f["accn"]}
+
+
+def _components(f: dict, sign: int = 1) -> list[dict]:
+    """A fact's components: a parent figure derived from ProfitLoss shows the ProfitLoss part and the NCI part (opposite sign)."""
+    nci = f.get("nci")
+    return [_component(f, sign)] if nci is None else [_component(f, sign), _component(nci, -sign)]
+
+
+def _parent_net_income_facts(tax: dict | None, mapping: dict, unit: str, as_of: str) -> list[dict]:
+    """Net income facts as the parent's figure (3.7.0, C2): a ProfitLoss fact keeps only with the NCI fact of the same unit, accn,
+    start and end, and its value becomes ProfitLoss - NCI; one without it is dropped (not tagged)."""
+    out: list[dict] = []
+    nci_concept = mapping["netIncomeNci"]
+    nci_rows = (((tax or {}).get(nci_concept) or {}).get("units") or {}).get(unit) or []
+    for f in _facts_for(tax, mapping["netIncome"], unit, as_of):
+        if f["concept"] != "ProfitLoss":
+            out.append(f)
+            continue
+        hit = next((n for n in nci_rows if isinstance(f["accn"], str) and n.get("accn") == f["accn"] and n.get("end") == f["end"]
+                    and (n.get("start") if isinstance(n.get("start"), str) else None) == f["start"] and _num(n.get("val"))), None)
+        if hit is None:
+            continue
+        nci = {"concept": nci_concept, "start": f["start"], "end": f["end"], "val": hit["val"], "filed": hit.get("filed"),
+               "form": hit.get("form"), "accn": hit["accn"]}
+        out.append({**f, "val": f["val"] - hit["val"], "profitLoss": f["val"], "nci": nci})
+    return out
 
 
 def _is_annual(f: dict) -> bool:
@@ -186,7 +215,7 @@ def flow_bases(facts: list[dict]) -> dict:
         missing = {"status": "NOT_AVAILABLE", "value": None, "reason": "NO_ANNUAL_PERIOD_FILED"}
         return {"LFY": missing, "LTM": missing}
     lfy_out = {"status": "OK", "value": lfy["val"], "periodStart": lfy["start"], "periodEnd": lfy["end"], "method": "REPORTED_FISCAL_YEAR",
-               "components": [_component(lfy)]}
+               "components": _components(lfy)}
     later = [f for f in durations if f["end"] > lfy["end"]]
     if not later:
         return {"LFY": lfy_out, "LTM": {**lfy_out, "method": "LAST_FISCAL_YEAR_IS_LATEST"}}
@@ -211,7 +240,7 @@ def flow_bases(facts: list[dict]) -> dict:
             "periodStart": None,
             "periodEnd": ytd["end"],
             "method": "LFY_PLUS_YTD_MINUS_PRIOR_YTD",
-            "components": [_component(lfy), _component(ytd), _component(prior, -1)],
+            "components": [*_components(lfy), *_components(ytd), *_components(prior, -1)],
         },
     }
 
@@ -712,7 +741,7 @@ def valuation_at_date(inp: dict, date: str, taxonomy: str, currency: str) -> dic
 
     revenue = flow_bases(_facts_for(tax, mapping["revenue"], currency, date))
     oi = flow_bases(_facts_for(tax, mapping["operatingIncome"], currency, date))
-    ni = flow_bases(_facts_for(tax, mapping["netIncome"], currency, date))
+    ni = flow_bases(_parent_net_income_facts(tax, mapping, currency, date))
     da = _da_for(tax, mapping, currency, date, oi)
     only = mapping.get("depreciationOnly")
     if only and any(da[k]["value"]["status"] == "OK" and da[k]["concepts"] == [only["depreciation"]] for k in ("LTM", "LFY")):

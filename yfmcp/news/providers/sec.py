@@ -63,6 +63,16 @@ _FORM4_TRANSACTION_LABELS = {
 }
 
 
+_FORM4_CODE_FOOTNOTES_RE = _re.compile(r"(?:\s*\(\d+\))+\s*$")
+
+
+def _form4_code(value: str | None) -> str | None:
+    """A transaction code without its trailing footnote marks ("S(1)", "G (2)", "S(1)(2)" -> "S", "G", "S"); None when nothing is left."""
+    if value is None:
+        return None
+    return _FORM4_CODE_FOOTNOTES_RE.sub("", value).strip() or None
+
+
 def _form4_num(value: str | None) -> float | None:
     if value is None:
         return None
@@ -139,7 +149,7 @@ def _parse_form4_html_transactions(html_text: str) -> list[dict]:
             for row in _parse_html_table(table_html):
                 if len(row) < 10:
                     continue
-                code = row[3].strip().upper()
+                code = _form4_code(row[3].strip().upper())
                 shares = _form4_num(row[5])
                 if not code or shares is None:
                     continue
@@ -156,7 +166,7 @@ def _parse_form4_html_transactions(html_text: str) -> list[dict]:
             for row in _parse_html_table(table_html):
                 if len(row) < 15:
                     continue
-                code = row[4].strip().upper()
+                code = _form4_code(row[4].strip().upper())
                 shares = _form4_num(row[6])
                 if not code or shares is None:
                     continue
@@ -188,6 +198,7 @@ def _form4_transaction_payload(
     ownership_form: str | None,
     transaction_date: str | None,
 ) -> dict:
+    code = _form4_code(code)
     return {
         "owner": owner_name,
         "role": role,

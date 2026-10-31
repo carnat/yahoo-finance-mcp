@@ -61,6 +61,13 @@ class TestParityHarnessSelf(unittest.TestCase):
         self.assertEqual(harness.evaluate(case, {"ok": True, "value": {"a": 1}}, {"ok": True, "value": {"a": 2}}), [])
         self.assertTrue(harness.evaluate(case, {"ok": True, "value": {"a": 1}}, {"ok": True, "value": {"a": 1}}))
 
+    def test_pinned_case_without_intentional_label_is_reported(self):
+        def case(name, decision):
+            return harness.Case(name=name, ids=["X"], py=lambda: 1, ts={"js": "return 2;"}, mode="pinned",
+                                decision=decision, expect_py=1, expect_ts=2)
+        cases = [case("a", "FINDING: x"), case("b", "INTENTIONAL (3.7.0): reason"), case("c", "FINDING: y")]
+        self.assertEqual(harness.pinned_decision_problems(cases, frozenset({"c"})), ["a"])
+
     def test_canonical_number_and_key_order(self):
         self.assertEqual(harness.canonical({"b": 1.0, "a": [2.5, float("nan")]}), {"a": [2.5, "NaN"], "b": 1})
 

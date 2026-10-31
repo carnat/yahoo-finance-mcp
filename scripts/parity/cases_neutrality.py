@@ -409,7 +409,7 @@ POSITION_ROUTES = {
 # What the stubbed Python components return: the same market as the canned Worker responses above.
 PY_COMPONENTS = {
     "get_analyst_upgrade_radar": {"netSentiment": 0, "upgrades": 0, "downgrades": 0, "initiations": 0},
-    "get_analyst_consensus": {"dominantRating": "buy", "totalAnalysts": 7, "numberOfAnalysts": 7},
+    "get_analyst_consensus": {"dominantRating": "buy", "numberOfAnalysts": 7},
     # 300 sessions cover the 1-year CAGR window only, so price stats carry two INSUFFICIENT_HISTORY rows (3.1.0).
     "get_price_stats": {"lastPrice": 129.9, "yearHigh": 129.9, "yearLow": 100, "pctFromYearHigh": 0, "pctFromYearLow": 29.9,
                         "priceTimestamp": "2026-10-09T20:00:00Z",
@@ -488,9 +488,8 @@ CASES += [
 ]
 
 
-# analystCount source. Python reads consensus.totalAnalysts, the Worker reads consensus.numberOfAnalysts. Both name the
-# rating count today, because each runtime's consensus tool emits the field its own position tool reads; Python emits
-# both names, the Worker only numberOfAnalysts. Function level, on a recommendation trend of 2+3+1+1+0 = 7 ratings and
+# analystCount source (3.7.0, D6): both runtimes read consensus.numberOfAnalysts, the rating count; Python no longer emits
+# the deprecated totalAnalysts. Function level, on a recommendation trend of 2+3+1+1+0 = 7 ratings and
 # a price-target contributor count of 3.
 from types import SimpleNamespace  # noqa: E402
 
@@ -505,14 +504,13 @@ def _py_consensus() -> dict:
 
 
 CASES.append(Case(
-    name="neutral.n3c.finding_analyst_count_source_totalanalysts_in_python_numberofanalysts_in_the_worker", ids=["Q14-N3"],
+    name="neutral.n3c.analyst_count_is_numberofanalysts_in_both", ids=["Q14-N3"],
     py=_py_consensus,
     ts={"js": _ts_with_clock(GATE_NOW, 'return JSON.parse(await m.yahooFinance.getAnalystConsensus("CNSNS"));'), "isolate": True},
     routes={**YAHOO_AUTH_ROUTES, "https://query1.finance.yahoo.com/v10/finance/quoteSummary/CNSNS?*": {"json": _POS_SUMMARY}},
     select=lambda v: {"ratingCount": v.get("ratingCount"), "numberOfAnalysts": v.get("numberOfAnalysts"),
-                      "totalAnalysts": v.get("totalAnalysts"), "targetContributors": v["priceTargets"]["numberOfAnalysts"]},
-    mode="pinned", decision=_POS_DECISION,
-    expect_py={"ratingCount": 7, "numberOfAnalysts": 7, "totalAnalysts": 7, "targetContributors": 3},
-    expect_ts={"ratingCount": 7, "numberOfAnalysts": 7, "totalAnalysts": None, "targetContributors": 3}))
+                      "hasTotalAnalysts": "totalAnalysts" in v, "targetContributors": v["priceTargets"]["numberOfAnalysts"]},
+    mode="equal", decision="3.7.0 D6",
+    expect={"ratingCount": 7, "numberOfAnalysts": 7, "hasTotalAnalysts": False, "targetContributors": 3}))
 
 

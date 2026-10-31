@@ -48,6 +48,14 @@ def _number(value: object) -> float | int | None:
     return int(number) if number.is_integer() else number
 
 
+def _first_present(row: dict[str, object], *keys: str) -> object:
+    """First key whose value is not None (the Worker's `??` chain); 0 and "" are kept."""
+    for key in keys:
+        if row.get(key) is not None:
+            return row[key]
+    return None
+
+
 def _attempt(provider: str, result: ProviderJsonResult) -> dict[str, object]:
     attempt: dict[str, object] = {
         "provider": provider,
@@ -104,15 +112,22 @@ def _provider_failure_payload(
     }
 
 
+_HISTORICAL_DATE_ERROR = (
+    "date must be a valid YYYY-MM-DD after 2008-01-01 and not in the future. "
+    "Use summarize_options_flow for a current Yahoo options snapshot."
+)
+
+
 def _validate_historical_date(value: str) -> datetime.date:
+    text = str(value).strip()
+    if not _re.fullmatch(r"\d{4}-\d{2}-\d{2}", text, _re.ASCII):
+        raise ValueError(_HISTORICAL_DATE_ERROR)
     try:
-        parsed = datetime.date.fromisoformat(str(value))
+        parsed = datetime.date.fromisoformat(text)
     except ValueError as error:
-        raise ValueError("date must use YYYY-MM-DD format.") from error
-    if parsed <= datetime.date(2008, 1, 1):
-        raise ValueError("date must be later than 2008-01-01.")
-    if parsed > datetime.datetime.now(datetime.timezone.utc).date():
-        raise ValueError("date must not be in the future.")
+        raise ValueError(_HISTORICAL_DATE_ERROR) from error
+    if parsed <= datetime.date(2008, 1, 1) or parsed > datetime.datetime.now(datetime.timezone.utc).date():
+        raise ValueError(_HISTORICAL_DATE_ERROR)
     return parsed
 
 
@@ -140,7 +155,7 @@ async def get_historical_put_call_ratio(
         return _mcp_failure(
             tool,
             ErrorCode.INPUT_VALIDATION_ERROR,
-            f"{error} Use summarize_options_flow for a current Yahoo options snapshot.",
+            str(error),
         )
 
     ticker_u = ticker.upper()
@@ -261,9 +276,9 @@ def _ownership_rows(payload: dict[str, object], provider: str) -> list[dict[str,
         else:
             normalized = {
                 "holderName": row.get("name") or row.get("holder") or row.get("holderName"),
-                "sharesHeld": _number(row.get("share") or row.get("shares") or row.get("sharesHeld")),
-                "sharesChanged": _number(row.get("change") or row.get("sharesChanged")),
-                "sharesChangedPct": _number(row.get("changePercent") or row.get("sharesChangedPct")),
+                "sharesHeld": _number(_first_present(row, "share", "shares", "sharesHeld")),
+                "sharesChanged": _number(_first_present(row, "change", "sharesChanged")),
+                "sharesChangedPct": _number(_first_present(row, "changePercent", "sharesChangedPct")),
                 "reportDate": row.get("filingDate") or row.get("reportDate") or row.get("date"),
             }
         compact = {

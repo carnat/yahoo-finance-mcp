@@ -36,6 +36,7 @@ CASES: list[Case] = []
 DECISION = "R3C-python-mirror"
 BATCH_DECISION = ("Python batch per-ticker work runs through yfinance (uncounted); "
                   "the subrequest limit is a Worker runtime limit")
+INTENTIONAL_BATCH_DECISION = "INTENTIONAL (3.7.0): the Worker stops a batch at the Cloudflare subrequest cap; Python has no such cap. " + BATCH_DECISION
 
 # The Worker body: the news cases' frozen clock and fake env, plus a root scope with part of the budget spent.
 _BUDGET_TOOL_JS = """
@@ -173,7 +174,7 @@ CASES += [
     Case(name="budget.batch.stops_partway_with_per_ticker_code", ids=["R3C-BUDGET-002"],
          py=_python_batch,
          ts={"js": _BATCH_JS, "fx": {"spent": 42}, "isolate": True},
-         routes=_PROFILE_ROUTES, mode="pinned", decision=BATCH_DECISION, select=_batch_view,
+         routes=_PROFILE_ROUTES, mode="pinned", decision=INTENTIONAL_BATCH_DECISION, select=_batch_view,
          expect_py={"AAPL": {"failed": False}, "MSFT": {"failed": False}, "batchMeta": None},
          expect_ts={"AAPL": {"failed": False},
                     "MSFT": {"failed": True, "code": "PROVIDER_BUDGET_EXHAUSTED", "retryable": True, "recoveryAction": "RETRY_LATER"},

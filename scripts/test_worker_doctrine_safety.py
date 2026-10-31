@@ -322,17 +322,18 @@ class TestWorkerDoctrineSafety(unittest.TestCase):
 
     def test_reliability_class_is_the_same_in_both_runtimes_and_doctrine_use_is_gone(self) -> None:
         """3.0.0: doctrineUse and meta.decisionGrade are removed; reliabilityClass is a plain value in both runtimes."""
-        from yfmcp.deprecations import TOOL_RELIABILITY_CLASS
+        from yfmcp.deprecations import TOOL_RELIABILITY_STATUS
 
+        classes = {tool: entry["reliabilityClass"] for tool, entry in TOOL_RELIABILITY_STATUS.items()}
         self.assertEqual(
-            TOOL_RELIABILITY_CLASS,
+            classes,
             {"get_sec_filing_section_markdown": "UNRELIABLE", "get_company_press_releases": "RELIABLE", "extract_sec_filing_fact": "RELIABLE"},
         )
         # The three tools of the Worker's status table, with their reliabilityClass.
         tools = _tools_source()
         table = find_definition("worker", "TOOL_RELIABILITY_STATUS").text
         worker_status = dict(re.findall(r'(\w+): \{[^{}]*?reliabilityClass: "(\w+)"', table))
-        self.assertEqual(worker_status, TOOL_RELIABILITY_CLASS)
+        self.assertEqual(worker_status, classes)
         self.assertNotRegex(table, re.compile(r"^\s+decisionGrade:", re.M))
         worker = _yahoo_worker_source()
         self.assertIn('reliabilityClass: "RELIABLE",\n    failureMode: payloadDecisionGrade', worker)
@@ -342,8 +343,8 @@ class TestWorkerDoctrineSafety(unittest.TestCase):
         self.assertIn("metaExtra: { ...status }", tools)
         # Every Python runtime module, wherever get_company_press_releases and the section tool live.
         python = python_runtime_source()
-        self.assertIn('"reliabilityClass": _TOOL_RELIABILITY_CLASS["get_company_press_releases"]', python)
-        self.assertIn('"reliabilityClass": _TOOL_RELIABILITY_CLASS["get_sec_filing_section_markdown"]', python)
+        self.assertIn('"reliabilityClass": _TOOL_RELIABILITY_STATUS["get_company_press_releases"]["reliabilityClass"]', python)
+        self.assertIn('"reliabilityClass": _TOOL_RELIABILITY_STATUS["get_sec_filing_section_markdown"]["reliabilityClass"]', python)
         self.assertNotIn("reliability_class_for", python)
         self.assertNotIn("RELIABILITY_CLASS_BY_DOCTRINE_USE", python)
         # Neither runtime names doctrineUse anywhere, in code or comments.

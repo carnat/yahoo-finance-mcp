@@ -1120,6 +1120,7 @@ def _pit_ni(name, ids, ni_rows, date, expect) -> Case:
     return _hv(name, ids, _inp(facts, date=date), select=_NI_SEL, expect=expect)
 
 
+_NCI = "NetIncomeLossAttributableToNoncontrollingInterest"
 _NI22 = lambda val, filed, accn, form="10-K": _f("2022-01-01", "2022-12-31", val, form, filed, accn)  # noqa: E731
 
 PIT_CASES = [
@@ -1157,9 +1158,103 @@ PIT_CASES = [
              "denominators.LFY.netIncome.components.0.filed": "2023-02-01"}),
     # The lower-priority concept is used only while the higher one has nothing filed by the date.
     _pit_ni("val.hist.pit.lower_priority_concept_used_until_listed_first_is_filed", ["BR-VAL-027", "BR-VAL-026"],
-            {"NetIncomeLoss": [_NI22(100 * M, "2023-07-01", "k22b", "10-K/A")], "ProfitLoss": [_NI22(110 * M, "2023-05-01", "k22a", "10-K/A")]}, "2023-06-01",
-            {"denominators.LFY.netIncome.status": "OK", "denominators.LFY.netIncome.value": 110 * M, "denominators.LFY.netIncome.components.0.concept": "ProfitLoss",
+            {"NetIncomeLoss": [_NI22(100 * M, "2023-07-01", "k22b", "10-K/A")], "ProfitLoss": [_NI22(110 * M, "2023-05-01", "k22a", "10-K/A")],
+             _NCI: [_NI22(5 * M, "2023-05-01", "k22a", "10-K/A")]}, "2023-06-01",
+            {"denominators.LFY.netIncome.status": "OK", "denominators.LFY.netIncome.value": 105 * M, "denominators.LFY.netIncome.components.0.concept": "ProfitLoss",
              "denominators.LFY.netIncome.components.0.filed": "2023-05-01"}),
+]
+
+
+# ───────────────────────────────────────────────────────────────── parent net income from ProfitLoss in the historical context (3.7.0, C2)
+
+_IFRS_NCI_C = "ProfitLossAttributableToNonControllingInterests"
+_C2_DECIDED = dict(decision="3.7.0 C2, owner 2026-10-31")
+_C2_SEL = _psel("denominators.LFY.netIncome.status", "denominators.LFY.netIncome.value", "denominators.LFY.netIncome.reason",
+                "denominators.LTM.netIncome.status", "denominators.LTM.netIncome.value", "denominators.LTM.netIncome.components",
+                "multiples.LTM.priceToEarnings.status", "multiples.LTM.priceToEarnings.value", "multiples.LTM.priceToEarnings.denominatorConcepts")
+
+
+def _ni_rows(parts):
+    """FY2024, H1 2025 and H1 2024 rows (10-K k24, 10-Q q225) for three values."""
+    return [_f("2024-01-01", "2024-12-31", parts[0], *K24), _f("2025-01-01", "2025-06-30", parts[1], *Q225), _f("2024-01-01", "2024-06-30", parts[2], *Q225)]
+
+
+def _comp(concept, start, end, value, sign, form, filed, accn) -> dict:
+    return {"concept": concept, "periodStart": start, "periodEnd": end, "value": value, "sign": sign, "form": form, "filed": filed, "accessionNumber": accn}
+
+
+def _ltm_components(pl, nci, concept="ProfitLoss", nci_concept=_NCI) -> list:
+    """LFY + YTD - prior YTD, each ProfitLoss part followed by its NCI part with the opposite sign."""
+    spans = [(("2024-01-01", "2024-12-31"), K24, 1, 0), (("2025-01-01", "2025-06-30"), Q225, 1, 1), (("2024-01-01", "2024-06-30"), Q225, -1, 2)]
+    out = []
+    for (start, end), (form, filed, accn), sign, i in spans:
+        out += [_comp(concept, start, end, pl[i], sign, form, filed, accn), _comp(nci_concept, start, end, nci[i], -sign, form, filed, accn)]
+    return out
+
+
+def _c2_scene(concepts: dict, *, ifrs: bool = False) -> dict:
+    if ifrs:
+        cur = "TWD"
+        rev = [_f("2024-01-01", "2024-12-31", 1000 * M, *K24), _f("2025-01-01", "2025-06-30", 600 * M, *Q225), _f("2024-01-01", "2024-06-30", 450 * M, *Q225)]
+        tax = {"Revenue": {"units": {cur: rev}}, **{c: {"units": {cur: rows}} for c, rows in concepts.items()}}
+        return _inp(_facts(None, _COVER(), ifrs=tax), close=20.0, currency=cur)
+    return _inp(_facts(_us(**concepts), _COVER()), close=20.0)
+
+
+_PL, _NC = (120 * M, 80 * M, 50 * M), (5 * M, 3 * M, 2 * M)
+
+C2_CASES = [
+    # ProfitLoss with its NCI in the same filing: P/E uses the parent figure; components show both parts and sum to the value.
+    _hv("val.hist.net_income.profit_loss_less_nci_is_the_parent_figure", ["BR-VAL-025", "BR-VAL-027"],
+        _c2_scene({"ProfitLoss": _ni_rows(_PL), _NCI: _ni_rows(_NC)}), select=_C2_SEL, **_C2_DECIDED,
+        expect={"denominators.LFY.netIncome.status": "OK", "denominators.LFY.netIncome.value": 115 * M, "denominators.LFY.netIncome.reason": None,
+                "denominators.LTM.netIncome.status": "OK", "denominators.LTM.netIncome.value": 144 * M,
+                "denominators.LTM.netIncome.components": _ltm_components(_PL, _NC),
+                "multiples.LTM.priceToEarnings.status": "OK", "multiples.LTM.priceToEarnings.value": 13.89,
+                "multiples.LTM.priceToEarnings.denominatorConcepts": ["ProfitLoss", _NCI], "warningCodes": []}),
+    # Without the NCI fact the ProfitLoss fact is dropped: net income is not tagged, so the existing reason and status apply.
+    _hv("val.hist.net_income.profit_loss_without_nci_is_not_available", ["BR-VAL-025", "BR-VAL-027"],
+        _c2_scene({"ProfitLoss": _ni_rows(_PL)}), select=_C2_SEL, **_C2_DECIDED,
+        expect={"denominators.LFY.netIncome.status": "NOT_AVAILABLE", "denominators.LFY.netIncome.value": None, "denominators.LFY.netIncome.reason": "NO_ANNUAL_PERIOD_FILED",
+                "denominators.LTM.netIncome.status": "NOT_AVAILABLE", "denominators.LTM.netIncome.value": None, "denominators.LTM.netIncome.components": None,
+                "multiples.LTM.priceToEarnings.status": "DENOMINATOR_NOT_AVAILABLE", "multiples.LTM.priceToEarnings.value": None,
+                "multiples.LTM.priceToEarnings.denominatorConcepts": [], "warningCodes": []}),
+    # An NCI fact from another filing (accession) does not match.
+    _hv("val.hist.net_income.nci_from_another_filing_is_not_matched", ["BR-VAL-025", "BR-VAL-027"],
+        _c2_scene({"ProfitLoss": _ni_rows(_PL), _NCI: [_f("2024-01-01", "2024-12-31", 5 * M, "10-K", "2025-02-15", "other"), *_ni_rows(_NC)[1:]]}), select=_C2_SEL, **_C2_DECIDED,
+        expect={"denominators.LFY.netIncome.status": "NOT_AVAILABLE", "denominators.LFY.netIncome.value": None, "denominators.LFY.netIncome.reason": "NO_ANNUAL_PERIOD_FILED",
+                "denominators.LTM.netIncome.status": "NOT_AVAILABLE", "denominators.LTM.netIncome.value": None, "denominators.LTM.netIncome.components": None,
+                "multiples.LTM.priceToEarnings.status": "DENOMINATOR_NOT_AVAILABLE", "multiples.LTM.priceToEarnings.value": None,
+                "multiples.LTM.priceToEarnings.denominatorConcepts": [], "warningCodes": []}),
+    # A NetIncomeLoss filer is unchanged: no NCI is read, the components are the one fact each.
+    _hv("val.hist.net_income.net_income_loss_filer_is_unchanged", ["BR-VAL-025", "BR-VAL-027"],
+        _c2_scene({"NetIncomeLoss": _ni_rows(_PL), _NCI: _ni_rows(_NC)}), select=_C2_SEL,
+        expect={"denominators.LFY.netIncome.status": "OK", "denominators.LFY.netIncome.value": 120 * M, "denominators.LFY.netIncome.reason": None,
+                "denominators.LTM.netIncome.status": "OK", "denominators.LTM.netIncome.value": 150 * M,
+                "denominators.LTM.netIncome.components": [
+                    _comp("NetIncomeLoss", "2024-01-01", "2024-12-31", 120 * M, 1, *K24), _comp("NetIncomeLoss", "2025-01-01", "2025-06-30", 80 * M, 1, *Q225),
+                    _comp("NetIncomeLoss", "2024-01-01", "2024-06-30", 50 * M, -1, *Q225)],
+                "multiples.LTM.priceToEarnings.status": "OK", "multiples.LTM.priceToEarnings.value": 13.33,
+                "multiples.LTM.priceToEarnings.denominatorConcepts": ["NetIncomeLoss"], "warningCodes": []}),
+    # IFRS: ProfitLoss less ProfitLossAttributableToNonControllingInterests.
+    _hv("val.hist.net_income.ifrs_profit_loss_less_nci", ["BR-VAL-025", "BR-VAL-027"],
+        _c2_scene({"ProfitLoss": _ni_rows(_PL), _IFRS_NCI_C: _ni_rows(_NC)}, ifrs=True), select=_C2_SEL, **_C2_DECIDED,
+        expect={"denominators.LFY.netIncome.status": "OK", "denominators.LFY.netIncome.value": 115 * M, "denominators.LFY.netIncome.reason": None,
+                "denominators.LTM.netIncome.status": "OK", "denominators.LTM.netIncome.value": 144 * M,
+                "denominators.LTM.netIncome.components": _ltm_components(_PL, _NC, nci_concept=_IFRS_NCI_C),
+                "multiples.LTM.priceToEarnings.status": "OK", "multiples.LTM.priceToEarnings.value": 13.89,
+                "multiples.LTM.priceToEarnings.denominatorConcepts": ["ProfitLoss", _IFRS_NCI_C], "warningCodes": []}),
+    # IFRS with the owners-of-parent concept: used as is, the NCI concept is not read.
+    _hv("val.hist.net_income.ifrs_owners_of_parent_is_unchanged", ["BR-VAL-025", "BR-VAL-027"],
+        _c2_scene({"ProfitLossAttributableToOwnersOfParent": _ni_rows(_PL), "ProfitLoss": _ni_rows(_PL), _IFRS_NCI_C: _ni_rows(_NC)}, ifrs=True), select=_C2_SEL,
+        expect={"denominators.LFY.netIncome.status": "OK", "denominators.LFY.netIncome.value": 120 * M, "denominators.LFY.netIncome.reason": None,
+                "denominators.LTM.netIncome.status": "OK", "denominators.LTM.netIncome.value": 150 * M,
+                "denominators.LTM.netIncome.components": [
+                    _comp("ProfitLossAttributableToOwnersOfParent", "2024-01-01", "2024-12-31", 120 * M, 1, *K24),
+                    _comp("ProfitLossAttributableToOwnersOfParent", "2025-01-01", "2025-06-30", 80 * M, 1, *Q225),
+                    _comp("ProfitLossAttributableToOwnersOfParent", "2024-01-01", "2024-06-30", 50 * M, -1, *Q225)],
+                "multiples.LTM.priceToEarnings.status": "OK", "multiples.LTM.priceToEarnings.value": 13.33,
+                "multiples.LTM.priceToEarnings.denominatorConcepts": ["ProfitLossAttributableToOwnersOfParent"], "warningCodes": []}),
 ]
 
 
@@ -1362,7 +1457,6 @@ RECON_FLOW_CASES = [
 # ───────────────────────────────────────────────────────────────── parent net income from ProfitLoss (cards BR-VAL-025, 056)
 
 _BE_FILED = ("10-K", "2026-02-26", "be26")
-_NCI = "NetIncomeLossAttributableToNoncontrollingInterest"
 
 
 def _ni_facts(**concepts) -> dict:
@@ -1394,9 +1488,20 @@ def _secobs(name: str, ids: list[str], facts: dict, expect: list, metric: str = 
 _DERIVATION = "ProfitLoss - NetIncomeLossAttributableToNoncontrollingInterest"
 
 
-def _derived(value, profit_loss, nci) -> list:
-    return [["SEC_XBRL_LATEST", "FOUND", value, "PARENT_DERIVED_FROM_PROFITLOSS", "ProfitLoss", profit_loss, nci, _DERIVATION],
-            ["SEC_XBRL_AS_FIRST_FILED", "FOUND", value, "PARENT_DERIVED_FROM_PROFITLOSS", "ProfitLoss", profit_loss, nci, _DERIVATION]]
+def _derived(value, profit_loss, nci, derivation=_DERIVATION) -> list:
+    return [["SEC_XBRL_LATEST", "FOUND", value, "PARENT_DERIVED_FROM_PROFITLOSS", "ProfitLoss", profit_loss, nci, derivation],
+            ["SEC_XBRL_AS_FIRST_FILED", "FOUND", value, "PARENT_DERIVED_FROM_PROFITLOSS", "ProfitLoss", profit_loss, nci, derivation]]
+
+
+_IFRS_NCI = "ProfitLossAttributableToNonControllingInterests"
+_IFRS_DERIVATION = f"ProfitLoss - {_IFRS_NCI}"
+_C1_DECIDED = dict(decision="3.7.0 C1, owner 2026-10-31")
+
+
+def _ifrs_ni_facts(**concepts) -> dict:
+    ifrs = {"Revenue": {"units": {"TWD": [_ni_row(2000 * M)]}}}
+    ifrs.update({c: {"units": {"TWD": rows}} for c, rows in concepts.items()})
+    return {"facts": {"ifrs-full": ifrs}}
 
 
 def _raw(concept, latest, first) -> list:
@@ -1443,11 +1548,24 @@ NET_INCOME_CASES = [
     # ... and for the same period start and end.
     _secobs("val.recon.net_income.nci_for_other_period_leaves_parent_net_income_unresolved", ["BR-VAL-025", "BR-VAL-056"],
             _ni_facts(ProfitLoss=[_ni_row(120 * M)], **{_NCI: [_ni_row(5 * M, end="2025-09-30")]}), _unresolved(), **_BE_DECIDED),
-    # Finding (Phase 2, for Q3i triage): IFRS ProfitLoss (which includes non-controlling interests) is reported as net income without any
-    # derivation when the owners-of-parent concept is not tagged; the derivation is US-GAAP only. Both runtimes agree; recorded as current behaviour.
-    _secobs("val.recon.net_income.ifrs_profit_loss_is_not_derived", ["BR-VAL-025", "BR-VAL-056"],
-            {"facts": {"ifrs-full": {"Revenue": {"units": {"TWD": [_ni_row(2000 * M)]}}, "ProfitLoss": {"units": {"TWD": [_ni_row(120 * M)]}}}}},
-            _raw("ProfitLoss", 120 * M, 120 * M)),
+    # 3.7.0 (C1): the NCI derivation also applies to IFRS filers whose chosen concept is ProfitLoss; without a matched NCI both rows are
+    # NOT_RESOLVED, as for us-gaap. Before, IFRS ProfitLoss (which includes non-controlling interests) was reported as net income.
+    _secobs("val.recon.net_income.ifrs_profit_loss_without_nci_is_unresolved", ["BR-VAL-025", "BR-VAL-056"], _ifrs_ni_facts(ProfitLoss=[_ni_row(120 * M)]), _unresolved(), **_C1_DECIDED),
+    _secobs("val.recon.net_income.ifrs_profit_loss_less_nci", ["BR-VAL-025", "BR-VAL-056"],
+            _ifrs_ni_facts(ProfitLoss=[_ni_row(120 * M)], **{_IFRS_NCI: [_ni_row(5 * M)]}), _derived(115 * M, 120 * M, 5 * M, _IFRS_DERIVATION), **_C1_DECIDED),
+    # Both the latest and the first-filed row need a matched NCI: here only the latest has one.
+    _secobs("val.recon.net_income.ifrs_nci_missing_for_first_filed_row_leaves_both_unresolved", ["BR-VAL-025", "BR-VAL-056"],
+            _ifrs_ni_facts(ProfitLoss=[_ni_row(118 * M), _ni_row(120 * M, "10-K/A", "2026-03-15", "be26a")], **{_IFRS_NCI: [_ni_row(5 * M, "10-K/A", "2026-03-15", "be26a")]}),
+            _unresolved(), **_C1_DECIDED),
+    # The us-gaap NCI concept does not stand in for the IFRS one.
+    _secobs("val.recon.net_income.ifrs_ignores_the_us_gaap_nci_concept", ["BR-VAL-025", "BR-VAL-056"],
+            {"facts": {"ifrs-full": {"Revenue": {"units": {"TWD": [_ni_row(2000 * M)]}}, "ProfitLoss": {"units": {"TWD": [_ni_row(120 * M)]}}},
+                       "us-gaap": {_NCI: {"units": {"TWD": [_ni_row(5 * M)]}}}}},
+            _unresolved(), **_C1_DECIDED),
+    # The owners-of-parent concept present: it is the chosen concept, no derivation (unchanged).
+    _secobs("val.recon.net_income.ifrs_owners_of_parent_concept_is_used_as_is", ["BR-VAL-025", "BR-VAL-056"],
+            _ifrs_ni_facts(ProfitLossAttributableToOwnersOfParent=[_ni_row(115 * M)], ProfitLoss=[_ni_row(115 * M)], **{_IFRS_NCI: [_ni_row(5 * M)]}),
+            _raw("ProfitLossAttributableToOwnersOfParent", 115 * M, 115 * M)),
     # Revenue concept tie-break (separate behaviour in the same function): same-day concepts, the larger magnitude wins.
     _secobs("val.recon.net_income.revenue_same_filing_larger_magnitude_wins", ["BR-VAL-025"],
             {"facts": {"us-gaap": {"RevenueFromContractWithCustomerExcludingAssessedTax": _usd(_ni_row(2_001_614_000)), "Revenues": _usd(_ni_row(2_023_994_000))}}},
@@ -1543,4 +1661,4 @@ DESCRIPTION_CASES = [
 ]
 
 CASES = (ADR_CASES + SHARE_BASIS_CASES + BALANCE_CASES + CURRENCY_CASES + EV_CASES + EV_CASES_HIST + BAL_HIST_CASES + PRICE_CASES + MCAP_CASES + COVER_CASES
-         + COVER_PARSE_CASES + FLOW_CASES + PIT_CASES + RECORDED_CASES + RECON_OBS_CASES + RECON_FLOW_CASES + NET_INCOME_CASES + TOLERANCE_CASES + DESCRIPTION_CASES)
+         + COVER_PARSE_CASES + FLOW_CASES + PIT_CASES + C2_CASES + RECORDED_CASES + RECON_OBS_CASES + RECON_FLOW_CASES + NET_INCOME_CASES + TOLERANCE_CASES + DESCRIPTION_CASES)

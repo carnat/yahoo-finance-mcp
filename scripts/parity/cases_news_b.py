@@ -5,8 +5,8 @@ These cases pin what both runtimes do TODAY, so the move can be proven safe.
 
 Conventions (same as the other cases_*.py files)
 - `equal` cases carry `expect` taken from the code (the legacy code is the oracle, not the rule card).
-- `pinned` cases record a Python/Worker divergence as it is today; `decision` starts with "FINDING:" and names the
-  difference. No winner is chosen here.
+- `pinned` cases record a Python/Worker divergence that is intentional; `decision` starts with "INTENTIONAL" (the harness
+  refuses any other start) and gives the reason.
 - "Finding (Q7, for triage)" comments mark behaviour both runtimes share that looks wrong.
 
 Determinism
@@ -24,8 +24,8 @@ Techniques worth knowing when reading or extending this file
 - Approved company IR pages: the shipped registry only holds candidates. Python reads a temporary registry file
   (`server._COMPANY_IR_PAGE_REGISTRY_PATH`); the Worker's registry is a bundled constant, so the case body briefly wraps
   `Array.prototype.find` to upgrade the IQE.L entry in place (isolated bundle copy, restored in `finally`).
-- Python-only helpers with no reachable Worker counterpart (BR-NWS-235, BR-NWS-250) are pinned with a placeholder Worker side
-  (`return null`), marked FINDING in `decision`.
+- Python-only helpers with no Worker counterpart (BR-NWS-235, BR-NWS-250) are not parity cases; since 3.7.0 they are asserted in
+  scripts/test_python_only_news_tooling.py.
 - A redirect to an off-list host (BR-NWS-208) cannot be driven: both harness stubs answer with the requested URL.
 """
 
@@ -1090,6 +1090,22 @@ CASES += [
                    "Sale by Doe Jane: 3 shares, value $25."]),
 ]
 
+# 3.7.0 (C3): footnote marks after a transaction code are stripped, so "S(1)" reads S and gets its label (HTML and XML paths). A code that is
+# only a footnote mark reads as an empty cell: the HTML row is skipped (no insiderTransaction), the XML code is null.
+from scripts.parity.cases_news_a import f4_html, f4_nd_row, f4_row, f4_xml, form4_case  # noqa: E402
+
+CASES += [
+    form4_case("news.form4.footnote_marks_after_the_code_are_stripped", ["BR-NWS-124", "BR-NWS-123"], 910301,
+               [f4_html([f4_nd_row("S(1)", "10", "$1")]), f4_html([f4_nd_row("G (2)", "10", "$1")]), f4_html([f4_nd_row("S(1)(2)", "10", "$1")]),
+                f4_html([f4_nd_row("M", "10", "$1")]), f4_html([f4_nd_row("(1)", "10", "$1")]),
+                f4_xml(rows=f4_row("S(1)", "10", "1")),
+                f4_xml(rows=f4_row("(1)", "10", "1"))],
+               select=lambda v: [[(it.get("insiderTransaction") or {}).get("transactionCode"), (it.get("insiderTransaction") or {}).get("transactionLabel")]
+                                 for it in v["items"]],
+               expect=[["S", "Sale"], ["G", "Gift"], ["S", "Sale"], ["M", "Option exercise/conversion"], [None, None], ["S", "Sale"],
+                       [None, "Other/Unclassified"]]),
+]
+
 
 # ═══════════════════════════════════════════════════════════════════════════════════════════════
 # Marketaux wire fallback: row acceptance, exchange check, HTTP outcomes (BR-NWS-229, BR-NWS-230)
@@ -1605,7 +1621,7 @@ CASES += [
     _ownership_calls_case(
         "news.provider.entitlement_denial_is_remembered_for_six_hours_in_the_worker_only", ["BR-NWS-193", "BR-NWS-233"], ["AAA1", "AAA2"],
         {FINNHUB_OWNERSHIP + "*": {"status": 403, "body": _PREMIUM_BODY}}, FINNHUB_ENV, hours=[10, 12], mode="pinned",
-        decision="FINDING: Worker remembers a Finnhub entitlement denial (HIT_PROCESS, attempted false, deniedUntil +6h); Python retries the provider on every call",
+        decision="INTENTIONAL (3.7.0): the Worker shares one Finnhub key across callers and remembers an entitlement denial for 6 h; Python retries the provider on every call",
         expect_py=[{"status": "ENTITLEMENT_REQUIRED", "action": "USE_ALPHA_VANTAGE_EXPLICITLY", "alphaFallbackAllowed": False,
                     "attempts": [["finnhub", "ENTITLEMENT_REQUIRED", True, "MISS", 403, None]]}] * 2,
         expect_ts=[{"status": "ENTITLEMENT_REQUIRED", "action": "USE_ALPHA_VANTAGE_EXPLICITLY", "alphaFallbackAllowed": False,
@@ -1616,7 +1632,7 @@ CASES += [
     _ownership_calls_case(
         "news.provider.alpha_daily_limit_is_remembered_until_utc_midnight_in_the_worker_only", ["BR-NWS-193"], ["AAA1", "AAA2"],
         {ALPHA_QUERY: {"json": {"Note": "Our standard API rate limit is 25 requests per day."}}}, ALPHA_ENV, allow=True, hours=[10, 12], mode="pinned",
-        decision="FINDING: Worker remembers Alpha's daily rate limit until 00:00Z (HIT_PROCESS, attempted false); Python retries Alpha on every call",
+        decision="INTENTIONAL (3.7.0): the Worker shares one Alpha Vantage key across callers and remembers the daily limit until 00:00Z; Python retries Alpha on every call",
         expect_py=[{"status": "RATE_LIMIT", "action": "RETRY_AFTER_PROVIDER_RESET", "alphaFallbackAllowed": True,
                     "attempts": [["finnhub", "SOURCE_UNCONFIGURED", False, "MISS", None, None],
                                  ["alpha_vantage", "RATE_LIMIT", True, "MISS", None, None]]}] * 2,
@@ -2114,7 +2130,7 @@ CASES += [
         lambda: server.get_company_news("AAPL", 10, 14, ["finnhub"]), 'm.yahooFinance.getCompanyNews("AAPL", 10, 14, ["finnhub"])',
         env=FINNHUB_ENV, routes=_finnhub([_frow(1, text="AAPL big news", days=1), _frow(2, text="Sector moves", days=1), _frow(3, text="Sector moves again", days=1)]),
         select=lambda v: sorted(i["duplicateGroupId"] for i in v["items"]), mode="pinned",
-        decision="FINDING: duplicateGroupId is a 16-hex SHA-256 prefix in Python and an 8-hex 32-bit hash in the Worker for the same item",
+        decision="INTENTIONAL (3.7.0): duplicateGroupId is an opaque id; Python uses a 16-hex SHA-256 prefix, the Worker an 8-hex 32-bit hash",
         expect_py=["129406048579cefe", "63592e348f7895dc", "9fba966b8551c339"], expect_ts=["bd521049", "c5902dde", "c8bfaf1e"]),
 ]
 
@@ -2790,54 +2806,6 @@ CASES += [
         news=[], info={}, select=_CANDIDATE_VIEW,
         expect={**_CANDIDATE_COMMON, "warnings": ["COMPANY_IR_PAGE_CANDIDATE_AVAILABLE"], "collection": "SOURCE_LIMITED_NOT_FOUND"}),
 ]
-
-
-# ═══════════════════════════════════════════════════════════════════════════════════════════════
-# Python-only helpers with no reachable Worker counterpart (BR-NWS-235, BR-NWS-250)
-# The Worker side is a placeholder returning null: the SEC URL checks are inline / unexported there and unreachable through a tool
-# (every SEC URL is built from the CIK and accession), and the audit script is a Python-only CI tool. The cases pin the Python value
-# so the move of the Python news code cannot change it.
-# ═══════════════════════════════════════════════════════════════════════════════════════════════
-
-def _audit_overlap_py():
-    import importlib.util
-    spec = importlib.util.spec_from_file_location("audit_arsenal_news", Path(__file__).resolve().parents[1] / "audit_arsenal_news.py")
-    audit = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(audit)
-
-    def response(titles, source, status):
-        return {"ok": True, "data": {"status": None, "items": [{"title": t, "evidenceClass": "CONTEXTUAL_NEWS"} for t in titles],
-                                     "sourceStatus": {source: {"status": status}}, "coverage": {"state": "FULL"}}}
-
-    both = audit.build_ticker_result("AAA", {"yahoo_finance_news": response(["A", "B", "C"], "yahoo_finance_news", "OK"),
-                                             "finnhub": response(["b", "D"], "finnhub", "OK")})
-    none = audit.build_ticker_result("BBB", {"yahoo_finance_news": {"ok": False}, "finnhub": response([], "finnhub", "EMPTY_RESULT")})
-    return {"both": both["comparison"], "none": none["comparison"],
-            "states": [none["providers"]["yahoo_finance_news"]["callState"], none["providers"]["finnhub"]["callState"]]}
-
-
-CASES += [
-    Case(name="news.python_only.safe_sec_url_and_xbrl_document_detection", ids=["BR-NWS-235"],
-         py=lambda: {
-             "safe": [server._safe_sec_url(u) for u in ("http://www.sec.gov/Archives/x.htm", "https://www.sec.gov/Archives/edgar/data/1/a.XML?x=1",
-                                                       "  https://www.sec.gov/Archives/xbrl/a.htm  ", None, "")],
-             "xbrl": [server._is_likely_xbrl_document_url(u) for u in ("https://www.sec.gov/Archives/edgar/data/1/a.XML?x=1",
-                                                                      "https://www.sec.gov/Archives/xbrl/a.htm", "https://www.sec.gov/Archives/edgar/data/1/a.htm")]},
-         ts={"js": "return null;"}, mode="pinned",
-         decision="FINDING: Python-only helpers (the Worker checks the SEC Archives prefix inline and cannot be driven to an unsafe URL); the Worker side is a placeholder",
-         expect_py={"safe": [None, "https://www.sec.gov/Archives/edgar/data/1/a.XML?x=1", "https://www.sec.gov/Archives/xbrl/a.htm", None, None],
-                    "xbrl": [True, True, False]},
-         expect_ts=None),
-    Case(name="news.python_only.audit_title_overlap_ratio_and_call_states", ids=["BR-NWS-250"],
-         py=_audit_overlap_py, ts={"js": "return null;"}, mode="pinned",
-         decision="FINDING: scripts/audit_arsenal_news.py is a Python-only CI audit; the Worker side is a placeholder",
-         expect_py={"both": {"sharedTitleCount": 1, "combinedUniqueTitleCount": 4, "titleOverlapRatio": 0.25},
-                    "none": {"sharedTitleCount": 0, "combinedUniqueTitleCount": 0, "titleOverlapRatio": None},
-                    "states": ["CALL_FAILED", "COMPLETED"]},
-         expect_ts=None),
-]
-
-
 
 
 # ═══════════════════════════════════════════════════════════════════════════════════════════════

@@ -3190,6 +3190,51 @@ F-024, F-026, F-029). Both runtimes change alike.
 - **Tests:** 21 new parity cases in `scripts/parity/cases_audit_2251.py`.
 - **Rollback:** redeploy 2.25.0.
 
+## Parity Differences Resolved and Intentional Ones Documented (3.7.0)
+
+- **Why:** Phase 6 exit criterion "no pinned expected difference remains in the harness except documented
+  intentional ones". Owner decision 2026-10-31 ("Yes, as recommended";
+  `analysis/yahoo-finance-mcp/PARITY_DIVERGENCES_3_7_0.md`). Release type: minor, because some statuses, messages
+  and meta keys change in one runtime. No new field, status value or warning code.
+- **Python takes the Worker's behaviour:**
+  - `get_analyst_consensus` no longer returns the deprecated `totalAnalysts` (deprecated since 2.27.0; the count is
+    `numberOfAnalysts`). `analyze_position_signals` reads `numberOfAnalysts`.
+  - `get_company_press_releases`, `extract_sec_filing_fact` and `get_sec_filing_section_markdown` carry the Worker's
+    whole status-table entry in `meta` (`capabilityStatus`, `reliabilityClass`, `failureMode`, `evidenceRequired`,
+    `sourceType`, and for the first two `successCriteria`, `limitationStatuses`, `note`), in the Worker's order.
+  - `get_expanded_institutional_ownership`: a Finnhub value of 0 stays 0 (before, Python's fallback chain replaced it
+    with the next field). A plain-text Finnhub 403 is `ENTITLEMENT_REQUIRED` with the body text (was `AUTH_ERROR`).
+    A Finnhub 200 whose body is not an object is `PROVIDER_ERROR`, "Finnhub returned a non-object payload." (was
+    `NOT_FOUND`).
+  - `get_historical_put_call_ratio`: every date fault gives one message, "date must be a valid YYYY-MM-DD after
+    2008-01-01 and not in the future. ...", and a compact date such as `20240315` is refused.
+- **The Worker takes Python's behaviour:**
+  - A Finnhub error body in JSON gives the parsed error text as the attempt message (was the raw JSON object).
+  - A blank or whitespace provider number is no number: a blank Alpha Vantage put/call ratio is `PROVIDER_ERROR`
+    (was `OK` with ratio 0). The same applies to the other Alpha Vantage and Finnhub ownership numbers.
+- **Defects fixed in both runtimes:**
+  - `reconcile_metric_sources` net income for IFRS filers: when `ProfitLoss` is the chosen concept, the
+    non-controlling share (`ProfitLossAttributableToNonControllingInterests`, same filing, period and unit) is taken
+    off (`PARENT_DERIVED_FROM_PROFITLOSS`); without it both SEC rows are `NOT_RESOLVED`, as for US-GAAP since 3.4.0.
+  - `get_historical_valuation_context`: a `ProfitLoss` net income fact is used only with the matching
+    non-controlling share, and is then ProfitLoss minus that share; its `components` list both parts with opposite
+    signs. Without the share the fact is treated as not tagged, so P/E reads `DENOMINATOR_NOT_AVAILABLE` rather than
+    a figure that includes minority holders.
+  - Form 4 insider transactions: a footnote mark after the transaction code ("S(1)", "G (2)") is stripped, so the
+    code reads "S" and gets its label instead of "Other/Unclassified".
+- **Documented as intentional (pinned in the harness with an `INTENTIONAL` decision):**
+  - Batch calls near the Worker's subrequest budget return `PROVIDER_BUDGET_EXHAUSTED` for later tickers; Python has
+    no such limit.
+  - News `duplicateGroupId` is an opaque id whose format differs by runtime; compare it only within one response.
+  - The Worker adds `__batchMeta` to batch results; Python returns the per-ticker results only.
+  - The Worker remembers a Finnhub "no access" for 6 hours and the Alpha Vantage daily limit until 00:00Z, because
+    one key serves every caller; a local Python server asks again.
+  - The harness now refuses any pinned case whose decision does not start with `INTENTIONAL`.
+- **Python-only tooling:** the SEC URL helpers and the news audit script have no Worker counterpart; their checks
+  moved from the parity harness to `scripts/test_python_only_news_tooling.py`.
+- **Unchanged:** `schemaHash` and `manifestHash`.
+- **Rollback:** redeploy 3.6.13.
+
 ## Deprecated Standard-Library Calls and Stale Tool Count (3.6.13)
 
 - **Why:** Phase 6 Debt #9 and #10 (`analysis/yahoo-finance-mcp/ASSESSMENT.md`). Release type: patch. No output

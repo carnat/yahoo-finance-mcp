@@ -327,6 +327,20 @@ def evaluate(case: Case, py_result: dict, ts_result: dict) -> list[str]:
     return problems
 
 
+# Pinned non-INTENTIONAL cases allowed during a release in progress; empty since 3.7.0.
+_PINNED_FINDING_ALLOW_LIST: frozenset[str] = frozenset()
+
+
+def pinned_decision_problems(cases: list[Case], allow: frozenset[str] | None = None) -> list[str]:
+    """Names of pinned cases with separate expect_py/expect_ts whose decision does not start with "INTENTIONAL"."""
+    allowed = _PINNED_FINDING_ALLOW_LIST if allow is None else allow
+    return [
+        c.name for c in cases
+        if c.mode == "pinned" and c.expect is _UNSET and c.name not in allowed
+        and not (c.decision or "").startswith("INTENTIONAL")
+    ]
+
+
 def load_cases() -> list[Case]:
     """Every CASES list in scripts/parity/cases_*.py, with names checked unique."""
     cases: list[Case] = []
@@ -339,6 +353,10 @@ def load_cases() -> list[Case]:
     dupes = {n for n in names if names.count(n) > 1}
     if dupes:
         raise ValueError(f"duplicate parity case names: {sorted(dupes)}")
+    unlabelled = pinned_decision_problems(cases)
+    if unlabelled:
+        raise ValueError("pinned cases with separate expect_py/expect_ts must have a decision starting with "
+                         f"'INTENTIONAL': {sorted(unlabelled)}")
     return cases
 
 

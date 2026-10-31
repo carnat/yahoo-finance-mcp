@@ -118,6 +118,20 @@ export async function fetchAlphaVantageJson(
   }
 }
 
+// Python parity: a JSON object body reports its error/message/Information/Note text; any other body is used as is.
+function finnhubErrorMessage(body: string): string {
+  try {
+    const parsed: unknown = JSON.parse(body);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      const record = parsed as Record<string, unknown>;
+      return String(record.error || record.message || record.Information || record.Note || body);
+    }
+  } catch {
+    // not JSON: fall through to the raw body
+  }
+  return body;
+}
+
 async function fetchFinnhubJson(
   path: string,
   params: Record<string, unknown>,
@@ -146,14 +160,15 @@ async function fetchFinnhubJson(
     const retryAfter = response.headers.get("Retry-After") ?? undefined;
     if (!response.ok) {
       const body = (await response.text()).replaceAll(token, "REDACTED");
+      const errorMessage = finnhubErrorMessage(body);
       return rememberProviderDenial(denialKey, {
         payload: null,
-        status: providerHttpStatus(response.status, body),
+        status: providerHttpStatus(response.status, errorMessage),
         publicUrl,
         providerAttempted: true,
         cacheStatus: "MISS",
         httpStatus: response.status,
-        message: body.slice(0, 500) || undefined,
+        message: errorMessage.slice(0, 500) || undefined,
         retryAfter,
       });
     }
@@ -174,7 +189,9 @@ async function fetchFinnhubJson(
 
 function providerNumber(value: unknown): number | null {
   if (value == null || typeof value === "boolean") return null;
-  const parsed = Number(String(value).replaceAll(",", ""));
+  const text = String(value).replaceAll(",", "");
+  if (text.trim() === "") return null;
+  const parsed = Number(text);
   return Number.isFinite(parsed) ? parsed : null;
 }
 

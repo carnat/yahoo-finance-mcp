@@ -65,15 +65,21 @@ function form4Date(value: string | null): string | null {
   if (!m) return text;
   return `${m[3]}-${m[1].padStart(2, "0")}-${m[2].padStart(2, "0")}`;
 }
+/** A transaction code without its trailing footnote marks ("S(1)", "G (2)", "S(1)(2)" -> "S", "G", "S"); null when nothing is left. */
+function form4Code(value: string | null): string | null {
+  if (value == null) return null;
+  return value.replace(/(?:\s*\(\d+\))+\s*$/, "").trim() || null;
+}
 function form4Payload(
   owner: string | null,
   role: string | null,
-  code: string | null,
+  rawCode: string | null,
   shares: number | null,
   price: number | null,
   ownershipForm: string | null,
   transactionDate: string | null,
 ): Record<string, unknown> {
+  const code = form4Code(rawCode);
   return {
     owner,
     role,
@@ -120,7 +126,7 @@ function parseForm4HtmlTransactions(html: string): Record<string, unknown>[] {
     if (tableText.includes("non-derivative securities")) {
       for (const row of parseHtmlTable(tableHtml)) {
         if (row.length < 10) continue;
-        const code = row[3].trim().toUpperCase();
+        const code = form4Code(row[3].trim().toUpperCase());
         const shares = form4Num(row[5]);
         if (!code || shares == null) continue;
         rowsFound.push(form4Payload(owner, role, code, shares, form4Num(row[7]), row[9].trim() || null, form4Date(row[1])));
@@ -129,7 +135,7 @@ function parseForm4HtmlTransactions(html: string): Record<string, unknown>[] {
     if (!rowsFound.length && tableText.includes("derivative securities")) {
       for (const row of parseHtmlTable(tableHtml)) {
         if (row.length < 15) continue;
-        const code = row[4].trim().toUpperCase();
+        const code = form4Code(row[4].trim().toUpperCase());
         const shares = form4Num(row[6]);
         if (!code || shares == null) continue;
         rowsFound.push(form4Payload(owner, role, code, shares, form4Num(row[1]), row[14].trim() || null, form4Date(row[2])));

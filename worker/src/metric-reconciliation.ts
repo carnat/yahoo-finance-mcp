@@ -223,9 +223,15 @@ export function resolvePeriod(companyfacts: unknown, metric: string, spec: strin
   };
 }
 
-/** NetIncomeLossAttributableToNoncontrollingInterest for a ProfitLoss row's period, in the same filing; null when not tagged. */
-function nciShare(companyfacts: unknown, unit: string | null, r: Row): number | null {
-  const list = ((((((companyfacts ?? {}) as Rec).facts as Rec | undefined)?.["us-gaap"] as Rec | undefined)?.NetIncomeLossAttributableToNoncontrollingInterest as Rec | undefined)?.units as Record<string, Rec[]> | undefined)?.[unit ?? ""];
+// The noncontrolling-interest concept taken off ProfitLoss, by taxonomy (3.7.0: IFRS filers, C1).
+const NCI_CONCEPT: Record<string, string> = {
+  "us-gaap": "NetIncomeLossAttributableToNoncontrollingInterest",
+  "ifrs-full": "ProfitLossAttributableToNonControllingInterests",
+};
+
+/** The taxonomy's NCI concept for a ProfitLoss row's period, in the same filing; null when not tagged. */
+function nciShare(companyfacts: unknown, taxonomy: string, unit: string | null, r: Row): number | null {
+  const list = ((((((companyfacts ?? {}) as Rec).facts as Rec | undefined)?.[taxonomy] as Rec | undefined)?.[NCI_CONCEPT[taxonomy]] as Rec | undefined)?.units as Record<string, Rec[]> | undefined)?.[unit ?? ""];
   if (!Array.isArray(list)) return null;
   const hit = list.find((f) => f.accn === r.accn && f.end === r.end && f.start === r.start && typeof f.val === "number");
   return hit ? (hit.val as number) : null;
@@ -257,12 +263,12 @@ export function secObservations(companyfacts: unknown, metric: string, period: R
   const last = matching[matching.length - 1];
   // Net income is the parent's: a filer that tags only ProfitLoss (BE) includes noncontrolling interests, so
   // the NCI share tagged for the same period in the same filing is taken off and the derivation shown (2.5.15).
-  if (metric === "net_income" && taxonomy === "us-gaap" && concept === "ProfitLoss") {
-    const nci = (r: Row) => nciShare(companyfacts, unit, r);
+  if (metric === "net_income" && taxonomy != null && taxonomy in NCI_CONCEPT && concept === "ProfitLoss") {
+    const nci = (r: Row) => nciShare(companyfacts, taxonomy, unit, r);
     const lastNci = nci(last);
     const firstNci = nci(first);
     if (lastNci != null && firstNci != null) {
-      const derived = (r: Row, share: number) => ({ ...rowRef(r), value: r.val - share, profitLoss: r.val, noncontrollingInterest: share, derivation: "ProfitLoss - NetIncomeLossAttributableToNoncontrollingInterest" });
+      const derived = (r: Row, share: number) => ({ ...rowRef(r), value: r.val - share, profitLoss: r.val, noncontrollingInterest: share, derivation: `ProfitLoss - ${NCI_CONCEPT[taxonomy]}` });
       return [
         { source: "SEC_XBRL_LATEST", provider: "SEC", status: "FOUND", value: last.val - lastNci, unit, taxonomy, precision: 0, basis: "PARENT_DERIVED_FROM_PROFITLOSS", evidence: derived(last, lastNci), filedValues: [...new Set(matching.map((r) => r.val))], otherConcepts: [] },
         { source: "SEC_XBRL_AS_FIRST_FILED", provider: "SEC", status: "FOUND", value: first.val - firstNci, unit, taxonomy, precision: 0, basis: "PARENT_DERIVED_FROM_PROFITLOSS", evidence: derived(first, firstNci) },

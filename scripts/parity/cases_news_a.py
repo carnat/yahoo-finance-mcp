@@ -740,7 +740,7 @@ CASES += [
                                                                   "Nasdaq:ACME", contributor="Acme Corp")])},
                           "https://www.globenewswire.com/RssFeed/*": {"body": rss([])}}},
               select=lambda v: [it["duplicateGroupId"] for it in v["items"]],
-              mode="pinned", decision="FINDING: duplicateGroupId is a 16-hex sha256 prefix in Python and an 8-hex 32-bit hash in the Worker",
+              mode="pinned", decision="INTENTIONAL (3.7.0): duplicateGroupId is an opaque id; Python uses a 16-hex sha256 prefix, the Worker an 8-hex 32-bit hash",
               expect_py=[hashlib.sha256(_GID_KEY.encode()).hexdigest()[:16]], expect_ts=[_js_hash32(_GID_KEY)]),
 ]
 
@@ -1829,7 +1829,7 @@ CASES += [
               [["AAPL", "MSFT"], 5, 14, []], {"info": {}},
               select=lambda v: {"keys": sorted(v), "errors": sorted(k for k, x in v.items() if isinstance(x, dict) and x.get("error")),
                                 "meta": v.get("__batchMeta")},
-              mode="pinned", decision="FINDING: batch get_company_news adds __batchMeta (partialSuccess/successCount/errorCount) in the Worker only",
+              mode="pinned", decision="INTENTIONAL (3.7.0): __batchMeta is Worker-only batch accounting that the envelope lifts into meta",
               expect_py={"keys": ["AAPL", "MSFT"], "errors": [], "meta": None},
               expect_ts={"keys": ["AAPL", "MSFT", "__batchMeta"], "errors": [], "meta": {"partialSuccess": False, "successCount": 2, "errorCount": 0}}),
     tool_case("batch.symbol_failing_ticker_validation_is_an_input_validation_error_entry", ["BR-NWS-143"], "news",
@@ -1843,7 +1843,7 @@ CASES += [
     tool_case("batch.batch_meta_counts_a_malformed_symbol_as_an_error_in_the_worker", ["BR-NWS-143"], "news",
               [["AAPL", "BAD TICKER!"], 5, 14, []], {"info": {}},
               select=lambda v: v.get("__batchMeta"),
-              mode="pinned", decision="FINDING: __batchMeta (here counting the malformed symbol as an error) exists in the Worker only; documented, not aligned",
+              mode="pinned", decision="INTENTIONAL (3.7.0): __batchMeta is Worker-only batch accounting (here counting the malformed symbol as an error)",
               expect_py=None, expect_ts={"partialSuccess": True, "successCount": 1, "errorCount": 1}),
     # R-news D (2.22.0, F13c): under the legacy envelope (MCP_ENVELOPE_V2=false) the Worker's normalizeBatchSymbolResult keeps the
     # entry's own code, so the malformed symbol reads INPUT_VALIDATION_ERROR (until then the message heuristics made it PROVIDER_ERROR).
@@ -1852,7 +1852,7 @@ CASES += [
               [["AAPL", "BAD TICKER!"], 5, 14, []], {"info": {}, "env": {"MCP_ENVELOPE_V2": "false"}},
               select=lambda v: {"errors": {k: (_batch_entry_error(x) or [None])[0] for k, x in v.items() if _batch_entry_error(x)},
                                 "meta": v.get("__batchMeta")},
-              mode="pinned", decision="FINDING: __batchMeta exists in the Worker only; documented, not aligned",
+              mode="pinned", decision="INTENTIONAL (3.7.0): __batchMeta is Worker-only batch accounting; the entry code agrees",
               expect_py={"errors": {"BAD TICKER!": "INPUT_VALIDATION_ERROR"}, "meta": None},
               expect_ts={"errors": {"BAD TICKER!": "INPUT_VALIDATION_ERROR"},
                          "meta": {"partialSuccess": True, "successCount": 1, "errorCount": 1}}),

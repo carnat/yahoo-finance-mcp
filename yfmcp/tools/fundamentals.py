@@ -568,10 +568,9 @@ async def get_analyst_consensus(ticker: str | list[str]) -> str:
             output["dominantRating"] = dominant
             output["ratingCounts"] = counts
             output["ratingCount"] = sum(counts.values()) if counts else None
-            # Deprecated names for the rating count, kept for existing callers;
+            # Deprecated name for the rating count, kept for existing callers;
             # priceTargets.numberOfAnalysts counts target contributors.
             output["numberOfAnalysts"] = output["ratingCount"]
-            output["totalAnalysts"] = output["ratingCount"]
     except Exception:
         output["recommendationSummary"] = None
 
@@ -2048,7 +2047,7 @@ async def get_position_score_inputs(ticker: str) -> str:
         "downgrades30d": upgrade.get("downgrades"),
         "initiations30d": upgrade.get("initiations"),
         "dominantRating": consensus.get("dominantRating"),
-        "analystCount": consensus.get("totalAnalysts"),
+        "analystCount": consensus.get("numberOfAnalysts"),
     }
 
     # T2: price vs 52-week range
