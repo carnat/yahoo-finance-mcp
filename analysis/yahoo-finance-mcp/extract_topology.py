@@ -120,7 +120,7 @@ FILE_DOMAIN = {
     "worker/src/extraction-rules.ts": "extractors", "worker/src/capital-structure.ts": "extractors",
     "worker/src/share-scenarios.ts": "extractors", "worker/src/funding-schedule.ts": "extractors",
     "worker/src/driver-ledger.ts": "extractors", "worker/src/exposure.ts": "extractors",
-    "worker/src/valuation.ts": "valuation", "worker/src/valuation-history.ts": "valuation",
+    "worker/src/valuation.ts": "valuation", "worker/src/valuation-history.ts": "valuation", "worker/src/valuation-tools.ts": "valuation",
     "worker/src/metric-reconciliation.ts": "valuation",
     "worker/src/guidance-history.ts": "earnings", "worker/src/earnings-period.ts": "earnings",
     "worker/src/transcript-contract.ts": "earnings",
