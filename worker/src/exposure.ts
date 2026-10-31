@@ -441,6 +441,138 @@ async function mayBe20FFiler(ticker: string): Promise<boolean> {
   return forms.some((form: unknown) => String(form ?? "").toUpperCase() === "20-F");
 }
 
+function geographicEvidenceBlock(
+  idx: Record<string, unknown>,
+  payload: Record<string, unknown>,
+  evidence: Record<string, unknown>,
+  defaultFilingType: string,
+): Record<string, unknown> {
+  return {
+    filingType: idx.filingType ?? payload.filingType ?? defaultFilingType,
+    filingDate: idx.filingDate ?? payload.filingDate ?? null,
+    acceptedAt: idx.acceptedAt ?? null,
+    accessionNumber: idx.accessionNumber ?? payload.accessionNumber ?? null,
+    documentUrl: idx.documentUrl ?? payload.documentUrl ?? null,
+    sectionHeading: evidence.sectionHeading ?? null,
+    tableTitle: evidence.tableTitle ?? null,
+    sourceTableId: evidence.sourceTableId ?? null,
+    sourceRows: Array.isArray(evidence.sourceRows) ? evidence.sourceRows : [],
+    sourceColumns: Array.isArray(evidence.sourceColumns) ? evidence.sourceColumns : [],
+  };
+}
+
+function buildGeographicRevenueOutput(
+  ticker: string,
+  region: string,
+  filingType: string,
+  payload: Record<string, unknown>,
+  idx: Record<string, unknown>,
+  warnings: unknown[],
+): Record<string, unknown> {
+  const evidence = payload.evidence && typeof payload.evidence === "object" ? payload.evidence as Record<string, unknown> : {};
+  const payloadStatus = String(payload.status ?? payload.code ?? payload.confidence ?? "").trim();
+  return {
+    ticker,
+    factType: "geographic_revenue",
+    region,
+    period: payload.period ?? null,
+    rawValue: payload.rawValue ?? null,
+    rawDenominator: payload.rawDenominator ?? null,
+    unit: payload.unit ?? "USD",
+    unitScale: payload.unitScale ?? "unknown",
+    unitScaleSource: payload.unitScaleSource ?? null,
+    value: payload.value ?? null,
+    denominator: payload.denominator ?? null,
+    valueRatio: payload.denominator != null ? (payload.valueRatio ?? null) : null,
+    valuePct: payload.denominator != null ? (payload.valuePct ?? null) : null,
+    extractionMethod: payload.extractionMethod ?? "NONE",
+    confidence: payload.confidence ?? "NOT_DISCLOSED",
+    evidence: geographicEvidenceBlock(idx, payload, evidence, filingType),
+    calculation: payload.calculation ?? null,
+    scanCoverage: payload.scanCoverage ?? null,
+    searchedTerms: Array.isArray(payload.searchedTerms) ? payload.searchedTerms : [],
+    notDisclosedBasis: payload.notDisclosedBasis ?? null,
+    status: payload.value != null ? "FOUND" : (payloadStatus || "NOT_DISCLOSED"),
+    code: payload.code ?? (payloadStatus && payloadStatus !== "FOUND" && payloadStatus !== "NOT_DISCLOSED" ? payloadStatus : null),
+    warnings,
+  };
+}
+
+function applyGeographic20FFallback(
+  out: Record<string, unknown>,
+  fallbackPayload: Record<string, unknown>,
+  fallbackIdx: Record<string, unknown>,
+): void {
+  // 20-F extraction succeeded — replace output with fallback data
+  const fbEvidence = fallbackPayload.evidence && typeof fallbackPayload.evidence === "object"
+    ? fallbackPayload.evidence as Record<string, unknown> : {};
+  const fbWarnings = Array.isArray(fallbackPayload.warnings) ? [...fallbackPayload.warnings] : [];
+  out.period = fallbackPayload.period ?? null;
+  out.rawValue = fallbackPayload.rawValue ?? null;
+  out.rawDenominator = fallbackPayload.rawDenominator ?? null;
+  out.unit = fallbackPayload.unit ?? "USD";
+  out.unitScale = fallbackPayload.unitScale ?? "unknown";
+  out.unitScaleSource = fallbackPayload.unitScaleSource ?? null;
+  out.value = fallbackPayload.value ?? null;
+  out.denominator = fallbackPayload.denominator ?? null;
+  out.valueRatio = fallbackPayload.denominator != null ? (fallbackPayload.valueRatio ?? null) : null;
+  out.valuePct = fallbackPayload.denominator != null ? (fallbackPayload.valuePct ?? null) : null;
+  out.extractionMethod = fallbackPayload.extractionMethod ?? "NONE";
+  // An untagged fallback is never HIGH: it takes the primary path's default (2.23.0, BR-EXT-035).
+  out.confidence = fallbackPayload.confidence ?? "NOT_DISCLOSED";
+  out.evidence = geographicEvidenceBlock(fallbackIdx, fallbackPayload, fbEvidence, "20-F");
+  out.calculation = fallbackPayload.calculation ?? null;
+  out.scanCoverage = fallbackPayload.scanCoverage ?? null;
+  out.searchedTerms = Array.isArray(fallbackPayload.searchedTerms) ? fallbackPayload.searchedTerms : [];
+  out.notDisclosedBasis = fallbackPayload.notDisclosedBasis ?? null;
+  out.status = "FOUND";
+  out.code = fallbackPayload.code ?? null;
+  // Append advisory warning noting automatic 20-F selection
+  fbWarnings.push({
+    code: "AUTO_20F_FALLBACK",
+    message: "Filing type automatically adapted from 10-K to 20-F (foreign private issuer detected).",
+    severity: "info",
+  });
+  out.warnings = fbWarnings;
+}
+
+async function maybeRetryGeographicRevenueAs20F(
+  out: Record<string, unknown>,
+  warnings: unknown[],
+  ticker: string,
+  region: string,
+  period: string,
+  accessionNumber: string | null,
+  pinned: boolean,
+  pinnedFilingForm: string | null,
+): Promise<void> {
+  const evidenceObj = out.evidence as Record<string, unknown>;
+  const evidenceFilingType = String(evidenceObj?.filingType ?? "").toUpperCase();
+  let possible20F = evidenceFilingType === "20-F";
+  if (pinned) {
+    // A pinned read stays pinned: the 20-F retry reads the same filing, and only when that filing is a 20-F (2.15.0).
+    possible20F = pinnedFilingForm === "20-F";
+  } else if (!possible20F && (evidenceFilingType === "" || evidenceFilingType === "10-K")) {
+    possible20F = await mayBe20FFiler(ticker);
+  }
+  if (!possible20F) return;
+  // Automatic 20-F fallback: retry extraction with 20-F filing type
+  const fallbackPayload = parseObjectJson(await getFilingData(ticker, "geographic_revenue", region, "20-F", period, "auto", pinned ? accessionNumber : null));
+  const fallbackIdx = parseObjectJson(await getSecFilingIndex(ticker, "20-F", period, accessionNumber));
+  if (fallbackPayload.value != null) {
+    applyGeographic20FFallback(out, fallbackPayload, fallbackIdx);
+  } else {
+    // 20-F extraction also failed — add advisory warning
+    if (!hasWarningCode(warnings, "POSSIBLE_20F_FILER")) {
+      warnings.push({
+        code: "POSSIBLE_20F_FILER",
+        message: "POSSIBLE_20F_FILER: Ticker may file 20-F. Retry with filing_type='20-F' or use IR web search.",
+        severity: "warning",
+      });
+    }
+  }
+}
+
 export async function extractGeographicRevenue(
   ticker: string,
   region: string,
@@ -483,116 +615,13 @@ export async function extractGeographicRevenue(
   const detail = String(detailLevel).toLowerCase();
   const needsIndex = detail === "raw";
   const idx = needsIndex ? parseObjectJson(await getSecFilingIndex(ticker, filingType, period, accessionNumber)) : {};
-  const evidence = payload.evidence && typeof payload.evidence === "object" ? payload.evidence as Record<string, unknown> : {};
   const warnings = Array.isArray(payload.warnings) ? [...payload.warnings] : [];
-  const payloadStatus = String(payload.status ?? payload.code ?? payload.confidence ?? "").trim();
   if (payload.value != null && payload.denominator == null && !hasWarningCode(warnings, "DENOMINATOR_NOT_FOUND")) {
     warnings.push({ code: "DENOMINATOR_NOT_FOUND", message: "Could not compute geographic revenue percentage due to missing denominator.", severity: "warning" });
   }
-  const out: Record<string, unknown> = {
-    ticker,
-    factType: "geographic_revenue",
-    region,
-    period: payload.period ?? null,
-    rawValue: payload.rawValue ?? null,
-    rawDenominator: payload.rawDenominator ?? null,
-    unit: payload.unit ?? "USD",
-    unitScale: payload.unitScale ?? "unknown",
-    unitScaleSource: payload.unitScaleSource ?? null,
-    value: payload.value ?? null,
-    denominator: payload.denominator ?? null,
-    valueRatio: payload.denominator != null ? (payload.valueRatio ?? null) : null,
-    valuePct: payload.denominator != null ? (payload.valuePct ?? null) : null,
-    extractionMethod: payload.extractionMethod ?? "NONE",
-    confidence: payload.confidence ?? "NOT_DISCLOSED",
-    evidence: {
-      filingType: idx.filingType ?? payload.filingType ?? filingType,
-      filingDate: idx.filingDate ?? payload.filingDate ?? null,
-      acceptedAt: idx.acceptedAt ?? null,
-      accessionNumber: idx.accessionNumber ?? payload.accessionNumber ?? null,
-      documentUrl: idx.documentUrl ?? payload.documentUrl ?? null,
-      sectionHeading: evidence.sectionHeading ?? null,
-      tableTitle: evidence.tableTitle ?? null,
-      sourceTableId: evidence.sourceTableId ?? null,
-      sourceRows: Array.isArray(evidence.sourceRows) ? evidence.sourceRows : [],
-      sourceColumns: Array.isArray(evidence.sourceColumns) ? evidence.sourceColumns : [],
-    },
-    calculation: payload.calculation ?? null,
-    scanCoverage: payload.scanCoverage ?? null,
-    searchedTerms: Array.isArray(payload.searchedTerms) ? payload.searchedTerms : [],
-    notDisclosedBasis: payload.notDisclosedBasis ?? null,
-    status: payload.value != null ? "FOUND" : (payloadStatus || "NOT_DISCLOSED"),
-    code: payload.code ?? (payloadStatus && payloadStatus !== "FOUND" && payloadStatus !== "NOT_DISCLOSED" ? payloadStatus : null),
-    warnings,
-  };
+  const out = buildGeographicRevenueOutput(ticker, region, filingType, payload, idx, warnings);
   if (filingType.toUpperCase() === "10-K" && String(out.confidence ?? "").toUpperCase() === "NOT_DISCLOSED") {
-    const evidenceObj = out.evidence as Record<string, unknown>;
-    const evidenceFilingType = String(evidenceObj?.filingType ?? "").toUpperCase();
-    let possible20F = evidenceFilingType === "20-F";
-    if (pinned) {
-      // A pinned read stays pinned: the 20-F retry reads the same filing, and only when that filing is a 20-F (2.15.0).
-      possible20F = pinnedFilingForm === "20-F";
-    } else if (!possible20F && (evidenceFilingType === "" || evidenceFilingType === "10-K")) {
-      possible20F = await mayBe20FFiler(ticker);
-    }
-    if (possible20F) {
-      // Automatic 20-F fallback: retry extraction with 20-F filing type
-      const fallbackPayload = parseObjectJson(await getFilingData(ticker, "geographic_revenue", region, "20-F", period, "auto", pinned ? accessionNumber : null));
-      const fallbackIdx = parseObjectJson(await getSecFilingIndex(ticker, "20-F", period, accessionNumber));
-      if (fallbackPayload.value != null) {
-        // 20-F extraction succeeded — replace output with fallback data
-        const fbEvidence = fallbackPayload.evidence && typeof fallbackPayload.evidence === "object"
-          ? fallbackPayload.evidence as Record<string, unknown> : {};
-        const fbWarnings = Array.isArray(fallbackPayload.warnings) ? [...fallbackPayload.warnings] : [];
-        out.period = fallbackPayload.period ?? null;
-        out.rawValue = fallbackPayload.rawValue ?? null;
-        out.rawDenominator = fallbackPayload.rawDenominator ?? null;
-        out.unit = fallbackPayload.unit ?? "USD";
-        out.unitScale = fallbackPayload.unitScale ?? "unknown";
-        out.unitScaleSource = fallbackPayload.unitScaleSource ?? null;
-        out.value = fallbackPayload.value ?? null;
-        out.denominator = fallbackPayload.denominator ?? null;
-        out.valueRatio = fallbackPayload.denominator != null ? (fallbackPayload.valueRatio ?? null) : null;
-        out.valuePct = fallbackPayload.denominator != null ? (fallbackPayload.valuePct ?? null) : null;
-        out.extractionMethod = fallbackPayload.extractionMethod ?? "NONE";
-        // An untagged fallback is never HIGH: it takes the primary path's default (2.23.0, BR-EXT-035).
-        out.confidence = fallbackPayload.confidence ?? "NOT_DISCLOSED";
-        out.evidence = {
-          filingType: fallbackIdx.filingType ?? fallbackPayload.filingType ?? "20-F",
-          filingDate: fallbackIdx.filingDate ?? fallbackPayload.filingDate ?? null,
-          acceptedAt: fallbackIdx.acceptedAt ?? null,
-          accessionNumber: fallbackIdx.accessionNumber ?? fallbackPayload.accessionNumber ?? null,
-          documentUrl: fallbackIdx.documentUrl ?? fallbackPayload.documentUrl ?? null,
-          sectionHeading: fbEvidence.sectionHeading ?? null,
-          tableTitle: fbEvidence.tableTitle ?? null,
-          sourceTableId: fbEvidence.sourceTableId ?? null,
-          sourceRows: Array.isArray(fbEvidence.sourceRows) ? fbEvidence.sourceRows : [],
-          sourceColumns: Array.isArray(fbEvidence.sourceColumns) ? fbEvidence.sourceColumns : [],
-        };
-        out.calculation = fallbackPayload.calculation ?? null;
-        out.scanCoverage = fallbackPayload.scanCoverage ?? null;
-        out.searchedTerms = Array.isArray(fallbackPayload.searchedTerms) ? fallbackPayload.searchedTerms : [];
-        out.notDisclosedBasis = fallbackPayload.notDisclosedBasis ?? null;
-        out.status = "FOUND";
-        out.code = fallbackPayload.code ?? null;
-        // Append advisory warning noting automatic 20-F selection
-        fbWarnings.push({
-          code: "AUTO_20F_FALLBACK",
-          message: "Filing type automatically adapted from 10-K to 20-F (foreign private issuer detected).",
-          severity: "info",
-        });
-        out.warnings = fbWarnings;
-      } else {
-        // 20-F extraction also failed — add advisory warning
-        if (!hasWarningCode(warnings, "POSSIBLE_20F_FILER")) {
-          warnings.push({
-            code: "POSSIBLE_20F_FILER",
-            message: "POSSIBLE_20F_FILER: Ticker may file 20-F. Retry with filing_type='20-F' or use IR web search.",
-            severity: "warning",
-          });
-        }
-      }
-    }
+    await maybeRetryGeographicRevenueAs20F(out, warnings, ticker, region, period, accessionNumber, pinned, pinnedFilingForm);
   }
   if (detail === "raw") out.rawContext = { filingIndex: idx };
   return JSON.stringify(out);

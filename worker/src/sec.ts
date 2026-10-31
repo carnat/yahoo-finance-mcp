@@ -2950,6 +2950,194 @@ export function isDecisionGradeXbrlFact(
     .every((field) => sourceEvidence[field] != null && String(sourceEvidence[field]).trim() !== "");
 }
 
+interface SecIndexContext {
+  ticker: string;
+  filingType: string;
+  period: string;
+  accessionNumber: string | null;
+  detail: string;
+  params: Record<string, unknown>;
+  warnings: Record<string, unknown>[];
+  shapeEvidence: (ev: Record<string, unknown>) => Record<string, unknown>;
+  result: (
+    status: string,
+    answer: Record<string, unknown> | null,
+    confidence: string,
+    evidenceItems?: Record<string, unknown>[],
+    warnItems?: Record<string, unknown>[],
+  ) => string;
+  missingParam: (name: string) => string;
+  accessionMiss: () => Promise<string | null>;
+}
+
+const SEC_INDEX_SUPPORTED_QUERIES = [
+  "geographic_revenue_share",
+  "revenue_exposure",
+  "china_exposure",
+  "risk_factor_mentions",
+  "customer_concentration",
+  "total_revenue",
+  "segment_revenue",
+];
+
+function secIndexEvidenceRequired(
+  status: string,
+  evidence: Record<string, unknown>[],
+  warnings: Record<string, unknown>[],
+): string {
+  if (status === "ANSWERED" && evidence.length === 0) {
+    warnings.push({ code: "EVIDENCE_REQUIRED", message: "ANSWERED responses require evidence." });
+    return "NOT_FOUND";
+  }
+  return status;
+}
+
+async function secIndexGeographicRevenueShare(ctx: SecIndexContext): Promise<string> {
+  const { ticker, filingType, period, accessionNumber, detail, params, warnings, shapeEvidence, result, missingParam } = ctx;
+  const region = String(params.region ?? "").trim();
+  if (!region) return missingParam("region");
+  const geo = parseObjectJson(await extractGeographicRevenue(ticker, region, filingType, period, accessionNumber, detail));
+  // An explicit accession that is not among the company's recent filings fails closed here too (2.15.0, R4-ACC-QUERY).
+  if (geo.ok === false && geo.error && typeof geo.error === "object" && isAccessionNotFound(geo.error as Record<string, unknown>)) {
+    return accessionNotFoundEnvelope(geo.error as Record<string, unknown>);
+  }
+  const evidenceObj = geo.evidence && typeof geo.evidence === "object" ? geo.evidence as Record<string, unknown> : {};
+  const evidence = Object.keys(evidenceObj).length > 0 ? [shapeEvidence(evidenceObj)] : [];
+  let status = geo.value != null ? "ANSWERED" : normalizeStatus(geo);
+  status = secIndexEvidenceRequired(status, evidence, warnings);
+  const answer = {
+    region,
+    value: geo.value ?? null,
+    denominator: geo.denominator ?? null,
+    valueRatio: geo.valueRatio ?? null,
+    valuePct: geo.valuePct ?? null,
+    unit: geo.unit ?? "USD",
+  };
+  const confidence = String(geo.confidence ?? (status === "ANSWERED" ? "LOW" : "NOT_DISCLOSED"));
+  return result(status, answer, confidence, evidence, warnings);
+}
+
+async function secIndexRevenueExposure(ctx: SecIndexContext): Promise<string> {
+  const { ticker, filingType, period, accessionNumber, detail, params, warnings, shapeEvidence, result, missingParam } = ctx;
+  const exposureQuery = String(params.exposure_query ?? "").trim();
+  if (!exposureQuery) return missingParam("exposure_query");
+  const rex = parseObjectJson(await extractRevenueExposure(ticker, exposureQuery, filingType, period, detail, accessionNumber));
+  const matches = Array.isArray(rex.matches) ? rex.matches.filter((m) => m && typeof m === "object") as Record<string, unknown>[] : [];
+  const first = matches.length > 0 ? matches[0] : {};
+  const evidenceObj = first.evidence && typeof first.evidence === "object" ? first.evidence as Record<string, unknown> : {};
+  const evidence = Object.keys(evidenceObj).length > 0 ? [shapeEvidence(evidenceObj)] : [];
+  let status = matches.length > 0 && String(rex.status ?? "") === "FOUND_REVENUE_EXPOSURE" ? "ANSWERED" : String(rex.status ?? "NOT_FOUND");
+  status = secIndexEvidenceRequired(status, evidence, warnings);
+  return result(status, {
+    exposureQuery,
+    value: first.value ?? null,
+    denominator: first.denominator ?? null,
+    valueRatio: first.valueRatio ?? null,
+    valuePct: first.valuePct ?? null,
+    period: first.period ?? null,
+  }, String(first.confidence ?? (status === "ANSWERED" ? "LOW" : "NOT_DISCLOSED")), evidence, warnings);
+}
+
+async function secIndexChinaExposure(ctx: SecIndexContext): Promise<string> {
+  const { ticker, filingType, period, accessionNumber, detail, warnings, shapeEvidence, result } = ctx;
+  const china = parseObjectJson(await extractChinaExposure(ticker, filingType, period, accessionNumber, detail));
+  const overall = String(china.overallStatus ?? "NOT_FOUND");
+  const answer = {
+    revenueExposure: china.revenueExposure ?? null,
+    manufacturingExposure: china.manufacturingExposure ?? null,
+    entityExposure: china.entityExposure ?? null,
+    bankExposure: china.bankExposure ?? null,
+    riskFactorExposure: china.riskFactorExposure ?? null,
+    overallStatus: overall,
+  };
+  const evidence: Record<string, unknown>[] = [];
+  for (const key of ["revenueExposure", "manufacturingExposure", "entityExposure", "bankExposure", "riskFactorExposure"]) {
+    const block = china[key];
+    if (!block || typeof block !== "object") continue;
+    const b = block as Record<string, unknown>;
+    if (b.evidence && typeof b.evidence === "object" && !Array.isArray(b.evidence)) evidence.push(shapeEvidence(b.evidence as Record<string, unknown>));
+    if (Array.isArray(b.evidence)) {
+      for (const item of b.evidence) {
+        if (item && typeof item === "object") evidence.push(shapeEvidence(item as Record<string, unknown>));
+      }
+    }
+  }
+  let status = (overall === "FOUND_REVENUE_EXPOSURE" || overall === "FOUND_NON_REVENUE_EXPOSURE") ? "ANSWERED" : overall;
+  status = secIndexEvidenceRequired(status, evidence, warnings);
+  const confidence = status === "ANSWERED" ? "HIGH" : (overall === "NOT_DISCLOSED" ? "NOT_DISCLOSED" : "LOW");
+  return result(status, answer, confidence, evidence, warnings);
+}
+
+async function secIndexRiskFactorMentions(ctx: SecIndexContext): Promise<string> {
+  const { ticker, filingType, period, accessionNumber, detail, params, warnings, shapeEvidence, result, missingParam, accessionMiss } = ctx;
+  const terms = Array.isArray(params.terms) ? params.terms.map((t) => String(t)) : [];
+  if (terms.length === 0) return missingParam("terms");
+  const riskMiss = await accessionMiss();
+  if (riskMiss) return riskMiss;
+  const risk = parseObjectJson(await extractRiskFactorMentions(ticker, terms, filingType, period, detail, accessionNumber));
+  const matches = Array.isArray(risk.matches) ? risk.matches.filter((m) => m && typeof m === "object") as Record<string, unknown>[] : [];
+  const evidence = matches
+    .map((m) => (m.evidence && typeof m.evidence === "object" && !Array.isArray(m.evidence)) ? shapeEvidence(m.evidence as Record<string, unknown>) : null)
+    .filter((m): m is Record<string, unknown> => m != null);
+  let status = matches.length > 0 ? "ANSWERED" : String(risk.status ?? "NOT_FOUND");
+  status = secIndexEvidenceRequired(status, evidence, warnings);
+  return result(status, { terms, matches }, status === "ANSWERED" ? "MEDIUM" : "LOW", evidence, warnings);
+}
+
+async function secIndexCustomerConcentration(ctx: SecIndexContext): Promise<string> {
+  const { ticker, filingType, period, accessionNumber, detail, params, warnings, shapeEvidence, result, accessionMiss } = ctx;
+  const customerLabel = String(params.customer_label ?? "").trim();
+  const custMiss = await accessionMiss();
+  if (custMiss) return custMiss;
+  const cust = parseObjectJson(await extractCustomerConcentration(ticker, filingType, period, detail, accessionNumber));
+  let customers = Array.isArray(cust.customers) ? cust.customers.filter((c) => c && typeof c === "object") as Record<string, unknown>[] : [];
+  if (customerLabel) customers = customers.filter((c) => String(c.label ?? "").toLowerCase() === customerLabel.toLowerCase());
+  const evidence = customers
+    .map((c) => (c.evidence && typeof c.evidence === "object" && !Array.isArray(c.evidence)) ? shapeEvidence(c.evidence as Record<string, unknown>) : null)
+    .filter((m): m is Record<string, unknown> => m != null);
+  let status = customers.length > 0 ? "ANSWERED" : String(cust.status ?? "NOT_FOUND");
+  status = secIndexEvidenceRequired(status, evidence, warnings);
+  const confidence = status === "ANSWERED" ? "HIGH" : (status === "NOT_DISCLOSED" ? "NOT_DISCLOSED" : "LOW");
+  return result(status, { customerLabel: customerLabel || null, customers }, confidence, evidence, warnings);
+}
+
+async function secIndexTotalRevenue(ctx: SecIndexContext): Promise<string> {
+  const { ticker, filingType, period, accessionNumber, warnings, shapeEvidence, result, accessionMiss } = ctx;
+  const totalMiss = await accessionMiss();
+  if (totalMiss) return totalMiss;
+  const total = parseObjectJson(await extractTotalRevenue(ticker, filingType, period, accessionNumber));
+  const evidenceObj = total.evidence && typeof total.evidence === "object" ? total.evidence as Record<string, unknown> : {};
+  const evidence = Object.keys(evidenceObj).length > 0 ? [shapeEvidence(evidenceObj)] : [];
+  let status = total.value != null ? "ANSWERED" : String(total.status ?? "NOT_FOUND");
+  status = secIndexEvidenceRequired(status, evidence, warnings);
+  return result(
+    status,
+    { value: total.value ?? null, period: total.period ?? null, unit: "USD" },
+    String(total.confidence ?? (status === "ANSWERED" ? "LOW" : "NOT_DISCLOSED")),
+    evidence,
+    warnings,
+  );
+}
+
+async function secIndexSegmentRevenue(ctx: SecIndexContext): Promise<string> {
+  const { ticker, filingType, period, accessionNumber, detail, params, warnings, shapeEvidence, result, accessionMiss } = ctx;
+  const segmentName = String(params.segment ?? "").trim();
+  const segMiss = await accessionMiss();
+  if (segMiss) return segMiss;
+  const seg = parseObjectJson(await extractSegmentRevenue(ticker, filingType, period, detail, accessionNumber));
+  let segments = Array.isArray(seg.segments) ? seg.segments.filter((s) => s && typeof s === "object") as Record<string, unknown>[] : [];
+  if (segmentName) segments = segments.filter((s) => String(s.label ?? "").toLowerCase() === segmentName.toLowerCase());
+  const evidence = segments
+    .map((s) => (s.evidence && typeof s.evidence === "object" && !Array.isArray(s.evidence)) ? shapeEvidence(s.evidence as Record<string, unknown>) : null)
+    .filter((m): m is Record<string, unknown> => m != null);
+  let status = segments.length > 0 ? "ANSWERED" : (segmentName ? "NOT_FOUND" : String(seg.status ?? "NOT_FOUND"));
+  status = secIndexEvidenceRequired(status, evidence, warnings);
+  const segmentConfidence = segments.length > 0 ? String(segments[0].confidence ?? "LOW") : null;
+  const confidence = status === "ANSWERED" ? segmentConfidence ?? "LOW" : (status === "NOT_DISCLOSED" ? "NOT_DISCLOSED" : "LOW");
+  if (Array.isArray(seg.warnings)) warnings.push(...seg.warnings as Record<string, unknown>[]);
+  return result(status, { segment: segmentName || null, segments }, confidence, evidence, warnings);
+}
+
 export async function querySecFilingIndex(
   ticker: string,
   filingType = "10-K",
@@ -3022,15 +3210,7 @@ export async function querySecFilingIndex(
     [{ code: "INPUT_VALIDATION_ERROR", message: `Missing required params.${name} for query_type=${query}` }],
   );
 
-  const supported = new Set([
-    "geographic_revenue_share",
-    "revenue_exposure",
-    "china_exposure",
-    "risk_factor_mentions",
-    "customer_concentration",
-    "total_revenue",
-    "segment_revenue",
-  ]);
+  const supported = new Set(SEC_INDEX_SUPPORTED_QUERIES);
   if (!supported.has(query)) {
     return mcpFailure(
       "query_sec_filing_index",
@@ -3044,88 +3224,6 @@ export async function querySecFilingIndex(
     );
   }
 
-  if (query === "geographic_revenue_share") {
-    const region = String(params.region ?? "").trim();
-    if (!region) return missingParam("region");
-    const geo = parseObjectJson(await extractGeographicRevenue(ticker, region, filingType, period, accessionNumber, detail));
-    // An explicit accession that is not among the company's recent filings fails closed here too (2.15.0, R4-ACC-QUERY).
-    if (geo.ok === false && geo.error && typeof geo.error === "object" && isAccessionNotFound(geo.error as Record<string, unknown>)) {
-      return accessionNotFoundEnvelope(geo.error as Record<string, unknown>);
-    }
-    const evidenceObj = geo.evidence && typeof geo.evidence === "object" ? geo.evidence as Record<string, unknown> : {};
-    const evidence = Object.keys(evidenceObj).length > 0 ? [shapeEvidence(evidenceObj)] : [];
-    let status = geo.value != null ? "ANSWERED" : normalizeStatus(geo);
-    if (status === "ANSWERED" && evidence.length === 0) {
-      status = "NOT_FOUND";
-      warnings.push({ code: "EVIDENCE_REQUIRED", message: "ANSWERED responses require evidence." });
-    }
-    const answer = {
-      region,
-      value: geo.value ?? null,
-      denominator: geo.denominator ?? null,
-      valueRatio: geo.valueRatio ?? null,
-      valuePct: geo.valuePct ?? null,
-      unit: geo.unit ?? "USD",
-    };
-    const confidence = String(geo.confidence ?? (status === "ANSWERED" ? "LOW" : "NOT_DISCLOSED"));
-    return result(status, answer, confidence, evidence, warnings);
-  }
-
-  if (query === "revenue_exposure") {
-    const exposureQuery = String(params.exposure_query ?? "").trim();
-    if (!exposureQuery) return missingParam("exposure_query");
-    const rex = parseObjectJson(await extractRevenueExposure(ticker, exposureQuery, filingType, period, detail, accessionNumber));
-    const matches = Array.isArray(rex.matches) ? rex.matches.filter((m) => m && typeof m === "object") as Record<string, unknown>[] : [];
-    const first = matches.length > 0 ? matches[0] : {};
-    const evidenceObj = first.evidence && typeof first.evidence === "object" ? first.evidence as Record<string, unknown> : {};
-    const evidence = Object.keys(evidenceObj).length > 0 ? [shapeEvidence(evidenceObj)] : [];
-    let status = matches.length > 0 && String(rex.status ?? "") === "FOUND_REVENUE_EXPOSURE" ? "ANSWERED" : String(rex.status ?? "NOT_FOUND");
-    if (status === "ANSWERED" && evidence.length === 0) {
-      status = "NOT_FOUND";
-      warnings.push({ code: "EVIDENCE_REQUIRED", message: "ANSWERED responses require evidence." });
-    }
-    return result(status, {
-      exposureQuery,
-      value: first.value ?? null,
-      denominator: first.denominator ?? null,
-      valueRatio: first.valueRatio ?? null,
-      valuePct: first.valuePct ?? null,
-      period: first.period ?? null,
-    }, String(first.confidence ?? (status === "ANSWERED" ? "LOW" : "NOT_DISCLOSED")), evidence, warnings);
-  }
-
-  if (query === "china_exposure") {
-    const china = parseObjectJson(await extractChinaExposure(ticker, filingType, period, accessionNumber, detail));
-    const overall = String(china.overallStatus ?? "NOT_FOUND");
-    const answer = {
-      revenueExposure: china.revenueExposure ?? null,
-      manufacturingExposure: china.manufacturingExposure ?? null,
-      entityExposure: china.entityExposure ?? null,
-      bankExposure: china.bankExposure ?? null,
-      riskFactorExposure: china.riskFactorExposure ?? null,
-      overallStatus: overall,
-    };
-    const evidence: Record<string, unknown>[] = [];
-    for (const key of ["revenueExposure", "manufacturingExposure", "entityExposure", "bankExposure", "riskFactorExposure"]) {
-      const block = china[key];
-      if (!block || typeof block !== "object") continue;
-      const b = block as Record<string, unknown>;
-      if (b.evidence && typeof b.evidence === "object" && !Array.isArray(b.evidence)) evidence.push(shapeEvidence(b.evidence as Record<string, unknown>));
-      if (Array.isArray(b.evidence)) {
-        for (const item of b.evidence) {
-          if (item && typeof item === "object") evidence.push(shapeEvidence(item as Record<string, unknown>));
-        }
-      }
-    }
-    let status = (overall === "FOUND_REVENUE_EXPOSURE" || overall === "FOUND_NON_REVENUE_EXPOSURE") ? "ANSWERED" : overall;
-    if (status === "ANSWERED" && evidence.length === 0) {
-      status = "NOT_FOUND";
-      warnings.push({ code: "EVIDENCE_REQUIRED", message: "ANSWERED responses require evidence." });
-    }
-    const confidence = status === "ANSWERED" ? "HIGH" : (overall === "NOT_DISCLOSED" ? "NOT_DISCLOSED" : "LOW");
-    return result(status, answer, confidence, evidence, warnings);
-  }
-
   // An explicit accession that is not among the company's filings fails closed for the pinned reads too, as
   // geographic_revenue_share does; checked after each query's own params (2.24.0, F21).
   const accessionMiss = async (): Promise<string | null> => {
@@ -3134,79 +3232,15 @@ export async function querySecFilingIndex(
     return !resolved.ok && isAccessionNotFound(resolved.error) ? accessionNotFoundEnvelope(resolved.error) : null;
   };
 
-  if (query === "risk_factor_mentions") {
-    const terms = Array.isArray(params.terms) ? params.terms.map((t) => String(t)) : [];
-    if (terms.length === 0) return missingParam("terms");
-    const riskMiss = await accessionMiss();
-    if (riskMiss) return riskMiss;
-    const risk = parseObjectJson(await extractRiskFactorMentions(ticker, terms, filingType, period, detail, accessionNumber));
-    const matches = Array.isArray(risk.matches) ? risk.matches.filter((m) => m && typeof m === "object") as Record<string, unknown>[] : [];
-    const evidence = matches
-      .map((m) => (m.evidence && typeof m.evidence === "object" && !Array.isArray(m.evidence)) ? shapeEvidence(m.evidence as Record<string, unknown>) : null)
-      .filter((m): m is Record<string, unknown> => m != null);
-    let status = matches.length > 0 ? "ANSWERED" : String(risk.status ?? "NOT_FOUND");
-    if (status === "ANSWERED" && evidence.length === 0) {
-      status = "NOT_FOUND";
-      warnings.push({ code: "EVIDENCE_REQUIRED", message: "ANSWERED responses require evidence." });
-    }
-    return result(status, { terms, matches }, status === "ANSWERED" ? "MEDIUM" : "LOW", evidence, warnings);
-  }
-
-  if (query === "customer_concentration") {
-    const customerLabel = String(params.customer_label ?? "").trim();
-    const custMiss = await accessionMiss();
-    if (custMiss) return custMiss;
-    const cust = parseObjectJson(await extractCustomerConcentration(ticker, filingType, period, detail, accessionNumber));
-    let customers = Array.isArray(cust.customers) ? cust.customers.filter((c) => c && typeof c === "object") as Record<string, unknown>[] : [];
-    if (customerLabel) customers = customers.filter((c) => String(c.label ?? "").toLowerCase() === customerLabel.toLowerCase());
-    const evidence = customers
-      .map((c) => (c.evidence && typeof c.evidence === "object" && !Array.isArray(c.evidence)) ? shapeEvidence(c.evidence as Record<string, unknown>) : null)
-      .filter((m): m is Record<string, unknown> => m != null);
-    let status = customers.length > 0 ? "ANSWERED" : String(cust.status ?? "NOT_FOUND");
-    if (status === "ANSWERED" && evidence.length === 0) {
-      status = "NOT_FOUND";
-      warnings.push({ code: "EVIDENCE_REQUIRED", message: "ANSWERED responses require evidence." });
-    }
-    const confidence = status === "ANSWERED" ? "HIGH" : (status === "NOT_DISCLOSED" ? "NOT_DISCLOSED" : "LOW");
-    return result(status, { customerLabel: customerLabel || null, customers }, confidence, evidence, warnings);
-  }
-
-  if (query === "total_revenue") {
-    const totalMiss = await accessionMiss();
-    if (totalMiss) return totalMiss;
-    const total = parseObjectJson(await extractTotalRevenue(ticker, filingType, period, accessionNumber));
-    const evidenceObj = total.evidence && typeof total.evidence === "object" ? total.evidence as Record<string, unknown> : {};
-    const evidence = Object.keys(evidenceObj).length > 0 ? [shapeEvidence(evidenceObj)] : [];
-    let status = total.value != null ? "ANSWERED" : String(total.status ?? "NOT_FOUND");
-    if (status === "ANSWERED" && evidence.length === 0) {
-      status = "NOT_FOUND";
-      warnings.push({ code: "EVIDENCE_REQUIRED", message: "ANSWERED responses require evidence." });
-    }
-    return result(
-      status,
-      { value: total.value ?? null, period: total.period ?? null, unit: "USD" },
-      String(total.confidence ?? (status === "ANSWERED" ? "LOW" : "NOT_DISCLOSED")),
-      evidence,
-      warnings,
-    );
-  }
-
-  const segmentName = String(params.segment ?? "").trim();
-  const segMiss = await accessionMiss();
-  if (segMiss) return segMiss;
-  const seg = parseObjectJson(await extractSegmentRevenue(ticker, filingType, period, detail, accessionNumber));
-  let segments = Array.isArray(seg.segments) ? seg.segments.filter((s) => s && typeof s === "object") as Record<string, unknown>[] : [];
-  if (segmentName) segments = segments.filter((s) => String(s.label ?? "").toLowerCase() === segmentName.toLowerCase());
-  const evidence = segments
-    .map((s) => (s.evidence && typeof s.evidence === "object" && !Array.isArray(s.evidence)) ? shapeEvidence(s.evidence as Record<string, unknown>) : null)
-    .filter((m): m is Record<string, unknown> => m != null);
-  let status = segments.length > 0 ? "ANSWERED" : (segmentName ? "NOT_FOUND" : String(seg.status ?? "NOT_FOUND"));
-  if (status === "ANSWERED" && evidence.length === 0) {
-    status = "NOT_FOUND";
-    warnings.push({ code: "EVIDENCE_REQUIRED", message: "ANSWERED responses require evidence." });
-  }
-  const segmentConfidence = segments.length > 0 ? String(segments[0].confidence ?? "LOW") : null;
-  const confidence = status === "ANSWERED" ? segmentConfidence ?? "LOW" : (status === "NOT_DISCLOSED" ? "NOT_DISCLOSED" : "LOW");
-  if (Array.isArray(seg.warnings)) warnings.push(...seg.warnings as Record<string, unknown>[]);
-  return result(status, { segment: segmentName || null, segments }, confidence, evidence, warnings);
+  const ctx: SecIndexContext = {
+    ticker, filingType, period, accessionNumber, detail, params, warnings,
+    shapeEvidence, result, missingParam, accessionMiss,
+  };
+  if (query === "geographic_revenue_share") return secIndexGeographicRevenueShare(ctx);
+  if (query === "revenue_exposure") return secIndexRevenueExposure(ctx);
+  if (query === "china_exposure") return secIndexChinaExposure(ctx);
+  if (query === "risk_factor_mentions") return secIndexRiskFactorMentions(ctx);
+  if (query === "customer_concentration") return secIndexCustomerConcentration(ctx);
+  if (query === "total_revenue") return secIndexTotalRevenue(ctx);
+  return secIndexSegmentRevenue(ctx);
 }
