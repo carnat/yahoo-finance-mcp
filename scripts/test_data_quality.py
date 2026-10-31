@@ -971,7 +971,7 @@ class TestPr2DataQuality(unittest.TestCase):
             return json.dumps(radar)
 
         async def fake_consensus(ticker):
-            return json.dumps({"dominantRating": "buy", "totalAnalysts": 10})
+            return json.dumps({"dominantRating": "buy", "numberOfAnalysts": 10})
 
         async def fake_price(ticker):
             return json.dumps({})

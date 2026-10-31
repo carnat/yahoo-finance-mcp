@@ -5,6 +5,7 @@ server.py re-imports all public names from this module so that
 ``server._mcp_success``, ``server.ErrorCode``, etc. keep working.
 """
 
+import copy
 import datetime
 import json
 import os
@@ -12,7 +13,7 @@ import re
 from typing import NotRequired, TypedDict
 
 from yfmcp.build_info import BUILD_DATE, SERVER_VERSION
-from yfmcp.deprecations import TOOL_RELIABILITY_CLASS
+from yfmcp.deprecations import TOOL_RELIABILITY_STATUS
 from yfmcp.pricing_notices import lift_payload_warnings
 from yfmcp.url_policy import SUBREQUEST_BUDGET, SUBREQUEST_BUDGET_WARNING, SUBREQUEST_LIMIT
 
@@ -569,11 +570,9 @@ def _legacy_text_failure(tool: str, text: str) -> str | None:
 
 
 def _success_meta(tool: str, **kwargs) -> dict:
-    """Base meta for a success envelope, with reliabilityClass for the tools that carry one (2.8.0)."""
+    """Base meta for a success envelope, with the status-table entry for the tools that carry one (3.7.0)."""
     meta = _base_meta(tool, **kwargs)
-    reliability_class = TOOL_RELIABILITY_CLASS.get(tool)
-    if reliability_class is not None:
-        meta["reliabilityClass"] = reliability_class
+    meta.update(copy.deepcopy(TOOL_RELIABILITY_STATUS.get(tool, {})))
     return meta
 
 
@@ -606,7 +605,9 @@ def _envelope_tool_result(tool: str, result: object) -> object:
     if isinstance(parsed, dict):
         if isinstance(parsed.get("ok"), bool) and ("data" in parsed or "error" in parsed):
             inner_meta = parsed.get("meta") if isinstance(parsed.get("meta"), dict) else {}
-            parsed["meta"] = {**_base_meta(tool), **inner_meta}
+            # The Worker's status-table entry lands after the base keys and wins over the inner meta, ok or not.
+            status = copy.deepcopy(TOOL_RELIABILITY_STATUS.get(tool, {}))
+            parsed["meta"] = {**_base_meta(tool), **status, **inner_meta, **status}
             if "cacheSource" not in inner_meta:
                 parsed["meta"]["cacheSource"] = "memory" if parsed["meta"].get("cacheHit") is True else None
             if parsed["meta"].get("dataDate") is None:
@@ -618,8 +619,6 @@ def _envelope_tool_result(tool: str, result: object) -> object:
                     existing = parsed["meta"].get("warnings")
                     parsed["meta"]["warnings"] = [*(existing if isinstance(existing, list) else []), *payload_warnings]
                 parsed["data"] = _confidence_levels(tool, _enrich_facts(parsed.get("data")))
-                if tool in TOOL_RELIABILITY_CLASS:
-                    parsed["meta"]["reliabilityClass"] = TOOL_RELIABILITY_CLASS[tool]
             return json.dumps(parsed)
         if parsed.get("error") is True:
             meta_extra: dict = {}

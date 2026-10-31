@@ -10,8 +10,8 @@ Both runtimes must return the same payloads after the removals, so every case ru
 - analyze_position_signals has no t1/t2/t4/t5_inputs; analystInputs takes the radar's plain counts.
 - analyze_options_flow_window has no ivPctile, putVolVs10dAvg or fieldNotes.
 - get_analyst_rating_changes (the radar) has no upgrades30d, downgrades30d or initiations30d.
-- The Worker's meta for the three status-table tools has no doctrineUse or decisionGrade (Python's meta carries
-  reliabilityClass only: pinned).
+- The meta of the three status-table tools has no doctrineUse or decisionGrade, and carries the Worker's whole status
+  table entry in both runtimes (3.7.0, D7).
 
 Python reads Yahoo's quoteSummary through yfinance's own fetcher (``Ticker._data.get_raw_json``), which these cases replace
 with a fake that checks the URL and parameters; the Worker is served the same JSON by route.
@@ -38,6 +38,7 @@ from scripts.parity.harness import Case
 
 import server  # noqa: E402
 from scripts.parity.cases_accession import _python_sec_state  # noqa: E402
+from yfmcp.deprecations import TOOL_RELIABILITY_STATUS  # noqa: E402
 from yfmcp.envelope import _envelope_tool_result  # noqa: E402
 from yfmcp.news.providers import yahoo as yahoo_provider  # noqa: E402
 from yfmcp.tools import pricing  # noqa: E402
@@ -379,16 +380,16 @@ CASES += [
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # Worker meta for the three status-table tools: reliabilityClass first after capabilityStatus, no doctrineUse or decisionGrade
-# Python's meta carries reliabilityClass only (it never emitted the rest of the status table).
+# Since 3.7.0 (D7) Python's meta carries the same status-table entry, in the same position.
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
 _STATUS_KEYS = ["capabilityStatus", "reliabilityClass", "failureMode", "evidenceRequired", "sourceType", "successCriteria",
                 "limitationStatuses", "note"]
 _FULL_STATUS_KEYS = list(_STATUS_KEYS)
-_META_DECISION = "FINDING 3.0.0: Python meta carries reliabilityClass only from the Worker's status table (it never emitted capabilityStatus, failureMode, evidenceRequired or sourceType)"
+_META_DECISION = "3.7.0 D7: Python meta carries the Worker's whole status table entry"
 
 
-def _meta_order_case(name: str, tool, routes: dict | None, expect_ts_keys: list[str]) -> Case:
+def _meta_order_case(name: str, tool, routes: dict | None, expect_keys: list[str]) -> Case:
     """The envelope meta's own keys, in order, filtered to the status table's and to the retired doctrineUse / decisionGrade.
     (The harness sorts dict keys before `select` runs, so each runtime returns the key list itself.)"""
     name_, args, py_call = tool
@@ -406,8 +407,27 @@ def _meta_order_case(name: str, tool, routes: dict | None, expect_ts_keys: list[
     body = (f'const r = await m.tools.callToolResult({json.dumps(name_)}, {json.dumps(args)}); '
             f'return Object.keys(r.value.meta).filter((k) => {json.dumps(watched)}.includes(k));')
     return Case(name=name, ids=["Q14-N1"], py=py, ts={"js": _worker(body), "isolate": True}, routes=routes or {},
-                mode="pinned", decision=_META_DECISION,
-                expect_py=["reliabilityClass"], expect_ts=expect_ts_keys)
+                mode="equal", decision=_META_DECISION, expect=expect_keys)
+
+
+def _meta_values_case(name: str, tool, routes: dict | None, expect_values: dict) -> Case:
+    """The status-table values in the envelope meta (not only the key names), identical in both runtimes."""
+    name_, args, py_call = tool
+
+    def py():
+        async def call():
+            return _envelope_tool_result(name_, await py_call())
+        with patch.object(server.yf, "Ticker", side_effect=RuntimeError("offline")), \
+                patch.object(yahoo_provider, "_yahoo_search_news", return_value=[]), \
+                (_python_sec_state() if routes else contextlib.nullcontext()):
+            out = asyncio.run(call())
+        meta = json.loads(out)["meta"]
+        return {k: meta[k] for k in _STATUS_KEYS if k in meta}
+
+    body = (f'const r = await m.tools.callToolResult({json.dumps(name_)}, {json.dumps(args)}); '
+            f'const out = {{}}; for (const k of {json.dumps(_STATUS_KEYS)}) if (k in r.value.meta) out[k] = r.value.meta[k]; return out;')
+    return Case(name=name, ids=["Q14-N1"], py=py, ts={"js": _worker(body), "isolate": True}, routes=routes or {},
+                mode="equal", decision=_META_DECISION, expect=expect_values)
 
 
 CASES += [
@@ -417,6 +437,10 @@ CASES += [
                      _FULL_STATUS_KEYS),
     _meta_order_case("major300.meta.section_markdown_status_table_order_without_doctrine_use_or_decision_grade", SECTION, SECTION_ROUTES,
                      ["capabilityStatus", "reliabilityClass", "failureMode", "evidenceRequired", "sourceType"]),
+    _meta_values_case("major300.meta.press_releases_status_table_values", PRESS, None, TOOL_RELIABILITY_STATUS["get_company_press_releases"]),
+    _meta_values_case("major300.meta.extract_sec_filing_fact_status_table_values", FACT, None, TOOL_RELIABILITY_STATUS["extract_sec_filing_fact"]),
+    _meta_values_case("major300.meta.section_markdown_status_table_values", SECTION, SECTION_ROUTES,
+                      TOOL_RELIABILITY_STATUS["get_sec_filing_section_markdown"]),
 ]
 
 

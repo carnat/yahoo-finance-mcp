@@ -48,7 +48,7 @@ from yfmcp.clients.endpoints import (
     sec_company_facts_url,
     sec_filing_index_url,
 )
-from yfmcp.deprecations import TOOL_RELIABILITY_CLASS as _TOOL_RELIABILITY_CLASS
+from yfmcp.deprecations import TOOL_RELIABILITY_STATUS as _TOOL_RELIABILITY_STATUS
 from yfmcp.envelope import ErrorCode, _classify_error_message, _mcp_failure
 from yfmcp.fiscal_calendar import document_fiscal_year_focus, filing_fiscal_year_label
 from yfmcp.parsing.extractors import (
@@ -3398,7 +3398,7 @@ async def get_sec_filing_section_markdown(
         "status": "SECTION_MARKDOWN_UNVERIFIED",
         "confidence": "NOT_DECISION_GRADE",
         "decisionGrade": False,
-        "reliabilityClass": _TOOL_RELIABILITY_CLASS["get_sec_filing_section_markdown"],
+        "reliabilityClass": _TOOL_RELIABILITY_STATUS["get_sec_filing_section_markdown"]["reliabilityClass"],
         "warnings": warnings,
         "source": parser_source,
         "truncated": truncated,

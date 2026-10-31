@@ -42,7 +42,7 @@ from yfmcp.clients.edgar import _edgar_get_html, _get_submissions_for_ticker
 from yfmcp.clients.market_providers import _PROVIDER_USER_AGENT
 from yfmcp.parsing.html import _parse_html_table, _strip_html_tags
 from yfmcp import extraction_rules as _er
-from yfmcp.deprecations import TOOL_RELIABILITY_CLASS as _TOOL_RELIABILITY_CLASS
+from yfmcp.deprecations import TOOL_RELIABILITY_STATUS as _TOOL_RELIABILITY_STATUS
 from yfmcp.tools.pricing import _run_ticker_batch
 
 # Moved to yfmcp/news/ in 2.15.1 (pure restructure). Every moved name is re-imported here so
@@ -1688,7 +1688,7 @@ async def get_company_press_releases(
         "decisionGrade": decision_grade,
         "decisionGradeBasis": decision_grade_basis,
         "capabilityStatus": "ACTIVE",
-        "reliabilityClass": _TOOL_RELIABILITY_CLASS["get_company_press_releases"],
+        "reliabilityClass": _TOOL_RELIABILITY_STATUS["get_company_press_releases"]["reliabilityClass"],
         "failureMode": None if decision_grade else (sec_outage_mode or coverage_status),
     }
     if sec_8k_evidence:

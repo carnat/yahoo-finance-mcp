@@ -1090,6 +1090,22 @@ CASES += [
                    "Sale by Doe Jane: 3 shares, value $25."]),
 ]
 
+# 3.7.0 (C3): footnote marks after a transaction code are stripped, so "S(1)" reads S and gets its label (HTML and XML paths). A code that is
+# only a footnote mark reads as an empty cell: the HTML row is skipped (no insiderTransaction), the XML code is null.
+from scripts.parity.cases_news_a import f4_html, f4_nd_row, f4_row, f4_xml, form4_case  # noqa: E402
+
+CASES += [
+    form4_case("news.form4.footnote_marks_after_the_code_are_stripped", ["BR-NWS-124", "BR-NWS-123"], 910301,
+               [f4_html([f4_nd_row("S(1)", "10", "$1")]), f4_html([f4_nd_row("G (2)", "10", "$1")]), f4_html([f4_nd_row("S(1)(2)", "10", "$1")]),
+                f4_html([f4_nd_row("M", "10", "$1")]), f4_html([f4_nd_row("(1)", "10", "$1")]),
+                f4_xml(rows=f4_row("S(1)", "10", "1")),
+                f4_xml(rows=f4_row("(1)", "10", "1"))],
+               select=lambda v: [[(it.get("insiderTransaction") or {}).get("transactionCode"), (it.get("insiderTransaction") or {}).get("transactionLabel")]
+                                 for it in v["items"]],
+               expect=[["S", "Sale"], ["G", "Gift"], ["S", "Sale"], ["M", "Option exercise/conversion"], [None, None], ["S", "Sale"],
+                       [None, "Other/Unclassified"]]),
+]
+
 
 # ═══════════════════════════════════════════════════════════════════════════════════════════════
 # Marketaux wire fallback: row acceptance, exchange check, HTTP outcomes (BR-NWS-229, BR-NWS-230)

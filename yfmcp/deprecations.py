@@ -1,4 +1,4 @@
-"""The caller-chosen liquidity minimum (2.8.0, N3b) and the reliabilityClass table. Mirrors worker/src/deprecations.ts.
+"""The caller-chosen liquidity minimum (2.8.0, N3b) and the status table. Mirrors worker/src/deprecations.ts.
 
 The 2.8.0 and 2.27.0 field deprecations and their DEPRECATED_FIELD notices were removed in 3.0.0; see
 docs/provider-runtime-guidance.md "Breaking Changes (3.0.0)".
@@ -10,12 +10,36 @@ from __future__ import annotations
 
 import math
 
-# The tools whose meta (and, for two of them, data) carry reliabilityClass. The values are the Worker's
-# TOOL_RELIABILITY_STATUS reliabilityClass.
-TOOL_RELIABILITY_CLASS = {
-    "get_sec_filing_section_markdown": "UNRELIABLE",
-    "get_company_press_releases": "RELIABLE",
-    "extract_sec_filing_fact": "RELIABLE",
+# The tools whose success meta carries their status-table entry (3.7.0): a copy of the Worker's TOOL_RELIABILITY_STATUS
+# (worker/src/tools.ts), same values and key order. reliabilityClass also appears in two tools' data.
+TOOL_RELIABILITY_STATUS: dict[str, dict] = {
+    "get_sec_filing_section_markdown": {
+        "capabilityStatus": "DEGRADED",
+        "reliabilityClass": "UNRELIABLE",
+        "failureMode": "LIVE_SECTION_EXTRACTION_UNRELIABLE",
+        "evidenceRequired": True,
+        "sourceType": "sec_filing",
+    },
+    "get_company_press_releases": {
+        "capabilityStatus": "ACTIVE",
+        "reliabilityClass": "RELIABLE",
+        "failureMode": None,
+        "evidenceRequired": True,
+        "sourceType": "company_ir_page",
+        "successCriteria": ["coverageStatus=SEC_EX99_RESOLVED or APPROVED_IR_PAGE_RESOLVED", "decisionGrade=true", "secEvidence or irPageEvidence present"],
+        "limitationStatuses": ["SEC_8K_FOUND_EX99_NOT_FOUND", "NO_OFFICIAL_RELEASE_SOURCE", "NO_YAHOO_PRESS_RELEASE", "COMPANY_IR_PAGE_NOT_APPROVED", "COMPANY_IR_PAGE_CANDIDATE_ONLY", "COMPANY_IR_NOT_FOUND", "NOT_FOUND"],
+        "note": "Tool is usable, but gate-clear is payload-level only; candidate, unresolved, RSS-only, newswire, and Yahoo payloads remain non-decision-grade.",
+    },
+    "extract_sec_filing_fact": {
+        "capabilityStatus": "ACTIVE",
+        "reliabilityClass": "RELIABLE",
+        "failureMode": None,
+        "evidenceRequired": True,
+        "sourceType": "sec_xbrl",
+        "successCriteria": ["value", "xbrlContext", "sourceEvidence"],
+        "limitationStatuses": ["SEC_FACT_NOT_AVAILABLE", "NO_COMPANYCONCEPT_FACT_FOR_FORM", "UNSUPPORTED_XBRL_CONCEPT"],
+        "note": "Decision-grade only for successful XBRL facts with value, xbrlContext, and sourceEvidence; limitation statuses remain non-decision-grade at payload level.",
+    },
 }
 
 

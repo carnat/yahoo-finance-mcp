@@ -64,12 +64,18 @@ function latestFiling(filings: PeriodicFiling[] | null | undefined, asOf: string
   return best;
 }
 
-interface Fact { concept: string; start: string | null; end: string; val: number; filed: string; form: string; accn: string | null }
+interface Fact {
+  concept: string; start: string | null; end: string; val: number; filed: string; form: string; accn: string | null;
+  // A parent figure derived from ProfitLoss (3.7.0, C2): the ProfitLoss value and the NCI fact taken off it.
+  profitLoss?: number; nci?: Fact;
+}
 
 interface TaxonomyMap {
   revenue: string[];
   operatingIncome: string[];
   netIncome: string[];
+  // ProfitLoss includes the noncontrolling interests; this concept is taken off it (3.7.0, C2).
+  netIncomeNci: string;
   depreciationAmortization: string[][];
   cash: string[];
   shortTermInvestments: string[];
@@ -87,6 +93,7 @@ const US_GAAP: TaxonomyMap = {
   revenue: [...REVENUE_CONCEPTS],
   operatingIncome: ["OperatingIncomeLoss"],
   netIncome: ["NetIncomeLoss", "ProfitLoss"],
+  netIncomeNci: "NetIncomeLossAttributableToNoncontrollingInterest",
   depreciationAmortization: [["DepreciationDepletionAndAmortization"], ["DepreciationAndAmortization"], ["DepreciationAmortizationAndAccretionNet"], ["Depreciation", "AmortizationOfIntangibleAssets"]],
   cash: ["CashAndCashEquivalentsAtCarryingValue", "Cash"],
   shortTermInvestments: ["ShortTermInvestments", "MarketableSecuritiesCurrent", "AvailableForSaleSecuritiesDebtSecuritiesCurrent"],
@@ -102,6 +109,7 @@ const IFRS: TaxonomyMap = {
   revenue: ["Revenue", "RevenueFromContractsWithCustomers"],
   operatingIncome: ["ProfitLossFromOperatingActivities"],
   netIncome: ["ProfitLossAttributableToOwnersOfParent", "ProfitLoss"],
+  netIncomeNci: "ProfitLossAttributableToNonControllingInterests",
   depreciationAmortization: [["DepreciationAndAmortisationExpense"], ["DepreciationExpense", "AmortisationExpense"]],
   cash: ["CashAndCashEquivalents"],
   shortTermInvestments: [],
@@ -203,7 +211,33 @@ function factsFor(tax: Rec | null, concepts: string[], unit: string, asOf: strin
 }
 
 function component(f: Fact, sign = 1): Rec {
-  return { concept: f.concept, periodStart: f.start, periodEnd: f.end, value: f.val, sign, form: f.form, filed: f.filed, accessionNumber: f.accn };
+  return { concept: f.concept, periodStart: f.start, periodEnd: f.end, value: f.profitLoss ?? f.val, sign, form: f.form, filed: f.filed, accessionNumber: f.accn };
+}
+
+/** A fact's components: a parent figure derived from ProfitLoss shows the ProfitLoss part and the NCI part (opposite sign). */
+function components(f: Fact, sign = 1): Rec[] {
+  return f.nci ? [component(f, sign), component(f.nci, -sign)] : [component(f, sign)];
+}
+
+/**
+ * Net income facts as the parent's figure (3.7.0, C2): a ProfitLoss fact keeps only with the NCI fact of the same unit, accn,
+ * start and end, and its value becomes ProfitLoss - NCI; one without it is dropped (not tagged).
+ */
+function parentNetIncomeFacts(tax: Rec | null, map: TaxonomyMap, unit: string, asOf: string): Fact[] {
+  const out: Fact[] = [];
+  const nciRows = ((((tax?.[map.netIncomeNci] as Rec | undefined)?.units ?? {}) as Record<string, Rec[]>)[unit]) ?? [];
+  for (const f of factsFor(tax, map.netIncome, unit, asOf)) {
+    if (f.concept !== "ProfitLoss") {
+      out.push(f);
+      continue;
+    }
+    const hit = nciRows.find((n) => typeof f.accn === "string" && n.accn === f.accn && n.end === f.end
+      && (typeof n.start === "string" ? n.start : null) === f.start && typeof n.val === "number");
+    if (!hit) continue;
+    const nci: Fact = { concept: map.netIncomeNci, start: f.start, end: f.end, val: hit.val as number, filed: hit.filed as string, form: hit.form as string, accn: hit.accn as string };
+    out.push({ ...f, val: f.val - nci.val, profitLoss: f.val, nci });
+  }
+  return out;
 }
 
 const isAnnual = (f: Fact) => f.start != null && days(f.start, f.end) >= 350 && days(f.start, f.end) <= 380;
@@ -221,7 +255,7 @@ export function flowBases(facts: Fact[]): { LFY: Rec; LTM: Rec } {
     const missing = { status: "NOT_AVAILABLE", value: null, reason: "NO_ANNUAL_PERIOD_FILED" };
     return { LFY: missing, LTM: missing };
   }
-  const lfyOut = { status: "OK", value: lfy.val, periodStart: lfy.start, periodEnd: lfy.end, method: "REPORTED_FISCAL_YEAR", components: [component(lfy)] };
+  const lfyOut = { status: "OK", value: lfy.val, periodStart: lfy.start, periodEnd: lfy.end, method: "REPORTED_FISCAL_YEAR", components: components(lfy) };
   const later = durations.filter((f) => f.end > lfy.end);
   if (later.length === 0) return { LFY: lfyOut, LTM: { ...lfyOut, method: "LAST_FISCAL_YEAR_IS_LATEST" } };
   const latestEnd = later.reduce((a, b) => (b.end > a ? b.end : a), "");
@@ -244,7 +278,7 @@ export function flowBases(facts: Fact[]): { LFY: Rec; LTM: Rec } {
       periodStart: null,
       periodEnd: ytd.end,
       method: "LFY_PLUS_YTD_MINUS_PRIOR_YTD",
-      components: [component(lfy), component(ytd), component(prior, -1)],
+      components: [...components(lfy), ...components(ytd), ...components(prior, -1)],
     },
   };
 }
@@ -660,7 +694,7 @@ export function valuationAtDate(input: ValuationHistoryInput, date: string, taxo
 
   const revenue = flowBases(factsFor(tax, map.revenue, currency, date));
   const oi = flowBases(factsFor(tax, map.operatingIncome, currency, date));
-  const ni = flowBases(factsFor(tax, map.netIncome, currency, date));
+  const ni = flowBases(parentNetIncomeFacts(tax, map, currency, date));
   const da = daFor(tax, map, currency, date, oi);
   const only = map.depreciationOnly;
   if (only && (["LTM", "LFY"] as const).some((k) => da[k].value.status === "OK" && da[k].concepts?.length === 1 && da[k].concepts?.[0] === only.depreciation)) {

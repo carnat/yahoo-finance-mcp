@@ -243,11 +243,18 @@ def _row_ref(r: dict) -> dict:
     return {"concept": r["concept"], "value": r["val"], "form": r["form"], "filed": r["filed"], "accessionNumber": r["accn"]}
 
 
-def _nci_share(companyfacts: Any, unit: str | None, r: dict) -> float | int | None:
-    """NetIncomeLossAttributableToNoncontrollingInterest for a ProfitLoss row's period, in the same filing; None when not tagged."""
+# The noncontrolling-interest concept taken off ProfitLoss, by taxonomy (3.7.0: IFRS filers, C1).
+_NCI_CONCEPT = {
+    "us-gaap": "NetIncomeLossAttributableToNoncontrollingInterest",
+    "ifrs-full": "ProfitLossAttributableToNonControllingInterests",
+}
+
+
+def _nci_share(companyfacts: Any, taxonomy: str, unit: str | None, r: dict) -> float | int | None:
+    """The taxonomy's NCI concept for a ProfitLoss row's period, in the same filing; None when not tagged."""
     facts = companyfacts.get("facts") if isinstance(companyfacts, dict) else None
-    us_gaap = facts.get("us-gaap") if isinstance(facts, dict) else None
-    entry = us_gaap.get("NetIncomeLossAttributableToNoncontrollingInterest") if isinstance(us_gaap, dict) else None
+    tax_facts = facts.get(taxonomy) if isinstance(facts, dict) else None
+    entry = tax_facts.get(_NCI_CONCEPT[taxonomy]) if isinstance(tax_facts, dict) else None
     units = entry.get("units") if isinstance(entry, dict) else None
     rows = units.get(unit or "") if isinstance(units, dict) else None
     if not isinstance(rows, list):
@@ -295,13 +302,13 @@ def sec_observations(companyfacts: Any, metric: str, period: dict) -> list[dict]
     first, last = matching[0], matching[-1]
     # Net income is the parent's: a filer that tags only ProfitLoss (BE) includes noncontrolling interests, so
     # the NCI share tagged for the same period in the same filing is taken off and the derivation shown (2.5.15).
-    if metric == "net_income" and taxonomy == "us-gaap" and concept == "ProfitLoss":
-        last_nci = _nci_share(companyfacts, unit, last)
-        first_nci = _nci_share(companyfacts, unit, first)
+    if metric == "net_income" and taxonomy in _NCI_CONCEPT and concept == "ProfitLoss":
+        last_nci = _nci_share(companyfacts, taxonomy, unit, last)
+        first_nci = _nci_share(companyfacts, taxonomy, unit, first)
         if last_nci is not None and first_nci is not None:
             def derived(r: dict, share: float | int) -> dict:
                 return {**_row_ref(r), "value": r["val"] - share, "profitLoss": r["val"], "noncontrollingInterest": share,
-                        "derivation": "ProfitLoss - NetIncomeLossAttributableToNoncontrollingInterest"}
+                        "derivation": f"ProfitLoss - {_NCI_CONCEPT[taxonomy]}"}
             return [
                 {"source": "SEC_XBRL_LATEST", "provider": "SEC", "status": "FOUND", "value": last["val"] - last_nci, "unit": unit, "taxonomy": taxonomy, "precision": 0,
                  "basis": "PARENT_DERIVED_FROM_PROFITLOSS", "evidence": derived(last, last_nci), "filedValues": list(dict.fromkeys(r["val"] for r in matching)), "otherConcepts": []},
