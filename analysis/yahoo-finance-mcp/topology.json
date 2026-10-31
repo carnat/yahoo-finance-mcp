@@ -530,7 +530,7 @@
       "name": "sec.py",
       "kind": "module",
       "language": "python",
-      "loc": 2906,
+      "loc": 3122,
       "file": "yfmcp/tools/sec.py"
      }
     ]
@@ -974,7 +974,7 @@
       "name": "news.py",
       "kind": "module",
       "language": "python",
-      "loc": 1930,
+      "loc": 1950,
       "file": "yfmcp/tools/news.py"
      }
     ]

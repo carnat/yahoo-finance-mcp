@@ -3190,6 +3190,17 @@ F-024, F-026, F-029). Both runtimes change alike.
 - **Tests:** 21 new parity cases in `scripts/parity/cases_audit_2251.py`.
 - **Rollback:** redeploy 2.25.0.
 
+## Filing Data, Filing Text Search and News Source Status Split Into Helpers (3.6.11)
+
+- **Why:** Phase 5 exit criterion "no function has CCN >= 100" (`analysis/yahoo-finance-mcp/PHASE5_CCN3_SPEC.md`).
+  Release type: patch. No behaviour change. Python only.
+- **What changed:** `_get_filing_data_unchecked` and `search_filing_text` (yfmcp/tools/sec.py) and
+  `_compute_source_status` (yfmcp/tools/news.py) build their parts in private helpers (CCN 181/117/124 → 29/20/45).
+  After this release no function in either runtime is at CCN 100 or above.
+- **Unchanged:** outputs, key order, warning order, fetch order and error paths; the parity harness passes with no
+  expected value changed.
+- **Rollback:** redeploy 3.6.10.
+
 ## Capital Structure and Valuation Snapshot Split Into Helpers (3.6.10)
 
 - **Why:** Phase 5 exit criterion "no function has CCN >= 100" (`analysis/yahoo-finance-mcp/PHASE5_CCN2_SPEC.md`).
