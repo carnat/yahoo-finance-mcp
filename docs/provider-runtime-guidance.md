@@ -3190,6 +3190,23 @@ F-024, F-026, F-029). Both runtimes change alike.
 - **Tests:** 21 new parity cases in `scripts/parity/cases_audit_2251.py`.
 - **Rollback:** redeploy 2.25.0.
 
+## SEC Retrieval Module Move (3.6.1)
+
+- **Why:** internal restructuring only (Phase 5 unit 1, `analysis/yahoo-finance-mcp/PHASE5_SEC_SPEC.md`). Release
+  type: patch. No behaviour change.
+- **What moved (Worker):** the SEC EDGAR retrieval code (filing selection and accession resolution, filing data,
+  filing index, outline, sections, tables, documents, exhibits, filing text search, XBRL facts and filing intelligence)
+  from `worker/src/yahoo-finance.ts` to `worker/src/sec.ts`: 54 functions and the constants and types only they use.
+- **What moved (Python):** the same code from `server.py` to `yfmcp/tools/sec.py`: 55 functions and 21 constants.
+  `query_sec_filing_index` stays in `server.py` until the extractors it calls move (Phase 5 unit 2).
+- **Unchanged:** no tool name, input, output, schema, status, warning, cache key or ordering changed.
+- **Compatibility:** `yahoo-finance.ts` and `server.py` re-export the moved names other modules and tests read. Tests
+  that patch a moved helper now patch it in `yfmcp.tools.sec`; no assertion changed.
+- **Verification:** the moved Worker text keeps its line multiset (only `export` keywords and import lines differ);
+  the moved Python functions and constants keep their `ast.dump`; tool listings (expanded and grouped) are
+  byte-identical; the Worker bundle grows 13 bytes; the parity harness passes with no expected value changed.
+- **Rollback:** redeploy 3.6.0.
+
 ## Form 4: Every Transaction of a Filing (3.6.0)
 
 - **Why:** the scheduled Q3i repair BR-SHR-016, multi-line Form 4 parsing (owner decision 2026-10-31, "Add a list

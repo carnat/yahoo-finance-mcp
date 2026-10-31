@@ -348,12 +348,7 @@ def region_id(f: str, dom: str) -> str:
 # and moves with its Phase 5 unit. Each entry seeds that function's domain; helpers only it calls follow it.
 DOMAIN_OVERRIDES: dict[str, dict[str, str]] = {
     "server.py": {
-        # SEC filing selection and retrieval (D11), the filing-data and filing-text tools.
-        "_resolve_sec_filing": "sec", "_sec_filing_index_full": "sec", "_accession_not_found_envelope": "sec",
-        "_is_accession_not_found": "sec", "_filing_period_failure": "sec",
-        "_legacy_accession_miss_payload": "sec", "_resolve_periodic_filings": "sec",
-        "_is_decision_grade_sec_xbrl_fact": "sec", "_sec_xbrl_source_evidence": "sec",
-        "get_filing_data": "sec", "_get_filing_data_unchecked": "sec", "search_filing_text": "sec",
+        # The SEC seeds left with their code for yfmcp/tools/sec.py and worker/src/sec.ts (Phase 5 unit 1, 3.6.1).
         # SEC extractors reached from query_sec_filing_index as well as their own tools.
         "_extract_customer_concentration": "extractors", "_extract_revenue_exposure": "extractors",
         "_extract_risk_factor_mentions": "extractors", "_extract_segment_revenue": "extractors",
@@ -366,9 +361,6 @@ DOMAIN_OVERRIDES: dict[str, dict[str, str]] = {
         "_consensus_providers": "fundamentals", "_write_consensus_observation": "fundamentals",
     },
     "worker/src/yahoo-finance.ts": {
-        "resolveSecFiling": "sec", "filingNotFoundPayload": "sec", "legacyAccessionMissPayload": "sec",
-        "uniqueRecentForms": "sec", "accessionNotFoundEnvelope": "sec", "isAccessionNotFound": "sec",
-        "_buildFilingIndexFromHtml": "sec",
         "extractGeoRevenueFromHtml": "extractors", "geoRegionAliases": "extractors", "normalizeStatus": "extractors",
         "earningsReleasePicks": "earnings", "readReleaseText": "earnings",
         "fetchAlphaVantageJson": "providers",
