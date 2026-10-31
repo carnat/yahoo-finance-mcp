@@ -36,10 +36,6 @@ function xmlTag(xml: string, path: string[]): string | null {
   }
   return scope.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim() || null;
 }
-function xmlBlock(xml: string, tag: string): string | null {
-  const m = xml.match(new RegExp(`<(?:\\w+:)?${tag}\\b[^>]*>([\\s\\S]*?)<\\/(?:\\w+:)?${tag}>`, "i"));
-  return m ? m[1] : null;
-}
 const FORM4_TRANSACTION_LABELS: Record<string, string> = {
   P: "Purchase",
   S: "Sale",
@@ -110,72 +106,66 @@ function form4RoleFromHtml(html: string): string | null {
   }
   return [...new Set(roles)].join(", ") || null;
 }
-function parseForm4HtmlTransaction(html: string): Record<string, unknown> | null {
+/** Every transaction row of an HTML Form 4, in table order (Table I non-derivative, then Table II derivative). */
+function parseForm4HtmlTransactions(html: string): Record<string, unknown>[] {
   const owner = form4OwnerFromHtml(html);
   const role = form4RoleFromHtml(html);
+  const transactions: Record<string, unknown>[] = [];
   const tableRe = /<table[^>]*>[\s\S]*?<\/table>/gi;
   let tableM: RegExpExecArray | null;
   while ((tableM = tableRe.exec(html)) !== null) {
     const tableHtml = tableM[0];
     const tableText = stripHtmlTags(tableHtml).toLowerCase();
+    const rowsFound: Record<string, unknown>[] = [];
     if (tableText.includes("non-derivative securities")) {
       for (const row of parseHtmlTable(tableHtml)) {
         if (row.length < 10) continue;
         const code = row[3].trim().toUpperCase();
         const shares = form4Num(row[5]);
         if (!code || shares == null) continue;
-        return form4Payload(
-          owner,
-          role,
-          code,
-          shares,
-          form4Num(row[7]),
-          row[9].trim() || null,
-          form4Date(row[1]),
-        );
+        rowsFound.push(form4Payload(owner, role, code, shares, form4Num(row[7]), row[9].trim() || null, form4Date(row[1])));
       }
     }
-    if (tableText.includes("derivative securities")) {
+    if (!rowsFound.length && tableText.includes("derivative securities")) {
       for (const row of parseHtmlTable(tableHtml)) {
         if (row.length < 15) continue;
         const code = row[4].trim().toUpperCase();
         const shares = form4Num(row[6]);
         if (!code || shares == null) continue;
-        return form4Payload(
-          owner,
-          role,
-          code,
-          shares,
-          form4Num(row[1]),
-          row[14].trim() || null,
-          form4Date(row[2]),
-        );
+        rowsFound.push(form4Payload(owner, role, code, shares, form4Num(row[1]), row[14].trim() || null, form4Date(row[2])));
       }
     }
+    transactions.push(...rowsFound);
   }
-  return null;
+  return transactions;
 }
-function parseForm4Transaction(xml: string): Record<string, unknown> | null {
-  const tx = xmlBlock(xml, "nonDerivativeTransaction") ?? xmlBlock(xml, "derivativeTransaction");
-  if (!tx) return parseForm4HtmlTransaction(xml);
+function xmlBlocks(xml: string, tag: string): string[] {
+  const re = new RegExp(`<(?:\\w+:)?${tag}\\b[^>]*>([\\s\\S]*?)<\\/(?:\\w+:)?${tag}>`, "gi");
+  const out: string[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(xml)) !== null) out.push(m[1]);
+  return out;
+}
+/** Every transaction of a Form 4: the non-derivative rows in document order, then the derivative rows (3.6.0). */
+function parseForm4Transactions(xml: string): Record<string, unknown>[] {
+  const blocks = [...xmlBlocks(xml, "nonDerivativeTransaction"), ...xmlBlocks(xml, "derivativeTransaction")];
+  if (!blocks.length) return parseForm4HtmlTransactions(xml);
   const owner = xmlTag(xml, ["reportingOwnerId", "rptOwnerName"]);
   const officerTitle = xmlTag(xml, ["reportingOwnerRelationship", "officerTitle"]);
   const roles: string[] = [];
   for (const [tag, label] of [["isDirector", "director"], ["isOfficer", "officer"], ["isTenPercentOwner", "ten_percent_owner"], ["isOther", "other"]]) {
     if (["1", "true"].includes(_str(xmlTag(xml, ["reportingOwnerRelationship", tag])).toLowerCase())) roles.push(label);
   }
-  const code = xmlTag(tx, ["transactionCoding", "transactionCode"]);
-  const shares = form4Num(xmlTag(tx, ["transactionAmounts", "transactionShares", "value"]));
-  const price = form4Num(xmlTag(tx, ["transactionAmounts", "transactionPricePerShare", "value"]));
-  return form4Payload(
+  const role = officerTitle || roles.join(", ") || null;
+  return blocks.map((tx) => form4Payload(
     owner,
-    officerTitle || roles.join(", ") || null,
-    code,
-    shares,
-    price,
+    role,
+    xmlTag(tx, ["transactionCoding", "transactionCode"]),
+    form4Num(xmlTag(tx, ["transactionAmounts", "transactionShares", "value"])),
+    form4Num(xmlTag(tx, ["transactionAmounts", "transactionPricePerShare", "value"])),
     xmlTag(tx, ["ownershipNature", "directOrIndirectOwnership", "value"]),
     form4Date(xmlTag(tx, ["transactionDate", "value"])),
-  );
+  ));
 }
 async function tryAttachForm4Transaction(item: Record<string, unknown>, filing: Record<string, unknown>, warnings: Record<string, unknown>[]): Promise<void> {
   if (_str(filing.filingType).toUpperCase() !== "4") return;
@@ -185,19 +175,24 @@ async function tryAttachForm4Transaction(item: Record<string, unknown>, filing: 
     return;
   }
   const xml = await edgarGetHtml(url, 2_000_000);
-  const parsed = parseForm4Transaction(xml ?? "");
+  const transactions = parseForm4Transactions(xml ?? "");
+  const parsed = transactions[0] ?? null;
   if (!parsed) {
     warnings.push({ code: "FORM4_PARSE_UNAVAILABLE", message: "Form 4 transaction details could not be parsed from the primary document.", severity: "warning" });
     return;
   }
+  // insiderTransaction stays the first row; insiderTransactions lists every row of the filing (3.6.0, owner 2026-10-31).
   item.insiderTransaction = parsed;
+  item.insiderTransactions = transactions;
   const label = _str(parsed.transactionLabel) || "Insider transaction";
   const owner = _str(parsed.owner) || "reporting owner";
   // The summary rounds with the same helper as the value (2.17.0).
   const shares = typeof parsed.shares === "number" ? `${roundHalfAwayFromZero(parsed.shares, 0).toLocaleString("en-US")} shares` : "shares unavailable";
   const value = typeof parsed.value === "number" ? `, value $${roundHalfAwayFromZero(parsed.value, 0).toLocaleString("en-US")}` : "";
   item.title = `Form 4: ${label} by ${owner}`;
-  item.summary = shortText(`${label} by ${owner}: ${shares}${value}.`);
+  const more = transactions.length - 1;
+  const morePart = more > 0 ? ` ${more} more transaction${more > 1 ? "s" : ""} in this filing.` : "";
+  item.summary = shortText(`${label} by ${owner}: ${shares}${value}.${morePart}`);
   item.evidenceText = shortText(`SEC Form 4 transaction code ${_str(parsed.transactionCode) || "unknown"} on ${_str(parsed.transactionDate) || _str(item.filingDate)}.`);
 }
 function buildSecEventItem(
