@@ -3190,6 +3190,24 @@ F-024, F-026, F-029). Both runtimes change alike.
 - **Tests:** 21 new parity cases in `scripts/parity/cases_audit_2251.py`.
 - **Rollback:** redeploy 2.25.0.
 
+## Provider Module Move and Provider Rule Cases (3.6.5)
+
+- **Why:** internal restructuring only (Phase 5 unit 5, `analysis/yahoo-finance-mcp/PHASE5_PROVIDERS_SPEC.md`).
+  Release type: patch. No behaviour change.
+- **What moved (Worker):** the Alpha Vantage and Finnhub fetchers, expanded institutional ownership, the historical
+  put/call ratio, provider attempt, recovery and denial memory, and Companies House, from `worker/src/yahoo-finance.ts`
+  to `worker/src/providers.ts`: 15 functions and the constants only they use.
+- **What moved (Python):** Companies House (`get_uk_company_filings` and its four helpers) from `server.py` into
+  `yfmcp/tools/provider_gaps.py`, which already held the Python scarce-provider tools.
+- **Tests:** `scripts/parity/cases_providers.py` adds 88 cases for the provider rules BR-PRV-001 and 004 to 011. They
+  pin today's output; eight Python/Worker differences are pinned as findings, listed in the spec, and left for a later
+  decision.
+- **Unchanged:** no tool name, input, output, schema, status, warning, cache key or ordering changed.
+- **Verification:** the moved Worker text keeps its line multiset (only import lines differ); the moved Python
+  functions keep their `ast.dump`; tool listings (expanded and grouped) are byte-identical; the parity harness passes
+  with no existing expected value changed.
+- **Rollback:** redeploy 3.6.4.
+
 ## Fundamentals and Analyst Module Move (3.6.4)
 
 - **Why:** internal restructuring only (Phase 5 unit 4, `analysis/yahoo-finance-mcp/PHASE5_FUNDAMENTALS_SPEC.md`).

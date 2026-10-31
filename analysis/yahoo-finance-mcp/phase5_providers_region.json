@@ -1,0 +1,27 @@
+{
+ "base": "096e1ec",
+ "server.py": [
+  "_charge_rows",
+  "_companies_house_error",
+  "_companies_house_get",
+  "_issuer_name",
+  "get_uk_company_filings"
+ ],
+ "worker/src/yahoo-finance.ts": [
+  "chargeRows",
+  "companiesHouseError",
+  "companiesHouseGet",
+  "fetchAlphaVantageJson",
+  "fetchFinnhubJson",
+  "getExpandedInstitutionalOwnership",
+  "getHistoricalPutCallRatio",
+  "getUkCompanyFilings",
+  "ownershipDataDate",
+  "ownershipRows",
+  "providerAttempt",
+  "providerNumber",
+  "providerRecovery",
+  "rememberProviderDenial",
+  "rememberedProviderDenial"
+ ]
+}
