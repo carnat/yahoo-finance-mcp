@@ -3190,6 +3190,16 @@ F-024, F-026, F-029). Both runtimes change alike.
 - **Tests:** 21 new parity cases in `scripts/parity/cases_audit_2251.py`.
 - **Rollback:** redeploy 2.25.0.
 
+## Capital Structure and Valuation Snapshot Split Into Helpers (3.6.10)
+
+- **Why:** Phase 5 exit criterion "no function has CCN >= 100" (`analysis/yahoo-finance-mcp/PHASE5_CCN2_SPEC.md`).
+  Release type: patch. No behaviour change. Python only; the Worker counterparts were already under the limit.
+- **What changed:** `capital_structure`, `dilution_bridge` and `_warrants_component` (yfmcp/capital_structure.py)
+  and `valuation_snapshot` (yfmcp/valuation.py) build their parts in private helpers (CCN 152/139/134/109 → 32–53).
+- **Unchanged:** outputs, key order, warning order, rounding and error paths; the parity harness passes with no
+  expected value changed.
+- **Rollback:** redeploy 3.6.9.
+
 ## SEC Filing Index and Geographic Revenue Split Into Helpers (3.6.9)
 
 - **Why:** Phase 5 exit criterion "no function has CCN >= 100" (`analysis/yahoo-finance-mcp/PHASE5_CCN1_SPEC.md`).

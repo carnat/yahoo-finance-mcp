@@ -593,7 +593,7 @@
       "name": "capital_structure.py",
       "kind": "module",
       "language": "python",
-      "loc": 3105,
+      "loc": 3141,
       "file": "yfmcp/capital_structure.py"
      },
      {
@@ -712,7 +712,7 @@
       "name": "valuation.py",
       "kind": "module",
       "language": "python",
-      "loc": 444,
+      "loc": 467,
       "file": "yfmcp/valuation.py"
      },
      {
