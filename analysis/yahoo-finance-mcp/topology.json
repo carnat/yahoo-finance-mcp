@@ -723,20 +723,20 @@
     "kind": "domain",
     "children": [
      {
-      "id": "server.py#earnings",
-      "name": "server.py \u00b7 Earnings intelligence & transcripts",
-      "kind": "module",
-      "language": "python",
-      "loc": 36,
-      "file": "server.py"
-     },
-     {
       "id": "worker/src/earnings-period.ts",
       "name": "earnings-period.ts",
       "kind": "module",
       "language": "typescript",
       "loc": 50,
       "file": "worker/src/earnings-period.ts"
+     },
+     {
+      "id": "worker/src/earnings.ts",
+      "name": "earnings.ts",
+      "kind": "module",
+      "language": "typescript",
+      "loc": 2350,
+      "file": "worker/src/earnings.ts"
      },
      {
       "id": "worker/src/guidance-history.ts",
@@ -753,14 +753,6 @@
       "language": "typescript",
       "loc": 71,
       "file": "worker/src/transcript-contract.ts"
-     },
-     {
-      "id": "worker/src/yahoo-finance.ts#earnings",
-      "name": "yahoo-finance.ts \u00b7 Earnings intelligence & transcripts",
-      "kind": "module",
-      "language": "typescript",
-      "loc": 2290,
-      "file": "worker/src/yahoo-finance.ts"
      },
      {
       "id": "yfmcp/clients/yahoo_transcripts.py",
@@ -791,7 +783,7 @@
       "name": "earnings.py",
       "kind": "module",
       "language": "python",
-      "loc": 2169,
+      "loc": 2215,
       "file": "yfmcp/tools/earnings.py"
      }
     ]
@@ -1390,26 +1382,6 @@
    "kind": "write"
   },
   {
-   "source": "server.py#earnings",
-   "target": "yfmcp/clients/edgar.py",
-   "kind": "call"
-  },
-  {
-   "source": "server.py#earnings",
-   "target": "yfmcp/guidance_history.py",
-   "kind": "call"
-  },
-  {
-   "source": "server.py#earnings",
-   "target": "yfmcp/tools/exposure.py",
-   "kind": "call"
-  },
-  {
-   "source": "server.py#earnings",
-   "target": "yfmcp/util.py",
-   "kind": "call"
-  },
-  {
    "source": "server.py#evidence",
    "target": "ds:evidence_localdir",
    "kind": "read"
@@ -1576,17 +1548,7 @@
   },
   {
    "source": "tool:earnings_intelligence",
-   "target": "server.py#earnings",
-   "kind": "dispatch"
-  },
-  {
-   "source": "tool:earnings_intelligence",
    "target": "worker/src/tools.ts",
-   "kind": "dispatch"
-  },
-  {
-   "source": "tool:earnings_intelligence",
-   "target": "worker/src/yahoo-finance.ts#earnings",
    "kind": "dispatch"
   },
   {
@@ -2000,6 +1962,106 @@
    "kind": "call"
   },
   {
+   "source": "worker/src/earnings.ts",
+   "target": "ds:company-ir-sites",
+   "kind": "read"
+  },
+  {
+   "source": "worker/src/earnings.ts",
+   "target": "ds:yahoo-finance",
+   "kind": "read"
+  },
+  {
+   "source": "worker/src/earnings.ts",
+   "target": "worker/src/cache.ts",
+   "kind": "call"
+  },
+  {
+   "source": "worker/src/earnings.ts",
+   "target": "worker/src/clients/edgar.ts",
+   "kind": "call"
+  },
+  {
+   "source": "worker/src/earnings.ts",
+   "target": "worker/src/clients/endpoints.ts",
+   "kind": "call"
+  },
+  {
+   "source": "worker/src/earnings.ts",
+   "target": "worker/src/clients/html.ts",
+   "kind": "call"
+  },
+  {
+   "source": "worker/src/earnings.ts",
+   "target": "worker/src/clients/provider-http.ts",
+   "kind": "call"
+  },
+  {
+   "source": "worker/src/earnings.ts",
+   "target": "worker/src/clients/yahoo.ts",
+   "kind": "call"
+  },
+  {
+   "source": "worker/src/earnings.ts",
+   "target": "worker/src/earnings-period.ts",
+   "kind": "call"
+  },
+  {
+   "source": "worker/src/earnings.ts",
+   "target": "worker/src/extraction-rules.ts",
+   "kind": "call"
+  },
+  {
+   "source": "worker/src/earnings.ts",
+   "target": "worker/src/fundamentals.ts",
+   "kind": "call"
+  },
+  {
+   "source": "worker/src/earnings.ts",
+   "target": "worker/src/guidance-history.ts",
+   "kind": "call"
+  },
+  {
+   "source": "worker/src/earnings.ts",
+   "target": "worker/src/providers.ts",
+   "kind": "call"
+  },
+  {
+   "source": "worker/src/earnings.ts",
+   "target": "worker/src/request-context.ts",
+   "kind": "call"
+  },
+  {
+   "source": "worker/src/earnings.ts",
+   "target": "worker/src/response.ts",
+   "kind": "call"
+  },
+  {
+   "source": "worker/src/earnings.ts",
+   "target": "worker/src/sec-facts.ts",
+   "kind": "call"
+  },
+  {
+   "source": "worker/src/earnings.ts",
+   "target": "worker/src/sec.ts",
+   "kind": "call"
+  },
+  {
+   "source": "worker/src/earnings.ts",
+   "target": "worker/src/transcript-contract.ts",
+   "kind": "call"
+  },
+  {
+   "source": "worker/src/earnings.ts",
+   "target": "worker/src/url-policy.ts",
+   "kind": "call"
+  },
+  {
+   "source": "worker/src/earnings.ts",
+   "target": "worker/src/util.ts",
+   "kind": "call"
+  },
+  {
    "source": "worker/src/evidence-pack.ts",
    "target": "ds:evidence_r2",
    "kind": "read"
@@ -2052,11 +2114,6 @@
   {
    "source": "worker/src/evidence-pack.ts",
    "target": "worker/src/valuation.ts",
-   "kind": "call"
-  },
-  {
-   "source": "worker/src/evidence-pack.ts",
-   "target": "worker/src/yahoo-finance.ts#earnings",
    "kind": "call"
   },
   {
@@ -2116,6 +2173,11 @@
   },
   {
    "source": "worker/src/exposure.ts",
+   "target": "worker/src/earnings.ts",
+   "kind": "call"
+  },
+  {
+   "source": "worker/src/exposure.ts",
    "target": "worker/src/extraction-rules.ts",
    "kind": "call"
   },
@@ -2147,11 +2209,6 @@
   {
    "source": "worker/src/exposure.ts",
    "target": "worker/src/util.ts",
-   "kind": "call"
-  },
-  {
-   "source": "worker/src/exposure.ts",
-   "target": "worker/src/yahoo-finance.ts#earnings",
    "kind": "call"
   },
   {
@@ -3026,11 +3083,6 @@
   },
   {
    "source": "worker/src/tools.ts",
-   "target": "worker/src/yahoo-finance.ts#earnings",
-   "kind": "call"
-  },
-  {
-   "source": "worker/src/tools.ts",
    "target": "worker/src/yahoo-finance.ts#valuation",
    "kind": "call"
   },
@@ -3070,106 +3122,6 @@
    "kind": "call"
   },
   {
-   "source": "worker/src/yahoo-finance.ts#earnings",
-   "target": "ds:company-ir-sites",
-   "kind": "read"
-  },
-  {
-   "source": "worker/src/yahoo-finance.ts#earnings",
-   "target": "ds:yahoo-finance",
-   "kind": "read"
-  },
-  {
-   "source": "worker/src/yahoo-finance.ts#earnings",
-   "target": "worker/src/cache.ts",
-   "kind": "call"
-  },
-  {
-   "source": "worker/src/yahoo-finance.ts#earnings",
-   "target": "worker/src/clients/edgar.ts",
-   "kind": "call"
-  },
-  {
-   "source": "worker/src/yahoo-finance.ts#earnings",
-   "target": "worker/src/clients/endpoints.ts",
-   "kind": "call"
-  },
-  {
-   "source": "worker/src/yahoo-finance.ts#earnings",
-   "target": "worker/src/clients/html.ts",
-   "kind": "call"
-  },
-  {
-   "source": "worker/src/yahoo-finance.ts#earnings",
-   "target": "worker/src/clients/provider-http.ts",
-   "kind": "call"
-  },
-  {
-   "source": "worker/src/yahoo-finance.ts#earnings",
-   "target": "worker/src/clients/yahoo.ts",
-   "kind": "call"
-  },
-  {
-   "source": "worker/src/yahoo-finance.ts#earnings",
-   "target": "worker/src/earnings-period.ts",
-   "kind": "call"
-  },
-  {
-   "source": "worker/src/yahoo-finance.ts#earnings",
-   "target": "worker/src/extraction-rules.ts",
-   "kind": "call"
-  },
-  {
-   "source": "worker/src/yahoo-finance.ts#earnings",
-   "target": "worker/src/fundamentals.ts",
-   "kind": "call"
-  },
-  {
-   "source": "worker/src/yahoo-finance.ts#earnings",
-   "target": "worker/src/guidance-history.ts",
-   "kind": "call"
-  },
-  {
-   "source": "worker/src/yahoo-finance.ts#earnings",
-   "target": "worker/src/providers.ts",
-   "kind": "call"
-  },
-  {
-   "source": "worker/src/yahoo-finance.ts#earnings",
-   "target": "worker/src/request-context.ts",
-   "kind": "call"
-  },
-  {
-   "source": "worker/src/yahoo-finance.ts#earnings",
-   "target": "worker/src/response.ts",
-   "kind": "call"
-  },
-  {
-   "source": "worker/src/yahoo-finance.ts#earnings",
-   "target": "worker/src/sec-facts.ts",
-   "kind": "call"
-  },
-  {
-   "source": "worker/src/yahoo-finance.ts#earnings",
-   "target": "worker/src/sec.ts",
-   "kind": "call"
-  },
-  {
-   "source": "worker/src/yahoo-finance.ts#earnings",
-   "target": "worker/src/transcript-contract.ts",
-   "kind": "call"
-  },
-  {
-   "source": "worker/src/yahoo-finance.ts#earnings",
-   "target": "worker/src/url-policy.ts",
-   "kind": "call"
-  },
-  {
-   "source": "worker/src/yahoo-finance.ts#earnings",
-   "target": "worker/src/util.ts",
-   "kind": "call"
-  },
-  {
    "source": "worker/src/yahoo-finance.ts#valuation",
    "target": "worker/src/clients/edgar.ts",
    "kind": "call"
@@ -3187,6 +3139,11 @@
   {
    "source": "worker/src/yahoo-finance.ts#valuation",
    "target": "worker/src/companyfacts-coverage.ts",
+   "kind": "call"
+  },
+  {
+   "source": "worker/src/yahoo-finance.ts#valuation",
+   "target": "worker/src/earnings.ts",
    "kind": "call"
   },
   {
@@ -3222,11 +3179,6 @@
   {
    "source": "worker/src/yahoo-finance.ts#valuation",
    "target": "worker/src/valuation.ts",
-   "kind": "call"
-  },
-  {
-   "source": "worker/src/yahoo-finance.ts#valuation",
-   "target": "worker/src/yahoo-finance.ts#earnings",
    "kind": "call"
   },
   {
@@ -3656,11 +3608,6 @@
   },
   {
    "source": "yfmcp/tools/earnings.py",
-   "target": "server.py#transport",
-   "kind": "dispatch"
-  },
-  {
-   "source": "yfmcp/tools/earnings.py",
    "target": "yfmcp/app.py",
    "kind": "call"
   },
@@ -3722,6 +3669,21 @@
   {
    "source": "yfmcp/tools/earnings.py",
    "target": "yfmcp/sec_facts.py",
+   "kind": "call"
+  },
+  {
+   "source": "yfmcp/tools/earnings.py",
+   "target": "yfmcp/tools/exposure.py",
+   "kind": "call"
+  },
+  {
+   "source": "yfmcp/tools/earnings.py",
+   "target": "yfmcp/tools/fundamentals.py",
+   "kind": "call"
+  },
+  {
+   "source": "yfmcp/tools/earnings.py",
+   "target": "yfmcp/tools/sec.py",
    "kind": "call"
   },
   {
@@ -4413,8 +4375,7 @@
  "observations": [
   "Both god files are hubs, not layers: their 'shared' regions (server.py 0 NLOC, yahoo-finance.ts 0 NLOC) are helpers reached from 2+ domains (Yahoo client, EDGAR fetch, HTML/table parsing). Extract these first \u2014 every domain module split out later will otherwise import back into the god file.",
   "SEC EDGAR is read from 7 separate nodes across both runtimes (direct URL use, not through one client). It is the single most important upstream and a single point of failure; consolidating behind yfmcp/clients/edgar.py and one TS edgar module would make fair-access/User-Agent policy enforceable in one place.",
-  "Open-fetch surface: 2 nodes fetch caller- or registry-supplied URLs (worker/src/yahoo-finance.ts#earnings, yfmcp/tools/earnings.py). These are the S-01/S-04 SSRF paths from ASSESSMENT.md and should sit behind one allow-listed fetcher per runtime.",
-  "Circular dependency: yfmcp/tools/earnings.py back-calls server.py through string-keyed _server_attr(...) \u2014 resolved here to server.py#transport. These edges are invisible to static import analysis and block extracting earnings without first moving those targets out of server.py.",
+  "Open-fetch surface: 2 nodes fetch caller- or registry-supplied URLs (worker/src/earnings.ts, yfmcp/tools/earnings.py). These are the S-01/S-04 SSRF paths from ASSESSMENT.md and should sit behind one allow-listed fetcher per runtime.",
   "The Python runtime reads the Worker's JSON registries (company-ir-page-registry.json, news-source-capabilities.json, exposure-presets.json, exchange-calendars.json) from worker/src at run time, so Python packaging depends on the Worker tree; the IR registry has a second writer (the daily ir-source-discovery job).",
   "Extraction candidates (cleanest seams): News & public events (one region per god file, ~3.3k lines each, no dedicated module either side) and the Thai SEC funds pair (already isolated in both runtimes, only touched by the router)."
  ],
@@ -4441,7 +4402,6 @@
     {
      "label": "Find the latest earnings press release",
      "nodes": [
-      "worker/src/yahoo-finance.ts#earnings",
       "ds:sec-edgar"
      ]
     },

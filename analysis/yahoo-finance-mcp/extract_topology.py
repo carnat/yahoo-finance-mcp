@@ -352,8 +352,8 @@ DOMAIN_OVERRIDES: dict[str, dict[str, str]] = {
     "server.py": {
         # The SEC seeds left with their code for yfmcp/tools/sec.py and worker/src/sec.ts (Phase 5 unit 1, 3.6.1).
         # The SEC extractor seeds left for yfmcp/tools/exposure.py (Phase 5 unit 2, 3.6.2). The earnings-release reads
-        # (_earnings_release_picks, _read_release_text) moved there too, since the driver ledger calls them; they join
-        # the earnings module in unit 6.
+        # (_earnings_release_picks, _read_release_text) moved there too, since the driver ledger calls them; they stay
+        # there (unit 6, 3.6.6): exposure.py is imported before earnings.py, so moving them would reorder tools/list.
         # The analyst_data / stock_fundamentals seeds (get_earnings_momentum, get_analyst_upgrade_radar and the consensus
         # helpers) left for yfmcp/tools/fundamentals.py (Phase 5 unit 4).
     },
@@ -658,10 +658,12 @@ observations = [
     f"Both god files are hubs, not layers: their 'shared' regions (server.py {shared_py} NLOC, yahoo-finance.ts {shared_ts} NLOC) are helpers reached from 2+ domains (Yahoo client, EDGAR fetch, HTML/table parsing). Extract these first — every domain module split out later will otherwise import back into the god file.",
     f"SEC EDGAR is read from {len(sec_readers)} separate nodes across both runtimes (direct URL use, not through one client). It is the single most important upstream and a single point of failure; consolidating behind yfmcp/clients/edgar.py and one TS edgar module would make fair-access/User-Agent policy enforceable in one place.",
     f"Open-fetch surface: {len(open_fetch)} nodes fetch caller- or registry-supplied URLs ({', '.join(open_fetch)}). These are the S-01/S-04 SSRF paths from ASSESSMENT.md and should sit behind one allow-listed fetcher per runtime.",
-    f"Circular dependency: yfmcp/tools/earnings.py back-calls server.py through string-keyed _server_attr(...) — resolved here to {', '.join(back_calls) or 'none'}. These edges are invisible to static import analysis and block extracting earnings without first moving those targets out of server.py.",
+    # Phase 5 unit 6 (3.6.6) removed the _server_attr back-calls; the scan above stays as a guard against new ones.
+    (f"Circular dependency: yfmcp/tools/earnings.py back-calls server.py through string-keyed _server_attr(...) — resolved here to {', '.join(back_calls)}. These edges are invisible to static import analysis and block extracting earnings without first moving those targets out of server.py." if back_calls else None),
     "The Python runtime reads the Worker's JSON registries (company-ir-page-registry.json, news-source-capabilities.json, exposure-presets.json, exchange-calendars.json) from worker/src at run time, so Python packaging depends on the Worker tree; the IR registry has a second writer (the daily ir-source-discovery job).",
     "Extraction candidates (cleanest seams): News & public events (one region per god file, ~3.3k lines each, no dedicated module either side) and the Thai SEC funds pair (already isolated in both runtimes, only touched by the router).",
 ]
+observations = [o for o in observations if o]
 if unresolved:
     observations.append(f"Unresolved during extraction ({len(unresolved)}): " + "; ".join(sorted(set(unresolved))[:6]))
 
