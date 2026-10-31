@@ -18,7 +18,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SCOPE = ROOT / "scripts" / "ir_page_scope.json"
-DEFAULT_REGISTRY = ROOT / "worker" / "src" / "company-ir-page-registry.json"
+DEFAULT_REGISTRY = ROOT / "yfmcp" / "data" / "company-ir-page-registry.json"
 MAX_BYTES = 750 * 1024
 DISCOVERY_PATHS = ("/", "/investor-relations", "/investors", "/investor", "/newsroom", "/news", "/press-releases")
 BLOCKED_HOSTS = {"facebook.com", "instagram.com", "linkedin.com", "twitter.com", "x.com", "youtube.com"}

@@ -28,7 +28,7 @@ import { MARKETAUX_WIRE_DOMAINS, MARKETAUX_MAX_ITEMS, collectMarketauxEvents } f
 import { collectSecEvents } from "./news/providers/sec.js";
 import { yahooNewsIdentityFor, yahooDecisionUse, collectYahooEvents } from "./news/providers/yahoo.js";
 import { sourceDecisionUse, shortText, withinDateWindow, isoUtc, tickerInText } from "./news/shared.js";
-import newsSourceRegistry from "./news-source-registry.json";
+import newsSourceRegistry from "../../yfmcp/data/news-source-registry.json";
 import { ErrorCode, getWorkerVar, mcpFailure } from "./response.js";
 import { validateTicker } from "./validate.js";
 import { yahooQuoteSummaryUrl } from "./clients/endpoints.js";

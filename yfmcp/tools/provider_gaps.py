@@ -10,7 +10,6 @@ import re as _re
 import urllib.error as _urlerror
 import urllib.parse as _urlparse
 import urllib.request as _urlrequest
-from pathlib import Path
 from typing import Annotated, Any
 
 import yfinance as yf
@@ -18,6 +17,7 @@ from pydantic import Field
 
 from yfmcp import capital_structure as _cs
 from yfmcp import url_policy as _url_policy
+from yfmcp.data import DATA_DIR
 from yfmcp.app import yfinance_server
 from yfmcp.clients.market_providers import (
     _PROVIDER_USER_AGENT,
@@ -35,7 +35,7 @@ _ALPHA_HISTORICAL_PUT_CALL_TTL = 365 * 24 * 60 * 60
 _OWNERSHIP_TTL = 7 * 24 * 60 * 60
 _ALPHA_CAPACITY = "SCARCE_SHARED_QUOTA"
 _FINNHUB_CAPACITY = "ENTITLEMENT_DEPENDENT"
-_SOURCE_POLICY_PATH = Path(__file__).resolve().parents[2] / "worker" / "src" / "news-source-capabilities.json"
+_SOURCE_POLICY_PATH = DATA_DIR / "news-source-capabilities.json"
 
 
 def _number(value: object) -> float | int | None:

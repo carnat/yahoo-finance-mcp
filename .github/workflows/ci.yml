@@ -102,6 +102,9 @@ jobs:
       - name: Source-text guard (tests read runtime source through scripts/source_text.py)
         run: python scripts/test_no_direct_source_reads.py
 
+      - name: Worker-source guard (Python reads shared data from yfmcp/data, never worker/src)
+        run: python scripts/test_no_worker_src_reads.py
+
       - name: Deployed canary registry validation
         run: python scripts/test_deployed_canaries.py --validate-only
 

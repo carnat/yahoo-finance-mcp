@@ -384,7 +384,7 @@ schemas.
 - Official company website RSS/Atom feeds when discoverable from public profile
   website metadata
 - Git-reviewed official company IR-page registry at
-  `worker/src/company-ir-page-registry.json`; daily discovery writes candidates
+  `yfmcp/data/company-ir-page-registry.json`; daily discovery writes candidates
   for manual review and never promotes sources automatically.
 - Thailand SEC Open Data Fund API (`https://api.sec.or.th/v2/fund/...`) with a
   configured subscription key. It returns official regulatory data but does

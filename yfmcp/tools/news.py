@@ -19,7 +19,6 @@ import functools
 import json
 import math
 import os
-from pathlib import Path
 import re as _re
 import urllib.parse as _urlparse
 import urllib.request as _urlrequest
@@ -31,6 +30,7 @@ import yfinance as yf
 from pydantic import Field
 
 from yfmcp import url_policy as _url_policy
+from yfmcp.data import DATA_DIR
 from yfmcp.app import yfinance_server
 from yfmcp.schemas import _TOOL_OUTPUT_SCHEMAS
 from yfmcp.envelope import ErrorCode, _mcp_failure
@@ -323,8 +323,8 @@ _NEWSWIRE_HINTS = ("businesswire", "globenewswire", "prnewswire")
 _COMPANY_IR_URL_MARKERS = ("investor.", "investors.", "/investor", "/news-releases", "/press-release")
 
 
-_NEWS_SOURCE_CAPABILITIES_PATH = Path(__file__).resolve().parents[2] / "worker" / "src" / "news-source-capabilities.json"
-_NEWS_SOURCE_REGISTRY_PATH = Path(__file__).resolve().parents[2] / "worker" / "src" / "news-source-registry.json"
+_NEWS_SOURCE_CAPABILITIES_PATH = DATA_DIR / "news-source-capabilities.json"
+_NEWS_SOURCE_REGISTRY_PATH = DATA_DIR / "news-source-registry.json"
 
 
 

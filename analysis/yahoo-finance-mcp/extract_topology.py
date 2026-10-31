@@ -85,7 +85,7 @@ FILE_DOMAIN = {
     "yfmcp/__init__.py": "transport", "yfmcp/tools/__init__.py": "transport",
     "yfmcp/envelope.py": "envelope", "yfmcp/schemas.py": "envelope", "yfmcp/cache.py": "envelope",
     "yfmcp/util.py": "envelope", "yfmcp/validation.py": "envelope", "yfmcp/build_info.py": "envelope",
-    "yfmcp/version.py": "envelope",
+    "yfmcp/version.py": "envelope", "yfmcp/data/__init__.py": "envelope",
     "yfmcp/tools/pricing.py": "pricing", "yfmcp/clients/yahoo.py": "pricing",
     "yfmcp/exchange_calendars.py": "pricing", "yfmcp/pricing_notices.py": "pricing",
     "yfmcp/clients/market_providers.py": "providers", "yfmcp/tools/provider_gaps.py": "providers",
@@ -668,7 +668,10 @@ shared_ts = nodes.get(region_id("worker/src/yahoo-finance.ts", "shared"), {}).ge
 sec_readers = sorted({s for s, t, k in edges if t == "ds:sec-edgar"})
 open_fetch = sorted({s for s, t, k in edges if t == "ds:company-ir-sites"})
 back_calls = sorted({t for s, t, k in edges if s == "yfmcp/tools/earnings.py" and k == "dispatch"})
-py_reads_worker = sorted({s for s, t, k in edges if t in ("ds:ir_registry", "ds:news_capabilities", "ds:exposure_presets", "ds:exchange_calendars") and s.endswith(".py") or (t in ("ds:ir_registry", "ds:news_capabilities", "ds:exposure_presets", "ds:exchange_calendars") and "server.py" in s)})
+# Python files that still read a registry from the Worker tree (a worker/src/*.json path or a "worker" / "src" join).
+# Phase 6 (3.6.12) moved the registries to yfmcp/data, so this is empty and the observation below does not fire.
+_WORKER_SRC_READ = re.compile(r"worker/src/[\w.-]+\.json|[\"']worker[\"']\s*/\s*[\"']src[\"']")
+py_reads_worker = sorted(f for f, t in sources.items() if f.endswith(".py") and (f == "server.py" or f.startswith("yfmcp/")) and _WORKER_SRC_READ.search(t))
 
 observations = [
     f"Both god files are hubs, not layers: their 'shared' regions (server.py {shared_py} NLOC, yahoo-finance.ts {shared_ts} NLOC) are helpers reached from 2+ domains (Yahoo client, EDGAR fetch, HTML/table parsing). Extract these first — every domain module split out later will otherwise import back into the god file.",
@@ -676,7 +679,7 @@ observations = [
     f"Open-fetch surface: {len(open_fetch)} nodes fetch caller- or registry-supplied URLs ({', '.join(open_fetch)}). These are the S-01/S-04 SSRF paths from ASSESSMENT.md and should sit behind one allow-listed fetcher per runtime.",
     # Phase 5 unit 6 (3.6.6) removed the _server_attr back-calls; the scan above stays as a guard against new ones.
     (f"Circular dependency: yfmcp/tools/earnings.py back-calls server.py through string-keyed _server_attr(...) — resolved here to {', '.join(back_calls)}. These edges are invisible to static import analysis and block extracting earnings without first moving those targets out of server.py." if back_calls else None),
-    "The Python runtime reads the Worker's JSON registries (company-ir-page-registry.json, news-source-capabilities.json, exposure-presets.json, exchange-calendars.json) from worker/src at run time, so Python packaging depends on the Worker tree; the IR registry has a second writer (the daily ir-source-discovery job).",
+    (f"The Python runtime reads the Worker's JSON registries from worker/src at run time ({', '.join(py_reads_worker)}), so Python packaging depends on the Worker tree; the IR registry has a second writer (the daily ir-source-discovery job)." if py_reads_worker else None),
     "Extraction candidates (cleanest seams): News & public events (one region per god file, ~3.3k lines each, no dedicated module either side) and the Thai SEC funds pair (already isolated in both runtimes, only touched by the router).",
 ]
 observations = [o for o in observations if o]

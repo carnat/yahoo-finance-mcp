@@ -1,6 +1,6 @@
 """Exchange holiday calendars (BR-PRC-002, 3.1.0).
 
-The closures live in worker/src/exchange-calendars.json, which the Worker compiles in, so both runtimes name the same
+The closures live in yfmcp/data/exchange-calendars.json, which the Worker compiles in, so both runtimes name the same
 previous session. An exchange without a calendar, or a date outside the covered years, has no known previous session.
 """
 
@@ -9,9 +9,9 @@ from __future__ import annotations
 import datetime
 import json
 import re
-from pathlib import Path
+from yfmcp.data import DATA_DIR
 
-_PATH = Path(__file__).resolve().parents[1] / "worker" / "src" / "exchange-calendars.json"
+_PATH = DATA_DIR / "exchange-calendars.json"
 CALENDARS: dict = json.loads(_PATH.read_text(encoding="utf-8"))["calendars"]
 _BY_EXCHANGE: dict[str, dict] = {
     code: {**calendar, "closureSet": frozenset(calendar["closures"])}
