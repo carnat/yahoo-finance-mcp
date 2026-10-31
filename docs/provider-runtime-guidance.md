@@ -3190,6 +3190,16 @@ F-024, F-026, F-029). Both runtimes change alike.
 - **Tests:** 21 new parity cases in `scripts/parity/cases_audit_2251.py`.
 - **Rollback:** redeploy 2.25.0.
 
+## Deprecated Standard-Library Calls and Stale Tool Count (3.6.13)
+
+- **Why:** Phase 6 Debt #9 and #10 (`analysis/yahoo-finance-mcp/ASSESSMENT.md`). Release type: patch. No output
+  change. Python only.
+- **What changed:** `asyncio.get_event_loop()` inside coroutines (8 sites) is now `asyncio.get_running_loop()`;
+  `datetime.utcnow()` and `utcfromtimestamp()` (5 sites) are now timezone-aware UTC calls that give the same dates and
+  the same `...Z` timestamp text. The Python server's grouped-mode instructions and comments said "79 individual
+  tools"; they now say "every individual tool" (there are 97), so the text cannot go stale again.
+- **Rollback:** redeploy 3.6.12.
+
 ## Shared Data Directory (3.6.12)
 
 - **Why:** Phase 6 "shared data dir" (`analysis/yahoo-finance-mcp/PHASE6_SHARED_DATA_SPEC.md`). Release type: patch.
