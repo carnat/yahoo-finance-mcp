@@ -3190,6 +3190,24 @@ F-024, F-026, F-029). Both runtimes change alike.
 - **Tests:** 21 new parity cases in `scripts/parity/cases_audit_2251.py`.
 - **Rollback:** redeploy 2.25.0.
 
+## Fundamentals and Analyst Module Move (3.6.4)
+
+- **Why:** internal restructuring only (Phase 5 unit 4, `analysis/yahoo-finance-mcp/PHASE5_FUNDAMENTALS_SPEC.md`).
+  Release type: patch. No behaviour change.
+- **What moved (Worker):** company profile and stock info, statements and ratios, calendars and corporate actions,
+  holders, ETF and fund profiles, analyst consensus, recommendations, rating changes and upgrade radar, earnings
+  analysis and momentum, credit health, share-count trend, peer valuations and analyst valuation methods, from
+  `worker/src/yahoo-finance.ts` to `worker/src/fundamentals.ts`: 31 functions and the constants only they use.
+- **What moved (Python):** the same tools from `server.py` to `yfmcp/tools/fundamentals.py`: 52 functions and 13
+  constants, including the two position tools left in `server.py` by 3.6.3.
+- **Unchanged:** no tool name, input, output, schema, status, warning, cache key or ordering changed.
+- **Compatibility:** `yahoo-finance.ts` and `server.py` re-export the moved names other modules and tests read. Tests
+  that patch a moved helper now patch it in `yfmcp.tools.fundamentals`; no assertion changed.
+- **Verification:** the moved Worker text keeps its line multiset (only `export` keywords and import lines differ);
+  the moved Python functions and constants keep their `ast.dump`; tool listings (expanded and grouped) are
+  byte-identical; the Worker bundle grows 24 bytes; the parity harness passes with no expected value changed.
+- **Rollback:** redeploy 3.6.3.
+
 ## Pricing and Options Module Move (3.6.3)
 
 - **Why:** internal restructuring only (Phase 5 unit 3, `analysis/yahoo-finance-mcp/PHASE5_PRICING_SPEC.md`).
