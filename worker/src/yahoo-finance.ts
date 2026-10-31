@@ -63,7 +63,6 @@ export {
 } from "./news.js";
 // Phase 5 unit 1: SEC EDGAR retrieval moved to sec.ts; this re-export keeps tools.ts, index.ts, evidence-pack.ts and the
 // parity bundle (m.yahooFinance.*) unchanged.
-import { _buildFilingIndexFromHtml } from "./sec.js";
 export {
   getFilingData,
   type FilingSearchOptions,

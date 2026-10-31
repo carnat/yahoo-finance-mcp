@@ -1,0 +1,36 @@
+{
+ "base": "83a5e48",
+ "server.py": {
+  "evidence": [
+   "_not_applicable",
+   "_run_component",
+   "_sec_filing_rows",
+   "build_valuation_evidence_pack",
+   "get_evidence_cut",
+   "get_evidence_quality",
+   "list_evidence_cuts"
+  ],
+  "valuation": [
+   "_cover_counts_for",
+   "_daily_history",
+   "_daily_history_sync",
+   "_periodic_reports",
+   "_valuation_history_for",
+   "_yahoo_statement_rows_sync",
+   "get_historical_valuation_context",
+   "get_valuation_snapshot",
+   "reconcile_metric_sources"
+  ]
+ },
+ "worker/src/yahoo-finance.ts": {
+  "valuation": [
+   "coverCountsFor",
+   "dailyHistory",
+   "getHistoricalValuationContext",
+   "getValuationSnapshot",
+   "periodicReports",
+   "reconcileMetricSources",
+   "valuationHistoryFor"
+  ]
+ }
+}

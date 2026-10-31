@@ -3190,6 +3190,27 @@ F-024, F-026, F-029). Both runtimes change alike.
 - **Tests:** 21 new parity cases in `scripts/parity/cases_audit_2251.py`.
 - **Rollback:** redeploy 2.25.0.
 
+## Evidence Pack and Valuation Module Move (3.6.7)
+
+- **Why:** internal restructuring only (Phase 5 unit 7, `analysis/yahoo-finance-mcp/PHASE5_EVIDENCE_VALUATION_SPEC.md`).
+  Release type: patch. No behaviour change.
+- **What moved (Python):** the valuation handlers (historical valuation context, metric reconciliation, valuation
+  snapshot and their helpers, 9 functions) from `server.py` to `yfmcp/tools/valuation.py`, and the evidence handlers
+  (consensus curve, EPS revisions, evidence quality, valuation evidence pack and evidence cuts, 7 functions) to
+  `yfmcp/tools/evidence_pack.py`. Neither module imports `server`.
+- **What moved (Worker):** the 7 valuation functions and the constants only they use, from
+  `worker/src/yahoo-finance.ts` to `worker/src/valuation-tools.ts`. `yahoo-finance.ts` re-exports the three handlers,
+  so `tools.ts`, `index.ts` and the parity bundle are unchanged.
+- **Tests:** patches that reached the moved code through `server` now patch the defining module; no expected value
+  changed.
+- **Topology:** `extract_topology.py` now follows TypeScript `export { … } from` re-exports, so callers resolve to the
+  module that defines a function instead of the god file.
+- **Unchanged:** no tool name, input, output, schema, status, warning, cache key or ordering changed.
+- **Verification:** the moved Python functions keep their `ast.dump`; the moved Worker text keeps its line multiset
+  (only import and re-export lines differ); tool listings (expanded and grouped) are byte-identical; the parity
+  harness passes. `server.py` 972 → 460 lines, `yahoo-finance.ts` 630 → 346.
+- **Rollback:** redeploy 3.6.6.
+
 ## Earnings Module Move and No More Back-Calls Into server.py (3.6.6)
 
 - **Why:** internal restructuring only (Phase 5 unit 6, `analysis/yahoo-finance-mcp/PHASE5_EARNINGS_SPEC.md`).

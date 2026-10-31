@@ -364,18 +364,7 @@ from yfmcp.tools.earnings import (  # re-export for compatibility and grouped ro
 )
 
 
-# ---------------------------------------------------------------------------
-# Evidence tools (2.5.0): consensus curve, EPS revisions, evidence quality,
-# valuation evidence pack and content-addressed evidence cuts. Shared logic
-# lives in yfmcp/evidence.py (parity with worker/src/evidence.ts); storage in
-# yfmcp/evidence_store.py (YFMCP_EVIDENCE_DIR, else UNAVAILABLE).
-# ---------------------------------------------------------------------------
-from yfmcp import evidence as _ev  # noqa: E402
-from yfmcp import companyfacts_coverage as _cfc  # noqa: E402
-from yfmcp import evidence_store as _es  # noqa: E402
-from yfmcp.build_info import BUILD_SHA as _BUILD_SHA  # noqa: E402
-from yfmcp.clients.market_providers import fetch_alpha_vantage_json as _fetch_alpha_vantage_json  # noqa: E402
-
+# Evidence tools: handlers live in yfmcp/tools/evidence_pack.py.
 import yfmcp.tools.evidence_pack  # noqa: F401 (side-effect import: registers the evidence-pack tools)
 from yfmcp.tools.evidence_pack import (  # re-export for compatibility, grouped routing and server-side callers
     build_valuation_evidence_pack,
