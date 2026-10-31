@@ -109,7 +109,7 @@ class TestQuerySecFilingIndex(unittest.TestCase):
             self.assertEqual(res.get("code"), "UNSUPPORTED_QUERY_TYPE")
 
     def test_missing_required_param_region(self):
-        with patch("server.extract_geographic_revenue", new_callable=AsyncMock) as mocked:
+        with patch("yfmcp.tools.exposure.extract_geographic_revenue", new_callable=AsyncMock) as mocked:
             res = self._call(
                 ticker="AAPL",
                 query_type="geographic_revenue_share",
@@ -130,7 +130,7 @@ class TestQuerySecFilingIndex(unittest.TestCase):
             "evidence": {},
             "unit": "USD",
         }
-        with patch("server.extract_geographic_revenue", new_callable=AsyncMock, return_value=json.dumps(geo)):
+        with patch("yfmcp.tools.exposure.extract_geographic_revenue", new_callable=AsyncMock, return_value=json.dumps(geo)):
             res = self._call(
                 ticker="AAPL",
                 query_type="geographic_revenue_share",
@@ -155,7 +155,7 @@ class TestQuerySecFilingIndex(unittest.TestCase):
                 "sourceRows": [["Greater China", "64,377"], ["Total net sales", "416,161"]],
             },
         }
-        with patch("server.extract_geographic_revenue", new_callable=AsyncMock, return_value=json.dumps(geo)):
+        with patch("yfmcp.tools.exposure.extract_geographic_revenue", new_callable=AsyncMock, return_value=json.dumps(geo)):
             res = self._call(
                 ticker="AAPL",
                 query_type="geographic_revenue_share",
@@ -177,7 +177,7 @@ class TestQuerySecFilingIndex(unittest.TestCase):
             "evidence": {},
             "unit": "USD",
         }
-        with patch("server.extract_geographic_revenue", new_callable=AsyncMock, return_value=json.dumps(geo)):
+        with patch("yfmcp.tools.exposure.extract_geographic_revenue", new_callable=AsyncMock, return_value=json.dumps(geo)):
             res = self._call(
                 ticker="AXTI",
                 query_type="geographic_revenue_share",

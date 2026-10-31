@@ -3190,6 +3190,25 @@ F-024, F-026, F-029). Both runtimes change alike.
 - **Tests:** 21 new parity cases in `scripts/parity/cases_audit_2251.py`.
 - **Rollback:** redeploy 2.25.0.
 
+## SEC Extractors and Exposure Module Move (3.6.2)
+
+- **Why:** internal restructuring only (Phase 5 unit 2, `analysis/yahoo-finance-mcp/PHASE5_EXPOSURE_SPEC.md`).
+  Release type: patch. No behaviour change.
+- **What moved (Worker):** the SEC extractors and exposure tools (total, segment and geographic revenue, customer
+  concentration, risk factors, generic and China exposure, capital structure, dilution bridge, funding schedule,
+  operating driver ledger, share-count scenarios) from `worker/src/yahoo-finance.ts` to `worker/src/exposure.ts`: 43
+  functions and the constants, caches and types only they use. `sec.ts` now imports them from `exposure.ts`.
+- **What moved (Python):** the same code from `server.py` to `yfmcp/tools/exposure.py`: 38 functions (including
+  `query_sec_filing_index`, left behind by 3.6.1) and 13 constants, plus the two earnings-release readers the driver
+  ledger calls.
+- **Unchanged:** no tool name, input, output, schema, status, warning, cache key or ordering changed.
+- **Compatibility:** `yahoo-finance.ts` and `server.py` re-export the moved names other modules and tests read. Tests
+  that patch a moved helper now patch it in `yfmcp.tools.exposure`; no assertion changed.
+- **Verification:** the moved Worker text keeps its line multiset (only `export` keywords and import lines differ);
+  the moved Python functions and constants keep their `ast.dump`; tool listings (expanded and grouped) are
+  byte-identical; the Worker bundle grows 19 bytes; the parity harness passes with no expected value changed.
+- **Rollback:** redeploy 3.6.1.
+
 ## SEC Retrieval Module Move (3.6.1)
 
 - **Why:** internal restructuring only (Phase 5 unit 1, `analysis/yahoo-finance-mcp/PHASE5_SEC_SPEC.md`). Release

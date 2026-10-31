@@ -536,11 +536,13 @@ def _python(name: str) -> dict:
             patch("yfmcp.tools.sec._edgar_get", new=edgar_get), \
             patch("server._edgar_get_html", new=edgar_html), \
             patch("yfmcp.tools.sec._edgar_get_html", new=edgar_html), \
+            patch("yfmcp.tools.exposure._edgar_get_html", new=edgar_html), \
             patch("server._edgar_get_document", new=edgar_document), \
             patch("yfmcp.tools.sec._edgar_get_document", new=edgar_document), \
             patch("yfmcp.clients.edgar._edgar_get", new=edgar_get), \
             patch("server._get_submissions_for_ticker", new=submissions), \
             patch("yfmcp.tools.sec._get_submissions_for_ticker", new=submissions), \
+            patch("yfmcp.tools.exposure._get_submissions_for_ticker", new=submissions), \
             patch("yfmcp.clients.edgar._get_submissions_for_ticker", new=submissions):
         call = case.get("call", "total_revenue")
         period = case.get("period", "latest")

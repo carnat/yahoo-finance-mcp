@@ -94,7 +94,7 @@ FILE_DOMAIN = {
     "yfmcp/parsing/extractors.py": "extractors", "yfmcp/extraction_rules.py": "extractors",
     "yfmcp/capital_structure.py": "extractors", "yfmcp/share_scenarios.py": "extractors",
     "yfmcp/funding_schedule.py": "extractors", "yfmcp/driver_ledger.py": "extractors",
-    "yfmcp/exposure_presets.py": "extractors",
+    "yfmcp/exposure_presets.py": "extractors", "yfmcp/tools/exposure.py": "extractors",
     "yfmcp/valuation.py": "valuation", "yfmcp/valuation_history.py": "valuation",
     "yfmcp/metric_reconciliation.py": "valuation",
     "yfmcp/tools/earnings.py": "earnings", "yfmcp/clients/yahoo_transcripts.py": "earnings",
@@ -118,7 +118,7 @@ FILE_DOMAIN = {
     "worker/src/sec.ts": "sec",
     "worker/src/extraction-rules.ts": "extractors", "worker/src/capital-structure.ts": "extractors",
     "worker/src/share-scenarios.ts": "extractors", "worker/src/funding-schedule.ts": "extractors",
-    "worker/src/driver-ledger.ts": "extractors",
+    "worker/src/driver-ledger.ts": "extractors", "worker/src/exposure.ts": "extractors",
     "worker/src/valuation.ts": "valuation", "worker/src/valuation-history.ts": "valuation",
     "worker/src/metric-reconciliation.ts": "valuation",
     "worker/src/guidance-history.ts": "earnings", "worker/src/earnings-period.ts": "earnings",
@@ -349,19 +349,16 @@ def region_id(f: str, dom: str) -> str:
 DOMAIN_OVERRIDES: dict[str, dict[str, str]] = {
     "server.py": {
         # The SEC seeds left with their code for yfmcp/tools/sec.py and worker/src/sec.ts (Phase 5 unit 1, 3.6.1).
-        # SEC extractors reached from query_sec_filing_index as well as their own tools.
-        "_extract_customer_concentration": "extractors", "_extract_revenue_exposure": "extractors",
-        "_extract_risk_factor_mentions": "extractors", "_extract_segment_revenue": "extractors",
-        "_extract_total_revenue": "extractors", "_as_status": "extractors",
-        # Earnings-release reads shared by guidance history, the driver ledger and reconciliation.
-        "_earnings_release_picks": "earnings", "_read_release_text": "earnings",
+        # The SEC extractor seeds left for yfmcp/tools/exposure.py (Phase 5 unit 2, 3.6.2). The earnings-release reads
+        # (_earnings_release_picks, _read_release_text) moved there too, since the driver ledger calls them; they join
+        # the earnings module in unit 6.
         # analyst_data / stock_fundamentals handlers and the consensus helpers behind them.
         "get_earnings_momentum": "fundamentals", "get_analyst_upgrade_radar": "fundamentals",
         "_consensus_naming": "fundamentals", "_consensus_policy": "fundamentals",
         "_consensus_providers": "fundamentals", "_write_consensus_observation": "fundamentals",
     },
     "worker/src/yahoo-finance.ts": {
-        "extractGeoRevenueFromHtml": "extractors", "geoRegionAliases": "extractors", "normalizeStatus": "extractors",
+        # The SEC extractor seeds left with their code for worker/src/exposure.ts (Phase 5 unit 2).
         "earningsReleasePicks": "earnings", "readReleaseText": "earnings",
         "fetchAlphaVantageJson": "providers",
         "snapshotComponentMessage": "pricing",

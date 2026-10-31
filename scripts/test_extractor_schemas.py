@@ -377,10 +377,10 @@ class TestExposureFanOut(unittest.TestCase):
         from unittest.mock import AsyncMock, patch
 
         with patch("yfmcp.clients.edgar._get_submissions_for_ticker", new_callable=AsyncMock) as warm, \
-             patch("server._sec_filing_index_full", side_effect=self._slow({"filingDate": "2026-02-01"})), \
-             patch("server.extract_geographic_revenue", side_effect=self._slow(error=RuntimeError("geo parser failed"))), \
-             patch("server.search_sec_filing_text", side_effect=self._slow({"matches": []})) as search, \
-             patch("server.extract_risk_factor_mentions", side_effect=self._slow({"matches": []})):
+             patch("yfmcp.tools.exposure._sec_filing_index_full", side_effect=self._slow({"filingDate": "2026-02-01"})), \
+             patch("yfmcp.tools.exposure.extract_geographic_revenue", side_effect=self._slow(error=RuntimeError("geo parser failed"))), \
+             patch("yfmcp.tools.exposure.search_sec_filing_text", side_effect=self._slow({"matches": []})) as search, \
+             patch("yfmcp.tools.exposure.extract_risk_factor_mentions", side_effect=self._slow({"matches": []})):
             warm.return_value = ("0000320193", {})
             started = time.monotonic()
             result = _parse(_run(srv.extract_exposure(ticker="AAPL", topic="China")))
@@ -397,10 +397,10 @@ class TestExposureFanOut(unittest.TestCase):
         from unittest.mock import AsyncMock, patch
 
         with patch("yfmcp.clients.edgar._get_submissions_for_ticker", new_callable=AsyncMock), \
-             patch("server._sec_filing_index_full", side_effect=self._slow(error=RuntimeError("index down"))), \
-             patch("server.extract_geographic_revenue", side_effect=self._slow()), \
-             patch("server.search_sec_filing_text", side_effect=self._slow()), \
-             patch("server.extract_risk_factor_mentions", side_effect=self._slow()):
+             patch("yfmcp.tools.exposure._sec_filing_index_full", side_effect=self._slow(error=RuntimeError("index down"))), \
+             patch("yfmcp.tools.exposure.extract_geographic_revenue", side_effect=self._slow()), \
+             patch("yfmcp.tools.exposure.search_sec_filing_text", side_effect=self._slow()), \
+             patch("yfmcp.tools.exposure.extract_risk_factor_mentions", side_effect=self._slow()):
             with self.assertRaisesRegex(RuntimeError, "index down"):
                 _run(srv.extract_exposure(ticker="AAPL", topic="China"))
 
@@ -409,10 +409,10 @@ class TestExposureFanOut(unittest.TestCase):
         from unittest.mock import AsyncMock, patch
 
         with patch("yfmcp.clients.edgar._get_submissions_for_ticker", new_callable=AsyncMock), \
-             patch("server._sec_filing_index_full", side_effect=self._slow({"index": {}})), \
-             patch("server._extract_revenue_exposure", side_effect=self._slow({"status": "NOT_DISCLOSED"})), \
-             patch("server.search_sec_filing_text", side_effect=self._slow({"matches": []})), \
-             patch("server._extract_risk_factor_mentions", side_effect=self._slow({"matches": []})):
+             patch("yfmcp.tools.exposure._sec_filing_index_full", side_effect=self._slow({"index": {}})), \
+             patch("yfmcp.tools.exposure._extract_revenue_exposure", side_effect=self._slow({"status": "NOT_DISCLOSED"})), \
+             patch("yfmcp.tools.exposure.search_sec_filing_text", side_effect=self._slow({"matches": []})), \
+             patch("yfmcp.tools.exposure._extract_risk_factor_mentions", side_effect=self._slow({"matches": []})):
             started = time.monotonic()
             result = _parse(_run(srv.extract_china_exposure(ticker="AAPL")))
             elapsed = time.monotonic() - started

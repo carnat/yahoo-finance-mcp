@@ -1834,11 +1834,12 @@ def _worker_e2e() -> dict:
 
 def _python_e2e() -> dict:
     import server as srv
+    from yfmcp.tools import exposure as exposure_tools
     from yfmcp.tools import sec as sec_tools
 
     sec_tools._FILING_TEXT_CACHE.clear()
     sec_tools._FILING_TEXT_CACHE_CHARS = 0
-    srv._IXBRL_DOCUMENTS.clear()
+    exposure_tools._IXBRL_DOCUMENTS.clear()
     ch_requests: list[str] = []
 
     async def fake_html(url: str, max_bytes: int = 5_000_000) -> str | None:
@@ -1857,8 +1858,10 @@ def _python_e2e() -> dict:
     out: dict = {}
     with patch.object(srv, "_get_submissions_for_ticker", AsyncMock(return_value=(f"{CIK:010d}", copy.deepcopy(SUBMISSIONS)))), \
             patch.object(sec_tools, "_get_submissions_for_ticker", AsyncMock(return_value=(f"{CIK:010d}", copy.deepcopy(SUBMISSIONS)))), \
+            patch.object(exposure_tools, "_get_submissions_for_ticker", AsyncMock(return_value=(f"{CIK:010d}", copy.deepcopy(SUBMISSIONS)))), \
             patch.object(srv, "_edgar_get_html", fake_html), \
             patch.object(sec_tools, "_edgar_get_html", fake_html), \
+            patch.object(exposure_tools, "_edgar_get_html", fake_html), \
             patch.object(srv, "_companies_house_get", fake_ch):
         with patch.dict(os.environ, {"COMPANIES_HOUSE_API_KEY": CH_KEY}):
             for name, (_, action, params) in CALLS.items():
