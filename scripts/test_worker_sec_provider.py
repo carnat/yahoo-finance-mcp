@@ -44,7 +44,7 @@ class TestWorkerSecProvider(unittest.TestCase):
             "extract_exposure": "extractExposure(",
         }
         for tool, target in expected_routes.items():
-            self.assertRegex(self.tools, rf'case "{tool}":[\s\S]*?return {re.escape(target)}')
+            self.assertRegex(self.tools, rf'\["{tool}", (?:async )?\(args\) =>[\s\S]*?{re.escape(target)}')
 
     def test_public_diagnostics_do_not_expose_provider_configuration(self) -> None:
         for field in (
@@ -61,7 +61,7 @@ class TestWorkerSecProvider(unittest.TestCase):
 
     def test_public_tools_do_not_route_through_sidecar_style_gate(self) -> None:
         dispatch = re.search(
-            r'case "extract_geographic_revenue":[\s\S]*?case "extract_risk_factor_mentions"',
+            r'\["extract_geographic_revenue",[\s\S]*?\["extract_risk_factor_mentions",',
             self.tools,
         )
         self.assertIsNotNone(dispatch)
@@ -210,7 +210,7 @@ if (heading !== "PART I - FINANCIAL INFORMATION Net 31.5 Item 2") throw new Erro
         self.assertIn('"OUTLINE_NOT_PARSED"', self.tools)
         self.assertIn('"TABLES_FOUND_OUTLINE_EMPTY"', self.tools)
         dispatch = re.search(
-            r'case "get_sec_filing_outline":[\s\S]*?case "get_sec_filing_section"',
+            r'\["get_sec_filing_outline",[\s\S]*?\["get_sec_filing_section",',
             self.tools,
         )
         self.assertIsNotNone(dispatch)
@@ -268,7 +268,7 @@ if (heading !== "PART I - FINANCIAL INFORMATION Net 31.5 Item 2") throw new Erro
         self.assertIn('"UNSUPPORTED_XBRL_CONCEPT"', self.tools)
         self.assertIn("mappedSecFactType(requestedFactName)", self.tools)
         dispatch = re.search(
-            r'case "extract_sec_filing_fact":[\s\S]*?case "list_sec_company_filings"',
+            r'\["extract_sec_filing_fact",[\s\S]*?\["list_sec_company_filings",',
             self.tools,
         )
         self.assertIsNotNone(dispatch)
@@ -354,14 +354,14 @@ if (heading !== "PART I - FINANCIAL INFORMATION Net 31.5 Item 2") throw new Erro
         self.assertNotIn("xbrl_available: false,\n    xbrl_facts: {},", self.worker)
 
         fact_dispatch = re.search(
-            r'case "extract_sec_filing_fact":[\s\S]*?case "list_sec_company_filings"',
+            r'\["extract_sec_filing_fact",[\s\S]*?\["list_sec_company_filings",',
             self.tools,
         )
         self.assertIsNotNone(fact_dispatch)
         self.assertIn("evidence: decisionGrade ? sourceEvidence", fact_dispatch.group(0))
 
         transcript_dispatch = re.search(
-            r'case "parse_public_transcript":[\s\S]*?case "get_earnings_call_transcript"',
+            r'\["parse_public_transcript",[\s\S]*?\["get_earnings_call_transcript",',
             self.tools,
         )
         self.assertIsNotNone(transcript_dispatch)

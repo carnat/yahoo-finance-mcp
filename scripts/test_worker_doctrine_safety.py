@@ -210,7 +210,7 @@ class TestWorkerDoctrineSafety(unittest.TestCase):
         self.assertNotIn("TOOL_ALIASES", tools)
         self.assertNotIn("DEPRECATED_ALIAS_NAMES", tools)
         self.assertNotIn('name: "get_historical_stock_prices"', tools)
-        self.assertNotIn('case "get_historical_stock_prices":', tools)
+        self.assertNotIn('["get_historical_stock_prices", ', tools)
 
     def test_deployed_smoke_covers_alias_and_public_schema_behavior(self) -> None:
         smoke = DEPLOYED_DISCOVERY.read_text(encoding="utf-8")
