@@ -61,7 +61,7 @@ import {
   isDecisionGradeXbrlFact,
 } from "./sec.js";
 import exposurePresets from "./exposure-presets.json";
-import { earningsReleasePicks, readReleaseText } from "./yahoo-finance.js";
+import { earningsReleasePicks, readReleaseText } from "./earnings.js";
 
 /** The China exposure preset (Q5): the terms extractChinaExposure and extractExposure search, shared with Python. */
 export const CHINA_PRESET = exposurePresets.presets.china;

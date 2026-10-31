@@ -131,6 +131,7 @@ FILE_DOMAIN = {
     "worker/src/clients/yahoo.ts": "pricing", "worker/src/clients/provider-http.ts": "providers",
     "worker/src/exchange-calendars.ts": "pricing", "worker/src/pricing-notices.ts": "pricing",
     "worker/src/pricing.ts": "pricing", "worker/src/fundamentals.ts": "fundamentals", "worker/src/providers.ts": "providers",
+    "worker/src/earnings.ts": "earnings",
     "worker/src/clients/html.ts": "sec", "worker/src/clients/endpoints.ts": "sec",
     "worker/src/util.ts": "envelope", "worker/src/batch.ts": "envelope", "worker/src/news/identity.ts": "news",
     "worker/src/news/shared.ts": "news", "worker/src/news/providers/types.ts": "news",
@@ -360,7 +361,7 @@ DOMAIN_OVERRIDES: dict[str, dict[str, str]] = {
         # The SEC extractor seeds left with their code for worker/src/exposure.ts (Phase 5 unit 2).
         # snapshotComponentMessage left with the pricing code for worker/src/pricing.ts (Phase 5 unit 3).
         # fetchAlphaVantageJson left with the provider code for worker/src/providers.ts (Phase 5 unit 5).
-        "earningsReleasePicks": "earnings", "readReleaseText": "earnings",
+        # earningsReleasePicks and readReleaseText left with the earnings code for worker/src/earnings.ts (Phase 5 unit 6).
     },
 }
 
