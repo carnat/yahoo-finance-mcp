@@ -115,6 +115,7 @@ FILE_DOMAIN = {
     "worker/src/cache.ts": "envelope", "worker/src/validate.ts": "envelope",
     "worker/src/filing-search.ts": "sec", "worker/src/sec-facts.ts": "sec",
     "worker/src/fiscal-calendar.ts": "sec", "worker/src/companyfacts-coverage.ts": "sec",
+    "worker/src/sec.ts": "sec",
     "worker/src/extraction-rules.ts": "extractors", "worker/src/capital-structure.ts": "extractors",
     "worker/src/share-scenarios.ts": "extractors", "worker/src/funding-schedule.ts": "extractors",
     "worker/src/driver-ledger.ts": "extractors",
