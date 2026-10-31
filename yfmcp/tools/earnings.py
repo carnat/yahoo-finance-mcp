@@ -1,8 +1,8 @@
 """Earnings and transcript MCP tools.
 
-Extracted from server.py as a focused domain module. A few older cross-domain
-handlers still live in server.py, so this module lazily resolves them at call
-time instead of pulling more code into this refactor.
+Extracted from server.py as a focused domain module. Cross-domain handlers are
+reached through the module that defines them, bound late so a patch on that
+module reaches this code.
 """
 
 import asyncio
@@ -25,6 +25,9 @@ from pydantic import Field
 
 from yfmcp import url_policy as _url_policy
 from yfmcp.app import yfinance_server
+import yfmcp.clients.edgar as _edgar_client
+import yfmcp.tools.fundamentals as _fundamentals
+import yfmcp.tools.sec as _sec
 from yfmcp.schemas import _TOOL_OUTPUT_SCHEMAS
 from yfmcp.envelope import ErrorCode, _mcp_failure, _wrap_envelope_v2
 from yfmcp.validation import _validate_ticker, _sanitize_sec_html
@@ -36,6 +39,7 @@ from yfmcp.util import (
     _safe_json_loads,
     _compact_excerpt,
     _round_half_away_from_zero,
+    _clamp_int,
 )
 from yfmcp.clients.edgar import (
     _edgar_fetch_page_detail,
@@ -46,9 +50,13 @@ from yfmcp.clients.edgar import (
     _edgar_read_exhibit_index,
     _get_submissions_for_ticker,
     _resolve_ex991_url,
+    _load_edgar_tickers,
+    _edgar_get_company_facts,
 )
 from yfmcp.clients.market_providers import fetch_alpha_vantage_json
 from yfmcp import extraction_rules as _er
+from yfmcp import guidance_history as _gh
+from yfmcp.tools.exposure import _earnings_release_picks, _read_release_text
 from yfmcp.clients.yahoo_transcripts import (
     assess_yahoo_transcript_payload_completeness,
     fetch_yahoo_quartr_transcript,
@@ -57,11 +65,6 @@ from yfmcp.clients.yahoo_transcripts import (
 )
 from yfmcp.parsing.html import _strip_html_blocks, _strip_html_tags
 from yfmcp.clients.endpoints import SEC_ARCHIVES_PREFIX, sec_archive_document_url, sec_company_concept_url
-
-
-def _server_attr(name: str):
-    import server as _server  # local import avoids module-load circularity
-    return getattr(_server, name)
 
 
 _GUIDANCE_CONTEXT_RE = _re.compile(
@@ -376,7 +379,7 @@ async def _resolve_latest_earnings_release(ticker: str) -> dict:
         }
 
     yahoo_url = f"https://finance.yahoo.com/quote/{ticker.upper()}/analysis"
-    cal_raw = await _server_attr("get_calendar")(ticker=ticker.upper())
+    cal_raw = await _fundamentals.get_calendar(ticker=ticker.upper())
     cal = _safe_json_loads(cal_raw)
     earnings_dates = (((cal.get("calendar") or {}).get("earnings") or {}).get("earningsDate") or [])
     # Yahoo's calendar lists the next (estimated) report date: a date still ahead is not the latest release
@@ -490,7 +493,7 @@ async def index_earnings_release(ticker: str, period: str = "latest", source_url
     if not html:
         return _wrap_envelope_v2("index_earnings_release", None, error=f"Failed to fetch source: {source_url}", error_code=ErrorCode.PROVIDER_ERROR)
 
-    idx = _server_attr("_build_filing_index_from_html")(_sanitize_sec_html(html))
+    idx = _sec._build_filing_index_from_html(_sanitize_sec_html(html))
     period_info = _extract_earnings_period_from_text(_strip_html_blocks(_sanitize_sec_html(html)))
     out_data = {
         "ticker": ticker.upper(),
@@ -596,7 +599,7 @@ def _xbrl_quarter_in_window(period_end: str | None, release_filing_date: str | N
 async def _xbrl_quarter_metrics(ticker: str, cik_padded: str, release_filing_date: str, retrieved_at: str) -> list[tuple[str, dict]]:
     """The Worker's tier 1: confirmed 10-Q/10-K XBRL quarter facts at HIGH, in the Worker's metric order (2.25.5, F29)."""
     from yfmcp.sec_facts import REVENUE_CONCEPTS
-    read_json = _server_attr("_edgar_read_json")
+    read_json = _edgar_client._edgar_read_json
 
     async def _quarterly(primary, fallback: str | None = None, unit: str = "USD") -> dict | None:
         concepts = list(primary) if isinstance(primary, list) else [primary, *([fallback] if fallback else [])]
@@ -711,7 +714,7 @@ async def extract_earnings_metrics(
 
     # Tier 1, as in the Worker: confirmed 10-Q/10-K XBRL quarter facts (2.25.5, F29). The release text below is read
     # only when no XBRL quarter applies.
-    cik_padded = str(src.get("cikPadded") or "") or (await _server_attr("_resolve_cik_for_ticker")(ticker)) or ""
+    cik_padded = str(src.get("cikPadded") or "") or (await _edgar_client._resolve_cik_for_ticker(ticker)) or ""
     xbrl_metrics = await _xbrl_quarter_metrics(ticker, cik_padded, str(src.get("filingDate") or ""), retrieved_at) if cik_padded else []
     for key, value in xbrl_metrics:
         metrics[key] = value
@@ -968,7 +971,7 @@ async def compare_earnings_actual_vs_estimate(ticker: str, period: str = "latest
     raw_metrics = _safe_json_loads(await extract_earnings_metrics(ticker=ticker, period=period))
     # extract_earnings_metrics now returns Envelope V2; unwrap data
     metrics = raw_metrics.get("data") if isinstance(raw_metrics.get("data"), dict) else raw_metrics
-    ea = _safe_json_loads(await _server_attr("get_earnings_analysis")(ticker=ticker))
+    ea = _safe_json_loads(await _fundamentals.get_earnings_analysis(ticker=ticker))
 
     def _num(v: object) -> float | None:
         if v is None:
@@ -2369,3 +2372,46 @@ async def get_earnings_call_transcript(
         ),
     })
     return _wrap_envelope_v2("get_earnings_call_transcript", sec_fallback)
+
+
+@yfinance_server.tool(
+    name="get_guidance_history",
+    description="Company guidance across recent earnings releases (SEC 8-K Item 2.02, EX-99.1): each revenue, gross-margin and EPS range with its stated target period and source; revisions between consecutive releases for the same metric and period (INITIATED, RAISED, LOWERED, NARROWED, WIDENED, REAFFIRMED, WITHDRAWN); and outcomes comparing the later reported SEC XBRL actual with the first and last range (BELOW, WITHIN, ABOVE). Ranges without a stated period are listed but not compared; unread releases are reported, never treated as withdrawn. Evidence only.",
+    after="extract_operating_driver_ledger",
+)
+async def get_guidance_history(ticker: str, max_releases: int = 8) -> str:
+    limit = _clamp_int(max_releases, 8, 1, 12)
+    upper = ticker.upper()
+    cik_padded, subs = await _get_submissions_for_ticker(ticker)
+    if not cik_padded:
+        ticker_index = await _load_edgar_tickers()
+        code = "NO_SEC_REGISTRANT" if ticker_index else "SEC_LOOKUP_UNAVAILABLE"
+        message = (f"SEC has no registrant CIK for ticker {upper}." if ticker_index
+                   else f"SEC's ticker index could not be read, so {upper} was not resolved to a CIK; retry.")
+        return json.dumps({"ticker": upper, "status": code, "code": code, "retryable": not ticker_index, "message": message})
+    if not subs:
+        return json.dumps({"ticker": upper, "status": "SEC_LOOKUP_UNAVAILABLE", "code": "SEC_LOOKUP_UNAVAILABLE", "retryable": True,
+                           "message": "SEC submissions could not be read; retry."})
+    cik_int = int(cik_padded)
+    picks = _earnings_release_picks(subs, cik_int, limit)
+    releases = []
+    # Four at a time keeps within SEC's request-rate guidance.
+    for i in range(0, len(picks), 4):
+        batch = picks[i:i + 4]
+        reads = await asyncio.gather(*(_read_release_text(cik_int, p["accessionNumber"], p["primaryUrl"]) for p in batch))
+        releases += [{"filingDate": p["filingDate"], "accessionNumber": p["accessionNumber"], **r} for p, r in zip(batch, reads)]
+    facts = await _edgar_get_company_facts(cik_padded)
+    out = _gh.guidance_history(ticker, releases, facts)
+    unread = len([r for r in releases if r["status"] != "READ"])
+    warnings = []
+    if not picks:
+        warnings.append({"code": "NO_EARNINGS_RELEASES_FOUND", "message": "No 8-K reporting results of operations (Item 2.02) is in SEC's recent submissions.", "severity": "warning"})
+    if unread:
+        warnings.append({"code": "RELEASE_TEXT_NOT_AVAILABLE", "message": f"{unread} of {len(releases)} earnings releases could not be read from SEC; their guidance is missing, not withdrawn. Retry.", "severity": "warning"})
+    if not facts:
+        warnings.append({"code": "ACTUALS_NOT_READ", "message": "SEC companyfacts could not be read, so outcomes were not evaluated; retry.", "severity": "warning"})
+    out["status"] = ("NO_EARNINGS_RELEASES_FOUND" if not picks else "RELEASE_TEXT_NOT_AVAILABLE" if unread == len(releases)
+                     else "PARTIAL" if unread or not facts else "OK")
+    out["retryable"] = bool(unread) or not facts
+    out["warnings"] = warnings
+    return json.dumps(out)

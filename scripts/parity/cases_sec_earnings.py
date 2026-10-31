@@ -640,7 +640,7 @@ def _python_env(fake_ticker=_NoInfoTicker, calendar="{}"):
     # Provider keys are removed so results never depend on the developer's environment (CI sets none).
     keyless = {k: v for k, v in os.environ.items() if k not in _PROVIDER_KEYS}
     with patch.dict(os.environ, keyless, clear=True), patch("yfinance.Ticker", fake_ticker), \
-            patch("server.get_calendar", new=AsyncMock(return_value=calendar)):
+            patch("yfmcp.tools.fundamentals.get_calendar", new=AsyncMock(return_value=calendar)):
         yield
 
 

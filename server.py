@@ -323,49 +323,6 @@ from yfmcp.tools.exposure import (  # re-export for compatibility, grouped routi
 )
 
 
-
-@yfinance_server.tool(
-    name="get_guidance_history",
-    description="Company guidance across recent earnings releases (SEC 8-K Item 2.02, EX-99.1): each revenue, gross-margin and EPS range with its stated target period and source; revisions between consecutive releases for the same metric and period (INITIATED, RAISED, LOWERED, NARROWED, WIDENED, REAFFIRMED, WITHDRAWN); and outcomes comparing the later reported SEC XBRL actual with the first and last range (BELOW, WITHIN, ABOVE). Ranges without a stated period are listed but not compared; unread releases are reported, never treated as withdrawn. Evidence only.",
-)
-async def get_guidance_history(ticker: str, max_releases: int = 8) -> str:
-    limit = _clamp_int(max_releases, 8, 1, 12)
-    upper = ticker.upper()
-    cik_padded, subs = await _get_submissions_for_ticker(ticker)
-    if not cik_padded:
-        ticker_index = await _load_edgar_tickers()
-        code = "NO_SEC_REGISTRANT" if ticker_index else "SEC_LOOKUP_UNAVAILABLE"
-        message = (f"SEC has no registrant CIK for ticker {upper}." if ticker_index
-                   else f"SEC's ticker index could not be read, so {upper} was not resolved to a CIK; retry.")
-        return json.dumps({"ticker": upper, "status": code, "code": code, "retryable": not ticker_index, "message": message})
-    if not subs:
-        return json.dumps({"ticker": upper, "status": "SEC_LOOKUP_UNAVAILABLE", "code": "SEC_LOOKUP_UNAVAILABLE", "retryable": True,
-                           "message": "SEC submissions could not be read; retry."})
-    cik_int = int(cik_padded)
-    picks = _earnings_release_picks(subs, cik_int, limit)
-    releases = []
-    # Four at a time keeps within SEC's request-rate guidance.
-    for i in range(0, len(picks), 4):
-        batch = picks[i:i + 4]
-        reads = await asyncio.gather(*(_read_release_text(cik_int, p["accessionNumber"], p["primaryUrl"]) for p in batch))
-        releases += [{"filingDate": p["filingDate"], "accessionNumber": p["accessionNumber"], **r} for p, r in zip(batch, reads)]
-    facts = await _edgar_get_company_facts(cik_padded)
-    out = _gh.guidance_history(ticker, releases, facts)
-    unread = len([r for r in releases if r["status"] != "READ"])
-    warnings = []
-    if not picks:
-        warnings.append({"code": "NO_EARNINGS_RELEASES_FOUND", "message": "No 8-K reporting results of operations (Item 2.02) is in SEC's recent submissions.", "severity": "warning"})
-    if unread:
-        warnings.append({"code": "RELEASE_TEXT_NOT_AVAILABLE", "message": f"{unread} of {len(releases)} earnings releases could not be read from SEC; their guidance is missing, not withdrawn. Retry.", "severity": "warning"})
-    if not facts:
-        warnings.append({"code": "ACTUALS_NOT_READ", "message": "SEC companyfacts could not be read, so outcomes were not evaluated; retry.", "severity": "warning"})
-    out["status"] = ("NO_EARNINGS_RELEASES_FOUND" if not picks else "RELEASE_TEXT_NOT_AVAILABLE" if unread == len(releases)
-                     else "PARTIAL" if unread or not facts else "OK")
-    out["retryable"] = bool(unread) or not facts
-    out["warnings"] = warnings
-    return json.dumps(out)
-
-
 # ── Historical valuation context and metric reconciliation (2.5.4) ────────
 
 def _daily_history_sync(ticker: str, from_date: str) -> dict | None:
@@ -721,6 +678,7 @@ from yfmcp.tools.earnings import (  # re-export for compatibility and grouped ro
     _alpha_vantage_quarter,
     _fetch_alpha_vantage_transcript,
     get_earnings_call_transcript,
+    get_guidance_history,
 )
 
 
