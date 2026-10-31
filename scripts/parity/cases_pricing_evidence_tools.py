@@ -15,6 +15,8 @@ Conventions
 
 from __future__ import annotations
 
+import dataclasses
+
 import asyncio
 import datetime as dt
 import json
@@ -1958,14 +1960,55 @@ CASES += [
     _form4_case("shr.form4.unknown_code_is_other_unclassified", ["BR-SHR-016"], "FRC", 910003, _f4_row("X", "100", "10.00"),
                 {"owner": "Doe Jane", "role": "Chief Financial Officer", "transactionCode": "X", "transactionLabel": "Other/Unclassified",
                  "shares": 100, "price": 10, "value": 1000, "transactionDate": "2026-10-01"}),
-    # Q3i: only the first transaction row is read. An option exercise (M, 10,000 at $5.00) followed by the sale of
-    # those shares (S, 10,000 at $25.50) reports the exercise alone.
-    _form4_case("shr.form4.q3i_multi_line_filing_reports_only_the_first_transaction", ["BR-SHR-016"], "FRD", 910004,
+    # 3.6.0 (Q3i BR-SHR-016, owner 2026-10-31 "Add a list of every transaction"): insiderTransaction stays the first
+    # row, an option exercise (M, 10,000 at $5.00); the sale of those shares (S, 10,000 at $25.50) is no longer hidden.
+    _form4_case("shr.form4.multi_line_filing_keeps_the_first_transaction_as_insider_transaction", ["BR-SHR-016"], "FRD", 910004,
                 _f4_row("M", "10000", "5.00") + _f4_row("S", "10000", "25.50"),
-                mode="pinned", decision="Q3i",
                 expect={"owner": "Doe Jane", "role": "Chief Financial Officer", "transactionCode": "M",
                         "transactionLabel": "Option exercise/conversion", "shares": 10000, "price": 5, "value": 50000,
                         "transactionDate": "2026-10-01"}),
+]
+
+
+def _all_form4_rows(v):
+    for item in v.get("items") or []:
+        if item.get("insiderTransaction"):
+            return {"transactions": [[t.get(k) for k in ("transactionCode", "shares", "price", "value", "transactionDate")]
+                                     for t in item.get("insiderTransactions") or []],
+                    "summary": item.get("summary")}
+    return {"items": len(v.get("items") or [])}
+
+
+_F4_DERIVATIVE_ROW = ("<derivativeTransaction><transactionDate><value>2026-10-01</value></transactionDate>"
+                      "<transactionCoding><transactionCode>M</transactionCode></transactionCoding>"
+                      "<transactionAmounts><transactionShares><value>10000</value></transactionShares>"
+                      "<transactionPricePerShare><value>0</value></transactionPricePerShare></transactionAmounts>"
+                      "<ownershipNature><directOrIndirectOwnership><value>D</value></directOrIndirectOwnership></ownershipNature>"
+                      "</derivativeTransaction>")
+
+CASES += [
+    # insiderTransactions lists every row: the exercise and the sale, and the summary counts the rest.
+    dataclasses.replace(
+        _form4_case("shr.form4.multi_line_filing_lists_every_transaction", ["BR-SHR-016"], "FRE", 910005,
+                    _f4_row("M", "10000", "5.00") + _f4_row("S", "10000", "25.50", "2026-10-02")),
+        select=_all_form4_rows,
+        expect={"transactions": [["M", 10000, 5, 50000, "2026-10-01"], ["S", 10000, 25.5, 255000, "2026-10-02"]],
+                "summary": "Option exercise/conversion by Doe Jane: 10,000 shares, value $50,000. 1 more transaction in this filing."}),
+    # Non-derivative rows come first, then the derivative table (the order of Table I and Table II).
+    dataclasses.replace(
+        _form4_case("shr.form4.derivative_rows_follow_the_non_derivative_rows", ["BR-SHR-016"], "FRF", 910006,
+                    _f4_row("S", "4000", "30.00") + "</nonDerivativeTable><derivativeTable>" + _F4_DERIVATIVE_ROW
+                    + "</derivativeTable><nonDerivativeTable>" + _f4_row("S", "1000", "31.00")),
+        select=_all_form4_rows,
+        expect={"transactions": [["S", 4000, 30, 120000, "2026-10-01"], ["S", 1000, 31, 31000, "2026-10-01"],
+                                 ["M", 10000, 0, 0, "2026-10-01"]],
+                "summary": "Sale by Doe Jane: 4,000 shares, value $120,000. 2 more transactions in this filing."}),
+    # A one-row filing has a one-row list and the summary is unchanged.
+    dataclasses.replace(
+        _form4_case("shr.form4.single_row_filing_has_a_one_row_list", ["BR-SHR-016"], "FRG", 910007, SALE_ROW),
+        select=_all_form4_rows,
+        expect={"transactions": [["S", 10000, 25.5, 255000, "2026-10-01"]],
+                "summary": "Sale by Doe Jane: 10,000 shares, value $255,000."}),
 ]
 
 

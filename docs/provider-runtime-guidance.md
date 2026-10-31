@@ -3190,6 +3190,27 @@ F-024, F-026, F-029). Both runtimes change alike.
 - **Tests:** 21 new parity cases in `scripts/parity/cases_audit_2251.py`.
 - **Rollback:** redeploy 2.25.0.
 
+## Form 4: Every Transaction of a Filing (3.6.0)
+
+- **Why:** the scheduled Q3i repair BR-SHR-016, multi-line Form 4 parsing (owner decision 2026-10-31, "Add a list
+  of every transaction"; `analysis/yahoo-finance-mcp/FORM4_MULTILINE_SPEC.md`). Release type: minor, because one
+  field is new. Both runtimes.
+- **New field `insiderTransactions`** on each Form 4 item from the SEC source (`get_sec_recent_events`, company news
+  with the `sec` source). It lists every transaction row of the filing, each with the same keys as
+  `insiderTransaction`: owner, role, transactionCode, transactionLabel, shares, price, value, ownershipForm and
+  transactionDate. Order: the non-derivative rows (Table I) in document order, then the derivative rows (Table II).
+  For an HTML primary document, the tables are read in page order with the existing row rules.
+- **`insiderTransaction` is unchanged:** it is still the first row, the same one as before. The title is unchanged.
+  When the filing has more rows, the summary ends with "N more transaction(s) in this filing." Example: an option
+  exercise (M, 10,000 at $5.00) followed by the sale of those shares (S, 10,000 at $25.50). Before, only the exercise
+  was visible. Now `insiderTransactions` has both, and the summary says "1 more transaction in this filing."
+- **Unchanged:** `schemaHash` and `manifestHash`, because news items have no declared item schema. No warning code
+  was added.
+- **Tests:** in `scripts/parity/cases_pricing_evidence_tools.py` the pinned multi-line case now asserts the first
+  row in both runtimes. Three new cases cover the full list with its summary, derivative rows after the
+  non-derivative rows, and a one-row filing.
+- **Rollback:** redeploy 3.5.0.
+
 ## Fundamentals: Credit Health Needs a Full Year and a Positive Earnings Base; Beat Streak From the Newest Quarter (3.5.0)
 
 - **Why:** R5-fundamentals, the scheduled Q3i repairs BR-FND-004, BR-FND-006, BR-FND-007 and BR-SHR-010/012

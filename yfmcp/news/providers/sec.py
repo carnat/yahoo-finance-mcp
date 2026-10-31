@@ -126,12 +126,15 @@ def _form4_role_from_html(html_text: str) -> str | None:
     return ", ".join(dict.fromkeys(roles)) or None
 
 
-def _parse_form4_html_transaction(html_text: str) -> dict | None:
+def _parse_form4_html_transactions(html_text: str) -> list[dict]:
+    """Every transaction row of an HTML Form 4, in table order (Table I non-derivative, then Table II derivative)."""
     owner_name = _form4_owner_from_html(html_text)
     role = _form4_role_from_html(html_text)
+    transactions: list[dict] = []
     for table_m in _re.finditer(r"<table[^>]*>([\s\S]*?)</table>", html_text, _re.IGNORECASE):
         table_html = table_m.group(0)
         table_text = _strip_html_tags(table_html).lower()
+        rows_found: list[dict] = []
         if "non-derivative securities" in table_text:
             for row in _parse_html_table(table_html):
                 if len(row) < 10:
@@ -140,17 +143,16 @@ def _parse_form4_html_transaction(html_text: str) -> dict | None:
                 shares = _form4_num(row[5])
                 if not code or shares is None:
                     continue
-                price = _form4_num(row[7])
-                return _form4_transaction_payload(
+                rows_found.append(_form4_transaction_payload(
                     owner_name=owner_name,
                     role=role,
                     code=code,
                     shares=shares,
-                    price=price,
+                    price=_form4_num(row[7]),
                     ownership_form=row[9].strip() or None,
                     transaction_date=_form4_date(row[1]),
-                )
-        if "derivative securities" in table_text:
+                ))
+        if not rows_found and "derivative securities" in table_text:
             for row in _parse_html_table(table_html):
                 if len(row) < 15:
                     continue
@@ -158,7 +160,7 @@ def _parse_form4_html_transaction(html_text: str) -> dict | None:
                 shares = _form4_num(row[6])
                 if not code or shares is None:
                     continue
-                return _form4_transaction_payload(
+                rows_found.append(_form4_transaction_payload(
                     owner_name=owner_name,
                     role=role,
                     code=code,
@@ -166,8 +168,14 @@ def _parse_form4_html_transaction(html_text: str) -> dict | None:
                     price=_form4_num(row[1]),
                     ownership_form=row[14].strip() or None,
                     transaction_date=_form4_date(row[2]),
-                )
-    return None
+                ))
+        transactions.extend(rows_found)
+    return transactions
+
+
+def _parse_form4_html_transaction(html_text: str) -> dict | None:
+    transactions = _parse_form4_html_transactions(html_text)
+    return transactions[0] if transactions else None
 
 
 def _form4_transaction_payload(
@@ -193,11 +201,12 @@ def _form4_transaction_payload(
     }
 
 
-def _parse_form4_transaction(xml_text: str) -> dict | None:
+def _parse_form4_transactions(xml_text: str) -> list[dict]:
+    """Every transaction of a Form 4: the non-derivative rows in document order, then the derivative rows (3.6.0)."""
     try:
         root = _ET.fromstring(_strip_xml_namespaces(xml_text))
     except Exception:
-        return _parse_form4_html_transaction(xml_text)
+        return _parse_form4_html_transactions(xml_text)
     owner_name = _xml_text(root, ".//reportingOwnerId/rptOwnerName")
     officer_title = _xml_text(root, ".//reportingOwnerRelationship/officerTitle")
     roles: list[str] = []
@@ -209,26 +218,28 @@ def _parse_form4_transaction(xml_text: str) -> dict | None:
     ):
         if (_xml_text(root, f".//reportingOwnerRelationship/{flag}") or "").lower() in {"1", "true"}:
             roles.append(label)
-    tx = root.find(".//nonDerivativeTransaction")
-    if tx is None:
-        tx = root.find(".//derivativeTransaction")
-    if tx is None:
+    nodes = root.findall(".//nonDerivativeTransaction") + root.findall(".//derivativeTransaction")
+    if not nodes:
         # A well-formed XHTML primary document has no XML transaction node: read it as HTML (Worker behaviour, 2.17.0).
-        return _parse_form4_html_transaction(xml_text)
-    code = _xml_text(tx, ".//transactionCoding/transactionCode")
-    shares_text = _xml_text(tx, ".//transactionAmounts/transactionShares/value")
-    price_text = _xml_text(tx, ".//transactionAmounts/transactionPricePerShare/value")
-    shares = _form4_num(shares_text)
-    price = _form4_num(price_text)
-    return _form4_transaction_payload(
-        owner_name=owner_name,
-        role=officer_title or ", ".join(roles) or None,
-        code=code,
-        shares=shares,
-        price=price,
-        ownership_form=_xml_text(tx, ".//ownershipNature/directOrIndirectOwnership/value"),
-        transaction_date=_form4_date(_xml_text(tx, ".//transactionDate/value")),
-    )
+        return _parse_form4_html_transactions(xml_text)
+    role = officer_title or ", ".join(roles) or None
+    return [
+        _form4_transaction_payload(
+            owner_name=owner_name,
+            role=role,
+            code=_xml_text(tx, ".//transactionCoding/transactionCode"),
+            shares=_form4_num(_xml_text(tx, ".//transactionAmounts/transactionShares/value")),
+            price=_form4_num(_xml_text(tx, ".//transactionAmounts/transactionPricePerShare/value")),
+            ownership_form=_xml_text(tx, ".//ownershipNature/directOrIndirectOwnership/value"),
+            transaction_date=_form4_date(_xml_text(tx, ".//transactionDate/value")),
+        )
+        for tx in nodes
+    ]
+
+
+def _parse_form4_transaction(xml_text: str) -> dict | None:
+    transactions = _parse_form4_transactions(xml_text)
+    return transactions[0] if transactions else None
 
 
 async def _try_attach_form4_transaction(item: dict, filing: dict, warnings: list[dict]) -> None:
@@ -243,7 +254,8 @@ async def _try_attach_form4_transaction(item: dict, filing: dict, warnings: list
         })
         return
     xml_text = await _edgar_get_html(url, max_bytes=2_000_000)
-    parsed = _parse_form4_transaction(xml_text or "")
+    transactions = _parse_form4_transactions(xml_text or "")
+    parsed = transactions[0] if transactions else None
     if not parsed:
         warnings.append({
             "code": "FORM4_PARSE_UNAVAILABLE",
@@ -251,7 +263,9 @@ async def _try_attach_form4_transaction(item: dict, filing: dict, warnings: list
             "severity": "warning",
         })
         return
+    # insiderTransaction stays the first row; insiderTransactions lists every row of the filing (3.6.0, owner 2026-10-31).
     item["insiderTransaction"] = parsed
+    item["insiderTransactions"] = transactions
     label = parsed.get("transactionLabel") or "Insider transaction"
     owner = parsed.get("owner") or "reporting owner"
     shares = parsed.get("shares")
@@ -260,7 +274,9 @@ async def _try_attach_form4_transaction(item: dict, filing: dict, warnings: list
     value_part = f", value ${int(_round_half_away_from_zero(value, 0)):,}" if isinstance(value, (int, float)) else ""
     shares_part = f"{int(_round_half_away_from_zero(shares, 0)):,} shares" if isinstance(shares, (int, float)) else "shares unavailable"
     item["title"] = f"Form 4: {label} by {owner}"
-    item["summary"] = _short_text(f"{label} by {owner}: {shares_part}{value_part}.")
+    more = len(transactions) - 1
+    more_part = f" {more} more transaction{'s' if more > 1 else ''} in this filing." if more > 0 else ""
+    item["summary"] = _short_text(f"{label} by {owner}: {shares_part}{value_part}.{more_part}")
     item["evidenceText"] = _short_text(f"SEC Form 4 transaction code {parsed.get('transactionCode') or 'unknown'} on {parsed.get('transactionDate') or item.get('filingDate')}.")
 
 
