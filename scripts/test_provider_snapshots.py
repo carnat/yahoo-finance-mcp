@@ -49,7 +49,7 @@ def _python_outputs() -> dict:
     try:
         fetched = _ago(0)
         ok = ProviderJsonResult(AV, "OK", "https://www.alphavantage.co/query", True, "MISS", fetched_at=fetched)
-        with patch("server._fetch_alpha_vantage_json", new=AsyncMock(return_value=ok)):
+        with patch("yfmcp.tools.fundamentals._fetch_alpha_vantage_json", new=AsyncMock(return_value=ok)):
             live = asyncio.run(srv._alpha_vantage_estimates("ASTS"))
             again = asyncio.run(srv._alpha_vantage_estimates("ASTS"))
         written = sorted(store.objects)
@@ -60,13 +60,13 @@ def _python_outputs() -> dict:
             "alpha_vantage", "EARNINGS_ESTIMATES", "ASTS", old, AV)
         refused = ProviderJsonResult(None, "RATE_LIMIT", "https://www.alphavantage.co/query", True, "MISS", message=QUOTA)
         denied = ProviderJsonResult(None, "AUTH_ERROR", "https://www.alphavantage.co/query", True, "MISS", message="Invalid API key.")
-        with patch("server._fetch_alpha_vantage_json", new=AsyncMock(return_value=refused)):
+        with patch("yfmcp.tools.fundamentals._fetch_alpha_vantage_json", new=AsyncMock(return_value=refused)):
             stale = asyncio.run(srv._alpha_vantage_estimates("ASTS"))
             other = asyncio.run(srv._alpha_vantage_estimates("MSFT"))
-        with patch("server._fetch_alpha_vantage_json", new=AsyncMock(return_value=denied)):
+        with patch("yfmcp.tools.fundamentals._fetch_alpha_vantage_json", new=AsyncMock(return_value=denied)):
             auth = asyncio.run(srv._alpha_vantage_estimates("ASTS"))
         es.set_store_for_tests(None)
-        with patch("server._fetch_alpha_vantage_json", new=AsyncMock(return_value=refused)):
+        with patch("yfmcp.tools.fundamentals._fetch_alpha_vantage_json", new=AsyncMock(return_value=refused)):
             no_store = asyncio.run(srv._alpha_vantage_estimates("ASTS"))
     finally:
         es.set_store_for_tests(es._UNSET)

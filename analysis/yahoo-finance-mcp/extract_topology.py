@@ -106,7 +106,7 @@ FILE_DOMAIN = {
     "yfmcp/news/providers/yahoo.py": "news", "yfmcp/url_policy.py": "envelope",
     "yfmcp/earnings_period.py": "earnings", "yfmcp/guidance_history.py": "earnings",
     "yfmcp/evidence.py": "evidence", "yfmcp/evidence_store.py": "evidence",
-    "yfmcp/tools/thai_funds.py": "thai",
+    "yfmcp/tools/thai_funds.py": "thai", "yfmcp/tools/fundamentals.py": "fundamentals",
     # TypeScript
     "worker/src/index.ts": "transport", "worker/src/mcp.ts": "transport", "worker/src/tools.ts": "transport",
     "worker/src/tool-catalog.ts": "transport", "worker/src/access-keys.ts": "transport",
@@ -130,7 +130,7 @@ FILE_DOMAIN = {
     "worker/src/clients/edgar.ts": "sec",
     "worker/src/clients/yahoo.ts": "pricing", "worker/src/clients/provider-http.ts": "providers",
     "worker/src/exchange-calendars.ts": "pricing", "worker/src/pricing-notices.ts": "pricing",
-    "worker/src/pricing.ts": "pricing",
+    "worker/src/pricing.ts": "pricing", "worker/src/fundamentals.ts": "fundamentals",
     "worker/src/clients/html.ts": "sec", "worker/src/clients/endpoints.ts": "sec",
     "worker/src/util.ts": "envelope", "worker/src/batch.ts": "envelope", "worker/src/news/identity.ts": "news",
     "worker/src/news/shared.ts": "news", "worker/src/news/providers/types.ts": "news",
@@ -353,10 +353,8 @@ DOMAIN_OVERRIDES: dict[str, dict[str, str]] = {
         # The SEC extractor seeds left for yfmcp/tools/exposure.py (Phase 5 unit 2, 3.6.2). The earnings-release reads
         # (_earnings_release_picks, _read_release_text) moved there too, since the driver ledger calls them; they join
         # the earnings module in unit 6.
-        # analyst_data / stock_fundamentals handlers and the consensus helpers behind them.
-        "get_earnings_momentum": "fundamentals", "get_analyst_upgrade_radar": "fundamentals",
-        "_consensus_naming": "fundamentals", "_consensus_policy": "fundamentals",
-        "_consensus_providers": "fundamentals", "_write_consensus_observation": "fundamentals",
+        # The analyst_data / stock_fundamentals seeds (get_earnings_momentum, get_analyst_upgrade_radar and the consensus
+        # helpers) left for yfmcp/tools/fundamentals.py (Phase 5 unit 4).
     },
     "worker/src/yahoo-finance.ts": {
         # The SEC extractor seeds left with their code for worker/src/exposure.ts (Phase 5 unit 2).

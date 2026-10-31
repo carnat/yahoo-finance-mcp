@@ -31,6 +31,7 @@ from scripts.parity.harness import Case
 # Registers the tools (server.py imports the yfmcp modules) the way the existing suites do.
 import server  # noqa: F401,E402
 from yfmcp.app import registered_tool_fn  # noqa: E402
+from yfmcp.tools import fundamentals as fundamentals_tools  # noqa: E402
 from yfmcp.tools import news as news_tools  # noqa: E402
 from yfmcp.tools import pricing  # noqa: E402
 
@@ -2028,9 +2029,9 @@ def _observation_py():
     times = iter([OBS_T1, OBS_T2])
     yahoo = ev.yahoo_consensus_input(OBS_TREND, retrieved_at=OBS_T1, financial_currency="USD")
     providers = AsyncMock(return_value=([yahoo], {"price": None}, {"status": "NO_DATA", "splits": []}))
-    with patch.object(server, "_consensus_providers", providers), \
-            patch.object(server, "_consensus_naming", AsyncMock(return_value=server.fiscal_year_naming(None))), \
-            patch.object(server, "_now_iso", lambda: next(times)), _python_store(store):
+    with patch.object(fundamentals_tools, "_consensus_providers", providers), \
+            patch.object(fundamentals_tools, "_consensus_naming", AsyncMock(return_value=server.fiscal_year_naming(None))), \
+            patch.object(fundamentals_tools, "_now_iso", lambda: next(times)), _python_store(store):
         first = json.loads(asyncio.run(server.get_consensus_forecast_curve("TST")))["storage"]["consensusObservation"]
         key = first["key"]
         body = store.objects[key]

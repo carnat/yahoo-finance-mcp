@@ -53,6 +53,7 @@ from yfmcp.app import registered_tool_fn  # noqa: E402
 from yfmcp import capital_structure as cs  # noqa: E402
 from yfmcp import cache as pycache  # noqa: E402
 from yfmcp.clients import edgar  # noqa: E402
+from yfmcp.tools import fundamentals as fundamentals_tools  # noqa: E402
 from yfmcp.tools import news as news_tools  # noqa: E402
 from yfmcp.news import shared as news_shared  # noqa: E402
 from yfmcp.news.providers import company_ir_page as ir_page_provider, finnhub as finnhub_provider, marketaux as marketaux_provider, sec as sec_provider, yahoo as yahoo_provider  # noqa: E402
@@ -1741,7 +1742,7 @@ def _valuation_tool_case(name, ids, days, *, ticker="RKLB", news=None, info=None
     def py():
         urls = []
         with _py_news_env(news=news, info=info, env=env), \
-                patch.object(server, "get_analyst_upgrade_radar", AsyncMock(return_value=json.dumps({"changes": []}))):
+                patch.object(fundamentals_tools, "get_analyst_upgrade_radar", AsyncMock(return_value=json.dumps({"changes": []}))):
             real = url_policy.urlopen
 
             def record(req, *a, **k):
@@ -1817,7 +1818,7 @@ CASES += [
 def _radar_failure_case(name, ids, **kw) -> Case:
     def py():
         with _py_news_env(news=_RKLB_NEWS, info=_RKLB_INFO), \
-                patch.object(server, "get_analyst_upgrade_radar", AsyncMock(side_effect=RuntimeError("radar boom"))):
+                patch.object(fundamentals_tools, "get_analyst_upgrade_radar", AsyncMock(side_effect=RuntimeError("radar boom"))):
             return json.loads(asyncio.run(server.extract_analyst_valuation_methods("RKLB", 30)))
 
     js = _worker_js("""
