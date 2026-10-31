@@ -130,7 +130,7 @@ FILE_DOMAIN = {
     "worker/src/clients/edgar.ts": "sec",
     "worker/src/clients/yahoo.ts": "pricing", "worker/src/clients/provider-http.ts": "providers",
     "worker/src/exchange-calendars.ts": "pricing", "worker/src/pricing-notices.ts": "pricing",
-    "worker/src/pricing.ts": "pricing",
+    "worker/src/pricing.ts": "pricing", "worker/src/fundamentals.ts": "fundamentals",
     "worker/src/clients/html.ts": "sec", "worker/src/clients/endpoints.ts": "sec",
     "worker/src/util.ts": "envelope", "worker/src/batch.ts": "envelope", "worker/src/news/identity.ts": "news",
     "worker/src/news/shared.ts": "news", "worker/src/news/providers/types.ts": "news",

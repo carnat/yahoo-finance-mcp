@@ -28,10 +28,8 @@ import {
   HISTORICAL_PERIODS,
   INDICATOR_MIN_LOOKBACK,
   POSITION_SINGLE_TICKER_MESSAGE,
-  getAnalystConsensus,
-  getAnalystUpgradeRadar,
-  getEarningsMomentum,
 } from "./yahoo-finance.js";
+import { getAnalystConsensus, getEarningsMomentum, getAnalystUpgradeRadar } from "./fundamentals.js";
 
 const PLACEHOLDER_IV_THRESHOLD = 0.10;
 
