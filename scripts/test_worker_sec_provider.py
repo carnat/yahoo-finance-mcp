@@ -282,6 +282,7 @@ if (heading !== "PART I - FINANCIAL INFORMATION Net 31.5 Item 2") throw new Erro
 
     def test_python_sec_fact_decision_grade_requires_resolved_xbrl_evidence(self) -> None:
         import server
+        from yfmcp.tools import exposure as exposure_tools
         from yfmcp.tools import sec as sec_tools
 
         resolved = {
@@ -311,7 +312,7 @@ if (heading !== "PART I - FINANCIAL INFORMATION Net 31.5 Item 2") throw new Erro
         self.assertIs(result["decisionGrade"], True)
         self.assertEqual(result["sourceEvidence"]["concept"], resolved["xbrlContext"]["concept"])
         self.assertEqual(result["evidence"], result["sourceEvidence"])
-        with patch.object(server, "get_filing_data", AsyncMock(return_value=json.dumps(resolved))):
+        with patch.object(exposure_tools, "get_filing_data", AsyncMock(return_value=json.dumps(resolved))):
             specialized = json.loads(asyncio.run(server.extract_total_revenue(ticker="TEST")))
         self.assertEqual(specialized["value"], result["value"])
         self.assertIs(specialized["decisionGrade"], True)

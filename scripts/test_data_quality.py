@@ -15,7 +15,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import server as srv  # noqa: E402
 from scripts import test_deployed_canaries as deployed_canaries  # noqa: E402
-from yfmcp.tools import pricing  # noqa: E402
+from yfmcp.tools import exposure, pricing  # noqa: E402
 
 _SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
 if _SCRIPTS_DIR not in sys.path:
@@ -1094,12 +1094,12 @@ class TestPr2DataQuality(unittest.TestCase):
                 ],
             })
 
-        old_search = srv.search_sec_filing_text
+        old_search = exposure.search_sec_filing_text
         try:
-            srv.search_sec_filing_text = fake_search
+            exposure.search_sec_filing_text = fake_search
             data = json.loads(_run(srv.extract_risk_factor_mentions("AAOI", ["China"])))
         finally:
-            srv.search_sec_filing_text = old_search
+            exposure.search_sec_filing_text = old_search
         self.assertEqual(data["status"], "FOUND")
         self.assertEqual(len(data["matches"]), 1)
         self.assertIn("operations in China", data["matches"][0]["excerpt"])
@@ -1127,21 +1127,21 @@ class TestPr2DataQuality(unittest.TestCase):
         async def fake_risk(**kwargs):
             return json.dumps({"status": "NOT_FOUND", "matches": []})
 
-        old_index = srv._sec_filing_index_full
-        old_geo = srv.extract_geographic_revenue
-        old_search = srv.search_sec_filing_text
-        old_risk = srv.extract_risk_factor_mentions
+        old_index = exposure._sec_filing_index_full
+        old_geo = exposure.extract_geographic_revenue
+        old_search = exposure.search_sec_filing_text
+        old_risk = exposure.extract_risk_factor_mentions
         try:
-            srv._sec_filing_index_full = fake_index
-            srv.extract_geographic_revenue = fake_geo
-            srv.search_sec_filing_text = fake_search
-            srv.extract_risk_factor_mentions = fake_risk
+            exposure._sec_filing_index_full = fake_index
+            exposure.extract_geographic_revenue = fake_geo
+            exposure.search_sec_filing_text = fake_search
+            exposure.extract_risk_factor_mentions = fake_risk
             data = json.loads(_run(srv.extract_exposure("AAOI", "china")))
         finally:
-            srv._sec_filing_index_full = old_index
-            srv.extract_geographic_revenue = old_geo
-            srv.search_sec_filing_text = old_search
-            srv.extract_risk_factor_mentions = old_risk
+            exposure._sec_filing_index_full = old_index
+            exposure.extract_geographic_revenue = old_geo
+            exposure.search_sec_filing_text = old_search
+            exposure.extract_risk_factor_mentions = old_risk
         self.assertEqual(data["entityExposure"]["status"], "NOT_FOUND")
         self.assertEqual(data["entityExposure"]["entities"], [])
         self.assertEqual(data["entityExposure"]["rejectedNoiseCount"], 1)
@@ -1259,24 +1259,24 @@ class TestPr2DataQuality(unittest.TestCase):
         async def fake_search(**kwargs):
             return json.dumps({"matches": []})
 
-        old_index = srv._sec_filing_index_full
-        old_revenue = srv._extract_revenue_exposure
-        old_risk = srv.extract_risk_factor_mentions
-        old_resolve = srv._resolve_sec_filing
-        old_search = srv.search_sec_filing_text
+        old_index = exposure._sec_filing_index_full
+        old_revenue = exposure._extract_revenue_exposure
+        old_risk = exposure.extract_risk_factor_mentions
+        old_resolve = exposure._resolve_sec_filing
+        old_search = exposure.search_sec_filing_text
         try:
-            srv._resolve_sec_filing = fake_resolve
-            srv.search_sec_filing_text = fake_search
-            srv._sec_filing_index_full = fake_index
-            srv._extract_revenue_exposure = fake_revenue
-            srv.extract_risk_factor_mentions = fake_risk
+            exposure._resolve_sec_filing = fake_resolve
+            exposure.search_sec_filing_text = fake_search
+            exposure._sec_filing_index_full = fake_index
+            exposure._extract_revenue_exposure = fake_revenue
+            exposure.extract_risk_factor_mentions = fake_risk
             data = json.loads(_run(srv.extract_china_exposure("MRVL")))
         finally:
-            srv._sec_filing_index_full = old_index
-            srv._extract_revenue_exposure = old_revenue
-            srv.extract_risk_factor_mentions = old_risk
-            srv._resolve_sec_filing = old_resolve
-            srv.search_sec_filing_text = old_search
+            exposure._sec_filing_index_full = old_index
+            exposure._extract_revenue_exposure = old_revenue
+            exposure.extract_risk_factor_mentions = old_risk
+            exposure._resolve_sec_filing = old_resolve
+            exposure.search_sec_filing_text = old_search
         entity_evidence = data["manufacturingExposure"]["evidence"][0]
         self.assertTrue(entity_evidence["excerptAvailable"])
         self.assertEqual(data["riskFactorExposure"]["status"], "NOT_FOUND")
