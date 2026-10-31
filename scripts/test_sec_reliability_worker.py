@@ -38,7 +38,7 @@ class TestSecReliabilityWorker(unittest.TestCase):
     def test_table_listing_is_paginated_and_index_backed(self) -> None:
         self.assertRegex(self.tools, r'name: "list_sec_filing_tables"[\s\S]+offset[\s\S]+limit')
         self.assertIn("function secIndexTablesPayload", self.tools)
-        self.assertRegex(self.tools, r"case \"list_sec_filing_tables\"[\s\S]+getSecFilingIndex[\s\S]+secIndexTablesPayload")
+        self.assertRegex(self.tools, r"\[\"list_sec_filing_tables\",[\s\S]+getSecFilingIndex[\s\S]+secIndexTablesPayload")
         self.assertRegex(self.worker, r"export async function listFilingTables\(ticker: string, documentUrl: string, offset: number = 0, limit: number = 50\)")
         self.assertNotRegex(self.worker, r"while \(\(tm = tableRe\.exec\(html\)\) !== null && tables\.length < 50\)")
 
@@ -74,7 +74,7 @@ class TestSecReliabilityWorker(unittest.TestCase):
         self.assertIn('fiscal_quarter: { type: "string", pattern: "^[0-9]{4}Q[1-4]$"', self.tools)
         self.assertRegex(
             self.tools,
-            r'case "get_earnings_call_transcript"[\s\S]+?args\.fiscal_quarter[\s\S]+?getEarningsCallTranscript',
+            r'\["get_earnings_call_transcript",[\s\S]+?args\.fiscal_quarter[\s\S]+?getEarningsCallTranscript',
         )
         self.assertNotRegex(
             self.worker,

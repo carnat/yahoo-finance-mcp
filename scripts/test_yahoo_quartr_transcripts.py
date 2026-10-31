@@ -612,8 +612,8 @@ class WorkerParityTests(unittest.TestCase):
         self.assertIn("maximum: 50", transcript_tool)
 
     def test_worker_dispatch_passes_transcript_identity_and_pagination(self):
-        dispatch_start = self.worker_tools.index('case "get_earnings_call_transcript":')
-        dispatch_end = self.worker_tools.index('case "extract_geographic_revenue":', dispatch_start)
+        dispatch_start = self.worker_tools.index('["get_earnings_call_transcript", ')
+        dispatch_end = self.worker_tools.index('["extract_geographic_revenue", ', dispatch_start)
         dispatch = self.worker_tools[dispatch_start:dispatch_end]
         for field in ("args.event_id", "args.source_url", "args.paragraph_limit", "args.paragraph_cursor"):
             self.assertIn(field, dispatch)

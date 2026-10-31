@@ -110,7 +110,7 @@ FILE_DOMAIN = {
     "yfmcp/tools/thai_funds.py": "thai", "yfmcp/tools/fundamentals.py": "fundamentals",
     # TypeScript
     "worker/src/index.ts": "transport", "worker/src/mcp.ts": "transport", "worker/src/tools.ts": "transport",
-    "worker/src/tool-catalog.ts": "transport", "worker/src/access-keys.ts": "transport",
+    "worker/src/tool-catalog.ts": "transport", "worker/src/schemas.ts": "transport", "worker/src/access-keys.ts": "transport",
     "worker/src/auth.ts": "transport", "worker/src/telemetry.ts": "transport", "worker/src/url-policy.ts": "envelope",
     "worker/src/response.ts": "envelope", "worker/src/request-context.ts": "envelope",
     "worker/src/cache.ts": "envelope", "worker/src/validate.ts": "envelope",
@@ -395,10 +395,11 @@ def seed_handlers(f: str) -> dict[str, str]:
 
 
 def ts_dispatch_arms():
-    """action -> set of (file, symbol) called in its _dispatchTool case arm."""
+    """action -> set of (file, symbol) called in its TOOL_HANDLERS table entry."""
     src = sources["worker/src/tools.ts"]
-    body = functions["worker/src/tools.ts"]["_dispatchTool"][1]
-    arms = re.split(r"^\s*case\s+\"", body, flags=re.M)[1:]
+    start = src.index("const TOOL_HANDLERS")
+    body = src[start:src.index("\n]);", start)]
+    arms = re.split(r"^  \[\"", body, flags=re.M)[1:]
     out = defaultdict(set)
     imp = imports["worker/src/tools.ts"]
     local = functions["worker/src/tools.ts"]

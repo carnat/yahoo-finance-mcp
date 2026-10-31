@@ -3190,6 +3190,18 @@ F-024, F-026, F-029). Both runtimes change alike.
 - **Tests:** 21 new parity cases in `scripts/parity/cases_audit_2251.py`.
 - **Rollback:** redeploy 2.25.0.
 
+## Tool Handler Table and schemas.ts (3.6.8)
+
+- **Why:** internal restructuring only (Phase 5 unit 8, `analysis/yahoo-finance-mcp/PHASE5_ROUTER_SCHEMAS_SPEC.md`).
+  Release type: patch. No behaviour change. Worker only; Python registers tools with decorators and has no switch.
+- **What changed:** the tool definitions and input/output schemas moved from `worker/src/tools.ts` to
+  `worker/src/schemas.ts`, and the `switch` in `_dispatchTool` became a `Map` from tool name to handler
+  (`TOOL_HANDLERS`). The checks before dispatch are unchanged, and an unknown name still throws `Unknown tool`.
+- **Adding a tool (Worker):** define it in `schemas.ts` and add one `TOOL_HANDLERS` entry in `tools.ts`.
+- **Unchanged:** no tool name, input, output, schema, description, status, warning, cache key or ordering changed;
+  `listVisibleTools()` is byte-identical in every mode.
+- **Rollback:** redeploy 3.6.7.
+
 ## Evidence Pack and Valuation Module Move (3.6.7)
 
 - **Why:** internal restructuring only (Phase 5 unit 7, `analysis/yahoo-finance-mcp/PHASE5_EVIDENCE_VALUATION_SPEC.md`).

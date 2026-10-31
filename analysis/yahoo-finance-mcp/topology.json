@@ -59,6 +59,14 @@
       "file": "worker/src/mcp.ts"
      },
      {
+      "id": "worker/src/schemas.ts",
+      "name": "schemas.ts",
+      "kind": "module",
+      "language": "typescript",
+      "loc": 1395,
+      "file": "worker/src/schemas.ts"
+     },
+     {
       "id": "worker/src/telemetry.ts",
       "name": "telemetry.ts",
       "kind": "module",
@@ -79,7 +87,7 @@
       "name": "tools.ts",
       "kind": "module",
       "language": "typescript",
-      "loc": 2682,
+      "loc": 1260,
       "file": "worker/src/tools.ts"
      },
      {
@@ -2807,6 +2815,21 @@
    "kind": "read"
   },
   {
+   "source": "worker/src/schemas.ts",
+   "target": "ds:sec-edgar",
+   "kind": "read"
+  },
+  {
+   "source": "worker/src/schemas.ts",
+   "target": "ds:tool_catalog",
+   "kind": "read"
+  },
+  {
+   "source": "worker/src/schemas.ts",
+   "target": "worker/src/tool-catalog.ts",
+   "kind": "call"
+  },
+  {
    "source": "worker/src/sec-thailand.ts",
    "target": "ds:thai-sec-open-data",
    "kind": "read"
@@ -2923,16 +2946,6 @@
   },
   {
    "source": "worker/src/tools.ts",
-   "target": "ds:sec-edgar",
-   "kind": "read"
-  },
-  {
-   "source": "worker/src/tools.ts",
-   "target": "ds:tool_catalog",
-   "kind": "read"
-  },
-  {
-   "source": "worker/src/tools.ts",
    "target": "tool:analyst_data",
    "kind": "dispatch"
   },
@@ -3044,6 +3057,11 @@
   {
    "source": "worker/src/tools.ts",
    "target": "worker/src/response.ts",
+   "kind": "call"
+  },
+  {
+   "source": "worker/src/tools.ts",
+   "target": "worker/src/schemas.ts",
    "kind": "call"
   },
   {

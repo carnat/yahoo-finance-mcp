@@ -210,7 +210,7 @@ class TestPublicConnectorSurfaceSource(unittest.TestCase):
             self.assertNotIn(f'"{alias}"', self.py)
 
     def test_health_check_manifest_fields_exist(self) -> None:
-        ts_health = self._window(self.ts, 'case "health_check"', span=1400)
+        ts_health = self._window(self.ts, '["health_check", ', span=1400)
         for field in ("serverVersion", "buildVersion", "buildSha", "deployedAt", "manifestVersion", "manifestHash", "schemaHash", "runtimeHash", "privacyScope"):
             self.assertIn(field, ts_health, f"worker health_check missing {field}")
         py_health = self._window(self.py, "def _public_metadata", span=2000)
