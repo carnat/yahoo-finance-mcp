@@ -3190,6 +3190,25 @@ F-024, F-026, F-029). Both runtimes change alike.
 - **Tests:** 21 new parity cases in `scripts/parity/cases_audit_2251.py`.
 - **Rollback:** redeploy 2.25.0.
 
+## Pricing and Options Module Move (3.6.3)
+
+- **Why:** internal restructuring only (Phase 5 unit 3, `analysis/yahoo-finance-mcp/PHASE5_PRICING_SPEC.md`).
+  Release type: patch. No behaviour change.
+- **What moved (Worker):** quotes and the market snapshot, historical prices, price and volume statistics, technical
+  indicators, short interest, price targets, option expiries and chains, options summary and flow, put hedges, the
+  screener and ticker search, from `worker/src/yahoo-finance.ts` to `worker/src/pricing.ts`: 51 functions and the
+  constants, caches and types only they use.
+- **What moved (Python):** the same tools from `server.py` into the existing `yfmcp/tools/pricing.py`: 21 functions.
+  `get_position_score_inputs` and `analyze_position_signals` stay in `server.py` until the fundamentals handlers they
+  call move (Phase 5 unit 4).
+- **Unchanged:** no tool name, input, output, schema, status, warning, cache key or ordering changed.
+- **Compatibility:** `yahoo-finance.ts` and `server.py` re-export the moved names other modules and tests read. Tests
+  that patch a moved helper now patch it in `yfmcp.tools.pricing`; no assertion changed.
+- **Verification:** the moved Worker text keeps its line multiset (only import lines differ); the moved Python
+  functions keep their `ast.dump`; tool listings (expanded and grouped) are byte-identical; the Worker bundle grows 19
+  bytes; the parity harness passes with no expected value changed.
+- **Rollback:** redeploy 3.6.2.
+
 ## SEC Extractors and Exposure Module Move (3.6.2)
 
 - **Why:** internal restructuring only (Phase 5 unit 2, `analysis/yahoo-finance-mcp/PHASE5_EXPOSURE_SPEC.md`).
