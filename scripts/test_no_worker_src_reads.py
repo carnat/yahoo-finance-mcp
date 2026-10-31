@@ -11,13 +11,14 @@ from __future__ import annotations
 import ast
 import io
 import re
+import sys
 import tokenize
 import unittest
 from pathlib import Path
 
-from scripts.source_text import PYTHON, module_sources
-
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.append(str(ROOT / "scripts"))
+from source_text import PYTHON, module_sources  # noqa: E402
 
 # "worker/src", "worker" / "src", 'worker', 'src', "worker", "src" and spacing variants.
 WORKER_SRC = re.compile(r"""worker["'\s/,)]*\s*/?\s*["']?src""")

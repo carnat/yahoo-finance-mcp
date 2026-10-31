@@ -3190,6 +3190,18 @@ F-024, F-026, F-029). Both runtimes change alike.
 - **Tests:** 21 new parity cases in `scripts/parity/cases_audit_2251.py`.
 - **Rollback:** redeploy 2.25.0.
 
+## Shared Data Directory (3.6.12)
+
+- **Why:** Phase 6 "shared data dir" (`analysis/yahoo-finance-mcp/PHASE6_SHARED_DATA_SPEC.md`). Release type: patch.
+  No output change.
+- **What moved:** `company-ir-page-registry.json`, `exchange-calendars.json`, `exposure-presets.json`,
+  `news-source-capabilities.json` and `news-source-registry.json` moved from `worker/src/` to `yfmcp/data/`, unchanged.
+  The Worker still compiles them in; Python reads them from its own package (`yfmcp.data.DATA_DIR`), so an installed
+  wheel now carries them. Earlier sections that name `worker/src/<file>.json` refer to the same files.
+- **Maintenance:** edit the registries and the exchange calendar under `yfmcp/data/`; the daily IR discovery job
+  commits there. `scripts/test_no_worker_src_reads.py` keeps Python from reading `worker/src` again.
+- **Rollback:** redeploy 3.6.11.
+
 ## Filing Data, Filing Text Search and News Source Status Split Into Helpers (3.6.11)
 
 - **Why:** Phase 5 exit criterion "no function has CCN >= 100" (`analysis/yahoo-finance-mcp/PHASE5_CCN3_SPEC.md`).
