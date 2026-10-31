@@ -769,12 +769,13 @@ def _reconcile_py(spec: str | None):
     import asyncio as _asyncio
     from unittest.mock import patch as _patch
     from yfmcp.clients import edgar
+    from yfmcp.tools import valuation as valuation_tools
 
     def no_yahoo(*_a, **_k):
         raise RuntimeError("Yahoo statements unavailable")
 
     args = ("ZOFF", "revenue") + (() if spec is None else (spec,))
-    with _patch.dict(edgar._FILING_CIK_CACHE, {"ZOFF": f"{_OFF_CIK:010d}"}), _patch.object(server, "_yahoo_statement_rows_sync", no_yahoo):
+    with _patch.dict(edgar._FILING_CIK_CACHE, {"ZOFF": f"{_OFF_CIK:010d}"}), _patch.object(valuation_tools, "_yahoo_statement_rows_sync", no_yahoo):
         return json.loads(_asyncio.run(server.reconcile_metric_sources(*args)))
 
 

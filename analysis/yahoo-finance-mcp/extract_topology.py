@@ -99,6 +99,7 @@ FILE_DOMAIN = {
     "yfmcp/metric_reconciliation.py": "valuation",
     "yfmcp/tools/earnings.py": "earnings", "yfmcp/clients/yahoo_transcripts.py": "earnings",
     "yfmcp/tools/news.py": "news", "yfmcp/tools/sec.py": "sec",
+    "yfmcp/tools/evidence_pack.py": "evidence", "yfmcp/tools/valuation.py": "valuation",
     "yfmcp/news/__init__.py": "news", "yfmcp/news/shared.py": "news", "yfmcp/news/providers/__init__.py": "news",
     "yfmcp/news/providers/company_ir.py": "news", "yfmcp/news/providers/company_ir_page.py": "news",
     "yfmcp/news/providers/finnhub.py": "news", "yfmcp/news/providers/globenewswire.py": "news",
@@ -119,7 +120,7 @@ FILE_DOMAIN = {
     "worker/src/extraction-rules.ts": "extractors", "worker/src/capital-structure.ts": "extractors",
     "worker/src/share-scenarios.ts": "extractors", "worker/src/funding-schedule.ts": "extractors",
     "worker/src/driver-ledger.ts": "extractors", "worker/src/exposure.ts": "extractors",
-    "worker/src/valuation.ts": "valuation", "worker/src/valuation-history.ts": "valuation",
+    "worker/src/valuation.ts": "valuation", "worker/src/valuation-history.ts": "valuation", "worker/src/valuation-tools.ts": "valuation",
     "worker/src/metric-reconciliation.ts": "valuation",
     "worker/src/guidance-history.ts": "earnings", "worker/src/earnings-period.ts": "earnings",
     "worker/src/transcript-contract.ts": "earnings",
@@ -260,6 +261,8 @@ def ts_functions(src: str):
 
 IDENT = re.compile(r"\b[A-Za-z_$][\w$]*\b")
 TS_IMPORT = re.compile(r"^import\s+(type\s+)?(?:\{([^}]*)\}|([A-Za-z_$][\w$]*))\s+from\s+\"([^\"]+)\"", re.M)
+TS_REEXPORT = re.compile(r"^export\s+(type\s+)?\{([^}]*)\}\s+from\s+\"([^\"]+)\"", re.M)
+reexports: dict[str, dict[str, tuple[str, str]]] = defaultdict(dict)   # file -> name -> (target file, original name)
 
 
 def ts_resolve(from_file: Path, spec: str) -> str | None:
@@ -332,6 +335,16 @@ for p in ts_files:
                 continue
             orig, _, alias = part.partition(" as ")
             imports[f][(alias or orig).strip()] = (tgt, orig.strip())
+    for m in TS_REEXPORT.finditer(src):   # export { a, b } from "./x.js": callers resolve through to x
+        tgt = ts_resolve(p, m.group(3))
+        if m.group(1) or not tgt:
+            continue
+        for part in m.group(2).split(","):
+            part = part.strip()
+            if not part or part.startswith("type "):
+                continue
+            orig, _, alias = part.partition(" as ")
+            reexports[f][(alias or orig).strip()] = (tgt, orig.strip())
     for m in re.finditer(r"^(?:export\s+)?const\s+([A-Za-z_$][\w$]*)\b[^\n]*", src, re.M):
         hs = hosts_in(m.group(0))
         if hs:
@@ -473,6 +486,8 @@ for f, src in sources.items():
 
 
 def target_node(tfile: str, sym: str | None) -> str | None:
+    if sym and sym in reexports.get(tfile, {}) and (tfile, sym) not in func_region:
+        return target_node(*reexports[tfile][sym])
     if tfile in GOD_FILES:
         if sym and (tfile, sym) in func_region:
             return func_region[(tfile, sym)]

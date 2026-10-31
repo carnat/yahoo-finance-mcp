@@ -150,8 +150,8 @@ def _worker_outputs(reconcile: dict | None = None) -> dict:
 def _python_reconcile(facts: dict, subs: dict, period: str) -> dict:
     import server as srv
 
-    with patch("server._get_submissions_for_ticker", new=AsyncMock(return_value=(CIK, subs))), \
-            patch("server._edgar_get_company_facts", new=AsyncMock(return_value=facts)):
+    with patch("yfmcp.tools.valuation._get_submissions_for_ticker", new=AsyncMock(return_value=(CIK, subs))), \
+            patch("yfmcp.tools.valuation._edgar_get_company_facts", new=AsyncMock(return_value=facts)):
         return json.loads(asyncio.run(srv.reconcile_metric_sources("XYZ", "revenue", period)))
 
 

@@ -652,14 +652,6 @@
     "kind": "domain",
     "children": [
      {
-      "id": "server.py#valuation",
-      "name": "server.py \u00b7 Valuation & reconciliation",
-      "kind": "module",
-      "language": "python",
-      "loc": 274,
-      "file": "server.py"
-     },
-     {
       "id": "worker/src/metric-reconciliation.ts",
       "name": "metric-reconciliation.ts",
       "kind": "module",
@@ -676,6 +668,14 @@
       "file": "worker/src/valuation-history.ts"
      },
      {
+      "id": "worker/src/valuation-tools.ts",
+      "name": "valuation-tools.ts",
+      "kind": "module",
+      "language": "typescript",
+      "loc": 280,
+      "file": "worker/src/valuation-tools.ts"
+     },
+     {
       "id": "worker/src/valuation.ts",
       "name": "valuation.ts",
       "kind": "module",
@@ -684,20 +684,20 @@
       "file": "worker/src/valuation.ts"
      },
      {
-      "id": "worker/src/yahoo-finance.ts#valuation",
-      "name": "yahoo-finance.ts \u00b7 Valuation & reconciliation",
-      "kind": "module",
-      "language": "typescript",
-      "loc": 259,
-      "file": "worker/src/yahoo-finance.ts"
-     },
-     {
       "id": "yfmcp/metric_reconciliation.py",
       "name": "metric_reconciliation.py",
       "kind": "module",
       "language": "python",
       "loc": 571,
       "file": "yfmcp/metric_reconciliation.py"
+     },
+     {
+      "id": "yfmcp/tools/valuation.py",
+      "name": "valuation.py",
+      "kind": "module",
+      "language": "python",
+      "loc": 337,
+      "file": "yfmcp/tools/valuation.py"
      },
      {
       "id": "yfmcp/valuation.py",
@@ -977,14 +977,6 @@
     "kind": "domain",
     "children": [
      {
-      "id": "server.py#evidence",
-      "name": "server.py \u00b7 Evidence layer",
-      "kind": "module",
-      "language": "python",
-      "loc": 157,
-      "file": "server.py"
-     },
-     {
       "id": "worker/src/evidence-pack.ts",
       "name": "evidence-pack.ts",
       "kind": "module",
@@ -1023,6 +1015,14 @@
       "language": "python",
       "loc": 101,
       "file": "yfmcp/evidence_store.py"
+     },
+     {
+      "id": "yfmcp/tools/evidence_pack.py",
+      "name": "evidence_pack.py",
+      "kind": "module",
+      "language": "python",
+      "loc": 206,
+      "file": "yfmcp/tools/evidence_pack.py"
      }
     ]
    },
@@ -1382,76 +1382,6 @@
    "kind": "write"
   },
   {
-   "source": "server.py#evidence",
-   "target": "ds:evidence_localdir",
-   "kind": "read"
-  },
-  {
-   "source": "server.py#evidence",
-   "target": "ds:evidence_localdir",
-   "kind": "write"
-  },
-  {
-   "source": "server.py#evidence",
-   "target": "yfmcp/build_info.py",
-   "kind": "call"
-  },
-  {
-   "source": "server.py#evidence",
-   "target": "yfmcp/clients/edgar.py",
-   "kind": "call"
-  },
-  {
-   "source": "server.py#evidence",
-   "target": "yfmcp/envelope.py",
-   "kind": "call"
-  },
-  {
-   "source": "server.py#evidence",
-   "target": "yfmcp/evidence.py",
-   "kind": "call"
-  },
-  {
-   "source": "server.py#evidence",
-   "target": "yfmcp/evidence_store.py",
-   "kind": "call"
-  },
-  {
-   "source": "server.py#evidence",
-   "target": "yfmcp/tools/earnings.py",
-   "kind": "call"
-  },
-  {
-   "source": "server.py#evidence",
-   "target": "yfmcp/tools/exposure.py",
-   "kind": "call"
-  },
-  {
-   "source": "server.py#evidence",
-   "target": "yfmcp/tools/fundamentals.py",
-   "kind": "call"
-  },
-  {
-   "source": "server.py#evidence",
-   "target": "yfmcp/tools/sec.py",
-   "kind": "call"
-  },
-  {
-   "source": "server.py#evidence",
-   "target": "yfmcp/util.py",
-   "kind": "call"
-  },
-  {
-   "source": "server.py#evidence",
-   "target": "yfmcp/validation.py",
-   "kind": "call"
-  },
-  {
-   "source": "server.py#evidence",
-   "target": "yfmcp/valuation.py",
-   "kind": "call"
-  },
-  {
    "source": "server.py#transport",
    "target": "tool_groups.py",
    "kind": "call"
@@ -1463,7 +1393,7 @@
   },
   {
    "source": "server.py#transport",
-   "target": "yfmcp/tools/earnings.py",
+   "target": "yfmcp/tools/evidence_pack.py",
    "kind": "call"
   },
   {
@@ -1472,68 +1402,13 @@
    "kind": "call"
   },
   {
-   "source": "server.py#valuation",
-   "target": "ds:yahoo-finance",
-   "kind": "read"
-  },
-  {
-   "source": "server.py#valuation",
-   "target": "yfmcp/clients/edgar.py",
-   "kind": "call"
-  },
-  {
-   "source": "server.py#valuation",
-   "target": "yfmcp/clients/endpoints.py",
-   "kind": "call"
-  },
-  {
-   "source": "server.py#valuation",
-   "target": "yfmcp/clients/yahoo.py",
-   "kind": "call"
-  },
-  {
-   "source": "server.py#valuation",
-   "target": "yfmcp/companyfacts_coverage.py",
-   "kind": "call"
-  },
-  {
-   "source": "server.py#valuation",
-   "target": "yfmcp/evidence.py",
-   "kind": "call"
-  },
-  {
-   "source": "server.py#valuation",
-   "target": "yfmcp/metric_reconciliation.py",
-   "kind": "call"
-  },
-  {
-   "source": "server.py#valuation",
-   "target": "yfmcp/tools/exposure.py",
-   "kind": "call"
-  },
-  {
-   "source": "server.py#valuation",
-   "target": "yfmcp/tools/fundamentals.py",
-   "kind": "call"
-  },
-  {
-   "source": "server.py#valuation",
-   "target": "yfmcp/util.py",
-   "kind": "call"
-  },
-  {
-   "source": "server.py#valuation",
-   "target": "yfmcp/valuation.py",
-   "kind": "call"
-  },
-  {
-   "source": "server.py#valuation",
-   "target": "yfmcp/valuation_history.py",
-   "kind": "call"
+   "source": "tool:analyst_data",
+   "target": "worker/src/evidence-pack.ts",
+   "kind": "dispatch"
   },
   {
    "source": "tool:analyst_data",
-   "target": "worker/src/evidence-pack.ts",
+   "target": "worker/src/fundamentals.ts",
    "kind": "dispatch"
   },
   {
@@ -1544,6 +1419,11 @@
   {
    "source": "tool:analyst_data",
    "target": "yfmcp/tools/fundamentals.py",
+   "kind": "dispatch"
+  },
+  {
+   "source": "tool:earnings_intelligence",
+   "target": "worker/src/earnings.ts",
    "kind": "dispatch"
   },
   {
@@ -1558,16 +1438,6 @@
   },
   {
    "source": "tool:evidence",
-   "target": "server.py#evidence",
-   "kind": "dispatch"
-  },
-  {
-   "source": "tool:evidence",
-   "target": "server.py#valuation",
-   "kind": "dispatch"
-  },
-  {
-   "source": "tool:evidence",
    "target": "worker/src/evidence-pack.ts",
    "kind": "dispatch"
   },
@@ -1578,7 +1448,27 @@
   },
   {
    "source": "tool:evidence",
-   "target": "worker/src/yahoo-finance.ts#valuation",
+   "target": "worker/src/valuation-tools.ts",
+   "kind": "dispatch"
+  },
+  {
+   "source": "tool:evidence",
+   "target": "yfmcp/tools/evidence_pack.py",
+   "kind": "dispatch"
+  },
+  {
+   "source": "tool:evidence",
+   "target": "yfmcp/tools/valuation.py",
+   "kind": "dispatch"
+  },
+  {
+   "source": "tool:news_events",
+   "target": "worker/src/news.ts",
+   "kind": "dispatch"
+  },
+  {
+   "source": "tool:news_events",
+   "target": "worker/src/providers.ts",
    "kind": "dispatch"
   },
   {
@@ -1598,6 +1488,16 @@
   },
   {
    "source": "tool:options_analysis",
+   "target": "worker/src/pricing.ts",
+   "kind": "dispatch"
+  },
+  {
+   "source": "tool:options_analysis",
+   "target": "worker/src/providers.ts",
+   "kind": "dispatch"
+  },
+  {
+   "source": "tool:options_analysis",
    "target": "worker/src/tools.ts",
    "kind": "dispatch"
   },
@@ -1609,6 +1509,11 @@
   {
    "source": "tool:options_analysis",
    "target": "yfmcp/tools/provider_gaps.py",
+   "kind": "dispatch"
+  },
+  {
+   "source": "tool:screening",
+   "target": "worker/src/pricing.ts",
    "kind": "dispatch"
   },
   {
@@ -1628,12 +1533,22 @@
   },
   {
    "source": "tool:sec_extractors",
+   "target": "worker/src/exposure.ts",
+   "kind": "dispatch"
+  },
+  {
+   "source": "tool:sec_extractors",
    "target": "worker/src/tools.ts",
    "kind": "dispatch"
   },
   {
    "source": "tool:sec_extractors",
    "target": "yfmcp/tools/exposure.py",
+   "kind": "dispatch"
+  },
+  {
+   "source": "tool:sec_filings",
+   "target": "worker/src/sec.ts",
    "kind": "dispatch"
   },
   {
@@ -1658,7 +1573,12 @@
   },
   {
    "source": "tool:stock_fundamentals",
-   "target": "server.py#valuation",
+   "target": "worker/src/fundamentals.ts",
+   "kind": "dispatch"
+  },
+  {
+   "source": "tool:stock_fundamentals",
+   "target": "worker/src/providers.ts",
    "kind": "dispatch"
   },
   {
@@ -1668,7 +1588,7 @@
   },
   {
    "source": "tool:stock_fundamentals",
-   "target": "worker/src/yahoo-finance.ts#valuation",
+   "target": "worker/src/valuation-tools.ts",
    "kind": "dispatch"
   },
   {
@@ -1679,6 +1599,16 @@
   {
    "source": "tool:stock_fundamentals",
    "target": "yfmcp/tools/provider_gaps.py",
+   "kind": "dispatch"
+  },
+  {
+   "source": "tool:stock_fundamentals",
+   "target": "yfmcp/tools/valuation.py",
+   "kind": "dispatch"
+  },
+  {
+   "source": "tool:stock_pricing",
+   "target": "worker/src/pricing.ts",
    "kind": "dispatch"
   },
   {
@@ -2073,6 +2003,11 @@
   },
   {
    "source": "worker/src/evidence-pack.ts",
+   "target": "worker/src/clients/edgar.ts",
+   "kind": "call"
+  },
+  {
+   "source": "worker/src/evidence-pack.ts",
    "target": "worker/src/clients/endpoints.ts",
    "kind": "call"
   },
@@ -2083,12 +2018,27 @@
   },
   {
    "source": "worker/src/evidence-pack.ts",
+   "target": "worker/src/earnings.ts",
+   "kind": "call"
+  },
+  {
+   "source": "worker/src/evidence-pack.ts",
    "target": "worker/src/evidence-store.ts",
    "kind": "call"
   },
   {
    "source": "worker/src/evidence-pack.ts",
    "target": "worker/src/evidence.ts",
+   "kind": "call"
+  },
+  {
+   "source": "worker/src/evidence-pack.ts",
+   "target": "worker/src/exposure.ts",
+   "kind": "call"
+  },
+  {
+   "source": "worker/src/evidence-pack.ts",
+   "target": "worker/src/fundamentals.ts",
    "kind": "call"
   },
   {
@@ -2104,6 +2054,11 @@
   {
    "source": "worker/src/evidence-pack.ts",
    "target": "worker/src/response.ts",
+   "kind": "call"
+  },
+  {
+   "source": "worker/src/evidence-pack.ts",
+   "target": "worker/src/sec.ts",
    "kind": "call"
   },
   {
@@ -3043,12 +2998,42 @@
   },
   {
    "source": "worker/src/tools.ts",
+   "target": "worker/src/earnings.ts",
+   "kind": "call"
+  },
+  {
+   "source": "worker/src/tools.ts",
    "target": "worker/src/evidence-pack.ts",
    "kind": "call"
   },
   {
    "source": "worker/src/tools.ts",
    "target": "worker/src/evidence.ts",
+   "kind": "call"
+  },
+  {
+   "source": "worker/src/tools.ts",
+   "target": "worker/src/exposure.ts",
+   "kind": "call"
+  },
+  {
+   "source": "worker/src/tools.ts",
+   "target": "worker/src/fundamentals.ts",
+   "kind": "call"
+  },
+  {
+   "source": "worker/src/tools.ts",
+   "target": "worker/src/news.ts",
+   "kind": "call"
+  },
+  {
+   "source": "worker/src/tools.ts",
+   "target": "worker/src/pricing.ts",
+   "kind": "call"
+  },
+  {
+   "source": "worker/src/tools.ts",
+   "target": "worker/src/providers.ts",
    "kind": "call"
   },
   {
@@ -3073,6 +3058,11 @@
   },
   {
    "source": "worker/src/tools.ts",
+   "target": "worker/src/sec.ts",
+   "kind": "call"
+  },
+  {
+   "source": "worker/src/tools.ts",
    "target": "worker/src/tool-catalog.ts",
    "kind": "call"
   },
@@ -3083,7 +3073,7 @@
   },
   {
    "source": "worker/src/tools.ts",
-   "target": "worker/src/yahoo-finance.ts#valuation",
+   "target": "worker/src/valuation-tools.ts",
    "kind": "call"
   },
   {
@@ -3117,68 +3107,68 @@
    "kind": "call"
   },
   {
-   "source": "worker/src/valuation.ts",
-   "target": "worker/src/capital-structure.ts",
-   "kind": "call"
-  },
-  {
-   "source": "worker/src/yahoo-finance.ts#valuation",
+   "source": "worker/src/valuation-tools.ts",
    "target": "worker/src/clients/edgar.ts",
    "kind": "call"
   },
   {
-   "source": "worker/src/yahoo-finance.ts#valuation",
+   "source": "worker/src/valuation-tools.ts",
    "target": "worker/src/clients/endpoints.ts",
    "kind": "call"
   },
   {
-   "source": "worker/src/yahoo-finance.ts#valuation",
+   "source": "worker/src/valuation-tools.ts",
    "target": "worker/src/clients/yahoo.ts",
    "kind": "call"
   },
   {
-   "source": "worker/src/yahoo-finance.ts#valuation",
+   "source": "worker/src/valuation-tools.ts",
    "target": "worker/src/companyfacts-coverage.ts",
    "kind": "call"
   },
   {
-   "source": "worker/src/yahoo-finance.ts#valuation",
+   "source": "worker/src/valuation-tools.ts",
    "target": "worker/src/earnings.ts",
    "kind": "call"
   },
   {
-   "source": "worker/src/yahoo-finance.ts#valuation",
+   "source": "worker/src/valuation-tools.ts",
    "target": "worker/src/evidence.ts",
    "kind": "call"
   },
   {
-   "source": "worker/src/yahoo-finance.ts#valuation",
+   "source": "worker/src/valuation-tools.ts",
    "target": "worker/src/exposure.ts",
    "kind": "call"
   },
   {
-   "source": "worker/src/yahoo-finance.ts#valuation",
+   "source": "worker/src/valuation-tools.ts",
    "target": "worker/src/fundamentals.ts",
    "kind": "call"
   },
   {
-   "source": "worker/src/yahoo-finance.ts#valuation",
+   "source": "worker/src/valuation-tools.ts",
    "target": "worker/src/metric-reconciliation.ts",
    "kind": "call"
   },
   {
-   "source": "worker/src/yahoo-finance.ts#valuation",
+   "source": "worker/src/valuation-tools.ts",
    "target": "worker/src/util.ts",
    "kind": "call"
   },
   {
-   "source": "worker/src/yahoo-finance.ts#valuation",
+   "source": "worker/src/valuation-tools.ts",
    "target": "worker/src/valuation-history.ts",
    "kind": "call"
   },
   {
-   "source": "worker/src/yahoo-finance.ts#valuation",
+   "source": "worker/src/valuation-tools.ts",
    "target": "worker/src/valuation.ts",
+   "kind": "call"
+  },
+  {
+   "source": "worker/src/valuation.ts",
+   "target": "worker/src/capital-structure.ts",
    "kind": "call"
   },
   {
@@ -3699,6 +3689,81 @@
   {
    "source": "yfmcp/tools/earnings.py",
    "target": "yfmcp/validation.py",
+   "kind": "call"
+  },
+  {
+   "source": "yfmcp/tools/evidence_pack.py",
+   "target": "ds:evidence_localdir",
+   "kind": "read"
+  },
+  {
+   "source": "yfmcp/tools/evidence_pack.py",
+   "target": "ds:evidence_localdir",
+   "kind": "write"
+  },
+  {
+   "source": "yfmcp/tools/evidence_pack.py",
+   "target": "yfmcp/app.py",
+   "kind": "call"
+  },
+  {
+   "source": "yfmcp/tools/evidence_pack.py",
+   "target": "yfmcp/build_info.py",
+   "kind": "call"
+  },
+  {
+   "source": "yfmcp/tools/evidence_pack.py",
+   "target": "yfmcp/clients/edgar.py",
+   "kind": "call"
+  },
+  {
+   "source": "yfmcp/tools/evidence_pack.py",
+   "target": "yfmcp/envelope.py",
+   "kind": "call"
+  },
+  {
+   "source": "yfmcp/tools/evidence_pack.py",
+   "target": "yfmcp/evidence.py",
+   "kind": "call"
+  },
+  {
+   "source": "yfmcp/tools/evidence_pack.py",
+   "target": "yfmcp/evidence_store.py",
+   "kind": "call"
+  },
+  {
+   "source": "yfmcp/tools/evidence_pack.py",
+   "target": "yfmcp/tools/earnings.py",
+   "kind": "call"
+  },
+  {
+   "source": "yfmcp/tools/evidence_pack.py",
+   "target": "yfmcp/tools/exposure.py",
+   "kind": "call"
+  },
+  {
+   "source": "yfmcp/tools/evidence_pack.py",
+   "target": "yfmcp/tools/fundamentals.py",
+   "kind": "call"
+  },
+  {
+   "source": "yfmcp/tools/evidence_pack.py",
+   "target": "yfmcp/tools/sec.py",
+   "kind": "call"
+  },
+  {
+   "source": "yfmcp/tools/evidence_pack.py",
+   "target": "yfmcp/util.py",
+   "kind": "call"
+  },
+  {
+   "source": "yfmcp/tools/evidence_pack.py",
+   "target": "yfmcp/validation.py",
+   "kind": "call"
+  },
+  {
+   "source": "yfmcp/tools/evidence_pack.py",
+   "target": "yfmcp/valuation.py",
    "kind": "call"
   },
   {
@@ -4274,6 +4339,71 @@
   {
    "source": "yfmcp/tools/thai_funds.py",
    "target": "yfmcp/url_policy.py",
+   "kind": "call"
+  },
+  {
+   "source": "yfmcp/tools/valuation.py",
+   "target": "ds:yahoo-finance",
+   "kind": "read"
+  },
+  {
+   "source": "yfmcp/tools/valuation.py",
+   "target": "yfmcp/app.py",
+   "kind": "call"
+  },
+  {
+   "source": "yfmcp/tools/valuation.py",
+   "target": "yfmcp/clients/edgar.py",
+   "kind": "call"
+  },
+  {
+   "source": "yfmcp/tools/valuation.py",
+   "target": "yfmcp/clients/endpoints.py",
+   "kind": "call"
+  },
+  {
+   "source": "yfmcp/tools/valuation.py",
+   "target": "yfmcp/clients/yahoo.py",
+   "kind": "call"
+  },
+  {
+   "source": "yfmcp/tools/valuation.py",
+   "target": "yfmcp/companyfacts_coverage.py",
+   "kind": "call"
+  },
+  {
+   "source": "yfmcp/tools/valuation.py",
+   "target": "yfmcp/evidence.py",
+   "kind": "call"
+  },
+  {
+   "source": "yfmcp/tools/valuation.py",
+   "target": "yfmcp/metric_reconciliation.py",
+   "kind": "call"
+  },
+  {
+   "source": "yfmcp/tools/valuation.py",
+   "target": "yfmcp/tools/exposure.py",
+   "kind": "call"
+  },
+  {
+   "source": "yfmcp/tools/valuation.py",
+   "target": "yfmcp/tools/fundamentals.py",
+   "kind": "call"
+  },
+  {
+   "source": "yfmcp/tools/valuation.py",
+   "target": "yfmcp/util.py",
+   "kind": "call"
+  },
+  {
+   "source": "yfmcp/tools/valuation.py",
+   "target": "yfmcp/valuation.py",
+   "kind": "call"
+  },
+  {
+   "source": "yfmcp/tools/valuation.py",
+   "target": "yfmcp/valuation_history.py",
    "kind": "call"
   },
   {

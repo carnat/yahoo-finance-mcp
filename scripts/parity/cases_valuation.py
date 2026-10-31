@@ -1484,12 +1484,13 @@ def _tolerances_py(values: list) -> list:
 
     import server
     from yfmcp.clients import edgar
+    from yfmcp.tools import valuation as valuation_tools
 
     def no_yahoo(*_a, **_k):
         raise RuntimeError("Yahoo statements unavailable")
 
     out = []
-    with patch.dict(edgar._FILING_CIK_CACHE, {"TST": "0001234567"}), patch.object(server, "_yahoo_statement_rows_sync", no_yahoo):
+    with patch.dict(edgar._FILING_CIK_CACHE, {"TST": "0001234567"}), patch.object(valuation_tools, "_yahoo_statement_rows_sync", no_yahoo):
         for v in values:
             args = ("TST", "revenue", "latest") + (() if v == _OMIT else (v,))
             result = json.loads(asyncio.run(server.reconcile_metric_sources(*args)))

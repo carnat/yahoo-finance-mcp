@@ -31,6 +31,7 @@ from scripts.parity.harness import Case
 # Registers the tools (server.py imports the yfmcp modules) the way the existing suites do.
 import server  # noqa: F401,E402
 from yfmcp.app import registered_tool_fn  # noqa: E402
+from yfmcp.tools import evidence_pack  # noqa: E402
 from yfmcp.tools import fundamentals as fundamentals_tools  # noqa: E402
 from yfmcp.tools import news as news_tools  # noqa: E402
 from yfmcp.tools import pricing  # noqa: E402
@@ -2082,13 +2083,13 @@ def _pack_py(persist: bool, with_store: bool):
     providers = AsyncMock(return_value=([ev.yahoo_consensus_input([], retrieved_at=OBS_T1, status="NO_DATA")],
                                         {"price": None, "currency": None, "priceTime": None, "status": "NO_DATA", "message": "stub"},
                                         {"status": "NO_DATA", "splits": []}))
-    with patch.object(server, "_consensus_providers", providers), \
-            patch.object(server, "_consensus_naming", AsyncMock(return_value=server.fiscal_year_naming(None))), \
-            patch.object(server, "_sec_filing_rows", AsyncMock(return_value=(None, "TICKER_NOT_FOUND"))), \
-            patch.object(server, "_warm_sec_submissions", AsyncMock(return_value=None)), \
-            patch.object(server, "extract_capital_structure", failing), patch.object(server, "extract_guidance", failing), \
-            patch.object(server, "list_sec_material_filings", failing), \
-            patch.object(server, "_now_iso", lambda: OBS_T1), _python_store(store):
+    with patch.object(evidence_pack, "_consensus_providers", providers), \
+            patch.object(evidence_pack, "_consensus_naming", AsyncMock(return_value=server.fiscal_year_naming(None))), \
+            patch.object(evidence_pack, "_sec_filing_rows", AsyncMock(return_value=(None, "TICKER_NOT_FOUND"))), \
+            patch.object(evidence_pack, "_warm_sec_submissions", AsyncMock(return_value=None)), \
+            patch.object(evidence_pack, "extract_capital_structure", failing), patch.object(evidence_pack, "extract_guidance", failing), \
+            patch.object(evidence_pack, "list_sec_material_filings", failing), \
+            patch.object(evidence_pack, "_now_iso", lambda: OBS_T1), _python_store(store):
         pack = json.loads(asyncio.run(server.build_valuation_evidence_pack("TST", 5, persist)))
         return {"cut": pack["evidenceCut"], "keys": sorted(store.objects) if store else None}
 
