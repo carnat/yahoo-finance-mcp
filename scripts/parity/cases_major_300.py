@@ -40,6 +40,7 @@ import server  # noqa: E402
 from scripts.parity.cases_accession import _python_sec_state  # noqa: E402
 from yfmcp.envelope import _envelope_tool_result  # noqa: E402
 from yfmcp.news.providers import yahoo as yahoo_provider  # noqa: E402
+from yfmcp.tools import pricing  # noqa: E402
 
 CASES: list[Case] = []
 
@@ -347,8 +348,8 @@ def _flow_case(name: str, select, **kw) -> Case:
 
     def py():
         with patch.object(server.yf, "Ticker", lambda _t: _Ticker()), \
-                patch.object(server, "_load_completed_daily_history", AsyncMock(side_effect=RuntimeError("no history"))), \
-                patch.object(server, "get_last_trading_date", lambda: "2026-10-08"):
+                patch.object(pricing, "_load_completed_daily_history", AsyncMock(side_effect=RuntimeError("no history"))), \
+                patch.object(pricing, "get_last_trading_date", lambda: "2026-10-08"):
             return json.loads(asyncio.run(server.get_options_flow_scan("MJRFLOW", "audit")))
 
     chain = {"optionChain": {"result": [{"expirationDates": [_FLOW_EXPIRY_TS], "options": [{"expirationDate": _FLOW_EXPIRY_TS,
