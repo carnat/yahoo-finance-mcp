@@ -356,7 +356,7 @@
       "name": "yahoo-finance.ts \u00b7 Yahoo fundamentals, analyst & calendar",
       "kind": "module",
       "language": "typescript",
-      "loc": 1685,
+      "loc": 1670,
       "file": "worker/src/yahoo-finance.ts"
      }
     ]
@@ -413,14 +413,6 @@
     "name": "SEC EDGAR retrieval",
     "kind": "domain",
     "children": [
-     {
-      "id": "server.py#sec",
-      "name": "server.py \u00b7 SEC EDGAR retrieval",
-      "kind": "module",
-      "language": "python",
-      "loc": 320,
-      "file": "server.py"
-     },
      {
       "id": "worker/src/clients/edgar.ts",
       "name": "edgar.ts",
@@ -482,7 +474,7 @@
       "name": "sec.ts",
       "kind": "module",
       "language": "typescript",
-      "loc": 3034,
+      "loc": 3032,
       "file": "worker/src/sec.ts"
      },
      {
@@ -557,14 +549,6 @@
     "kind": "domain",
     "children": [
      {
-      "id": "server.py#extractors",
-      "name": "server.py \u00b7 SEC extractors & capital structure",
-      "kind": "module",
-      "language": "python",
-      "loc": 1419,
-      "file": "server.py"
-     },
-     {
       "id": "worker/src/capital-structure.ts",
       "name": "capital-structure.ts",
       "kind": "module",
@@ -579,6 +563,14 @@
       "language": "typescript",
       "loc": 317,
       "file": "worker/src/driver-ledger.ts"
+     },
+     {
+      "id": "worker/src/exposure.ts",
+      "name": "exposure.ts",
+      "kind": "module",
+      "language": "typescript",
+      "loc": 1866,
+      "file": "worker/src/exposure.ts"
      },
      {
       "id": "worker/src/extraction-rules.ts",
@@ -603,14 +595,6 @@
       "language": "typescript",
       "loc": 314,
       "file": "worker/src/share-scenarios.ts"
-     },
-     {
-      "id": "worker/src/yahoo-finance.ts#extractors",
-      "name": "yahoo-finance.ts \u00b7 SEC extractors & capital structure",
-      "kind": "module",
-      "language": "typescript",
-      "loc": 1785,
-      "file": "worker/src/yahoo-finance.ts"
      },
      {
       "id": "yfmcp/capital_structure.py",
@@ -667,6 +651,14 @@
       "language": "python",
       "loc": 289,
       "file": "yfmcp/share_scenarios.py"
+     },
+     {
+      "id": "yfmcp/tools/exposure.py",
+      "name": "exposure.py",
+      "kind": "module",
+      "language": "python",
+      "loc": 1908,
+      "file": "yfmcp/tools/exposure.py"
      }
     ]
    },
@@ -751,7 +743,7 @@
       "name": "server.py \u00b7 Earnings intelligence & transcripts",
       "kind": "module",
       "language": "python",
-      "loc": 70,
+      "loc": 36,
       "file": "server.py"
      },
      {
@@ -783,7 +775,7 @@
       "name": "yahoo-finance.ts \u00b7 Earnings intelligence & transcripts",
       "kind": "module",
       "language": "typescript",
-      "loc": 2291,
+      "loc": 2290,
       "file": "worker/src/yahoo-finance.ts"
      },
      {
@@ -1443,32 +1435,17 @@
   },
   {
    "source": "server.py#earnings",
-   "target": "yfmcp/clients/endpoints.py",
-   "kind": "call"
-  },
-  {
-   "source": "server.py#earnings",
    "target": "yfmcp/guidance_history.py",
    "kind": "call"
   },
   {
    "source": "server.py#earnings",
-   "target": "yfmcp/parsing/html.py",
-   "kind": "call"
-  },
-  {
-   "source": "server.py#earnings",
-   "target": "yfmcp/tools/earnings.py",
+   "target": "yfmcp/tools/exposure.py",
    "kind": "call"
   },
   {
    "source": "server.py#earnings",
    "target": "yfmcp/util.py",
-   "kind": "call"
-  },
-  {
-   "source": "server.py#earnings",
-   "target": "yfmcp/validation.py",
    "kind": "call"
   },
   {
@@ -1480,11 +1457,6 @@
    "source": "server.py#evidence",
    "target": "ds:evidence_localdir",
    "kind": "write"
-  },
-  {
-   "source": "server.py#evidence",
-   "target": "server.py#extractors",
-   "kind": "call"
   },
   {
    "source": "server.py#evidence",
@@ -1523,6 +1495,11 @@
   },
   {
    "source": "server.py#evidence",
+   "target": "yfmcp/tools/exposure.py",
+   "kind": "call"
+  },
+  {
+   "source": "server.py#evidence",
    "target": "yfmcp/tools/sec.py",
    "kind": "call"
   },
@@ -1539,91 +1516,6 @@
   {
    "source": "server.py#evidence",
    "target": "yfmcp/valuation.py",
-   "kind": "call"
-  },
-  {
-   "source": "server.py#extractors",
-   "target": "server.py#earnings",
-   "kind": "call"
-  },
-  {
-   "source": "server.py#extractors",
-   "target": "yfmcp/capital_structure.py",
-   "kind": "call"
-  },
-  {
-   "source": "server.py#extractors",
-   "target": "yfmcp/clients/edgar.py",
-   "kind": "call"
-  },
-  {
-   "source": "server.py#extractors",
-   "target": "yfmcp/driver_ledger.py",
-   "kind": "call"
-  },
-  {
-   "source": "server.py#extractors",
-   "target": "yfmcp/envelope.py",
-   "kind": "call"
-  },
-  {
-   "source": "server.py#extractors",
-   "target": "yfmcp/exposure_presets.py",
-   "kind": "call"
-  },
-  {
-   "source": "server.py#extractors",
-   "target": "yfmcp/extraction_rules.py",
-   "kind": "call"
-  },
-  {
-   "source": "server.py#extractors",
-   "target": "yfmcp/funding_schedule.py",
-   "kind": "call"
-  },
-  {
-   "source": "server.py#extractors",
-   "target": "yfmcp/parsing/extractors.py",
-   "kind": "call"
-  },
-  {
-   "source": "server.py#extractors",
-   "target": "yfmcp/parsing/html.py",
-   "kind": "call"
-  },
-  {
-   "source": "server.py#extractors",
-   "target": "yfmcp/schemas.py",
-   "kind": "call"
-  },
-  {
-   "source": "server.py#extractors",
-   "target": "yfmcp/sec_facts.py",
-   "kind": "call"
-  },
-  {
-   "source": "server.py#extractors",
-   "target": "yfmcp/share_scenarios.py",
-   "kind": "call"
-  },
-  {
-   "source": "server.py#extractors",
-   "target": "yfmcp/tools/earnings.py",
-   "kind": "call"
-  },
-  {
-   "source": "server.py#extractors",
-   "target": "yfmcp/tools/sec.py",
-   "kind": "call"
-  },
-  {
-   "source": "server.py#extractors",
-   "target": "yfmcp/util.py",
-   "kind": "call"
-  },
-  {
-   "source": "server.py#extractors",
-   "target": "yfmcp/validation.py",
    "kind": "call"
   },
   {
@@ -1807,31 +1699,6 @@
    "kind": "call"
   },
   {
-   "source": "server.py#sec",
-   "target": "server.py#extractors",
-   "kind": "call"
-  },
-  {
-   "source": "server.py#sec",
-   "target": "yfmcp/envelope.py",
-   "kind": "call"
-  },
-  {
-   "source": "server.py#sec",
-   "target": "yfmcp/tools/sec.py",
-   "kind": "call"
-  },
-  {
-   "source": "server.py#sec",
-   "target": "yfmcp/util.py",
-   "kind": "call"
-  },
-  {
-   "source": "server.py#sec",
-   "target": "yfmcp/validation.py",
-   "kind": "call"
-  },
-  {
    "source": "server.py#shared",
    "target": "yfmcp/tools/earnings.py",
    "kind": "call"
@@ -1865,16 +1732,6 @@
    "source": "server.py#valuation",
    "target": "ds:yahoo-finance",
    "kind": "read"
-  },
-  {
-   "source": "server.py#valuation",
-   "target": "server.py#earnings",
-   "kind": "call"
-  },
-  {
-   "source": "server.py#valuation",
-   "target": "server.py#extractors",
-   "kind": "call"
   },
   {
    "source": "server.py#valuation",
@@ -1914,6 +1771,11 @@
   {
    "source": "server.py#valuation",
    "target": "yfmcp/metric_reconciliation.py",
+   "kind": "call"
+  },
+  {
+   "source": "server.py#valuation",
+   "target": "yfmcp/tools/exposure.py",
    "kind": "call"
   },
   {
@@ -2058,22 +1920,12 @@
   },
   {
    "source": "tool:sec_extractors",
-   "target": "server.py#extractors",
-   "kind": "dispatch"
-  },
-  {
-   "source": "tool:sec_extractors",
    "target": "worker/src/tools.ts",
    "kind": "dispatch"
   },
   {
    "source": "tool:sec_extractors",
-   "target": "worker/src/yahoo-finance.ts#extractors",
-   "kind": "dispatch"
-  },
-  {
-   "source": "tool:sec_filings",
-   "target": "server.py#sec",
+   "target": "yfmcp/tools/exposure.py",
    "kind": "dispatch"
   },
   {
@@ -2084,6 +1936,11 @@
   {
    "source": "tool:sec_filings",
    "target": "yfmcp/tools/earnings.py",
+   "kind": "dispatch"
+  },
+  {
+   "source": "tool:sec_filings",
+   "target": "yfmcp/tools/exposure.py",
    "kind": "dispatch"
   },
   {
@@ -2473,11 +2330,6 @@
   },
   {
    "source": "worker/src/evidence-pack.ts",
-   "target": "worker/src/yahoo-finance.ts#extractors",
-   "kind": "call"
-  },
-  {
-   "source": "worker/src/evidence-pack.ts",
    "target": "worker/src/yahoo-finance.ts#fundamentals",
    "kind": "call"
   },
@@ -2505,6 +2357,81 @@
    "source": "worker/src/exchange-calendars.ts",
    "target": "ds:exchange_calendars",
    "kind": "read"
+  },
+  {
+   "source": "worker/src/exposure.ts",
+   "target": "ds:exposure_presets",
+   "kind": "read"
+  },
+  {
+   "source": "worker/src/exposure.ts",
+   "target": "worker/src/cache.ts",
+   "kind": "call"
+  },
+  {
+   "source": "worker/src/exposure.ts",
+   "target": "worker/src/capital-structure.ts",
+   "kind": "call"
+  },
+  {
+   "source": "worker/src/exposure.ts",
+   "target": "worker/src/clients/edgar.ts",
+   "kind": "call"
+  },
+  {
+   "source": "worker/src/exposure.ts",
+   "target": "worker/src/clients/endpoints.ts",
+   "kind": "call"
+  },
+  {
+   "source": "worker/src/exposure.ts",
+   "target": "worker/src/clients/html.ts",
+   "kind": "call"
+  },
+  {
+   "source": "worker/src/exposure.ts",
+   "target": "worker/src/driver-ledger.ts",
+   "kind": "call"
+  },
+  {
+   "source": "worker/src/exposure.ts",
+   "target": "worker/src/extraction-rules.ts",
+   "kind": "call"
+  },
+  {
+   "source": "worker/src/exposure.ts",
+   "target": "worker/src/funding-schedule.ts",
+   "kind": "call"
+  },
+  {
+   "source": "worker/src/exposure.ts",
+   "target": "worker/src/request-context.ts",
+   "kind": "call"
+  },
+  {
+   "source": "worker/src/exposure.ts",
+   "target": "worker/src/sec-facts.ts",
+   "kind": "call"
+  },
+  {
+   "source": "worker/src/exposure.ts",
+   "target": "worker/src/sec.ts",
+   "kind": "call"
+  },
+  {
+   "source": "worker/src/exposure.ts",
+   "target": "worker/src/share-scenarios.ts",
+   "kind": "call"
+  },
+  {
+   "source": "worker/src/exposure.ts",
+   "target": "worker/src/util.ts",
+   "kind": "call"
+  },
+  {
+   "source": "worker/src/exposure.ts",
+   "target": "worker/src/yahoo-finance.ts#earnings",
+   "kind": "call"
   },
   {
    "source": "worker/src/funding-schedule.ts",
@@ -2998,6 +2925,11 @@
   },
   {
    "source": "worker/src/sec.ts",
+   "target": "worker/src/exposure.ts",
+   "kind": "call"
+  },
+  {
+   "source": "worker/src/sec.ts",
    "target": "worker/src/filing-search.ts",
    "kind": "call"
   },
@@ -3029,11 +2961,6 @@
   {
    "source": "worker/src/sec.ts",
    "target": "worker/src/validate.ts",
-   "kind": "call"
-  },
-  {
-   "source": "worker/src/sec.ts",
-   "target": "worker/src/yahoo-finance.ts#extractors",
    "kind": "call"
   },
   {
@@ -3184,11 +3111,6 @@
   {
    "source": "worker/src/tools.ts",
    "target": "worker/src/yahoo-finance.ts#earnings",
-   "kind": "call"
-  },
-  {
-   "source": "worker/src/tools.ts",
-   "target": "worker/src/yahoo-finance.ts#extractors",
    "kind": "call"
   },
   {
@@ -3344,86 +3266,6 @@
   {
    "source": "worker/src/yahoo-finance.ts#earnings",
    "target": "worker/src/yahoo-finance.ts#providers",
-   "kind": "call"
-  },
-  {
-   "source": "worker/src/yahoo-finance.ts#extractors",
-   "target": "ds:exposure_presets",
-   "kind": "read"
-  },
-  {
-   "source": "worker/src/yahoo-finance.ts#extractors",
-   "target": "worker/src/cache.ts",
-   "kind": "call"
-  },
-  {
-   "source": "worker/src/yahoo-finance.ts#extractors",
-   "target": "worker/src/capital-structure.ts",
-   "kind": "call"
-  },
-  {
-   "source": "worker/src/yahoo-finance.ts#extractors",
-   "target": "worker/src/clients/edgar.ts",
-   "kind": "call"
-  },
-  {
-   "source": "worker/src/yahoo-finance.ts#extractors",
-   "target": "worker/src/clients/endpoints.ts",
-   "kind": "call"
-  },
-  {
-   "source": "worker/src/yahoo-finance.ts#extractors",
-   "target": "worker/src/clients/html.ts",
-   "kind": "call"
-  },
-  {
-   "source": "worker/src/yahoo-finance.ts#extractors",
-   "target": "worker/src/clients/yahoo.ts",
-   "kind": "call"
-  },
-  {
-   "source": "worker/src/yahoo-finance.ts#extractors",
-   "target": "worker/src/driver-ledger.ts",
-   "kind": "call"
-  },
-  {
-   "source": "worker/src/yahoo-finance.ts#extractors",
-   "target": "worker/src/extraction-rules.ts",
-   "kind": "call"
-  },
-  {
-   "source": "worker/src/yahoo-finance.ts#extractors",
-   "target": "worker/src/funding-schedule.ts",
-   "kind": "call"
-  },
-  {
-   "source": "worker/src/yahoo-finance.ts#extractors",
-   "target": "worker/src/request-context.ts",
-   "kind": "call"
-  },
-  {
-   "source": "worker/src/yahoo-finance.ts#extractors",
-   "target": "worker/src/sec-facts.ts",
-   "kind": "call"
-  },
-  {
-   "source": "worker/src/yahoo-finance.ts#extractors",
-   "target": "worker/src/sec.ts",
-   "kind": "call"
-  },
-  {
-   "source": "worker/src/yahoo-finance.ts#extractors",
-   "target": "worker/src/share-scenarios.ts",
-   "kind": "call"
-  },
-  {
-   "source": "worker/src/yahoo-finance.ts#extractors",
-   "target": "worker/src/util.ts",
-   "kind": "call"
-  },
-  {
-   "source": "worker/src/yahoo-finance.ts#extractors",
-   "target": "worker/src/yahoo-finance.ts#earnings",
    "kind": "call"
   },
   {
@@ -3653,6 +3495,11 @@
   },
   {
    "source": "worker/src/yahoo-finance.ts#valuation",
+   "target": "worker/src/exposure.ts",
+   "kind": "call"
+  },
+  {
+   "source": "worker/src/yahoo-finance.ts#valuation",
    "target": "worker/src/metric-reconciliation.ts",
    "kind": "call"
   },
@@ -3674,11 +3521,6 @@
   {
    "source": "worker/src/yahoo-finance.ts#valuation",
    "target": "worker/src/yahoo-finance.ts#earnings",
-   "kind": "call"
-  },
-  {
-   "source": "worker/src/yahoo-finance.ts#valuation",
-   "target": "worker/src/yahoo-finance.ts#extractors",
    "kind": "call"
   },
   {
@@ -4202,6 +4044,96 @@
    "kind": "call"
   },
   {
+   "source": "yfmcp/tools/exposure.py",
+   "target": "yfmcp/app.py",
+   "kind": "call"
+  },
+  {
+   "source": "yfmcp/tools/exposure.py",
+   "target": "yfmcp/capital_structure.py",
+   "kind": "call"
+  },
+  {
+   "source": "yfmcp/tools/exposure.py",
+   "target": "yfmcp/clients/edgar.py",
+   "kind": "call"
+  },
+  {
+   "source": "yfmcp/tools/exposure.py",
+   "target": "yfmcp/clients/endpoints.py",
+   "kind": "call"
+  },
+  {
+   "source": "yfmcp/tools/exposure.py",
+   "target": "yfmcp/driver_ledger.py",
+   "kind": "call"
+  },
+  {
+   "source": "yfmcp/tools/exposure.py",
+   "target": "yfmcp/envelope.py",
+   "kind": "call"
+  },
+  {
+   "source": "yfmcp/tools/exposure.py",
+   "target": "yfmcp/exposure_presets.py",
+   "kind": "call"
+  },
+  {
+   "source": "yfmcp/tools/exposure.py",
+   "target": "yfmcp/extraction_rules.py",
+   "kind": "call"
+  },
+  {
+   "source": "yfmcp/tools/exposure.py",
+   "target": "yfmcp/funding_schedule.py",
+   "kind": "call"
+  },
+  {
+   "source": "yfmcp/tools/exposure.py",
+   "target": "yfmcp/parsing/extractors.py",
+   "kind": "call"
+  },
+  {
+   "source": "yfmcp/tools/exposure.py",
+   "target": "yfmcp/parsing/html.py",
+   "kind": "call"
+  },
+  {
+   "source": "yfmcp/tools/exposure.py",
+   "target": "yfmcp/schemas.py",
+   "kind": "call"
+  },
+  {
+   "source": "yfmcp/tools/exposure.py",
+   "target": "yfmcp/sec_facts.py",
+   "kind": "call"
+  },
+  {
+   "source": "yfmcp/tools/exposure.py",
+   "target": "yfmcp/share_scenarios.py",
+   "kind": "call"
+  },
+  {
+   "source": "yfmcp/tools/exposure.py",
+   "target": "yfmcp/tools/earnings.py",
+   "kind": "call"
+  },
+  {
+   "source": "yfmcp/tools/exposure.py",
+   "target": "yfmcp/tools/sec.py",
+   "kind": "call"
+  },
+  {
+   "source": "yfmcp/tools/exposure.py",
+   "target": "yfmcp/util.py",
+   "kind": "call"
+  },
+  {
+   "source": "yfmcp/tools/exposure.py",
+   "target": "yfmcp/validation.py",
+   "kind": "call"
+  },
+  {
    "source": "yfmcp/tools/news.py",
    "target": "ds:ir_registry",
    "kind": "read"
@@ -4721,7 +4653,6 @@
      "nodes": [
       "worker/src/evidence-pack.ts",
       "worker/src/capital-structure.ts",
-      "worker/src/yahoo-finance.ts#extractors",
       "ds:sec-edgar"
      ]
     },

@@ -349,15 +349,13 @@ def region_id(f: str, dom: str) -> str:
 DOMAIN_OVERRIDES: dict[str, dict[str, str]] = {
     "server.py": {
         # The SEC seeds left with their code for yfmcp/tools/sec.py and worker/src/sec.ts (Phase 5 unit 1, 3.6.1).
-        # The SEC extractor seeds left for yfmcp/tools/exposure.py (Phase 5 unit 2, 3.6.2).
+        # The SEC extractor seeds left for yfmcp/tools/exposure.py (Phase 5 unit 2, 3.6.2). The earnings-release reads
+        # (_earnings_release_picks, _read_release_text) moved there too, since the driver ledger calls them; they join
+        # the earnings module in unit 6.
         # analyst_data / stock_fundamentals handlers and the consensus helpers behind them.
         "get_earnings_momentum": "fundamentals", "get_analyst_upgrade_radar": "fundamentals",
         "_consensus_naming": "fundamentals", "_consensus_policy": "fundamentals",
         "_consensus_providers": "fundamentals", "_write_consensus_observation": "fundamentals",
-    },
-    "yfmcp/tools/exposure.py": {
-        # Earnings-release reads shared by guidance history, the driver ledger and reconciliation.
-        "_earnings_release_picks": "earnings", "_read_release_text": "earnings",
     },
     "worker/src/yahoo-finance.ts": {
         # The SEC extractor seeds left with their code for worker/src/exposure.ts (Phase 5 unit 2).
