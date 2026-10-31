@@ -269,7 +269,7 @@
       "name": "server.py \u00b7 Yahoo pricing, technicals, options & screening",
       "kind": "module",
       "language": "python",
-      "loc": 933,
+      "loc": 108,
       "file": "server.py"
      },
      {
@@ -297,12 +297,12 @@
       "file": "worker/src/pricing-notices.ts"
      },
      {
-      "id": "worker/src/yahoo-finance.ts#pricing",
-      "name": "yahoo-finance.ts \u00b7 Yahoo pricing, technicals, options & screening",
+      "id": "worker/src/pricing.ts",
+      "name": "pricing.ts",
       "kind": "module",
       "language": "typescript",
-      "loc": 2670,
-      "file": "worker/src/yahoo-finance.ts"
+      "loc": 2689,
+      "file": "worker/src/pricing.ts"
      },
      {
       "id": "yfmcp/clients/yahoo.py",
@@ -333,7 +333,7 @@
       "name": "pricing.py",
       "kind": "module",
       "language": "python",
-      "loc": 1862,
+      "loc": 2811,
       "file": "yfmcp/tools/pricing.py"
      }
     ]
@@ -356,7 +356,7 @@
       "name": "yahoo-finance.ts \u00b7 Yahoo fundamentals, analyst & calendar",
       "kind": "module",
       "language": "typescript",
-      "loc": 1670,
+      "loc": 1684,
       "file": "worker/src/yahoo-finance.ts"
      }
     ]
@@ -1535,11 +1535,6 @@
   },
   {
    "source": "server.py#fundamentals",
-   "target": "server.py#pricing",
-   "kind": "call"
-  },
-  {
-   "source": "server.py#fundamentals",
    "target": "server.py#shared",
    "kind": "call"
   },
@@ -1630,27 +1625,7 @@
   },
   {
    "source": "server.py#pricing",
-   "target": "ds:yahoo-finance",
-   "kind": "read"
-  },
-  {
-   "source": "server.py#pricing",
    "target": "server.py#fundamentals",
-   "kind": "call"
-  },
-  {
-   "source": "server.py#pricing",
-   "target": "yfmcp/cache.py",
-   "kind": "call"
-  },
-  {
-   "source": "server.py#pricing",
-   "target": "yfmcp/deprecations.py",
-   "kind": "call"
-  },
-  {
-   "source": "server.py#pricing",
-   "target": "yfmcp/envelope.py",
    "kind": "call"
   },
   {
@@ -1661,11 +1636,6 @@
   {
    "source": "server.py#pricing",
    "target": "yfmcp/tools/pricing.py",
-   "kind": "call"
-  },
-  {
-   "source": "server.py#pricing",
-   "target": "yfmcp/util.py",
    "kind": "call"
   },
   {
@@ -1710,11 +1680,6 @@
   },
   {
    "source": "server.py#transport",
-   "target": "server.py#pricing",
-   "kind": "call"
-  },
-  {
-   "source": "server.py#transport",
    "target": "tool_groups.py",
    "kind": "call"
   },
@@ -1726,6 +1691,11 @@
   {
    "source": "server.py#transport",
    "target": "yfmcp/tools/earnings.py",
+   "kind": "call"
+  },
+  {
+   "source": "server.py#transport",
+   "target": "yfmcp/tools/pricing.py",
    "kind": "call"
   },
   {
@@ -1880,22 +1850,17 @@
   },
   {
    "source": "tool:options_analysis",
-   "target": "server.py#pricing",
-   "kind": "dispatch"
-  },
-  {
-   "source": "tool:options_analysis",
    "target": "worker/src/tools.ts",
    "kind": "dispatch"
   },
   {
    "source": "tool:options_analysis",
-   "target": "worker/src/yahoo-finance.ts#pricing",
+   "target": "worker/src/yahoo-finance.ts#providers",
    "kind": "dispatch"
   },
   {
    "source": "tool:options_analysis",
-   "target": "worker/src/yahoo-finance.ts#providers",
+   "target": "yfmcp/tools/pricing.py",
    "kind": "dispatch"
   },
   {
@@ -1915,7 +1880,7 @@
   },
   {
    "source": "tool:screening",
-   "target": "worker/src/yahoo-finance.ts#pricing",
+   "target": "yfmcp/tools/pricing.py",
    "kind": "dispatch"
   },
   {
@@ -1985,17 +1950,7 @@
   },
   {
    "source": "tool:stock_pricing",
-   "target": "server.py#pricing",
-   "kind": "dispatch"
-  },
-  {
-   "source": "tool:stock_pricing",
    "target": "worker/src/tools.ts",
-   "kind": "dispatch"
-  },
-  {
-   "source": "tool:stock_pricing",
-   "target": "worker/src/yahoo-finance.ts#pricing",
    "kind": "dispatch"
   },
   {
@@ -2869,6 +2824,61 @@
    "kind": "call"
   },
   {
+   "source": "worker/src/pricing.ts",
+   "target": "worker/src/batch.ts",
+   "kind": "call"
+  },
+  {
+   "source": "worker/src/pricing.ts",
+   "target": "worker/src/cache.ts",
+   "kind": "call"
+  },
+  {
+   "source": "worker/src/pricing.ts",
+   "target": "worker/src/clients/endpoints.ts",
+   "kind": "call"
+  },
+  {
+   "source": "worker/src/pricing.ts",
+   "target": "worker/src/clients/yahoo.ts",
+   "kind": "call"
+  },
+  {
+   "source": "worker/src/pricing.ts",
+   "target": "worker/src/deprecations.ts",
+   "kind": "call"
+  },
+  {
+   "source": "worker/src/pricing.ts",
+   "target": "worker/src/exchange-calendars.ts",
+   "kind": "call"
+  },
+  {
+   "source": "worker/src/pricing.ts",
+   "target": "worker/src/pricing-notices.ts",
+   "kind": "call"
+  },
+  {
+   "source": "worker/src/pricing.ts",
+   "target": "worker/src/response.ts",
+   "kind": "call"
+  },
+  {
+   "source": "worker/src/pricing.ts",
+   "target": "worker/src/tool-catalog.ts",
+   "kind": "call"
+  },
+  {
+   "source": "worker/src/pricing.ts",
+   "target": "worker/src/util.ts",
+   "kind": "call"
+  },
+  {
+   "source": "worker/src/pricing.ts",
+   "target": "worker/src/yahoo-finance.ts#fundamentals",
+   "kind": "call"
+  },
+  {
    "source": "worker/src/request-context.ts",
    "target": "worker/src/url-policy.ts",
    "kind": "call"
@@ -3120,11 +3130,6 @@
   },
   {
    "source": "worker/src/tools.ts",
-   "target": "worker/src/yahoo-finance.ts#pricing",
-   "kind": "call"
-  },
-  {
-   "source": "worker/src/tools.ts",
    "target": "worker/src/yahoo-finance.ts#providers",
    "kind": "call"
   },
@@ -3364,61 +3369,6 @@
    "kind": "call"
   },
   {
-   "source": "worker/src/yahoo-finance.ts#pricing",
-   "target": "worker/src/batch.ts",
-   "kind": "call"
-  },
-  {
-   "source": "worker/src/yahoo-finance.ts#pricing",
-   "target": "worker/src/cache.ts",
-   "kind": "call"
-  },
-  {
-   "source": "worker/src/yahoo-finance.ts#pricing",
-   "target": "worker/src/clients/endpoints.ts",
-   "kind": "call"
-  },
-  {
-   "source": "worker/src/yahoo-finance.ts#pricing",
-   "target": "worker/src/clients/yahoo.ts",
-   "kind": "call"
-  },
-  {
-   "source": "worker/src/yahoo-finance.ts#pricing",
-   "target": "worker/src/deprecations.ts",
-   "kind": "call"
-  },
-  {
-   "source": "worker/src/yahoo-finance.ts#pricing",
-   "target": "worker/src/exchange-calendars.ts",
-   "kind": "call"
-  },
-  {
-   "source": "worker/src/yahoo-finance.ts#pricing",
-   "target": "worker/src/pricing-notices.ts",
-   "kind": "call"
-  },
-  {
-   "source": "worker/src/yahoo-finance.ts#pricing",
-   "target": "worker/src/response.ts",
-   "kind": "call"
-  },
-  {
-   "source": "worker/src/yahoo-finance.ts#pricing",
-   "target": "worker/src/tool-catalog.ts",
-   "kind": "call"
-  },
-  {
-   "source": "worker/src/yahoo-finance.ts#pricing",
-   "target": "worker/src/util.ts",
-   "kind": "call"
-  },
-  {
-   "source": "worker/src/yahoo-finance.ts#pricing",
-   "target": "worker/src/yahoo-finance.ts#fundamentals",
-   "kind": "call"
-  },
-  {
    "source": "worker/src/yahoo-finance.ts#providers",
    "target": "ds:alpha-vantage",
    "kind": "read"
@@ -3465,7 +3415,7 @@
   },
   {
    "source": "worker/src/yahoo-finance.ts#shared",
-   "target": "worker/src/yahoo-finance.ts#pricing",
+   "target": "worker/src/pricing.ts",
    "kind": "call"
   },
   {
