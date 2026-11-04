@@ -70,11 +70,16 @@ def _daily_history_sync(ticker: str, from_date: str) -> dict | None:
     return {"bars": bars, "splits": splits, "currency": meta.get("currency")}
 
 
-async def _daily_history(ticker: str, from_date: str) -> dict | None:
+async def _daily_history_read(ticker: str, from_date: str) -> tuple[dict | None, bool]:
+    """The daily history, and whether the Yahoo read failed (3.8.1): None with False is an empty success."""
     try:
-        return await asyncio.to_thread(_daily_history_sync, ticker, from_date)
+        return await asyncio.to_thread(_daily_history_sync, ticker, from_date), False
     except Exception:  # noqa: BLE001 - reported as unread
-        return None
+        return None, True
+
+
+async def _daily_history(ticker: str, from_date: str) -> dict | None:
+    return (await _daily_history_read(ticker, from_date))[0]
 
 
 # Cover pages sit at the top of a periodic report with the header contexts; the first 900 KB is read, not
@@ -138,6 +143,7 @@ async def _valuation_history_for(ticker: str, dates: list[str] | None, from_date
     _, currency = _vh.taxonomy_of(facts)
     price_currency = _vl._major_price(1, history["currency"])[1] if history["currency"] else None
     warnings: list[dict] = []
+    read_failed = False
     # One FX series per reporting currency the dates use (2.5.32, F-029: NBIS reported in RUB, then USD).
     fx_by_currency: dict[str, dict] = {}
     if price_currency:
@@ -145,8 +151,11 @@ async def _valuation_history_for(ticker: str, dates: list[str] | None, from_date
             if c == price_currency:
                 continue
             pair = f"{c}{price_currency}=X"
-            fx_history = await _daily_history(pair, from_date)
+            fx_history, fx_failed = await _daily_history_read(pair, from_date)
             fx_by_currency[c] = {"pair": pair, "bars": (fx_history or {}).get("bars") or []}
+            if fx_failed:
+                read_failed = True
+                warnings.append({"code": "FX_NOT_AVAILABLE", "message": f"Yahoo FX series {pair} could not be read; retry.", "severity": "warning"})
     fx = fx_by_currency.get(currency) if currency else None
     ratio = None
     if _vh.foreign_filer(facts):
@@ -154,6 +163,8 @@ async def _valuation_history_for(ticker: str, dates: list[str] | None, from_date
             market = await _valuation_market_inputs(ticker)
         except Exception:  # noqa: BLE001 - no ratio without Yahoo's count
             market = None
+            read_failed = True
+            warnings.append({"code": "SOURCE_UNAVAILABLE", "message": "Yahoo market inputs could not be read, so no ADR ratio was applied; retry.", "severity": "warning"})
         sec = _vh.latest_share_count(facts)
         quoted = (market or {}).get("sharesOutstanding")
         r = _vl.ads_ratio(sec, quoted) if sec is not None and quoted is not None else None
@@ -177,6 +188,8 @@ async def _valuation_history_for(ticker: str, dates: list[str] | None, from_date
             "SEC submissions could not be read, so no cover page was read; filers without an undimensioned share count have no market cap. Retry."),
             "severity": "warning"})
     out["warnings"] = warnings
+    if read_failed and out.get("status") == "OK":
+        out["status"] = "PARTIAL"
     return out
 
 

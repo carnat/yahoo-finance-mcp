@@ -31,7 +31,7 @@ from yfmcp import valuation as _vl
 from yfmcp.app import yfinance_server
 from yfmcp.build_info import BUILD_SHA as _BUILD_SHA
 from yfmcp.cache import _PRICE_TTL, _STMT_TTL, _tool_cache
-from yfmcp.clients.edgar import _edgar_get_company_facts, _resolve_cik_for_ticker
+from yfmcp.clients.edgar import _edgar_company_facts_read_failed, _edgar_get_company_facts, _resolve_cik_for_ticker
 from yfmcp.clients.market_providers import fetch_alpha_vantage_json as _fetch_alpha_vantage_json
 from yfmcp.clients.yahoo import _safe_parse, _valuation_market_inputs
 from yfmcp.envelope import SERVER_VERSION, ErrorCode, _mcp_failure
@@ -2369,14 +2369,23 @@ async def _consensus_providers(ticker: str) -> tuple[list[dict], dict, dict]:
     return [yahoo, alpha_input], quote, splits
 
 
-async def _consensus_naming(ticker: str) -> dict:
-    """How the company names its fiscal years, from its annual reports' stated fy (2.5.13); the period-end rule when SEC is not read."""
+async def _consensus_naming(ticker: str) -> tuple[dict, bool]:
+    """How the company names its fiscal years, from its annual reports' stated fy (2.5.13); the period-end rule when SEC is not
+    read. The second value is True when the SEC read failed (3.8.1), not when the company has no companyfacts."""
+    cik_padded = None
     try:
         cik_padded = await _resolve_cik_for_ticker(ticker)
         facts = await _edgar_get_company_facts(cik_padded) if cik_padded else None
     except Exception:  # noqa: BLE001 - SEC is optional here; the curve falls back to the period-end rule
-        facts = None
-    return fiscal_year_naming(facts)
+        return fiscal_year_naming(None), True
+    return fiscal_year_naming(facts), facts is None and _edgar_company_facts_read_failed(cik_padded)
+
+
+def _curve_with_naming_read(curve: dict, naming_read_failed: bool) -> dict:
+    """The curve with a COMPANYFACTS_NOT_AVAILABLE warning when the companyfacts read behind its fiscal-year naming failed."""
+    if naming_read_failed:
+        curve["warnings"] = [*curve["warnings"], {"code": "COMPANYFACTS_NOT_AVAILABLE", "message": "SEC companyfacts could not be read, so fiscal years use the period-end rule; retry.", "severity": "warning"}]
+    return curve
 
 
 def _consensus_policy(horizon_years: Any, min_analyst_count: Any, conflict_tolerance_pct: Any) -> dict | str:
@@ -2463,8 +2472,8 @@ async def get_consensus_forecast_curve(
     if isinstance(policy, str):
         return json.dumps({"error": True, "code": "INPUT_VALIDATION_ERROR", "message": policy})
     as_of = _now_iso()
-    (inputs, _, splits), naming = await asyncio.gather(_consensus_providers(ticker), _consensus_naming(ticker))
-    curve = _ev.build_consensus_curve(ticker, inputs, as_of, policy, naming, splits)
+    (inputs, _, splits), (naming, naming_failed) = await asyncio.gather(_consensus_providers(ticker), _consensus_naming(ticker))
+    curve = _curve_with_naming_read(_ev.build_consensus_curve(ticker, inputs, as_of, policy, naming, splits), naming_failed)
     # The first observation of the day is kept; later calls report ALREADY_STORED.
     observation = _write_consensus_observation(ticker, curve, as_of)
     return json.dumps({**curve, "storage": {"consensusObservation": observation}})

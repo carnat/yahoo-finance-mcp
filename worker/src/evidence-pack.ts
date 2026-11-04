@@ -49,6 +49,7 @@ import {
   secLookupUnavailable,
   listSecMaterialFilings,
   secFiscalYearNaming,
+  curveWithNamingRead,
 } from "./yahoo-finance.js";
 import { fetchAlphaVantageJson } from "./providers.js";
 import { yGet } from "./clients/yahoo.js";
@@ -256,8 +257,8 @@ export async function getConsensusForecastCurve(
   const policy = consensusPolicy(horizonYears, minAnalystCount, conflictTolerancePct);
   if (typeof policy === "string") return JSON.stringify({ error: true, code: "INPUT_VALIDATION_ERROR", message: policy });
   const asOf = new Date().toISOString();
-  const [{ inputs, splits }, naming] = await Promise.all([consensusProviders(ticker), secFiscalYearNaming(ticker)]);
-  const curve = buildConsensusCurve(ticker, inputs, asOf, policy, naming, splits);
+  const [{ inputs, splits }, { naming, readFailed }] = await Promise.all([consensusProviders(ticker), secFiscalYearNaming(ticker)]);
+  const curve = curveWithNamingRead(buildConsensusCurve(ticker, inputs, asOf, policy, naming, splits), readFailed);
   // The first observation of the day is kept; later calls report ALREADY_STORED.
   const observation = await writeConsensusObservation(ticker, curve, asOf);
   return JSON.stringify({ ...curve, storage: { consensusObservation: observation } });
@@ -307,8 +308,8 @@ async function secFilingRows(ticker: string): Promise<{ rows: FilingRow[] | null
 
 export async function getEvidenceQuality(ticker: string): Promise<string> {
   const asOf = new Date().toISOString();
-  const [{ inputs, quote, splits }, filings, naming] = await Promise.all([consensusProviders(ticker), secFilingRows(ticker), secFiscalYearNaming(ticker)]);
-  const curve = buildConsensusCurve(ticker, inputs, asOf, DEFAULT_CONSENSUS_POLICY, naming, splits);
+  const [{ inputs, quote, splits }, filings, { naming, readFailed }] = await Promise.all([consensusProviders(ticker), secFilingRows(ticker), secFiscalYearNaming(ticker)]);
+  const curve = curveWithNamingRead(buildConsensusCurve(ticker, inputs, asOf, DEFAULT_CONSENSUS_POLICY, naming, splits), readFailed);
   return JSON.stringify(evidenceQuality({
     ticker,
     asOf,
@@ -346,8 +347,8 @@ export async function buildValuationEvidencePack(ticker: string, horizonYears = 
   const symbol = ticker.toUpperCase();
   const cutoff = new Date().toISOString();
 
-  const [{ inputs, quote, splits }, filings, naming] = await Promise.all([consensusProviders(symbol), secFilingRows(symbol), secFiscalYearNaming(symbol)]);
-  const curve = buildConsensusCurve(symbol, inputs, cutoff, policy, naming, splits);
+  const [{ inputs, quote, splits }, filings, { naming, readFailed }] = await Promise.all([consensusProviders(symbol), secFilingRows(symbol), secFiscalYearNaming(symbol)]);
+  const curve = curveWithNamingRead(buildConsensusCurve(symbol, inputs, cutoff, policy, naming, splits), readFailed);
   const major = quote.price != null ? majorPrice(quote.price, quote.currency) : null;
 
   const dilutionRun = (): Promise<ComponentRecord> => {

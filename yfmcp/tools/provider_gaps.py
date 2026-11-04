@@ -508,10 +508,8 @@ def _charge_rows(payload: dict) -> list[dict]:
 
 
 async def _issuer_name(ticker: str) -> str | None:
-    try:
-        info = await asyncio.to_thread(lambda: yf.Ticker(ticker).info)
-    except Exception:
-        return None
+    """The issuer name from Yahoo, None when Yahoo has none; a failed read raises (3.8.1)."""
+    info = await asyncio.to_thread(lambda: yf.Ticker(ticker).info)
     info = info if isinstance(info, dict) else {}
     return str(info.get("longName") or info.get("shortName") or "").strip() or None
 
@@ -554,7 +552,10 @@ async def get_uk_company_filings(
             name = (company_name or "").strip() or None
             matched_by = "company_name"
             if not name and ticker:
-                name = await _issuer_name(ticker)
+                try:
+                    name = await _issuer_name(ticker)
+                except Exception:  # noqa: BLE001 - a failed read is not an unresolvable name
+                    return json.dumps({"error": True, "code": "PROVIDER_ERROR", "message": "Yahoo issuer name could not be read; retry.", "retryable": True})
                 matched_by = "ticker_issuer_name"
                 if not _re.search(r"\.(?:L|IL)$", ticker, _re.IGNORECASE):
                     warnings.append({"code": "NON_UK_LISTING", "message": f"{ticker} is not a London listing; the match is by issuer name only.", "severity": "info"})

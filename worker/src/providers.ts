@@ -558,6 +558,10 @@ export async function getUkCompanyFilings(
       if (!name && ticker) {
         const identity = await resolveNewsCompanyIdentity(ticker);
         name = identity.longName ?? identity.companyName ?? identity.shortName;
+        if (!name && identity.warnings.some((w) => w.code === "COMPANY_IDENTITY_PROVIDER_ERROR")) {
+          // A failed read is not an unresolvable name (3.8.1).
+          return JSON.stringify({ error: true, code: "PROVIDER_ERROR", message: "Yahoo issuer name could not be read; retry.", retryable: true });
+        }
         matchedBy = "ticker_issuer_name";
         if (!/\.(?:L|IL)$/i.test(ticker)) {
           warnings.push({ code: "NON_UK_LISTING", message: `${ticker} is not a London listing; the match is by issuer name only.`, severity: "info" });

@@ -1416,6 +1416,8 @@ CASES += [
         'm.yahooFinance.verifyCompanyEvent("ZZTP", "acquisition", "", "", ["yahoo_finance_press_releases"])',
         news=[_yn("Zeta Platforms announces acquisition of Beta Corp", publisher="Business Wire", when=_days_ago(2))],
         info={"shortName": "Zeta Platforms", "longName": "Zeta Platforms, Inc.", "exchange": "NMS"}, submissions=_py_sec(SEC_CIK, "Zeta Platforms, Inc.", {}),
+        # 3.8.1: a failed SEC submissions read is a warning, so the Worker is served the SEC reads Python's stub stands for.
+        routes=_sec_routes(SEC_CIK, "ZZTP", "Zeta Platforms, Inc.", {}),
         select=lambda v: {"status": v["status"], "warnings": _warning_codes(v),
                           "best": [[e["sourceType"], e["confidence"], e["relevance"], e["entityRelevance"], e["queryMatch"]] for e in v["bestEvidence"]]},
         expect={"status": "CONFIRMED", "warnings": [],
@@ -1988,7 +1990,8 @@ CASES += [
         'm.yahooFinance.verifyCompanyEvent("ZZTP", "acquisition", "", "", ["newswire"])',
         news=[], info={"shortName": "Zeta Platforms", "longName": "Zeta Platforms, Inc.", "exchange": "NMS"},
         submissions=_py_sec(SEC_CIK, "Zeta Platforms, Inc.", {}),
-        routes={GNW_FEEDS: {"body": _rss([_gitem(1, "Beta Corp to be bought in all-stock acquisition", ["Nasdaq:ZZTP"], desc="Beta Corp holders approve.")]),
+        routes={**_sec_routes(SEC_CIK, "ZZTP", "Zeta Platforms, Inc.", {}),  # 3.8.1: the SEC reads Python's stub stands for
+                GNW_FEEDS: {"body": _rss([_gitem(1, "Beta Corp to be bought in all-stock acquisition", ["Nasdaq:ZZTP"], desc="Beta Corp holders approve.")]),
                             "headers": {"content-type": "application/rss+xml"}}},
         select=lambda v: {"status": v["status"], "warnings": _warning_codes(v), "relevance": [e["relevance"] for e in v["bestEvidence"]]},
         expect={"status": "PARTIAL", "warnings": ["LOW_RELEVANCE_EVIDENCE"], "relevance": ["LOW"]}),
@@ -2375,7 +2378,8 @@ CASES += [
         "<html>" + _ir_article(1, "Board approves acquisition of Beta Corp", date=_ir_day(1)) + "</html>", verify_query="acquisition",
         select=lambda v: {"status": v["status"], "warnings": _warning_codes(v),
                           "best": [[e["sourceType"], e["confidence"], e["relevance"]] for e in v["bestEvidence"]]},
-        expect={"status": "CONFIRMED", "warnings": [], "best": [["company_ir_page", "HIGH", "HIGH"]]}),
+        # 3.8.1: this case serves no SEC reads, so the failed submissions read behind the issuer names is a SOURCE_UNAVAILABLE warning.
+        expect={"status": "CONFIRMED", "warnings": ["SOURCE_UNAVAILABLE"], "best": [["company_ir_page", "HIGH", "HIGH"]]}),
     # Card 208: exactly 768,000 bytes (750 KiB) is accepted; 768,001 is rejected with COMPANY_IR_PAGE_VALIDATION_FAILED and the source is
     # SOURCE_VALIDATION_FAILED. (A redirect to an off-list host cannot be driven here: both stubs answer with the requested URL.)
     _ir_page_case(

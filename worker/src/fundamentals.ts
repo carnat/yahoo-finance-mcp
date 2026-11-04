@@ -13,7 +13,7 @@ import { analystValuationMethods } from "./capital-structure.js";
 import { type MarketInputs, peerValuations, majorPrice } from "./valuation.js";
 import { EPS_BASIS } from "./evidence.js";
 import { type FiscalYearNaming, fiscalYearNaming } from "./fiscal-calendar.js";
-import { resolveCikForTicker, edgarGetJson } from "./clients/edgar.js";
+import { resolveCikForTicker, edgarReadJson } from "./clients/edgar.js";
 import {
   yahooTimeseriesUrl,
   YAHOO_QUERY1,
@@ -1745,14 +1745,21 @@ export async function getAnalystUpgradeRadar(ticker: string | string[], daysBack
 }
 
 /** How the company names its fiscal years, from its annual reports' stated fy (2.5.13); the period-end rule when SEC is not read. */
-export async function secFiscalYearNaming(ticker: string): Promise<FiscalYearNaming> {
+export async function secFiscalYearNaming(ticker: string): Promise<{ naming: FiscalYearNaming; readFailed: boolean }> {
   try {
     const cikPadded = await resolveCikForTicker(ticker);
-    const facts = cikPadded ? await edgarGetJson(secCompanyFactsUrl(cikPadded)) : null;
-    return fiscalYearNaming(facts);
+    const read = cikPadded ? await edgarReadJson(secCompanyFactsUrl(cikPadded)) : null;
+    // readFailed is a failed companyfacts read (3.8.1), not a company without companyfacts (404).
+    return { naming: fiscalYearNaming(read?.ok ? read.json : null), readFailed: read != null && !read.ok };
   } catch {
-    return fiscalYearNaming(null);
+    return { naming: fiscalYearNaming(null), readFailed: true };
   }
+}
+
+/** The curve with a COMPANYFACTS_NOT_AVAILABLE warning when the companyfacts read behind its fiscal-year naming failed (3.8.1). */
+export function curveWithNamingRead(curve: Record<string, unknown>, readFailed: boolean): Record<string, unknown> {
+  if (!readFailed) return curve;
+  return { ...curve, warnings: [...(curve.warnings as unknown[]), { code: "COMPANYFACTS_NOT_AVAILABLE", message: "SEC companyfacts could not be read, so fiscal years use the period-end rule; retry.", severity: "warning" }] };
 }
 
 const PRE_REVENUE_EPS_EPSILON = 1e-9;
