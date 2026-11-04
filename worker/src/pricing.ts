@@ -1933,7 +1933,12 @@ export async function getOptionsFlowScan(ticker: string, windowLabel: string): P
       // The same max-pain definition as summarize_options_flow: the strike
       // where option holders' total payout is smallest (not the strike with
       // the most open interest).
-      maxPainStrike = computeMaxPainStrike(calls, puts);
+      try {
+        maxPainStrike = computeMaxPainStrike(calls, puts);
+      } catch {
+        maxPainStrike = null;
+        scanWarnings.push("MAX_PAIN_UNAVAILABLE");
+      }
     }
 
     // ATM IV — reject placeholder
@@ -2094,7 +2099,9 @@ export async function getOptionsFlowScan(ticker: string, windowLabel: string): P
       if (adv10 && adv10 > 0 && putVol > 0) {
         putVolVs10d = +(putVol / (adv10 * 0.01)).toFixed(2);
       }
-    } catch { /* ignore */ }
+    } catch {
+      scanWarnings.push("ADV10_UNAVAILABLE");
+    }
 
     let putVolTrend = "STABLE";
     const cmpCurr = putVolVs10d ?? pcRatio;

@@ -594,7 +594,7 @@ async def get_price_stats(ticker: str | list[str]) -> str:
         "recommendedNextAction": "RETRY" if stats["status"] == "PARTIAL" else "NONE",
         "dataDate": data_date,
     })
-    with_notices(stats, [*freshness_notices(ticker, prepared.get("freshnessReason") if prepared is not None else None), *notices])
+    with_notices(stats, [*freshness_notices(ticker, prepared.get("freshnessReason") if prepared is not None else None, bool(prepared.get("metadataFailed")) if prepared is not None else False), *notices])
     result = json.dumps(stats)
     _tool_cache.set(cache_key, result, _PRICE_TTL)
     return result
@@ -793,7 +793,7 @@ async def get_technical_indicators(ticker: str | list[str], period: str = "1y") 
 
     output["lastClose"] = round(float(closes.iloc[-1]), 2)
     output["dataDate"] = data_date
-    with_notices(output, freshness_notices(ticker, prepared.get("freshnessReason")))
+    with_notices(output, freshness_notices(ticker, prepared.get("freshnessReason"), bool(prepared.get("metadataFailed"))))
 
     result = json.dumps(output)
     _tool_cache.set(cache_key, result, _PRICE_TTL)
@@ -1008,11 +1008,16 @@ async def _load_completed_daily_history(
             keepna=True,
         )
 
+    metadata_failed = False
+
     async def _load_metadata() -> dict:
+        nonlocal metadata_failed
         try:
             metadata = await asyncio.to_thread(company.get_history_metadata)
+            metadata_failed = False
             return metadata if isinstance(metadata, dict) else {}
         except Exception:
+            metadata_failed = True
             return {}
 
     hist = await _load_history()
@@ -1069,6 +1074,7 @@ async def _load_completed_daily_history(
         except Exception:
             pass
     prepared["metadata"] = metadata
+    prepared["metadataFailed"] = metadata_failed
     prepared["retryAttempted"] = retry_attempted
     return prepared
 
@@ -1244,7 +1250,7 @@ async def get_price_slope(ticker: str | list[str], days: int = 5) -> str:
         "direction": direction,
         "dataDate": data_date,
         "recommendedNextAction": "NONE",
-    }, freshness_notices(ticker, prepared.get("freshnessReason"))))
+    }, freshness_notices(ticker, prepared.get("freshnessReason"), bool(prepared.get("metadataFailed")))))
 
 
 # ---------------------------------------------------------------------------
@@ -1320,7 +1326,7 @@ async def get_volume_ratio(ticker: str | list[str], period: int = 10) -> str:
             "retryAttempted": prepared["retryAttempted"],
             "dataDate": data_date,
             "recommendedNextAction": "RETRY",
-        }, freshness_notices(ticker, prepared.get("freshnessReason"))))
+        }, freshness_notices(ticker, prepared.get("freshnessReason"), bool(prepared.get("metadataFailed")))))
     last_vol = int(volumes.iloc[-1])
     prior_volumes = volumes.iloc[:-1]
     avg_10d = (
@@ -1370,7 +1376,7 @@ async def get_volume_ratio(ticker: str | list[str], period: int = 10) -> str:
         "retryAttempted": prepared["retryAttempted"],
         "dataDate": data_date,
         "recommendedNextAction": "NONE",
-    }, [*volume_notices, *freshness_notices(ticker, prepared.get("freshnessReason"))]))
+    }, [*volume_notices, *freshness_notices(ticker, prepared.get("freshnessReason"), bool(prepared.get("metadataFailed")))]))
 
 
 # ---------------------------------------------------------------------------
@@ -1702,7 +1708,7 @@ async def get_volume_gate(ticker: str, foreign_exchange: bool = False, min_adv_u
             "dataDate": data_date,
             "note": "Volume gate UNKNOWN — latest completed session lacks price or volume",
             "recommendedNextAction": "RETRY",
-        }, freshness_notices(ticker, prepared.get("freshnessReason"))))
+        }, freshness_notices(ticker, prepared.get("freshnessReason"), bool(prepared.get("metadataFailed")))))
     prior_volumes = volumes.iloc[:-1]
 
     def _prior_average(count: int) -> float | None:
@@ -1780,7 +1786,7 @@ async def get_volume_gate(ticker: str, foreign_exchange: bool = False, min_adv_u
         "dataDate": data_date,
         "note": note,
         "recommendedNextAction": recommended_next_action,
-    }, freshness_notices(ticker, prepared.get("freshnessReason"))))
+    }, freshness_notices(ticker, prepared.get("freshnessReason"), bool(prepared.get("metadataFailed")))))
 
 def _classify_quote_freshness(
     quote_timestamp: str | None,
@@ -2812,7 +2818,8 @@ async def get_options_flow_scan(ticker: str, window_label: str) -> str:
                     min_pain = pain
                     max_pain_strike = float(strike)
         except Exception:
-            pass
+            max_pain_strike = None
+            scan_warnings.append("MAX_PAIN_UNAVAILABLE")
 
     # ATM implied volatility (nearest call strike to current price)
     atm_iv: float | None = None
@@ -2853,6 +2860,7 @@ async def get_options_flow_scan(ticker: str, window_label: str) -> str:
     historical_bar_status = "NOT_USED"
     freshness_status = "UNKNOWN"
     freshness_reason = None
+    history_metadata_failed = False
     excluded_incomplete_bar = False
     retry_attempted = False
     fallback_used = False
@@ -2874,6 +2882,7 @@ async def get_options_flow_scan(ticker: str, window_label: str) -> str:
             )
             freshness_status = prepared["freshnessStatus"]
             freshness_reason = prepared.get("freshnessReason")
+            history_metadata_failed = bool(prepared.get("metadataFailed"))
             excluded_incomplete_bar = prepared["excludedIncompleteBar"]
             retry_attempted = prepared["retryAttempted"]
             if freshness_status == "STALE":
@@ -2908,7 +2917,7 @@ async def get_options_flow_scan(ticker: str, window_label: str) -> str:
         if adv10 and adv10 > 0 and put_vol > 0:
             put_vol_vs_10d = round(put_vol / (adv10 * 0.01), 2)
     except Exception:
-        pass
+        scan_warnings.append("ADV10_UNAVAILABLE")
 
     # Look up prior window reading for trend analysis
     prev_window_map = {"T-7": "T-14", "T-2": "T-7"}
@@ -3001,7 +3010,7 @@ async def get_options_flow_scan(ticker: str, window_label: str) -> str:
 
     # Cache current reading for future trend comparison (72h TTL via 3-day window check)
     _tool_cache.set(f"options_flow:{ticker}:{window_label}", json.dumps(result_dict), 72 * 3600)
-    return json.dumps(with_notices(result_dict, _freshness_notices(ticker, freshness_reason)))
+    return json.dumps(with_notices(result_dict, _freshness_notices(ticker, freshness_reason, history_metadata_failed)))
 
 
 # ---------------------------------------------------------------------------

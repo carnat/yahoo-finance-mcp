@@ -89,9 +89,11 @@ def _extract_earnings_period_from_text(text: str) -> dict[str, str | None]:
     return _extract_release_period(text)
 
 
-def _release_text_unread_warning(url: str | None) -> dict:
-    """The warning for an earnings release whose text could not be read (the message exposure.py gives for the same case)."""
-    return {"code": "RELEASE_TEXT_NOT_AVAILABLE", "message": f"The earnings release {url} could not be read from SEC; retry.", "severity": "warning"}
+def _release_text_unread_warning(url: str | None, source: str = "SEC") -> dict:
+    """The warning for an earnings release whose text could not be read (the message exposure.py gives for the same case).
+    ``source`` is "SEC" for an SEC document and "public" for a company page (3.9.0)."""
+    where = " from SEC" if source == "SEC" else ""
+    return {"code": "RELEASE_TEXT_NOT_AVAILABLE", "message": f"The earnings release {url} could not be read{where}; retry.", "severity": "warning"}
 
 
 async def _resolve_earnings_period_from_source(source: dict, resolved: dict | None = None) -> dict[str, str | None]:
@@ -943,11 +945,18 @@ async def extract_management_commentary(ticker: str, period: str = "latest", top
     content = await _resolve_earnings_content_source(src)
     src_url = content["url"]
     text = ""
+    warnings: list[dict] = []
     if src_url.startswith(SEC_ARCHIVES_PREFIX):
         html = await _edgar_get_html(src_url, max_bytes=5_000_000)
         text = _strip_html_blocks(_sanitize_sec_html(html or ""))
+        # A failed read is not a 404 or an empty page: only the failure is reported (3.9.0).
+        if not html and _edgar_html_read_failed(src_url):
+            warnings.append(_release_text_unread_warning(src_url))
     elif src_url:
-        text = _strip_html_blocks(_sanitize_sec_html(_fetch_public_html(src_url) or ""))
+        public_html = _fetch_public_html(src_url)
+        text = _strip_html_blocks(_sanitize_sec_html(public_html or ""))
+        if public_html is None:
+            warnings.append(_release_text_unread_warning(src_url, "public"))
     out_topics: list[dict] = []
     for topic in topic_list:
         hit = _sentence_for_topic(text, topic) if text else None
@@ -978,7 +987,7 @@ async def extract_management_commentary(ticker: str, period: str = "latest", top
                 "evidence": [],
                 "confidence": "LOW",
             })
-    return _wrap_envelope_v2("extract_management_commentary", {"ticker": ticker.upper(), "period": release.get("period") or period, "topics": out_topics})
+    return _wrap_envelope_v2("extract_management_commentary", {"ticker": ticker.upper(), "period": release.get("period") or period, "topics": out_topics, "warnings": warnings})
 
 
 @yfinance_server.tool(

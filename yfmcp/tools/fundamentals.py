@@ -436,13 +436,24 @@ def _classify_analyst_change(action: object, from_grade: object, to_grade: objec
     return "MAINTAIN"
 
 
+def _component_failed_warning(part: str) -> dict[str, str]:
+    """A part of a partial result that could not be read (3.9.0; the Worker's one upstream call fails the whole tool)."""
+    return {"code": "COMPONENT_FAILED", "message": f"{part} could not be read; retry.", "severity": "warning"}
+
+
 def _target_analyst_count(company) -> int | None:
-    """Analysts contributing price targets (Yahoo financialData.numberOfAnalystOpinions)."""
-    try:
-        value = (company.info or {}).get("numberOfAnalystOpinions")
-    except Exception:
-        return None
+    """Analysts contributing price targets (Yahoo financialData.numberOfAnalystOpinions); a failed read raises (3.9.0)."""
+    value = (company.info or {}).get("numberOfAnalystOpinions")
     return int(value) if isinstance(value, (int, float)) else None
+
+
+def _target_analyst_count_or_warn(company, warnings: list) -> int | None:
+    """_target_analyst_count, with a failed read added to ``warnings`` as COMPONENT_FAILED."""
+    try:
+        return _target_analyst_count(company)
+    except Exception:
+        warnings.append(_component_failed_warning("Price target analyst count"))
+        return None
 
 
 @yfinance_server.tool(
@@ -501,7 +512,7 @@ async def get_analyst_consensus(ticker: str | list[str]) -> str:
                 "mean": target_mean,
                 "median": targets.get("median"),
                 # Analysts behind the price targets (not the rating counts).
-                "numberOfAnalysts": _target_analyst_count(company),
+                "numberOfAnalysts": _target_analyst_count_or_warn(company, warnings),
                 "pctUpsideFromLastPrice": (
                     round((target_mean - last_price) / last_price * 100, 2)
                     if target_mean and last_price
@@ -510,6 +521,7 @@ async def get_analyst_consensus(ticker: str | list[str]) -> str:
             }
     except Exception:
         output["priceTargets"] = None
+        warnings.append(_component_failed_warning("Price targets"))
 
     # Recent upgrades (last 30d) to flag potential target lag
     recent_upgrade_count_30d = None
@@ -553,6 +565,7 @@ async def get_analyst_consensus(ticker: str | list[str]) -> str:
             recent_upgrade_count_30d = count
     except Exception:
         recent_upgrade_count_30d = None
+        warnings.append(_component_failed_warning("Upgrades and downgrades"))
 
     # Recommendation summary (period breakdown)
     try:
@@ -573,6 +586,7 @@ async def get_analyst_consensus(ticker: str | list[str]) -> str:
             output["numberOfAnalysts"] = output["ratingCount"]
     except Exception:
         output["recommendationSummary"] = None
+        warnings.append(_component_failed_warning("Recommendation summary"))
 
     target_lag_signal = "UNKNOWN"
     if target_mean is not None and last_price is not None:
@@ -1402,17 +1416,16 @@ async def get_earnings_momentum(ticker: str | list[str]) -> str:
     # Fetch EPS trend and earnings history
     eps_trend_records = None
     earnings_history_records = None
+    output: dict = {"ticker": ticker}
+    warnings: list[dict[str, str]] = []
     try:
         eps_trend_records = _df_to_records(company.eps_trend)
     except Exception:
-        pass
+        warnings.append(_component_failed_warning("EPS trend"))
     try:
         earnings_history_records = _df_to_records(company.earnings_history)
     except Exception:
-        pass
-
-    output: dict = {"ticker": ticker}
-    warnings: list[dict[str, str]] = []
+        warnings.append(_component_failed_warning("Earnings history"))
     data_quality = "OK"
 
     # From epsTrend for current quarter (0q)
@@ -2187,6 +2200,8 @@ async def extract_analyst_valuation_methods(ticker: str, days_back: int = 30) ->
                                         names or None)
     warnings = []
     if not names:
+        if isinstance(issuer, BaseException):
+            warnings.append(_component_failed_warning("Issuer names"))
         warnings.append({"code": "ATTRIBUTION_UNCHECKED", "message": "The company name could not be resolved, so targets were not checked against the subject.", "severity": "warning"})
     if news.get("error") or not isinstance(news_raw, str):
         warnings.append({"code": "NEWS_UNAVAILABLE", "message": str(news.get("message") or "News could not be read."), "severity": "warning"})
@@ -2201,10 +2216,8 @@ async def extract_analyst_valuation_methods(ticker: str, days_back: int = 30) ->
 async def _issuer_names(ticker: str) -> list[str]:
     """Attribution names for a ticker (2.19.0, B-G11 / call #16; the Worker's alias set): Yahoo longName, shortName and the
     company name (longName, else shortName), without any name equal to the ticker."""
-    try:
-        info = await asyncio.to_thread(lambda: yf.Ticker(ticker).info)
-    except Exception:
-        return []
+    # A failed read raises (3.9.0): the caller tells it from a company with no name.
+    info = await asyncio.to_thread(lambda: yf.Ticker(ticker).info)
     info = info if isinstance(info, dict) else {}
     long_name = info.get("longName")
     short_name = info.get("shortName")

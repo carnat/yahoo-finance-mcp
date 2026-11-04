@@ -628,26 +628,43 @@ def _filing_has_relevant_geo_text(html: str, region: str) -> bool:
 _ANNUAL_FILING_TYPE_RE = _re.compile(r"(?:10-K|20-F|40-F)\b", _re.IGNORECASE)
 
 
+def _annual_coverage_read_failed_warning(failed_reads: list[dict]) -> dict:
+    """The info warning for an annual-coverage check that did not run because SEC could not be read (3.9.0)."""
+    return {
+        "code": "SEC_READ_FAILED",
+        "message": "SEC data could not be read, so the latest-annual coverage check did not run; retry.",
+        "severity": "info",
+        "failedReads": failed_reads,
+    }
+
+
+def _failed_read(endpoint: str, http_status: int | None = None) -> dict:
+    return {"endpoint": endpoint, "concept": None, "httpStatus": http_status}
+
+
 async def _annual_coverage_warning_for(ticker: str, payload: dict) -> dict | None:
     """The Worker's annualCoverageWarningFor (2.5.30, F-015): the LATEST_ANNUAL_NOT_IN_COMPANYFACTS warning for an
     annual-form fact read, looked for only when the read has no value or its value is from another accession than
-    the latest annual report. Unreadable SEC data gives none."""
+    the latest annual report. Unreadable SEC data gives an info SEC_READ_FAILED warning naming the endpoint (3.9.0);
+    an absent record gives none."""
     try:
         cik_padded, subs = await _get_submissions_for_ticker(ticker)
-    except Exception:  # noqa: BLE001 - no submissions, no check
-        return None
+    except Exception as exc:  # noqa: BLE001 - no submissions, no check
+        return _annual_coverage_read_failed_warning([_failed_read("submissions", getattr(exc, "status_code", None))])
     if not cik_padded or not subs:
-        return None
+        # Failed (ticker index or submissions read) is told from absent by the 3.8.0 read state.
+        return _annual_coverage_read_failed_warning([_failed_read("submissions")]) if _sec_lookup_failure(ticker) else None
     filings = _cfc.annual_filings_from_submissions(subs)
     latest = _cfc.latest_annual_filing(filings)
     used = str(payload["accessionNumber"]).replace("-", "") if payload.get("value") is not None and isinstance(payload.get("accessionNumber"), str) else None
     if latest is None or used == latest["accessionNumber"].replace("-", ""):
         return None
     try:
-        # Read as get_filing_data reads companyfacts; an unreadable file gives no warning.
+        # Read as get_filing_data reads companyfacts; a 404 gives no warning, a failed read says the check did not run.
         facts = await _edgar_get(sec_company_facts_url(cik_padded))
-    except Exception:  # noqa: BLE001
-        facts = None
+    except Exception as exc:  # noqa: BLE001
+        status = getattr(exc, "status_code", None)
+        return None if status == 404 else _annual_coverage_read_failed_warning([_failed_read("companyfacts", status)])
     return _cfc.latest_annual_coverage_warning(filings, facts) if isinstance(facts, dict) else None
 
 
