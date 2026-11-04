@@ -219,6 +219,9 @@ jobs:
       - name: Python-only news tooling tests
         run: python scripts/test_python_only_news_tooling.py -v
 
+      - name: Python-only partial-result warning tests
+        run: python scripts/test_python_only_partial_warnings_390.py -v
+
       - name: Historical prices contract tests (Worker and local)
         run: python scripts/test_historical_prices_contract.py -v
 

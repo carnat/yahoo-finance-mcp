@@ -3190,6 +3190,37 @@ F-024, F-026, F-029). Both runtimes change alike.
 - **Tests:** 21 new parity cases in `scripts/parity/cases_audit_2251.py`.
 - **Rollback:** redeploy 2.25.0.
 
+## Remaining Swallowed Reads Are Reported (3.9.0)
+
+- **Why:** the leftovers of the Phase 6 swallowed-error audit (owner decision 2026-11-04 09:48Z;
+  `analysis/yahoo-finance-mcp/SWALLOWED_ERRORS_3_8.md`). This minor release adds one field, two string codes and one
+  `failedReads` endpoint value. Nothing is removed.
+- **`extract_management_commentary`:** the payload now always carries `warnings` (after `topics`; `[]` when nothing
+  failed). When the release text could not be read, it holds `RELEASE_TEXT_NOT_AVAILABLE`: "The earnings release
+  {url} could not be read from SEC; retry." for an SEC release, or "... could not be read; retry." for a company
+  page. Topic statuses are unchanged. A release that was not found, a 404 or an empty page adds nothing.
+- **Annual-coverage check (`LATEST_ANNUAL_NOT_IN_COMPANYFACTS`):** when SEC submissions or company facts could not
+  be read, so the check did not run, the result adds an info warning `SEC_READ_FAILED`, "SEC data could not be read,
+  so the latest-annual coverage check did not run; retry.", with `failedReads: [{endpoint, concept: null,
+  httpStatus}]`. `endpoint` is `submissions` (new value) or `companyfacts`. An absent record stays silent.
+- **`get_options_flow_scan`:** its string `warnings` list adds `ADV10_UNAVAILABLE` when the 10-day average volume
+  read failed and `MAX_PAIN_UNAVAILABLE` when the max-pain calculation failed. A value that is legitimately absent
+  adds nothing.
+- **Python-only partial results (intentional runtime difference):** Python builds these results from several
+  upstream reads and keeps the parts it could read; the Worker makes one read, so a failure there fails the whole
+  tool. Python now adds `COMPONENT_FAILED` warnings naming the failed part, "<part> could not be read; retry.":
+  - `get_analyst_consensus`: "Price targets", "Upgrades and downgrades", "Recommendation summary", "Price target
+    analyst count";
+  - `get_earnings_momentum`: "EPS trend", "Earnings history";
+  - `extract_analyst_valuation_methods`: "Issuer names" (before the existing `ATTRIBUTION_UNCHECKED`);
+  - price-history tools that relay freshness notices: "Price history metadata".
+- **Left as is:** tools with no warnings list (`get_earnings_analysis`, `get_option_chain`, `get_fast_info`,
+  `get_ma_position`, `get_price_target_bracket`, `get_sec_filing_intelligence` company facts, consensus fiscal-year
+  naming). Adding a list to each would be a field change for little gain.
+- **Tests:** `scripts/parity/cases_leftovers_390.py` (7 cases) and `scripts/test_python_only_partial_warnings_390.py`
+  (8 tests).
+- **Rollback:** redeploy 3.8.3.
+
 ## Unreadable Tool and Source Output Is Reported (3.8.3)
 
 - **Why:** Phase 6 swallowed-error audit, part 4 of 4 (owner decision 2026-11-04). It changes both runtimes and uses

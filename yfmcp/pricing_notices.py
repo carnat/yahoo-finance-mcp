@@ -43,9 +43,13 @@ def session_calendar_notice(ticker: str) -> dict:
     }
 
 
-def freshness_notices(ticker: str, freshness_reason: object) -> list[dict]:
-    """Notices for a payload built from prepared daily history: SESSION_CALENDAR_UNKNOWN when its reason says so."""
-    return [session_calendar_notice(ticker)] if freshness_reason == SESSION_CALENDAR_UNKNOWN else []
+def freshness_notices(ticker: str, freshness_reason: object, metadata_failed: bool = False) -> list[dict]:
+    """Notices for a payload built from prepared daily history: SESSION_CALENDAR_UNKNOWN when its reason says so, and
+    COMPONENT_FAILED when the history metadata could not be read (3.9.0; Python only, the Worker makes one upstream call)."""
+    notices = [session_calendar_notice(ticker)] if freshness_reason == SESSION_CALENDAR_UNKNOWN else []
+    if metadata_failed:
+        notices.append({"code": "COMPONENT_FAILED", "message": "Price history metadata could not be read; retry.", "severity": "warning"})
+    return notices
 
 
 def with_notices(payload: dict, notices: list[dict]) -> dict:

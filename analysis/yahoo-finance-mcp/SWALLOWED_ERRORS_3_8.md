@@ -50,3 +50,4 @@ Not changed:
 - Owner approved 2026-11-04 07:36Z ("Yes, as recommended").
 - 3.8.0 (SEC reads), 3.8.1 (Yahoo enrichment), 3.8.2 (option expiries) and 3.8.3 (unreadable tool and source output) shipped; details in docs/provider-runtime-guidance.md. 3.8.1 also holds back the options-flow string codes and the Python-only partial rows.
 - Held back for new names: the management-commentary "not read" signal and the skipped annual-coverage check.
+- Leftovers 1-4 approved 2026-11-04 09:48Z and shipped as 3.9.0: the commentary `warnings` list, the coverage-check `SEC_READ_FAILED` info warning (endpoint `submissions`), `ADV10_UNAVAILABLE` / `MAX_PAIN_UNAVAILABLE`, and Python `COMPONENT_FAILED` on partial results (documented runtime difference). Tools without a warnings list are left as they are.

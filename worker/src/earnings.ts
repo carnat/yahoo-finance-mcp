@@ -1384,8 +1384,9 @@ function nowIsoUtc(): string {
 
 
 /** The warning for an earnings release whose text could not be read (the message the operating-driver ledger gives). */
-function releaseTextUnreadWarning(url: string | null): Record<string, unknown> {
-  return { code: "RELEASE_TEXT_NOT_AVAILABLE", message: `The earnings release ${url} could not be read from SEC; retry.`, severity: "warning" };
+function releaseTextUnreadWarning(url: string | null, source: "SEC" | "public" = "SEC"): Record<string, unknown> {
+  const where = source === "SEC" ? " from SEC" : "";
+  return { code: "RELEASE_TEXT_NOT_AVAILABLE", message: `The earnings release ${url} could not be read${where}; retry.`, severity: "warning" };
 }
 
 /**
@@ -2313,10 +2314,16 @@ export async function extractManagementCommentary(
   const srcUrl = content.url;
   const sourceType = content.sourceType;
   let text = "";
+  const warnings: Record<string, unknown>[] = [];
   if (srcUrl.startsWith(SEC_ARCHIVES_PREFIX)) {
-    text = _stripHtmlTagsIdx(_sanitizeFilingHtml((await edgarGetHtml(srcUrl, 5_000_000)) ?? ""));
+    const read = await edgarReadHtml(srcUrl, 5_000_000);
+    text = _stripHtmlTagsIdx(_sanitizeFilingHtml(read.text ?? ""));
+    // A failed read is not a 404 or an empty page: only the failure is reported (3.9.0).
+    if (!read.text && read.failed) warnings.push(releaseTextUnreadWarning(srcUrl));
   } else if (srcUrl) {
-    text = _stripHtmlTagsIdx(_sanitizeFilingHtml((await fetchPublicHtml(srcUrl)) ?? ""));
+    const publicHtml = await fetchPublicHtml(srcUrl);
+    text = _stripHtmlTagsIdx(_sanitizeFilingHtml(publicHtml ?? ""));
+    if (publicHtml == null) warnings.push(releaseTextUnreadWarning(srcUrl, "public"));
   }
   const outTopics = (topics ?? []).map((topic) => {
     const match = text ? sentenceForTopic(text, topic) : null;
@@ -2344,7 +2351,7 @@ export async function extractManagementCommentary(
     ticker: ticker.toUpperCase(),
     period: release.period ?? period,
     topics: outTopics,
-    warnings: [],
+    warnings,
   });
 }
 

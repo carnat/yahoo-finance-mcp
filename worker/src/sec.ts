@@ -364,20 +364,38 @@ function regionMatches(segmentLabel: string, region: string, includeAsiaFallback
 
 const ANNUAL_FILING_TYPE_RE = /^(?:10-K|20-F|40-F)\b/i;
 
+/** The info warning for an annual-coverage check that did not run because SEC could not be read (3.9.0). */
+function annualCoverageReadFailedWarning(endpoint: "submissions" | "companyfacts", httpStatus: number | null): Record<string, unknown> {
+  return {
+    code: "SEC_READ_FAILED",
+    message: "SEC data could not be read, so the latest-annual coverage check did not run; retry.",
+    severity: "info",
+    failedReads: [{ endpoint, concept: null, httpStatus }],
+  };
+}
+
 /**
  * The LATEST_ANNUAL_NOT_IN_COMPANYFACTS warning for an annual-form fact read (2.5.30, F-015), or null. It is
  * looked for only when the read has no value or its value is from another accession than the latest annual
- * report, so a fact read from that report costs no companyfacts read. Unreadable SEC data gives none.
+ * report, so a fact read from that report costs no companyfacts read. Unreadable SEC data gives an info
+ * SEC_READ_FAILED warning naming the endpoint (3.9.0); an absent record gives none.
  */
 async function annualCoverageWarningFor(ticker: string, payload: Record<string, unknown>): Promise<Record<string, unknown> | null> {
-  const { cikPadded, submissions } = await getSubmissionsForTicker(ticker).catch(() => ({ cikPadded: null, submissions: null }));
-  if (!cikPadded || !submissions) return null;
+  let lookup: Awaited<ReturnType<typeof getSubmissionsForTicker>>;
+  try {
+    lookup = await getSubmissionsForTicker(ticker);
+  } catch {
+    return annualCoverageReadFailedWarning("submissions", null);
+  }
+  const { cikPadded, submissions } = lookup;
+  if (!cikPadded || !submissions) return lookup.failure ? annualCoverageReadFailedWarning("submissions", null) : null;
   const filings = annualFilingsFromSubmissions(submissions);
   const latest = latestAnnualFiling(filings);
   const used = payload.value != null && typeof payload.accessionNumber === "string" ? payload.accessionNumber.replace(/-/g, "") : null;
   if (!latest || used === latest.accessionNumber.replace(/-/g, "")) return null;
-  const facts = await edgarGetJson(secCompanyFactsUrl(cikPadded)).catch(() => null);
-  return facts ? latestAnnualCoverageWarning(filings, facts) : null;
+  const read = await edgarReadJson(secCompanyFactsUrl(cikPadded));
+  if (!read.ok) return annualCoverageReadFailedWarning("companyfacts", read.httpStatus);
+  return read.json ? latestAnnualCoverageWarning(filings, read.json) : null;
 }
 
 export async function getFilingData(
