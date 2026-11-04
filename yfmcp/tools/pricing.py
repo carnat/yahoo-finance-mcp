@@ -2628,11 +2628,13 @@ async def get_put_hedge_candidates(
         "noTwoSidedQuote": 0,
         "noLiquidityEvidence": 0,
     }
+    failed_reads = 0
     for exp in qualifying_expiries:
         try:
             chain = company.option_chain(exp)
             puts_df = chain.puts
         except Exception:
+            failed_reads += 1
             continue
 
         # Filter strikes
@@ -2687,12 +2689,17 @@ async def get_put_hedge_candidates(
                 "otmPct": otm_pct,
             })
 
+    if failed_reads == len(qualifying_expiries):
+        return json.dumps({"error": True, "message": "No option chain could be read; retry.", "ticker": ticker})
+
     # Sort by expiry then strike
     candidates.sort(key=lambda c: (c["expiry"], c["strike"]))
 
     data_date = get_last_trading_date()
     data_quality = _compute_data_quality(considered_contracts, data_date)
     quality_warnings = list(data_quality.get("warnings", []))
+    if failed_reads:
+        quality_warnings.append("OPTION_CHAIN_READ_FAILED")
     if excluded_contracts["noTwoSidedQuote"]:
         quality_warnings.append("UNQUOTED_CONTRACTS_EXCLUDED")
     if excluded_contracts["noLiquidityEvidence"]:
@@ -2707,7 +2714,7 @@ async def get_put_hedge_candidates(
     )
     status = (
         "PARTIAL"
-        if data_quality.get("quality") == "LOW" or (considered_contracts and not candidates)
+        if data_quality.get("quality") == "LOW" or failed_reads or (considered_contracts and not candidates)
         else "OK" if candidates
         else "EMPTY_RESULT"
     )

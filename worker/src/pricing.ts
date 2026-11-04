@@ -1744,6 +1744,7 @@ export async function getPutHedgeCandidates(
       noLiquidityEvidence: 0,
     };
 
+    let failedReads = 0;
     for (const exp of qualifying) {
       try {
         // Reuse firstFetch data if this is the default expiry, otherwise fetch
@@ -1754,7 +1755,10 @@ export async function getPutHedgeCandidates(
           const specific = await yGetFullOptions(ticker, exp);
           putsRaw = specific.puts;
         }
-        if (!Array.isArray(putsRaw)) continue;
+        if (!Array.isArray(putsRaw)) {
+          failedReads += 1;
+          continue;
+        }
 
         const allIVs = putsRaw
           .map((p: Record<string, unknown>) => p.impliedVolatility as number | null)
@@ -1804,14 +1808,20 @@ export async function getPutHedgeCandidates(
           });
         }
       } catch {
+        failedReads += 1;
         continue;
       }
+    }
+
+    if (failedReads === qualifying.length) {
+      return JSON.stringify({ error: true, message: "No option chain could be read; retry.", ticker });
     }
 
     candidates.sort((a, b) => a.expiry.localeCompare(b.expiry) || a.strike - b.strike);
     const dataDate = getLastTradingDate();
     const dataQuality = computeDataQuality(consideredContracts, dataDate);
     const warnings = [...dataQuality.warnings];
+    if (failedReads) warnings.push("OPTION_CHAIN_READ_FAILED");
     if (excludedContracts.noTwoSidedQuote) warnings.push("UNQUOTED_CONTRACTS_EXCLUDED");
     if (excludedContracts.noLiquidityEvidence) warnings.push("NO_LIQUIDITY_EVIDENCE_EXCLUDED");
     const uniqueWarnings = [...new Set(warnings)];
@@ -1820,7 +1830,7 @@ export async function getPutHedgeCandidates(
       : candidates.length
       ? candidates.some((c) => c.withinBudget)
       : consideredContracts.length ? null : false;
-    const status = dataQuality.quality === "LOW" || (consideredContracts.length > 0 && candidates.length === 0)
+    const status = dataQuality.quality === "LOW" || failedReads > 0 || (consideredContracts.length > 0 && candidates.length === 0)
       ? "PARTIAL"
       : candidates.length ? "OK" : "EMPTY_RESULT";
 
