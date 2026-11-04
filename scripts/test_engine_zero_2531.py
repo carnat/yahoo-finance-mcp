@@ -137,7 +137,8 @@ class TestCikResolution(unittest.TestCase):
 
     def test_worker(self) -> None:
         out = _worker_outputs()
-        self.assertEqual(out["unknown"], {"cikPadded": None, "submissions": None})
+        # The ticker index answered 503, so the empty lookup is a failed read, not an absent ticker (3.8.0).
+        self.assertEqual(out["unknown"], {"cikPadded": None, "submissions": None, "failure": "TICKER_INDEX"})
         self.assertFalse(out["unknownAskedCompanySearch"])
         self.assertEqual(out["known"], BLOOM_CIK)
 
