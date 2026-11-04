@@ -3190,6 +3190,22 @@ F-024, F-026, F-029). Both runtimes change alike.
 - **Tests:** 21 new parity cases in `scripts/parity/cases_audit_2251.py`.
 - **Rollback:** redeploy 2.25.0.
 
+## Skipped Option Expiries Are Reported (3.8.2)
+
+- **Why:** Phase 6 swallowed-error audit, part 3 of 4. The owner decided on 2026-11-04 that this release adds one
+  warning code, `OPTION_CHAIN_READ_FAILED`. Both runtimes change.
+- **`get_put_hedge_candidates`:**
+  - **Some expiries unread:** the tool used to skip any expiry whose option chain could not be read, without
+    saying so. When at least one expiry fails, the tool now adds the string `OPTION_CHAIN_READ_FAILED` once to
+    `warnings`, sets the status to `PARTIAL` and returns the candidates from the expiries it did read.
+  - **No expiry read:** when every attempted expiry fails, the tool fails with "No option chain could be read;
+    retry." (`PROVIDER_ERROR`). It no longer answers "No put options found".
+  - **No qualifying puts:** a successful read with no qualifying puts gives the same output as before.
+- **Other options tools:** they read a single expiry and already fail when that read fails.
+- **Tests:** `scripts/parity/cases_options_reads_382.py` has 4 cases.
+- **Unchanged:** `schemaHash` and `manifestHash`.
+- **Rollback:** redeploy 3.8.1.
+
 ## Failed Yahoo Enrichment Reads Are Reported (3.8.1)
 
 - **Why:** Phase 6 swallowed-error audit, part 2 of 4 (owner decision 2026-11-04;
