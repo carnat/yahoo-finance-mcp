@@ -222,22 +222,36 @@ export async function edgarReadJson(url: string): Promise<EdgarJsonRead> {
   }
 }
 
+/** The warning for a tool that went on without companyfacts because SEC could not be read (3.8.0). */
+export function companyfactsReadFailedWarning(): Record<string, unknown> {
+  return { code: "SEC_READ_FAILED", message: "SEC companyfacts could not be read; figures that need them are missing; retry.", severity: "warning" };
+}
+
 /** Fetch an EDGAR HTML/text document. Reads at most maxBytes from the response
  *  stream and cancels the rest, avoiding large memory allocations for big filings. */
 export async function edgarGetHtml(url: string, maxBytes = 5_000_000): Promise<string | null> {
   // Filing documents go through the SEC document cache and are read up to
   // SEC_DOCUMENT_READ_MAX_CHARS; large inline-XBRL 10-Ks exceed 5 MB, and a
   // cut-off read hid their later tables. Small reads (index pages) stream.
+  return (await edgarReadHtml(url, maxBytes)).text;
+}
+
+/**
+ * An EDGAR HTML read that tells a failed read from an absent document (3.8.0): `failed` is true when nothing was read
+ * and SEC did not answer 404 (429, 5xx, timeout, network). Same bytes as edgarGetHtml.
+ */
+export async function edgarReadHtml(url: string, maxBytes = 5_000_000): Promise<{ text: string | null; failed: boolean }> {
   if (maxBytes >= 1_000_000 && url.startsWith(SEC_ARCHIVES_PREFIX)) {
     try {
       const doc = await fetchSecDocument(url);
-      if (!doc.ok) return null;
-      return doc.text.length > SEC_DOCUMENT_READ_MAX_CHARS ? doc.text.slice(0, SEC_DOCUMENT_READ_MAX_CHARS) : doc.text;
+      if (!doc.ok) return { text: null, failed: doc.status !== 404 };
+      return { text: doc.text.length > SEC_DOCUMENT_READ_MAX_CHARS ? doc.text.slice(0, SEC_DOCUMENT_READ_MAX_CHARS) : doc.text, failed: false };
     } catch {
-      return null;
+      return { text: null, failed: true };
     }
   }
-  return (await edgarStreamHtml(url, maxBytes)).text;
+  const read = await edgarStreamHtml(url, maxBytes);
+  return { text: read.text, failed: read.text == null && read.httpStatus !== 404 };
 }
 
 /** A streamed EDGAR read of at most maxBytes, with the HTTP status of a failed response (null when none came back). */
@@ -337,9 +351,9 @@ export async function edgarListExhibitsFromIndex(indexUrl: string): Promise<Reco
  * The exhibits a filing index lists, and whether SEC answered the index with HTTP 404 (the accession is not a filing
  * of that CIK). Any other failed read is not notFound (2.15.0, R4-ACC-EXHIBITS).
  */
-export async function edgarReadExhibitIndex(indexUrl: string): Promise<{ exhibits: Record<string, unknown>[]; notFound: boolean }> {
+export async function edgarReadExhibitIndex(indexUrl: string): Promise<{ exhibits: Record<string, unknown>[]; notFound: boolean; failed: boolean }> {
   const read = await edgarStreamHtml(indexUrl, 500_000);
-  return { exhibits: read.text ? parseExhibitIndexHtml(indexUrl, read.text) : [], notFound: read.httpStatus === 404 };
+  return { exhibits: read.text ? parseExhibitIndexHtml(indexUrl, read.text) : [], notFound: read.httpStatus === 404, failed: read.text == null && read.httpStatus !== 404 };
 }
 
 function parseExhibitIndexHtml(indexUrl: string, html: string): Record<string, unknown>[] {
@@ -500,22 +514,46 @@ export async function resolveCikForTicker(ticker: string): Promise<string | null
   return null;
 }
 
-export async function getSubmissionsForTicker(ticker: string): Promise<{ cikPadded: string | null; submissions: Record<string, unknown> | null }> {
+/**
+ * Why a ticker's submissions lookup came back empty when SEC could not be read (3.8.0): "TICKER_INDEX" (no CIK and the
+ * ticker index was not read), "SUBMISSIONS" (a CIK and a failed submissions read). null: SEC answered, so the ticker
+ * or its submissions are absent (a 404 is absence).
+ */
+export type SecLookupFailure = "TICKER_INDEX" | "SUBMISSIONS";
+
+export function secLookupUnavailableMessage(failure: SecLookupFailure, ticker: string): string {
+  return failure === "TICKER_INDEX"
+    ? `SEC's ticker index could not be read, so ${ticker.toUpperCase()} was not resolved to a CIK; retry.`
+    : "SEC submissions could not be read; retry.";
+}
+
+/** The message for a lookup that came back empty because SEC could not be read, else null (the ticker is absent). */
+export function secLookupUnavailable(lookup: { failure?: SecLookupFailure | null }, ticker: string): string | null {
+  return lookup.failure ? secLookupUnavailableMessage(lookup.failure, ticker) : null;
+}
+
+export async function getSubmissionsForTicker(ticker: string): Promise<{ cikPadded: string | null; submissions: Record<string, unknown> | null; failure: SecLookupFailure | null }> {
   const key = ticker.toUpperCase();
   const cachedSubmissions = filingSubmissionsCache.get(key) ?? null;
   const cikPadded = await resolveCikForTicker(ticker);
-  if (!cikPadded) return { cikPadded: null, submissions: null };
+  if (!cikPadded) return { cikPadded: null, submissions: null, failure: edgarTickerMapLoaded() ? null : "TICKER_INDEX" };
   if (cachedSubmissions) {
     countCacheEvent("sec", "memoryHits");
-    return { cikPadded, submissions: cachedSubmissions };
+    return { cikPadded, submissions: cachedSubmissions, failure: null };
   }
-  const submissions = await edgarGetJson(secSubmissionsUrl(cikPadded));
-  if (submissions) filingSubmissionsCache.set(key, submissions, FILING_SUBMISSIONS_TTL_MS);
-  return { cikPadded, submissions };
+  const read = await edgarReadJson(secSubmissionsUrl(cikPadded));
+  if (!read.ok) return { cikPadded, submissions: null, failure: "SUBMISSIONS" };
+  if (read.json) filingSubmissionsCache.set(key, read.json, FILING_SUBMISSIONS_TTL_MS);
+  return { cikPadded, submissions: read.json, failure: null };
 }
 
 /** Resolve the EX-99.1 exhibit URL from an 8-K filing index page. */
 export async function resolveEx991Url(cikInt: number, accessionNumber: string): Promise<string | null> {
+  return (await resolveEx991UrlRead(cikInt, accessionNumber)).url;
+}
+
+/** resolveEx991Url, and whether the filing index could not be read (3.8.0): no link then does not mean the 8-K has none. */
+export async function resolveEx991UrlRead(cikInt: number, accessionNumber: string): Promise<{ url: string | null; indexFailed: boolean }> {
   const { edgarIndexUrl: indexUrl } = edgarBuildFilingUrls(cikInt, accessionNumber, null);
   const exhibits = await edgarListExhibitsFromIndex(indexUrl);
   const ex991 = exhibits.find((exhibit) => {
@@ -528,14 +566,14 @@ export async function resolveEx991Url(cikInt: number, accessionNumber: string): 
   });
   if (ex991?.document) {
     const { edgarPrimaryDocumentUrl } = edgarBuildFilingUrls(cikInt, accessionNumber, String(ex991.document));
-    if (edgarPrimaryDocumentUrl) return edgarPrimaryDocumentUrl;
+    if (edgarPrimaryDocumentUrl) return { url: edgarPrimaryDocumentUrl, indexFailed: false };
   }
 
-  const html = await edgarGetHtml(indexUrl, 100_000);
-  if (!html) return null;
+  const read = await edgarReadHtml(indexUrl, 100_000);
+  if (!read.text) return { url: null, indexFailed: read.failed };
   // Match an EX-99.1 row in the filing index and capture its document link
   const re = /EX-99\.0?1\b[^<]{0,300}<[^>]+href="(\/Archives\/edgar\/data\/[^"]+\.(?:htm|html))"/i;
-  const m = re.exec(html);
-  if (m) return `${SEC_WWW}${m[1]}`;
-  return null;
+  const m = re.exec(read.text);
+  if (m) return { url: `${SEC_WWW}${m[1]}`, indexFailed: false };
+  return { url: null, indexFailed: false };
 }

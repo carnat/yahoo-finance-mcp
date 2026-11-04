@@ -697,9 +697,10 @@ CASES += [
                   _py(earnings_tools.list_sec_filing_exhibits, "AAPL", OLD_ACC),
                   _ts("listSecFilingExhibits", "AAPL", OLD_ACC),
                   expect={"accessionNumber": OLD_ACC, "documents": ["aapl-2010.htm", "ex99.htm"]}),
-    # A 5xx index read is not a miss: today's empty success, unchanged.
-    _exhibit_case("r4b2.exhibits.index_server_error_keeps_empty_success",
+    # A 5xx index read is not a miss, and no longer an empty success either (3.8.0): a retryable PROVIDER_ERROR.
+    _exhibit_case("r4b2.exhibits.index_server_error_is_provider_error",
                   _py(earnings_tools.list_sec_filing_exhibits, "AAPL", SERVER_ERROR_ACC),
                   _ts("listSecFilingExhibits", "AAPL", SERVER_ERROR_ACC),
-                  expect={"accessionNumber": SERVER_ERROR_ACC, "documents": []}),
+                  expect={"ok": False, "error": {"code": "PROVIDER_ERROR", "message": "SEC filing index could not be read; retry.",
+                                                 "retryable": True}}),
 ]

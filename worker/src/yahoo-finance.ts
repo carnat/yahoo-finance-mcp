@@ -5,6 +5,7 @@ export {
   edgarGetHtml,
   edgarTickerMapLoaded,
   getSubmissionsForTicker,
+  secLookupUnavailable,
   resolveEx991Url,
   secDocumentCacheStats,
   setTickerCikFixturesForTests,

@@ -33,13 +33,18 @@ from yfmcp.clients.edgar import (
     _edgar_get,
     _edgar_get_company_facts,
     _edgar_get_document,
+    _edgar_company_facts_read_failed,
     _edgar_get_html,
+    _edgar_html_read_failed,
     _edgar_list_exhibits_from_index,
     _edgar_read_json,
     _edgar_read_submissions,
+    _edgar_ticker_map_loaded,
     _get_submissions_for_ticker,
     _load_edgar_tickers,
     _resolve_cik_for_ticker,
+    _sec_lookup_failure,
+    _sec_lookup_unavailable_message,
 )
 from yfmcp.clients.endpoints import (
     _manual_lookup_payload,
@@ -95,6 +100,8 @@ async def list_sec_filings(ticker: str, form_type: str = "10-K", max_filings: in
     try:
         cik_padded = await _resolve_cik_for_ticker(ticker)
         if not cik_padded:
+            if not _edgar_ticker_map_loaded():
+                return _lookup_unavailable_envelope("list_sec_filings", _sec_lookup_unavailable_message("TICKER_INDEX", ticker))
             return _mcp_failure("list_sec_filings", ErrorCode.TICKER_NOT_FOUND,
                                 f"Could not find EDGAR CIK for ticker '{ticker}'")
         cik = int(cik_padded)
@@ -496,6 +503,27 @@ def _accession_not_found_envelope(error: dict) -> str:
     return json.dumps({"ok": False, "error": error})
 
 
+def _lookup_unavailable_message(ticker: str) -> str | None:
+    """The message for a ticker/submissions lookup that came back empty because SEC could not be read (3.8.0), else None
+    (SEC answered: the ticker or its submissions are absent)."""
+    failure = _sec_lookup_failure(ticker)
+    return _sec_lookup_unavailable_message(failure, ticker) if failure else None
+
+
+def _companyfacts_read_failed_warning() -> dict:
+    """The warning for a tool that went on without companyfacts because SEC could not be read (3.8.0)."""
+    return {"code": "SEC_READ_FAILED", "message": "SEC companyfacts could not be read; figures that need them are missing; retry.", "severity": "warning"}
+
+
+def _lookup_unavailable_envelope(tool: str, message: str) -> str:
+    return _mcp_failure(tool, ErrorCode.PROVIDER_ERROR, message, meta_extra={"error_extra": {"retryable": True}})
+
+
+def _lookup_unavailable_payload(ticker: str, message: str) -> dict:
+    """The 2.5.17 fact tools' envelope for an SEC lookup that could not be read, as a resolver error payload."""
+    return {"status": "PROVIDER_ERROR", "code": "SEC_LOOKUP_UNAVAILABLE", "retryable": True, "ticker": ticker, "message": message}
+
+
 async def _legacy_accession_miss_payload(ticker: str, filing_type: str) -> dict:
     """The Worker's legacyAccessionMissPayload: the filing-not-found payload the out-of-scope readers returned before 2.13.0."""
     _cik, subs = await _get_submissions_for_ticker(ticker)
@@ -513,6 +541,9 @@ async def _resolve_sec_filing(ticker: str, requested_filing_type: str = "10-K", 
     requested = (requested_filing_type or "10-K").upper()
     cik_padded, subs = await _get_submissions_for_ticker(ticker)
     if not cik_padded or not subs:
+        unavailable = _lookup_unavailable_message(ticker)
+        if unavailable:
+            return None, _lookup_unavailable_payload(ticker, unavailable)
         return None, {"status": "TICKER_NOT_FOUND", "code": "TICKER_NOT_FOUND", "ticker": ticker,
                       "message": f"Could not resolve EDGAR submissions for ticker '{ticker}'"}
     recent = (subs.get("filings") or {}).get("recent") or {}
@@ -1704,10 +1735,18 @@ def _fiscal_year_of(report_date: str | None, focus: int | None = None) -> str | 
     return filing_fiscal_year_label(focus, str(report_date) if report_date else None)
 
 
-async def _exhibit_targets(cik_int: int, accession: str, filing_date: str | None, filing_type: str, primary_url: str) -> list[dict]:
+_FILING_INDEX_UNREAD_MESSAGE = "SEC filing index could not be read; retry."
+
+
+async def _exhibit_targets(cik_int: int, accession: str, filing_date: str | None, filing_type: str, primary_url: str,
+                           warnings: list[dict] | None = None) -> list[dict]:
     index_url, _ = _edgar_build_filing_urls(cik_int, accession, None)
     out: list[dict] = []
-    for exhibit in await _edgar_list_exhibits_from_index(index_url):
+    exhibits = await _edgar_list_exhibits_from_index(index_url)
+    # An index that could not be read lists no exhibits; say so instead of searching none (3.8.0).
+    if not exhibits and warnings is not None and _edgar_html_read_failed(index_url):
+        warnings.append({"code": "FILING_TEXT_NOT_AVAILABLE", "message": _FILING_INDEX_UNREAD_MESSAGE, "severity": "warning", "accessionNumber": accession})
+    for exhibit in exhibits:
         doc_type = str(exhibit.get("type") or "").upper()
         name = str(exhibit.get("document") or "")
         url = f"{index_url.rsplit('/', 1)[0]}/{name}" if name else ""
@@ -1830,6 +1869,10 @@ async def _sft_select_filings(
     filings: list[dict] = []
     cik_padded, subs = await _get_submissions_for_ticker(ticker)
     if not cik_padded or not subs:
+        unavailable = _lookup_unavailable_message(ticker)
+        if unavailable:
+            return empty_result(status="PROVIDER_ERROR", code="SEC_LOOKUP_UNAVAILABLE", confidence="SEC_LOOKUP_UNAVAILABLE", retryable=True,
+                                message=unavailable)
         return empty_result(status="TICKER_NOT_FOUND", code="TICKER_NOT_FOUND", confidence="TICKER_NOT_FOUND",
                             message=f"Could not resolve EDGAR submissions for ticker '{ticker}'")
     recent = subs.get("filings", {}).get("recent", {})
@@ -1900,6 +1943,7 @@ async def _sft_build_groups(
     primary_url: str | None,
     accession_number: str | None,
     filing_type: str,
+    warnings: list[dict] | None = None,
 ) -> list[dict]:
     groups: list[dict] = (
         [{"filing": None, "targets": [explicit_target]}] if explicit_target else [
@@ -1919,7 +1963,7 @@ async def _sft_build_groups(
                 continue
             group["targets"].extend(await _exhibit_targets(
                 cik_value, acc, group["filing"]["filingDate"] if group["filing"] else None,
-                group["filing"]["filingType"] if group["filing"] else filing_type, group["targets"][0]["url"],
+                group["filing"]["filingType"] if group["filing"] else filing_type, group["targets"][0]["url"], warnings,
             ))
     return groups
 
@@ -2001,6 +2045,7 @@ async def _sft_page_payloads(
     start_at: int,
     page_size: int,
     return_tables: bool,
+    warnings: list[dict],
 ) -> tuple[list, list, list[dict]]:
     """The ordered matches, the requested page of them and the page's payloads."""
     ordered = _fs.order_matches(run.all_matches, ordering, run.doc_order)
@@ -2008,6 +2053,7 @@ async def _sft_page_payloads(
     multi_document = len(run.documents_searched) > 1
     target_by_key = {t["key"]: t for g in groups for t in g["targets"]}
     payloads: list[dict] = []
+    table_read_failed: set[str] = set()
     for m in page:
         payload = _fs.match_payload(m)
         target = target_by_key.get(m.doc.key)
@@ -2022,6 +2068,10 @@ async def _sft_page_payloads(
                 if html:
                     rows = [_fs.merge_financial_cells(r) for r in _parse_filing_table_rows(html[table.html_start:table.html_end], _FILING_SEARCH_TABLE_ROWS)]
                     table_parsed.append({"tableIndex": table.table_index, "rows": rows, "rowsTruncated": len(rows) >= _FILING_SEARCH_TABLE_ROWS})
+                elif _edgar_html_read_failed(target["url"]) and target["url"] not in table_read_failed:
+                    table_read_failed.add(target["url"])
+                    warnings.append({"code": "FILING_TEXT_NOT_AVAILABLE", "message": "Filing text could not be read to parse the table; retry.",
+                                     "severity": "warning", "accessionNumber": target["accessionNumber"]})
             payload["tableParsed"] = table_parsed
         payloads.append(payload)
     return ordered, page, payloads
@@ -2145,7 +2195,7 @@ async def search_filing_text(
             "warnings": [*warnings, {"code": "NO_SEARCH_TERMS", "message": "Pass search_terms, search_query or near to search the filing text.", "severity": "warning"}],
         })
 
-    groups = await _sft_build_groups(explicit_target, filings, include_exhibits, primary_url, accession_number, filing_type)
+    groups = await _sft_build_groups(explicit_target, filings, include_exhibits, primary_url, accession_number, filing_type, warnings)
 
     # ── Search each document in turn ──
     run = _FilingSearchRun()
@@ -2172,7 +2222,7 @@ async def search_filing_text(
         warnings.append({"code": "FILING_READ_TRUNCATED", "message": f"{run.truncated_documents} document(s) exceeded {_SEC_DOCUMENT_READ_MAX_CHARS} characters; text past that point was not searched.", "severity": "warning"})
 
     # ── Order, page and describe ──
-    ordered, page, payloads = await _sft_page_payloads(run, groups, ordering, start_at, page_size, return_tables)
+    ordered, page, payloads = await _sft_page_payloads(run, groups, ordering, start_at, page_size, return_tables, warnings)
     return _sft_build_output(run, base, spec, mode, ordering, section_hint, ordered, page, payloads, start_at, page_size, warnings)
 
 
@@ -2194,6 +2244,9 @@ async def list_sec_company_filings(ticker: str, filing_type: str = "10-K", limit
 
     cik_padded, subs = await _get_submissions_for_ticker(ticker)
     if not cik_padded or not subs:
+        unavailable = _lookup_unavailable_message(ticker)
+        if unavailable:
+            return _lookup_unavailable_envelope("list_sec_company_filings", unavailable)
         return _mcp_failure("list_sec_company_filings", ErrorCode.TICKER_NOT_FOUND,
                             f"Could not find EDGAR submissions for ticker '{ticker}'")
 
@@ -2943,6 +2996,9 @@ async def list_sec_material_filings(
 
     cik_padded, subs = await _get_submissions_for_ticker(ticker)
     if not cik_padded or not subs:
+        unavailable = _lookup_unavailable_message(ticker)
+        if unavailable:
+            return _lookup_unavailable_envelope("list_sec_material_filings", unavailable)
         return _mcp_failure("list_sec_material_filings", ErrorCode.TICKER_NOT_FOUND,
                             f"Could not find EDGAR submissions for ticker '{ticker}'")
 
@@ -3057,6 +3113,9 @@ async def get_sec_filing_intelligence(
 
     cik_padded, subs = await _get_submissions_for_ticker(ticker)
     if not cik_padded or not subs:
+        unavailable = _lookup_unavailable_message(ticker)
+        if unavailable:
+            return _lookup_unavailable_envelope("get_sec_filing_intelligence", unavailable)
         return _mcp_failure("get_sec_filing_intelligence", ErrorCode.TICKER_NOT_FOUND,
                             f"Could not find EDGAR submissions for ticker '{ticker}'")
 
@@ -3120,6 +3179,9 @@ async def get_sec_filing_intelligence(
     try:
         exhibits_index_url, _ = _edgar_build_filing_urls(cik_int, accession_number, None)
         exhibits_count = len(await _edgar_list_exhibits_from_index(exhibits_index_url))
+        # An index that could not be read is not an empty one: null, as when the read raises (3.8.0).
+        if exhibits_count == 0 and _edgar_html_read_failed(exhibits_index_url):
+            exhibits_count = None
     except Exception:
         exhibits_count = None
     try:
@@ -3315,6 +3377,9 @@ async def get_sec_filing_section_markdown(
 
     cik_padded, subs = await _get_submissions_for_ticker(ticker)
     if not cik_padded or not subs:
+        unavailable = _lookup_unavailable_message(ticker)
+        if unavailable:
+            return _lookup_unavailable_envelope("get_sec_filing_section_markdown", unavailable)
         return _mcp_failure("get_sec_filing_section_markdown", ErrorCode.TICKER_NOT_FOUND,
                             f"Could not find EDGAR submissions for ticker '{ticker}'")
 
@@ -3428,6 +3493,9 @@ async def _resolve_periodic_filings(ticker: str, filing_type: str, accession_num
     """The newest periodic report, plus the latest annual report when the newest is a 10-Q."""
     cik_padded, subs = await _get_submissions_for_ticker(ticker)
     if not cik_padded or not subs:
+        unavailable = _lookup_unavailable_message(ticker)
+        if unavailable:
+            return [], _lookup_unavailable_payload(ticker, unavailable)
         return [], {"status": "TICKER_NOT_FOUND", "code": "TICKER_NOT_FOUND", "ticker": ticker, "message": f"Could not resolve EDGAR submissions for ticker '{ticker}'"}
     recent = subs.get("filings", {}).get("recent", {})
     forms = [str(f) for f in recent.get("form", [])]

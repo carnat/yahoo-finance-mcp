@@ -32,7 +32,7 @@ from yfmcp.tools.fundamentals import (
     _consensus_providers,
     _write_consensus_observation,
 )
-from yfmcp.tools.sec import list_sec_material_filings
+from yfmcp.tools.sec import _lookup_unavailable_message, list_sec_material_filings
 from yfmcp.util import _now_iso
 from yfmcp.validation import _validate_ticker
 
@@ -43,6 +43,9 @@ async def _sec_filing_rows(ticker: str) -> tuple[list[dict] | None, str]:
     except Exception as exc:  # noqa: BLE001
         return None, f"PROVIDER_ERROR: {exc}"
     if not cik_padded or not subs:
+        unavailable = _lookup_unavailable_message(ticker)
+        if unavailable:
+            return None, f"PROVIDER_ERROR: {unavailable}"
         return None, "TICKER_NOT_FOUND"
     recent = (subs.get("filings") or {}).get("recent") or {}
     forms = recent.get("form") or []

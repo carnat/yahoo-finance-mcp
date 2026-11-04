@@ -46,6 +46,7 @@ import {
   extractDilutionBridge,
   extractGuidance,
   getSubmissionsForTicker,
+  secLookupUnavailable,
   listSecMaterialFilings,
   secFiscalYearNaming,
 } from "./yahoo-finance.js";
@@ -283,8 +284,12 @@ export async function getEpsRevisions(ticker: string): Promise<string> {
 
 async function secFilingRows(ticker: string): Promise<{ rows: FilingRow[] | null; status: string }> {
   try {
-    const { cikPadded, submissions } = await getSubmissionsForTicker(ticker);
-    if (!cikPadded || !submissions) return { rows: null, status: "TICKER_NOT_FOUND" };
+    const lookup = await getSubmissionsForTicker(ticker);
+    const { cikPadded, submissions } = lookup;
+    if (!cikPadded || !submissions) {
+      const unavailable = secLookupUnavailable(lookup, ticker);
+      return { rows: null, status: unavailable ? `PROVIDER_ERROR: ${unavailable}` : "TICKER_NOT_FOUND" };
+    }
     const recent = ((submissions.filings as Rec)?.recent ?? {}) as Record<string, unknown[]>;
     const forms = (recent.form ?? []) as string[];
     const rows: FilingRow[] = forms.map((form, i) => ({

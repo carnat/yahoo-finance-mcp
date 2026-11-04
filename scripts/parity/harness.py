@@ -206,6 +206,8 @@ def stub_urlopen(routes: dict | None):
         route = _route_for(routes, url)
         if route is None:
             raise RuntimeError(f"UNSTUBBED_FETCH {url}")
+        if route.get("error") == "timeout":  # no response at all: a timed-out or dropped connection
+            raise TimeoutError("timed out")
         status = int(route.get("status", 200))
         body = _route_body(route)
         if status >= 400:

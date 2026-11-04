@@ -11,7 +11,7 @@ import { coverReadsNeeded, coverShareCounts, foreignFiler, historicalValuation, 
 import { annualFilingsFromSubmissions, latestAnnualCoverageWarning } from "./companyfacts-coverage.js";
 import { DEFAULT_TOLERANCE_PCT, METRICS as RECONCILE_METRICS, RECONCILE_PERIOD_HELP, isReconcilePeriod, metricReconciliation, resolvePeriod } from "./metric-reconciliation.js";
 import { AUTHORITY_BOUNDARY } from "./evidence.js";
-import { edgarGetHtml, edgarGetJson, getEdgarTickerCikMap, getSubmissionsForTicker, resolveCikForTicker } from "./clients/edgar.js";
+import { edgarGetHtml, edgarReadJson, getEdgarTickerCikMap, getSubmissionsForTicker, resolveCikForTicker } from "./clients/edgar.js";
 import { secArchiveDocumentUrl, secCompanyFactsUrl, yahooChartUrl } from "./clients/endpoints.js";
 import { enc, fetchTimeseriesByDate, valuationMarketInputs, yGet } from "./clients/yahoo.js";
 import { dailyBarDate, parseObjectJson } from "./util.js";
@@ -93,11 +93,13 @@ async function valuationHistoryFor(ticker: string, dates: string[] | null, fromD
     const code = tickerIndex ? "NO_SEC_REGISTRANT" : "SEC_LOOKUP_UNAVAILABLE";
     return { ticker: upper, status: code, code, retryable: !tickerIndex, ...AUTHORITY_BOUNDARY };
   }
-  const [facts, history] = await Promise.all([
-    edgarGetJson(secCompanyFactsUrl(cikPadded)).catch(() => null),
+  const [factsRead, history] = await Promise.all([
+    edgarReadJson(secCompanyFactsUrl(cikPadded)),
     dailyHistory(ticker, fromDate).catch(() => null),
   ]);
-  if (!facts) return { ticker: upper, status: "COMPANYFACTS_NOT_AVAILABLE", code: "COMPANYFACTS_NOT_AVAILABLE", retryable: true, ...AUTHORITY_BOUNDARY };
+  const facts = factsRead.ok ? factsRead.json : null;
+  // A failed companyfacts read keeps the status and says so in the code (3.8.0).
+  if (!facts) return { ticker: upper, status: "COMPANYFACTS_NOT_AVAILABLE", code: factsRead.ok ? "COMPANYFACTS_NOT_AVAILABLE" : "SEC_READ_FAILED", retryable: true, ...AUTHORITY_BOUNDARY };
   if (!history || history.bars.length === 0) return { ticker: upper, status: "PRICE_HISTORY_NOT_AVAILABLE", code: "PRICE_HISTORY_NOT_AVAILABLE", retryable: true, ...AUTHORITY_BOUNDARY };
   const useDates = dates ?? valuationDates(null, history.bars[history.bars.length - 1].date).dates;
   const { currency } = taxonomyOf(facts);
@@ -192,8 +194,9 @@ export async function reconcileMetricSources(ticker: string, metric: string, per
     const code = tickerIndex ? "NO_SEC_REGISTRANT" : "SEC_LOOKUP_UNAVAILABLE";
     return JSON.stringify({ ticker: upper, metric, status: code, code, retryable: !tickerIndex });
   }
-  const facts = await edgarGetJson(secCompanyFactsUrl(cikPadded)).catch(() => null);
-  if (!facts) return JSON.stringify({ ticker: upper, metric, status: "COMPANYFACTS_NOT_AVAILABLE", code: "COMPANYFACTS_NOT_AVAILABLE", retryable: true });
+  const factsRead = await edgarReadJson(secCompanyFactsUrl(cikPadded));
+  const facts = factsRead.ok ? factsRead.json : null;
+  if (!facts) return JSON.stringify({ ticker: upper, metric, status: "COMPANYFACTS_NOT_AVAILABLE", code: factsRead.ok ? "COMPANYFACTS_NOT_AVAILABLE" : "SEC_READ_FAILED", retryable: true });
   // The latest annual report may be missing from companyfacts (2.5.30, F-015): said on every result, found or not.
   const coverageWarning = latestAnnualCoverageWarning(annualFilingsFromSubmissions(submissions), facts);
   const resolved = resolvePeriod(facts, metric, period);

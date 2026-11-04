@@ -30,7 +30,8 @@ import { operatingDriverLedger } from "./driver-ledger.js";
 import { parseShareScenarios, shareCountScenarios } from "./share-scenarios.js";
 import { customerConcentration, type ConcentrationFinding } from "./extraction-rules.js";
 import {
-  edgarGetJson,
+  edgarReadJson,
+  companyfactsReadFailedWarning,
   getSubmissionsForTicker,
   edgarGetHtml,
   fetchSecDocument,
@@ -1466,10 +1467,10 @@ export async function extractOperatingDriverLedger(ticker: string, filingType = 
   const resolved = await resolvePeriodicFilings(ticker, filingType, accessionNumber);
   if (!resolved.ok) return resolveFailure(resolved.error, ticker);
   const primary = resolved.filings[0].filing;
-  const [loaded, matches, companyfacts, release] = await Promise.all([
+  const [loaded, matches, factsRead, release] = await Promise.all([
     ixbrlSource("primary", primary).catch(() => null),
     filingTextMatches(ticker, primary, DRIVER_SEARCH_TERMS, 30, 700).catch(() => [] as TextMatch[]),
-    edgarGetJson(secCompanyFactsUrl(primary.cikPadded)).catch(() => null),
+    edgarReadJson(secCompanyFactsUrl(primary.cikPadded)),
     getSubmissionsForTicker(ticker).then(async ({ submissions }): Promise<Record<string, unknown>> => {
       // The newest results-of-operations 8-K, as in get_guidance_history.
       const pick = submissions ? earningsReleasePicks(submissions, primary.cikInt, 1)[0] : undefined;
@@ -1478,6 +1479,7 @@ export async function extractOperatingDriverLedger(ticker: string, filingType = 
       return { ...read, filingDate: pick.filingDate, accessionNumber: pick.accessionNumber };
     }).catch((): Record<string, unknown> => ({ status: "RELEASE_NOT_RESOLVED", url: null, filingDate: null, accessionNumber: null, text: null })),
   ]);
+  const companyfacts = factsRead.ok ? factsRead.json : null;
   const statements = [
     ...(typeof release.text === "string" ? [{
       contextText: release.text, sectionHeading: null, documentUrl: (release.url as string | null) ?? null,
@@ -1498,6 +1500,7 @@ export async function extractOperatingDriverLedger(ticker: string, filingType = 
   if (!loaded) warnings.push({ code: "FILING_TEXT_NOT_AVAILABLE", message: "The periodic filing could not be read from SEC, so company-specific series were not read; retry.", severity: "warning" });
   else if (loaded.truncated) warnings.push({ code: "FILING_READ_TRUNCATED", message: "The filing exceeded the read limit; facts past that point were not parsed.", severity: "warning" });
   if (!companyfacts) warnings.push({ code: "COMPANYFACTS_NOT_AVAILABLE", message: "SEC companyfacts could not be read, so standard driver series were not read; retry.", severity: "warning" });
+  if (!companyfacts && !factsRead.ok) warnings.push(companyfactsReadFailedWarning());
   if (release.status === "NOT_READ") warnings.push({ code: "RELEASE_TEXT_NOT_AVAILABLE", message: `The earnings release ${String(release.url)} could not be read from SEC; retry.`, severity: "warning" });
   else if (release.status === "RELEASE_NOT_RESOLVED") warnings.push({ code: "RELEASE_NOT_RESOLVED", message: "No SEC earnings release was resolved, so release statements were not read.", severity: "warning" });
   out.status = warnings.some((w) => w.code !== "FILING_READ_TRUNCATED" && w.code !== "RELEASE_NOT_RESOLVED") ? "PARTIAL" : "OK";

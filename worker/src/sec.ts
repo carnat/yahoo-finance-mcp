@@ -51,9 +51,9 @@ import {
   SEC_DOCUMENT_READ_MAX_CHARS,
   type SecDocumentResult,
   fetchSecDocument,
-  edgarListExhibitsFromIndex,
   edgarCikFromAccession,
   edgarReadExhibitIndex,
+  secLookupUnavailable,
   edgarDocumentUrlFromRef,
   edgarDocumentFileName,
 } from "./clients/edgar.js";
@@ -178,8 +178,11 @@ export async function resolveSecFiling(
   accessionNumber: string | null = null,
 ): Promise<{ ok: true; filing: ResolvedSecFiling } | { ok: false; error: Record<string, unknown> }> {
   const requested = (requestedFilingType || "10-K").toUpperCase();
-  const { cikPadded, submissions } = await getSubmissionsForTicker(ticker);
+  const lookup = await getSubmissionsForTicker(ticker);
+  const { cikPadded, submissions } = lookup;
   if (!cikPadded || !submissions) {
+    const unavailable = secLookupUnavailable(lookup, ticker);
+    if (unavailable) return { ok: false, error: { status: "PROVIDER_ERROR", code: "SEC_LOOKUP_UNAVAILABLE", retryable: true, ticker, message: unavailable } };
     return { ok: false, error: { status: "TICKER_NOT_FOUND", code: "TICKER_NOT_FOUND", ticker, message: `Could not resolve EDGAR submissions for ticker '${ticker}'` } };
   }
 
@@ -1316,10 +1319,22 @@ async function resolveSecFilingsForSearch(
   return { filings: filings.length > 0 ? filings : [first], capped };
 }
 
-async function exhibitTargets(cikInt: number, accessionNumber: string, filingDate: string | null, filingType: string, primaryUrl: string): Promise<FilingSearchTarget[]> {
+async function exhibitTargets(
+  cikInt: number,
+  accessionNumber: string,
+  filingDate: string | null,
+  filingType: string,
+  primaryUrl: string,
+  warnings?: Record<string, unknown>[],
+): Promise<FilingSearchTarget[]> {
   const { edgarIndexUrl } = edgarBuildFilingUrls(cikInt, accessionNumber, null);
   const out: FilingSearchTarget[] = [];
-  for (const exhibit of await edgarListExhibitsFromIndex(edgarIndexUrl)) {
+  const index = await edgarReadExhibitIndex(edgarIndexUrl);
+  // An index that could not be read lists no exhibits; say so instead of searching none (3.8.0).
+  if (index.failed && warnings) {
+    warnings.push({ code: "FILING_TEXT_NOT_AVAILABLE", message: "SEC filing index could not be read; retry.", severity: "warning", accessionNumber });
+  }
+  for (const exhibit of index.exhibits) {
     const type = String(exhibit.type ?? "").toUpperCase();
     const url = typeof exhibit.documentUrl === "string" ? exhibit.documentUrl : "";
     if (!/^EX-99/.test(type) || !/\.(?:htm|html|txt)$/i.test(url) || url === primaryUrl) continue;
@@ -1477,7 +1492,7 @@ export async function searchFilingText(
       const acc = group.filing?.accessionNumber ?? accessionNumber;
       const cikInt = group.filing?.cikInt ?? (primaryUrl ? parseInt(primaryUrl.match(/\/data\/(\d+)\//)?.[1] ?? "", 10) : NaN);
       if (!acc || !Number.isFinite(cikInt)) continue;
-      group.targets.push(...await exhibitTargets(cikInt, acc, group.filing?.filingDate ?? null, group.filing?.filingType ?? filingType, group.targets[0].url));
+      group.targets.push(...await exhibitTargets(cikInt, acc, group.filing?.filingDate ?? null, group.filing?.filingType ?? filingType, group.targets[0].url, warnings));
     }
   }
 
@@ -1596,6 +1611,7 @@ export async function searchFilingText(
   const targetByKey = new Map<string, FilingSearchTarget>();
   for (const group of targetsByFiling) for (const target of group.targets) targetByKey.set(target.key, target);
   const payloads: Record<string, unknown>[] = [];
+  const tableReadFailed = new Set<string>();
   for (const match of page) {
     const payload = matchPayload(match, false);
     const target = targetByKey.get(match.doc.key);
@@ -1613,6 +1629,10 @@ export async function searchFilingText(
         if (doc?.ok) {
           const rows = parseFilingTableRows(doc.text.slice(table.htmlStart, table.htmlEnd), FILING_SEARCH_TABLE_ROWS).map(mergeFinancialCells);
           tableParsed.push({ tableIndex: table.tableIndex, rows, rowsTruncated: rows.length >= FILING_SEARCH_TABLE_ROWS });
+        } else if ((doc === null || doc.status !== 404) && !tableReadFailed.has(target.url)) {
+          // The filing could not be read to parse the table (a 404 is absence) (3.8.0).
+          tableReadFailed.add(target.url);
+          warnings.push({ code: "FILING_TEXT_NOT_AVAILABLE", message: "Filing text could not be read to parse the table; retry.", severity: "warning", accessionNumber: target.accessionNumber });
         }
       }
       payload.tableParsed = tableParsed;
@@ -1673,8 +1693,11 @@ function looksLikeFilingMarkupText(text: string): boolean {
 
 /** Phase 2 canonical listing: returns cik, filingType, acceptedAt, primaryDocument, documentUrl, meta. */
 export async function listSecCompanyFilings(ticker: string, filingType: string = "10-K", limit: number = 5): Promise<string> {
-  const { cikPadded, submissions } = await getSubmissionsForTicker(ticker);
+  const lookup = await getSubmissionsForTicker(ticker);
+  const { cikPadded, submissions } = lookup;
   if (!cikPadded || !submissions) {
+    const unavailable = secLookupUnavailable(lookup, ticker);
+    if (unavailable) return JSON.stringify({ ok: false, error: { code: "PROVIDER_ERROR", message: unavailable, retryable: true } });
     return JSON.stringify({ ok: false, error: { code: "TICKER_NOT_FOUND", message: `Could not find EDGAR submissions for ticker '${ticker}'` } });
   }
 
@@ -2431,8 +2454,11 @@ export async function listSecMaterialFilings(
   const resolvedLimit = Math.min(Math.max(1, limit), SEC_MATERIAL_FILINGS_MAX);
   const allowedForms = new Set((forms ?? SEC_MATERIAL_FORMS_DEFAULT).map(f => f.toUpperCase()));
 
-  const { cikPadded, submissions } = await getSubmissionsForTicker(ticker);
+  const lookup = await getSubmissionsForTicker(ticker);
+  const { cikPadded, submissions } = lookup;
   if (!cikPadded || !submissions) {
+    const unavailable = secLookupUnavailable(lookup, ticker);
+    if (unavailable) return JSON.stringify({ ok: false, error: { code: "PROVIDER_ERROR", message: unavailable, retryable: true } });
     return JSON.stringify({ ok: false, error: { code: "TICKER_NOT_FOUND", message: `Could not find EDGAR submissions for ticker '${ticker}'` } });
   }
 
@@ -2555,8 +2581,11 @@ export async function getSecFilingIntelligence(
 ): Promise<string> {
   filingIndex = Math.max(0, Math.min(filingIndex, 9));
 
-  const { cikPadded, submissions } = await getSubmissionsForTicker(ticker);
+  const lookup = await getSubmissionsForTicker(ticker);
+  const { cikPadded, submissions } = lookup;
   if (!cikPadded || !submissions) {
+    const unavailable = secLookupUnavailable(lookup, ticker);
+    if (unavailable) return JSON.stringify({ ok: false, error: { code: "PROVIDER_ERROR", message: unavailable, retryable: true } });
     return JSON.stringify({ ok: false, error: { code: "TICKER_NOT_FOUND", message: `Could not find EDGAR submissions for ticker '${ticker}'` } });
   }
 
@@ -2627,7 +2656,9 @@ export async function getSecFilingIntelligence(
   let exhibitsCount: number | null = null;
   try {
     const { edgarIndexUrl } = edgarBuildFilingUrls(cikInt, accessionNumber, null);
-    exhibitsCount = (await edgarListExhibitsFromIndex(edgarIndexUrl)).length;
+    // An index that could not be read is not an empty one: null, as when the read throws (3.8.0).
+    const exhibitIndex = await edgarReadExhibitIndex(edgarIndexUrl);
+    exhibitsCount = exhibitIndex.failed ? null : exhibitIndex.exhibits.length;
   } catch { exhibitsCount = null; }
 
   let recommendedQueries = ["revenue by segment", "risk factors", "liquidity and capital resources", "customer concentration", "long-term debt"];
@@ -2660,8 +2691,11 @@ export async function getSecFilingSectionMarkdown(
   filingIndex = Math.max(0, Math.min(filingIndex, 9));
   maxChars = Math.min(Math.max(1000, maxChars), 100000);
 
-  const { cikPadded, submissions } = await getSubmissionsForTicker(ticker);
+  const lookup = await getSubmissionsForTicker(ticker);
+  const { cikPadded, submissions } = lookup;
   if (!cikPadded || !submissions) {
+    const unavailable = secLookupUnavailable(lookup, ticker);
+    if (unavailable) return JSON.stringify({ ok: false, error: { code: "PROVIDER_ERROR", message: unavailable, retryable: true } });
     return JSON.stringify({ ok: false, error: { code: "TICKER_NOT_FOUND", message: `Could not find EDGAR submissions for ticker '${ticker}'` } });
   }
 
@@ -2811,10 +2845,13 @@ export async function listSecFilingExhibits(ticker: string, accessionNumber: str
 
   // The issuer's CIK comes from the ticker; an accession prefix names the filer
   // agent (0001193125 is Donnelley), so it is only a fallback.
-  const { cikPadded: issuerCik } = await getSubmissionsForTicker(ticker);
+  const issuerLookup = await getSubmissionsForTicker(ticker);
+  const issuerCik = issuerLookup.cikPadded;
   let cik: number | null = issuerCik ? parseInt(issuerCik, 10) : null;
   if (!cik) cik = edgarCikFromAccession(accessionNumber);
   if (!cik) {
+    const unavailable = secLookupUnavailable(issuerLookup, ticker);
+    if (unavailable) return JSON.stringify({ ok: false, error: { code: "PROVIDER_ERROR", message: unavailable, retryable: true } });
     return JSON.stringify({ ok: false, error: { code: "TICKER_NOT_FOUND", message: `Could not resolve CIK for ticker '${ticker}'.` } });
   }
 
@@ -2823,6 +2860,8 @@ export async function listSecFilingExhibits(ticker: string, accessionNumber: str
   // SEC has no filing index for (CIK, accession): the accession is not that company's filing, never an empty
   // exhibit list (2.15.0, R4-ACC-EXHIBITS). Older accessions outside the recent-filings list still read.
   if (index.notFound) return accessionNotFoundEnvelope(accessionNotFoundError(ticker, accessionNumber, false));
+  // An index that could not be read is not an empty exhibit list (3.8.0).
+  if (index.failed) return JSON.stringify({ ok: false, error: { code: "PROVIDER_ERROR", message: "SEC filing index could not be read; retry.", retryable: true } });
   return JSON.stringify({
     ticker: ticker.toUpperCase(),
     accessionNumber,
@@ -2846,10 +2885,13 @@ export async function getSecFilingExhibitContent(
 
   // The issuer's CIK comes from the ticker; an accession prefix names the filer
   // agent (0001193125 is Donnelley), so it is only a fallback.
-  const { cikPadded: issuerCik } = await getSubmissionsForTicker(ticker);
+  const issuerLookup = await getSubmissionsForTicker(ticker);
+  const issuerCik = issuerLookup.cikPadded;
   let cik: number | null = issuerCik ? parseInt(issuerCik, 10) : null;
   if (!cik) cik = edgarCikFromAccession(accessionNumber);
   if (!cik) {
+    const unavailable = secLookupUnavailable(issuerLookup, ticker);
+    if (unavailable) return JSON.stringify({ ok: false, error: { code: "PROVIDER_ERROR", message: unavailable, retryable: true } });
     return JSON.stringify({ ok: false, error: { code: "TICKER_NOT_FOUND", message: `Could not resolve CIK for ticker '${ticker}'.` } });
   }
 
