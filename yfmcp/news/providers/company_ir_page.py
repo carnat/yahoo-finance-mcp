@@ -149,7 +149,8 @@ def _parse_company_ir_page_json(ticker: str, entry: dict, text: str, retrieved_a
     try:
         payload = json.loads(text)
     except Exception:
-        return []
+        # A structured entry whose body is not JSON fails validation (3.8.3).
+        raise ValueError("unexpected non-JSON body for structured adapter")
     items: list[dict] = []
     for raw in _company_ir_page_json_records(payload):
         title = str(raw.get("title") or raw.get("headline") or raw.get("name") or "").strip()

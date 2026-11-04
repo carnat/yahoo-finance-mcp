@@ -847,7 +847,8 @@ const TOOL_HANDLERS: ReadonlyMap<string, ToolHandler> = new Map<string, ToolHand
           parsed = parsedAny as Record<string, unknown>;
         }
       } catch {
-        parsed = {};
+        // A fact result that cannot be read is not "not disclosed" (3.8.3).
+        return mcpFailure("extract_sec_filing_fact", ErrorCode.PROVIDER_ERROR, "SEC fact result could not be read; retry.", { metaExtra: { retryable: true } });
       }
       const sourceEvidence = xbrlSourceEvidence(parsed)
         ?? (hasUsefulEvidence(parsed.evidence) ? parsed.evidence : null);

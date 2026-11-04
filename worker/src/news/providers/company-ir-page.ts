@@ -213,7 +213,8 @@ function companyIrPageStructuredJsonItems(
   try {
     parsed = JSON.parse(text);
   } catch {
-    return [];
+    // A structured entry whose body is not JSON fails validation (3.8.3).
+    throw new Error("unexpected non-JSON body for structured adapter");
   }
   const items: Record<string, unknown>[] = [];
   for (const raw of structuredJsonItemArrays(parsed)) {

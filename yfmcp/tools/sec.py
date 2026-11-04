@@ -2575,7 +2575,8 @@ async def extract_sec_filing_fact(
             if isinstance(parsed_any, dict):
                 parsed_payload = parsed_any
         except Exception:
-            parsed_payload = {}
+            # A fact result that cannot be read is not "not disclosed" (3.8.3).
+            return _lookup_unavailable_envelope("extract_sec_filing_fact", "SEC fact result could not be read; retry.")
         xbrl_context = parsed_payload.get("xbrlContext")
         source_evidence = _sec_xbrl_source_evidence(parsed_payload)
         status = parsed_payload.get("status") or (
