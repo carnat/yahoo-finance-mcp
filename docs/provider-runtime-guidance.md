@@ -3190,6 +3190,39 @@ F-024, F-026, F-029). Both runtimes change alike.
 - **Tests:** 21 new parity cases in `scripts/parity/cases_audit_2251.py`.
 - **Rollback:** redeploy 2.25.0.
 
+## Failed Yahoo Enrichment Reads Are Reported (3.8.1)
+
+- **Why:** Phase 6 swallowed-error audit, part 2 of 4 (owner decision 2026-11-04;
+  `analysis/yahoo-finance-mcp/SWALLOWED_ERRORS_3_8.md`). When an enrichment read fails, the tool still returns what
+  it has, and it now warns instead of looking complete. This applies to both runtimes. Every warning uses an
+  existing code. No field or schema changed.
+- **Changes:**
+  - **`get_uk_company_filings`:** when the issuer-name read fails, the tool returns `PROVIDER_ERROR` (retryable),
+    "Yahoo issuer name could not be read; retry.". Before, it returned `INPUT_VALIDATION_ERROR`. An empty profile
+    still returns `INPUT_VALIDATION_ERROR`.
+  - **`verify_company_event`:** when company-name aliases could not be read, it warns `SOURCE_IDENTITY_UNAVAILABLE`
+    (Yahoo) or `SOURCE_UNAVAILABLE` (SEC submissions). The verdict `status` is unchanged.
+  - **`get_historical_valuation_context`:**
+    - An FX series that could not be read warns `FX_NOT_AVAILABLE`, naming the pair. Before, it looked like "no
+      rate within 7 days".
+    - Failed market inputs for a foreign filer warn `SOURCE_UNAVAILABLE` ("... so no ADR ratio was applied").
+    - Either case sets the status to `PARTIAL` when it was `OK`.
+  - **Consensus curve** (`get_consensus_forecast_curve`, `get_evidence_quality`,
+    `build_valuation_evidence_pack`): when SEC company facts could not be read for fiscal-year naming, it warns
+    `COMPANYFACTS_NOT_AVAILABLE` ("... so fiscal years use the period-end rule"). A 404 is not a failed read and
+    does not warn.
+- **Not in this release:** these are held for an owner decision.
+  - **Options flow scan:** a failed 10-day volume read or max-pain read. The `warnings` there are plain strings, so
+    a new string code would be needed.
+  - **Python-only partial results:** analyst consensus parts, earnings momentum inputs, analyst-method issuer names
+    and history metadata. In these cases the Worker fails the whole tool instead.
+  - **Tools with no warnings list:** `get_earnings_analysis`, `get_option_chain`, `get_fast_info`,
+    `get_ma_position`, `get_price_target_bracket`. They are unchanged.
+- **Tests:** `scripts/parity/cases_yahoo_reads_381.py` has 18 cases. Each pairs a failing-read stub with an
+  empty-success or 404 stub. One news case whose stub served no SEC reads now expects `SOURCE_UNAVAILABLE`.
+- **Unchanged:** `schemaHash` and `manifestHash`.
+- **Rollback:** redeploy 3.8.0.
+
 ## Failed SEC Reads No Longer Look Like Missing Data (3.8.0)
 
 - **Why:** Phase 6 swallowed-error audit (Debt #5), part 1 of 4. Owner decision 2026-11-04 ("Yes, as recommended";

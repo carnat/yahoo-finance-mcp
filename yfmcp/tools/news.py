@@ -38,7 +38,7 @@ from yfmcp.validation import _validate_ticker
 from yfmcp.cache import _tool_cache, TTL_NEWS
 from yfmcp.util import _utc_now_iso, _to_iso_utc, _parse_rss_date
 from yfmcp.clients.yahoo import _safe_parse
-from yfmcp.clients.edgar import _edgar_get_html, _get_submissions_for_ticker
+from yfmcp.clients.edgar import _edgar_get_html, _get_submissions_for_ticker, _sec_lookup_failure
 from yfmcp.clients.market_providers import _PROVIDER_USER_AGENT
 from yfmcp.parsing.html import _parse_html_table, _strip_html_tags
 from yfmcp import extraction_rules as _er
@@ -1998,18 +1998,24 @@ async def verify_company_event(
         if name and name.lower() != ticker.lower() and name not in company_names:
             company_names.append(name)
 
+    identity_warnings: list[dict] = []
     if best:
         try:
             yahoo_info = await asyncio.to_thread(lambda: yf.Ticker(ticker).info)
         except Exception:
             yahoo_info = None
+            identity_warnings.append({"code": "SOURCE_IDENTITY_UNAVAILABLE", "message": "Yahoo issuer names could not be read; retry.", "severity": "warning"})
         if isinstance(yahoo_info, dict):
             _add_company_name(yahoo_info.get("longName"))
             _add_company_name(yahoo_info.get("shortName"))
         try:
             _cik_padded, submissions = await _get_submissions_for_ticker(ticker)
+            sec_read_failed = submissions is None and _sec_lookup_failure(ticker) is not None
         except Exception:
             submissions = None
+            sec_read_failed = True
+        if sec_read_failed:
+            identity_warnings.append({"code": "SOURCE_UNAVAILABLE", "message": "SEC submissions could not be read; retry.", "severity": "warning"})
         if isinstance(submissions, dict):
             _add_company_name(submissions.get("name"))
 
@@ -2114,6 +2120,8 @@ async def verify_company_event(
         })
     failure_mode = coverage_failure_mode if status == "SOURCE_LIMITED_NOT_FOUND" else None
     retryable = failure_mode in ("WORKER_SUBREQUEST_LIMIT", "RATE_LIMITED", "PROVIDER_TIMEOUT")
+    # Failed alias reads are reported after the source status is computed, so they do not count as a source failure (3.8.1).
+    warnings.extend(identity_warnings)
 
     payload = {
         "ticker": ticker_upper,

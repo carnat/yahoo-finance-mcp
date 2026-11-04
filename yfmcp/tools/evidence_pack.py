@@ -28,6 +28,7 @@ from yfmcp.tools.earnings import extract_guidance
 from yfmcp.tools.exposure import extract_capital_structure, extract_dilution_bridge
 from yfmcp.tools.fundamentals import (
     _consensus_naming,
+    _curve_with_naming_read,
     _consensus_policy,
     _consensus_providers,
     _write_consensus_observation,
@@ -76,8 +77,8 @@ async def _sec_filing_rows(ticker: str) -> tuple[list[dict] | None, str]:
 )
 async def get_evidence_quality(ticker: str) -> str:
     as_of = _now_iso()
-    (inputs, quote, splits), (rows, status), naming = await asyncio.gather(_consensus_providers(ticker), _sec_filing_rows(ticker), _consensus_naming(ticker))
-    curve = _ev.build_consensus_curve(ticker, inputs, as_of, None, naming, splits)
+    (inputs, quote, splits), (rows, status), (naming, naming_failed) = await asyncio.gather(_consensus_providers(ticker), _sec_filing_rows(ticker), _consensus_naming(ticker))
+    curve = _curve_with_naming_read(_ev.build_consensus_curve(ticker, inputs, as_of, None, naming, splits), naming_failed)
     return json.dumps(_ev.evidence_quality(ticker=ticker, as_of=as_of, quote=quote, filings=rows, filings_status=status,
                                            consensus=curve, storage_available=_es.get_store() is not None))
 
@@ -104,8 +105,8 @@ async def build_valuation_evidence_pack(ticker: str, horizon_years: int = 5, per
         return json.dumps({"error": True, "code": "INPUT_VALIDATION_ERROR", "message": policy})
     symbol = ticker.upper()
     cutoff = _now_iso()
-    (inputs, quote, splits), (rows, filings_status), naming = await asyncio.gather(_consensus_providers(symbol), _sec_filing_rows(symbol), _consensus_naming(symbol))
-    curve = _ev.build_consensus_curve(symbol, inputs, cutoff, policy, naming, splits)
+    (inputs, quote, splits), (rows, filings_status), (naming, naming_failed) = await asyncio.gather(_consensus_providers(symbol), _sec_filing_rows(symbol), _consensus_naming(symbol))
+    curve = _curve_with_naming_read(_ev.build_consensus_curve(symbol, inputs, cutoff, policy, naming, splits), naming_failed)
     major_price, major_currency = _vl._major_price(quote["price"], quote["currency"]) if quote["price"] is not None else (None, None)
 
     async def dilution() -> dict:

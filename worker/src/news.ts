@@ -1421,6 +1421,7 @@ export async function verifyCompanyEvent(
   // Issuer names score relevance only, so no evidence means no lookup. The name set is Yahoo longName and shortName plus the
   // SEC submissions name, without any name equal to the ticker (2.19.0, planner decision 6; the call #16 rule).
   const companyNames: string[] = [];
+  const identityWarnings: Record<string, unknown>[] = [];
   if (pool.length > 0) {
     const addName = (value: unknown): void => {
       const name = _str(value).trim();
@@ -1434,11 +1435,16 @@ export async function verifyCompanyEvent(
         ?.result as Record<string, unknown>[] | undefined)?.[0]?.price as Record<string, unknown> | undefined;
       addName(priceResult?.longName);
       addName(priceResult?.shortName);
-    } catch { /* non-fatal */ }
+    } catch {
+      identityWarnings.push({ code: "SOURCE_IDENTITY_UNAVAILABLE", message: "Yahoo issuer names could not be read; retry.", severity: "warning" });
+    }
+    let secReadFailed = false;
     try {
-      const { submissions } = await getSubmissionsForTicker(ticker);
+      const { submissions, failure } = await getSubmissionsForTicker(ticker);
+      secReadFailed = failure != null;
       addName(submissions?.name);
-    } catch { /* non-fatal */ }
+    } catch { secReadFailed = true; }
+    if (secReadFailed) identityWarnings.push({ code: "SOURCE_UNAVAILABLE", message: "SEC submissions could not be read; retry.", severity: "warning" });
   }
 
   const extractBaseCompanyName = (name: string): string => {
@@ -1540,6 +1546,8 @@ export async function verifyCompanyEvent(
   }
   const failureMode = status === "SOURCE_LIMITED_NOT_FOUND" ? coverageFailureMode : null;
   const retryable = ["WORKER_SUBREQUEST_LIMIT", "RATE_LIMITED", "PROVIDER_TIMEOUT"].includes(_str(failureMode));
+  // Failed alias reads are reported after the source status is computed, so they do not count as a source failure (3.8.1).
+  out.warnings.push(...identityWarnings);
   const payload: Record<string, unknown> = {
     ticker: ticker.toUpperCase(),
     query: eventQuery,

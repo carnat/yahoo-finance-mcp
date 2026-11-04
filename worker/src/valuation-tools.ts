@@ -105,20 +105,30 @@ async function valuationHistoryFor(ticker: string, dates: string[] | null, fromD
   const { currency } = taxonomyOf(facts);
   const priceCurrency = history.currency ? majorPrice(1, history.currency).currency : null;
   const warnings: Record<string, unknown>[] = [];
+  let readFailed = false;
   // One FX series per reporting currency the dates use (2.5.32, F-029: NBIS reported in RUB, then USD).
   const fxByCurrency: Record<string, { pair: string; bars: Bar[] }> = {};
   if (priceCurrency) {
     for (const c of reportingCurrencies(facts, useDates)) {
       if (c === priceCurrency) continue;
       const pair = `${c}${priceCurrency}=X`;
-      const fxHistory = await dailyHistory(pair, fromDate).catch(() => null);
+      let fxFailed = false;
+      const fxHistory = await dailyHistory(pair, fromDate).catch(() => { fxFailed = true; return null; });
       fxByCurrency[c] = { pair, bars: fxHistory?.bars ?? [] };
+      if (fxFailed) {
+        readFailed = true;
+        warnings.push({ code: "FX_NOT_AVAILABLE", message: `Yahoo FX series ${pair} could not be read; retry.`, severity: "warning" });
+      }
     }
   }
   const fx = currency ? fxByCurrency[currency] ?? null : null;
   let ratio: number | null = null;
   if (foreignFiler(facts)) {
-    const market = await valuationMarketInputs(ticker).catch(() => null);
+    const market = await valuationMarketInputs(ticker).catch(() => {
+      readFailed = true;
+      warnings.push({ code: "SOURCE_UNAVAILABLE", message: "Yahoo market inputs could not be read, so no ADR ratio was applied; retry.", severity: "warning" });
+      return null;
+    });
     const sec = latestShareCount(facts);
     const quoted = market?.sharesOutstanding ?? null;
     const r = sec != null && quoted != null ? adsRatio(sec, quoted) : null;
@@ -134,6 +144,7 @@ async function valuationHistoryFor(ticker: string, dates: string[] | null, fromD
   const out = historicalValuation({ ticker, dates: useDates, companyfacts: facts, bars: history.bars, priceCurrency: history.currency, splits: history.splits, fx, fxByCurrency, adsRatio: ratio, coverCounts, periodicFilings });
   if (!submissions) warnings.push({ code: "SUBMISSIONS_NOT_AVAILABLE", message: "SEC submissions could not be read, so no cover page was read; filers without an undimensioned share count have no market cap. Retry.", severity: "warning" });
   out.warnings = warnings;
+  if (readFailed as boolean && out.status === "OK") out.status = "PARTIAL";
   return out;
 }
 

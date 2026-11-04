@@ -2031,7 +2031,7 @@ def _observation_py():
     yahoo = ev.yahoo_consensus_input(OBS_TREND, retrieved_at=OBS_T1, financial_currency="USD")
     providers = AsyncMock(return_value=([yahoo], {"price": None}, {"status": "NO_DATA", "splits": []}))
     with patch.object(fundamentals_tools, "_consensus_providers", providers), \
-            patch.object(fundamentals_tools, "_consensus_naming", AsyncMock(return_value=server.fiscal_year_naming(None))), \
+            patch.object(fundamentals_tools, "_consensus_naming", AsyncMock(return_value=(server.fiscal_year_naming(None), False))), \
             patch.object(fundamentals_tools, "_now_iso", lambda: next(times)), _python_store(store):
         first = json.loads(asyncio.run(server.get_consensus_forecast_curve("TST")))["storage"]["consensusObservation"]
         key = first["key"]
@@ -2084,7 +2084,7 @@ def _pack_py(persist: bool, with_store: bool):
                                         {"price": None, "currency": None, "priceTime": None, "status": "NO_DATA", "message": "stub"},
                                         {"status": "NO_DATA", "splits": []}))
     with patch.object(evidence_pack, "_consensus_providers", providers), \
-            patch.object(evidence_pack, "_consensus_naming", AsyncMock(return_value=server.fiscal_year_naming(None))), \
+            patch.object(evidence_pack, "_consensus_naming", AsyncMock(return_value=(server.fiscal_year_naming(None), False))), \
             patch.object(evidence_pack, "_sec_filing_rows", AsyncMock(return_value=(None, "TICKER_NOT_FOUND"))), \
             patch.object(evidence_pack, "_warm_sec_submissions", AsyncMock(return_value=None)), \
             patch.object(evidence_pack, "extract_capital_structure", failing), patch.object(evidence_pack, "extract_guidance", failing), \

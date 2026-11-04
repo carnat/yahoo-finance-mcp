@@ -356,7 +356,7 @@
       "name": "fundamentals.ts",
       "kind": "module",
       "language": "typescript",
-      "loc": 1671,
+      "loc": 1677,
       "file": "worker/src/fundamentals.ts"
      },
      {
@@ -364,7 +364,7 @@
       "name": "fundamentals.py",
       "kind": "module",
       "language": "python",
-      "loc": 2212,
+      "loc": 2219,
       "file": "yfmcp/tools/fundamentals.py"
      }
     ]
@@ -387,7 +387,7 @@
       "name": "providers.ts",
       "kind": "module",
       "language": "typescript",
-      "loc": 605,
+      "loc": 609,
       "file": "worker/src/providers.ts"
      },
      {
@@ -403,7 +403,7 @@
       "name": "provider_gaps.py",
       "kind": "module",
       "language": "python",
-      "loc": 560,
+      "loc": 561,
       "file": "yfmcp/tools/provider_gaps.py"
      }
     ]
@@ -688,7 +688,7 @@
       "name": "valuation-tools.ts",
       "kind": "module",
       "language": "typescript",
-      "loc": 283,
+      "loc": 294,
       "file": "worker/src/valuation-tools.ts"
      },
      {
@@ -712,7 +712,7 @@
       "name": "valuation.py",
       "kind": "module",
       "language": "python",
-      "loc": 340,
+      "loc": 351,
       "file": "yfmcp/tools/valuation.py"
      },
      {
@@ -814,7 +814,7 @@
       "name": "news.ts",
       "kind": "module",
       "language": "typescript",
-      "loc": 1537,
+      "loc": 1545,
       "file": "worker/src/news.ts"
      },
      {
@@ -982,7 +982,7 @@
       "name": "news.py",
       "kind": "module",
       "language": "python",
-      "loc": 1950,
+      "loc": 1958,
       "file": "yfmcp/tools/news.py"
      }
     ]
@@ -997,7 +997,7 @@
       "name": "evidence-pack.ts",
       "kind": "module",
       "language": "typescript",
-      "loc": 449,
+      "loc": 450,
       "file": "worker/src/evidence-pack.ts"
      },
      {
@@ -1037,7 +1037,7 @@
       "name": "evidence_pack.py",
       "kind": "module",
       "language": "python",
-      "loc": 209,
+      "loc": 210,
       "file": "yfmcp/tools/evidence_pack.py"
      }
     ]

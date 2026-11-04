@@ -181,6 +181,7 @@ export {
   analystPriceTargetChange,
   getAnalystUpgradeRadar,
   secFiscalYearNaming,
+  curveWithNamingRead,
   extractAnalystValuationMethods,
   peerValuationError,
   comparePeerValuations,
