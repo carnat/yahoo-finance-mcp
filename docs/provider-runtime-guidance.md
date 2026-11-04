@@ -3190,6 +3190,51 @@ F-024, F-026, F-029). Both runtimes change alike.
 - **Tests:** 21 new parity cases in `scripts/parity/cases_audit_2251.py`.
 - **Rollback:** redeploy 2.25.0.
 
+## Failed SEC Reads No Longer Look Like Missing Data (3.8.0)
+
+- **Why:** Phase 6 swallowed-error audit (Debt #5), part 1 of 4. Owner decision 2026-11-04 ("Yes, as recommended";
+  `analysis/yahoo-finance-mcp/SWALLOWED_ERRORS_3_8.md`). It extends the 2.5.17 rule: a failed read must not read as
+  an absent record. Release type: minor, because existing codes and statuses now appear on more tools. No new
+  code, field or schema change. Both runtimes.
+- **Rule:** a 404, or a ticker not in a ticker index that was read, keeps today's output. A 429, 5xx, timeout or
+  network failure no longer gives the absent-record answer:
+  - **Ticker lookup:**
+    - `list_sec_company_filings`, `list_sec_material_filings`, `get_sec_filing_intelligence`,
+      `get_sec_filing_section_markdown`, `list_sec_filing_exhibits` and `get_sec_filing_exhibit_content` (when the
+      accession does not name the CIK) fail with `PROVIDER_ERROR`, `retryable: true`. They no longer return
+      `TICKER_NOT_FOUND`.
+    - The filing section, outline, table and index tools, the extractors and `search_filing_text` answer
+      `{status: PROVIDER_ERROR, code: SEC_LOOKUP_UNAVAILABLE, retryable: true}`.
+    - Messages: "SEC's ticker index could not be read, so X was not resolved to a CIK; retry." and "SEC submissions
+      could not be read; retry."
+  - **Filing index:**
+    - `list_sec_filing_exhibits` fails with `PROVIDER_ERROR` "SEC filing index could not be read; retry." It no longer
+      returns an empty list.
+    - `search_filing_text` warns `FILING_TEXT_NOT_AVAILABLE` when exhibits or a table could not be read.
+    - The transcript SEC-exhibit attempt reads `FAILED`.
+    - `get_sec_filing_intelligence` `exhibitsCount` is null (it was 0).
+  - **Release text:**
+    - When the 8-K index cannot be read, the release text is `NOT_READ`. Before, the 8-K cover page was read
+      instead and labelled `READ`.
+    - `get_latest_earnings_release` adds `RELEASE_TEXT_NOT_AVAILABLE` when the release page could not be read, and
+      `SEC_LOOKUP_UNAVAILABLE` when SEC could not be read. The fallback order is unchanged.
+    - `extract_earnings_metrics` adds `RELEASE_TEXT_NOT_AVAILABLE` when no XBRL metric applies.
+  - **Company facts:**
+    - `get_guidance_history` and `extract_operating_driver_ledger` add `SEC_READ_FAILED`.
+    - `reconcile_metric_sources` and `get_historical_valuation_context` keep their status and carry code
+      `SEC_READ_FAILED`.
+  - **Python public-page fetch:** a timeout returns no page as in the Worker. Before, it raised.
+- **Not in this release:**
+  - The management-commentary "not read" signal and the skipped annual-coverage check need new names and wait for
+    an owner decision.
+  - `get_sec_filing_intelligence` company facts and consensus fiscal-year naming have no warnings list to carry the
+    signal.
+- **Tests:** `scripts/parity/cases_sec_reads_380.py` has 93 cases. Each pairs a 429/500/timeout stub with a 404 stub,
+  and both runtimes must give equal output. One existing case that pinned the old empty exhibit list now expects
+  `PROVIDER_ERROR`.
+- **Unchanged:** `schemaHash` and `manifestHash`.
+- **Rollback:** redeploy 3.7.0.
+
 ## Parity Differences Resolved and Intentional Ones Documented (3.7.0)
 
 - **Why:** Phase 6 exit criterion "no pinned expected difference remains in the harness except documented

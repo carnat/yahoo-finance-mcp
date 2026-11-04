@@ -418,7 +418,7 @@
       "name": "edgar.ts",
       "kind": "module",
       "language": "typescript",
-      "loc": 495,
+      "loc": 527,
       "file": "worker/src/clients/edgar.ts"
      },
      {
@@ -474,7 +474,7 @@
       "name": "sec.ts",
       "kind": "module",
       "language": "typescript",
-      "loc": 3062,
+      "loc": 3104,
       "file": "worker/src/sec.ts"
      },
      {
@@ -482,7 +482,7 @@
       "name": "edgar.py",
       "kind": "module",
       "language": "python",
-      "loc": 444,
+      "loc": 489,
       "file": "yfmcp/clients/edgar.py"
      },
      {
@@ -538,7 +538,7 @@
       "name": "sec.py",
       "kind": "module",
       "language": "python",
-      "loc": 3122,
+      "loc": 3180,
       "file": "yfmcp/tools/sec.py"
      }
     ]
@@ -569,7 +569,7 @@
       "name": "exposure.ts",
       "kind": "module",
       "language": "typescript",
-      "loc": 1891,
+      "loc": 1894,
       "file": "worker/src/exposure.ts"
      },
      {
@@ -657,7 +657,7 @@
       "name": "exposure.py",
       "kind": "module",
       "language": "python",
-      "loc": 1941,
+      "loc": 1950,
       "file": "yfmcp/tools/exposure.py"
      }
     ]
@@ -688,7 +688,7 @@
       "name": "valuation-tools.ts",
       "kind": "module",
       "language": "typescript",
-      "loc": 280,
+      "loc": 283,
       "file": "worker/src/valuation-tools.ts"
      },
      {
@@ -712,7 +712,7 @@
       "name": "valuation.py",
       "kind": "module",
       "language": "python",
-      "loc": 337,
+      "loc": 340,
       "file": "yfmcp/tools/valuation.py"
      },
      {
@@ -751,7 +751,7 @@
       "name": "earnings.ts",
       "kind": "module",
       "language": "typescript",
-      "loc": 2350,
+      "loc": 2406,
       "file": "worker/src/earnings.ts"
      },
      {
@@ -799,7 +799,7 @@
       "name": "earnings.py",
       "kind": "module",
       "language": "python",
-      "loc": 2215,
+      "loc": 2251,
       "file": "yfmcp/tools/earnings.py"
      }
     ]
@@ -997,7 +997,7 @@
       "name": "evidence-pack.ts",
       "kind": "module",
       "language": "typescript",
-      "loc": 444,
+      "loc": 449,
       "file": "worker/src/evidence-pack.ts"
      },
      {
@@ -1037,7 +1037,7 @@
       "name": "evidence_pack.py",
       "kind": "module",
       "language": "python",
-      "loc": 206,
+      "loc": 209,
       "file": "yfmcp/tools/evidence_pack.py"
      }
     ]

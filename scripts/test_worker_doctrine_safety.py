@@ -252,7 +252,7 @@ class TestWorkerDoctrineSafety(unittest.TestCase):
         self.assertNotIn('failureMode: "SEC_EX99_LINKAGE_INCOMPLETE"', tools)
 
     def test_press_release_ex99_resolver_uses_index_exhibits(self) -> None:
-        resolver = find_definition("worker", "resolveEx991Url").text
+        resolver = find_definition("worker", "resolveEx991UrlRead").text  # resolveEx991Url wraps it (3.8.0)
         self.assertIn("edgarListExhibitsFromIndex(indexUrl)", resolver)
         self.assertIn('type.startsWith("EX-99")', resolver)
         self.assertIn("PRESS RELEASE|EARNINGS RELEASE|RESULTS RELEASE", resolver)

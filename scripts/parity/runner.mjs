@@ -4,7 +4,7 @@
 // casesJson: { cases: [{ name, module, fn, args, js, routes, isolate }] }
 //   module/fn/args  call bundle[module][fn](...args)
 //   js              body of an async function (m, args, fx) for setups a plain call can't express
-//   routes          { "<url or url prefix ending in *>": { status, body, json, headers } } served to fetch();
+//   routes          { "<url or url prefix ending in *>": { status, body, json, headers, error: "timeout" } } served to fetch();
 //                   any fetch not matched throws UNSTUBBED_FETCH, so a case can never reach the network
 //   isolate         load a fresh copy of the bundle for this case (module-level caches start empty)
 // Prints one JSON line: { "<name>": { ok, value } | { ok: false, error } }.
@@ -25,6 +25,7 @@ globalThis.fetch = async (input) => {
     route = prefix ? activeRoutes[prefix] : undefined;
   }
   if (!route) throw new Error(`UNSTUBBED_FETCH ${url}`);
+  if (route.error === "timeout") throw new Error("timed out"); // no response at all
   const body = route.json !== undefined ? JSON.stringify(route.json) : route.body ?? "";
   return new Response(body, { status: route.status ?? 200, headers: route.headers ?? {} });
 };

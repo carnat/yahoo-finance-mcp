@@ -28,8 +28,11 @@ from yfmcp import sec_facts as _sf
 from yfmcp import share_scenarios as _ss
 from yfmcp.app import yfinance_server
 from yfmcp.clients.edgar import (
+    _edgar_build_filing_urls,
+    _edgar_company_facts_read_failed,
     _edgar_get_company_facts,
     _edgar_get_html,
+    _edgar_html_read_failed,
     _get_submissions_for_ticker,
     _warm_sec_submissions,
 )
@@ -48,6 +51,7 @@ from yfmcp.tools.sec import (
     _FilingPeriodParam,
     _SEC_DOCUMENT_READ_MAX_CHARS,
     _accession_not_found_envelope,
+    _companyfacts_read_failed_warning as _sec_companyfacts_read_failed_warning,
     _filing_period_failure,
     _is_accession_not_found,
     _is_decision_grade_sec_xbrl_fact,
@@ -1152,6 +1156,9 @@ async def _read_release_text(cik_int: int, accession_number: str, primary_url: s
         ex991 = await _resolve_ex991_url(accession_number, cik_int)
     except Exception:  # noqa: BLE001 - fall back to the 8-K document
         ex991 = None
+    # An index that could not be read does not say the 8-K has no EX-99.1: the cover page is not the release (3.8.0).
+    if not ex991 and _edgar_html_read_failed(_edgar_build_filing_urls(cik_int, accession_number, None)[0]):
+        return {"url": primary_url, "status": "NOT_READ", "text": None}
     url = ex991 or primary_url
     try:
         html = await _edgar_get_html(url, max_bytes=5_000_000)
@@ -1220,6 +1227,8 @@ async def extract_operating_driver_ledger(ticker: str, filing_type: str = "lates
         warnings.append({"code": "FILING_READ_TRUNCATED", "message": "The filing exceeded the read limit; facts past that point were not parsed.", "severity": "warning"})
     if not facts:
         warnings.append({"code": "COMPANYFACTS_NOT_AVAILABLE", "message": "SEC companyfacts could not be read, so standard driver series were not read; retry.", "severity": "warning"})
+        if _edgar_company_facts_read_failed(cik_padded):
+            warnings.append(_sec_companyfacts_read_failed_warning())
     if release["status"] == "NOT_READ":
         warnings.append({"code": "RELEASE_TEXT_NOT_AVAILABLE", "message": f"The earnings release {release.get('url')} could not be read from SEC; retry.", "severity": "warning"})
     elif release["status"] == "RELEASE_NOT_RESOLVED":

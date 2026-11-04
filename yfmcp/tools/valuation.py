@@ -28,6 +28,7 @@ from yfmcp import valuation as _vl
 from yfmcp import valuation_history as _vh
 from yfmcp.app import yfinance_server
 from yfmcp.clients.edgar import (
+    _edgar_company_facts_read_failed,
     _edgar_get_company_facts,
     _edgar_get_html,
     _get_submissions_for_ticker,
@@ -129,7 +130,8 @@ async def _valuation_history_for(ticker: str, dates: list[str] | None, from_date
     facts = None if isinstance(facts, BaseException) else facts
     history = None if isinstance(history, BaseException) else history
     if not facts:
-        return {"ticker": upper, "status": "COMPANYFACTS_NOT_AVAILABLE", "code": "COMPANYFACTS_NOT_AVAILABLE", "retryable": True, **_AUTHORITY_BOUNDARY}
+        # A failed companyfacts read keeps the status and says so in the code (3.8.0).
+        return {"ticker": upper, "status": "COMPANYFACTS_NOT_AVAILABLE", "code": "SEC_READ_FAILED" if _edgar_company_facts_read_failed(cik_padded) else "COMPANYFACTS_NOT_AVAILABLE", "retryable": True, **_AUTHORITY_BOUNDARY}
     if not history or not history["bars"]:
         return {"ticker": upper, "status": "PRICE_HISTORY_NOT_AVAILABLE", "code": "PRICE_HISTORY_NOT_AVAILABLE", "retryable": True, **_AUTHORITY_BOUNDARY}
     use_dates = dates if dates is not None else _vh.valuation_dates(None, history["bars"][-1]["date"])[0]
@@ -263,7 +265,8 @@ async def reconcile_metric_sources(ticker: str, metric: str, period: Annotated[s
         return json.dumps({"ticker": upper, "metric": metric, "status": code, "code": code, "retryable": not ticker_index})
     facts = await _edgar_get_company_facts(cik_padded)
     if not facts:
-        return json.dumps({"ticker": upper, "metric": metric, "status": "COMPANYFACTS_NOT_AVAILABLE", "code": "COMPANYFACTS_NOT_AVAILABLE", "retryable": True})
+        return json.dumps({"ticker": upper, "metric": metric, "status": "COMPANYFACTS_NOT_AVAILABLE",
+                           "code": "SEC_READ_FAILED" if _edgar_company_facts_read_failed(cik_padded) else "COMPANYFACTS_NOT_AVAILABLE", "retryable": True})
     # The latest annual report may be missing from companyfacts (2.5.30, F-015): said on every result, found or not.
     coverage_warning = _cfc.latest_annual_coverage_warning(_cfc.annual_filings_from_submissions(subs), facts)
     resolved = _mr.resolve_period(facts, metric, period)

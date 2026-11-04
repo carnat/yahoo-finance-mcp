@@ -9,6 +9,7 @@ import asyncio
 import functools
 import datetime
 import hashlib
+import http.client
 import json
 import math
 import os
@@ -45,7 +46,9 @@ from yfmcp.clients.edgar import (
     _edgar_fetch_page_detail,
     _edgar_build_filing_urls,
     _edgar_cik_from_accession,
+    _edgar_company_facts_read_failed,
     _edgar_get_html,
+    _edgar_html_read_failed,
     _edgar_list_exhibits_from_index,
     _edgar_read_exhibit_index,
     _get_submissions_for_ticker,
@@ -84,6 +87,11 @@ def _extract_earnings_period_from_text(text: str) -> dict[str, str | None]:
     returns an unresolved period when a release does not state one.
     """
     return _extract_release_period(text)
+
+
+def _release_text_unread_warning(url: str | None) -> dict:
+    """The warning for an earnings release whose text could not be read (the message exposure.py gives for the same case)."""
+    return {"code": "RELEASE_TEXT_NOT_AVAILABLE", "message": f"The earnings release {url} could not be read from SEC; retry.", "severity": "warning"}
 
 
 async def _resolve_earnings_period_from_source(source: dict, resolved: dict | None = None) -> dict[str, str | None]:
@@ -157,7 +165,8 @@ def _fetch_public_html(url: str, max_bytes: int = 3_000_000) -> str | None:
         with _url_policy.urlopen(req, timeout=60) as resp:
             data = resp.read(max_bytes)
             return data.decode("utf-8", errors="ignore")
-    except (_urlerror.URLError, ValueError):
+    except (_urlerror.URLError, ValueError, OSError, http.client.HTTPException):
+        # A timeout or socket error is a failed fetch, as in the Worker's fetchPublicHtml (3.8.0).
         return None
 
 
@@ -364,6 +373,9 @@ def _latest_past_earnings_date(dates: list, now: datetime.datetime | None = None
 
 async def _resolve_latest_earnings_release(ticker: str) -> dict:
     sec = await _resolve_latest_earnings_sec_source(ticker)
+    # A submissions or ticker-index read that failed is not "no 8-K": the fallbacks below stay, and the payload says so (3.8.0).
+    unavailable = None if sec else _sec._lookup_unavailable_message(ticker)
+    lookup_warnings = [{"code": "SEC_LOOKUP_UNAVAILABLE", "message": unavailable, "severity": "warning"}] if unavailable else []
     if sec:
         reporting_ts = _to_iso_utc(sec.get("acceptedAt")) or _to_iso_utc(sec.get("filingDate"))
         return {
@@ -403,7 +415,7 @@ async def _resolve_latest_earnings_release(ticker: str) -> dict:
                 }
             ],
             "confidence": "MEDIUM",
-            "warnings": [{"code": "SEC_8K_NOT_FOUND", "message": "SEC 8-K earnings release source not found"}],
+            "warnings": [{"code": "SEC_8K_NOT_FOUND", "message": "SEC 8-K earnings release source not found"}, *lookup_warnings],
         }
 
     return {
@@ -415,7 +427,7 @@ async def _resolve_latest_earnings_release(ticker: str) -> dict:
         "reportedAt": None,
         "sources": [],
         "confidence": "NOT_FOUND",
-        "warnings": [],
+        "warnings": lookup_warnings,
     }
 
 
@@ -443,6 +455,10 @@ async def get_latest_earnings_release(ticker: str, period: str = "latest") -> st
         sources[0] = with_content
     if source and str(source.get("sourceType") or "") != "yahoo_estimate":
         period_info = await _resolve_earnings_period_from_source(source, content)
+        # The document the period came from could not be read (a failed read, not a 404) (3.8.0).
+        period_url = str((content or source).get("url") or "")
+        if period_url.startswith(SEC_ARCHIVES_PREFIX) and _edgar_html_read_failed(period_url):
+            data["warnings"] = [*(data.get("warnings") or []), _release_text_unread_warning(period_url)]
         prior_period = data.get("period")
         data.update(period_info)
         data["period"] = period_info.get("period") if period_info.get("period") is not None else (prior_period if prior_period is not None else "latest")
@@ -724,6 +740,8 @@ async def extract_earnings_metrics(
         html = await _edgar_get_html(src_url, max_bytes=5_000_000)
         text = _strip_html_blocks(_sanitize_sec_html(html or ""))
         period_info = _extract_earnings_period_from_text(text)
+        if not html and not xbrl_metrics and _edgar_html_read_failed(src_url):
+            warnings.append(_release_text_unread_warning(src_url))
     if not xbrl_metrics and src_url.startswith(SEC_ARCHIVES_PREFIX):
         hits = {key: _extract_release_text_metric(text, key) for key in ("revenue", "epsDiluted", "grossMargin", "operatingIncome", "freeCashFlow", "capex")}
 
@@ -1217,10 +1235,17 @@ async def list_sec_filing_exhibits(ticker: str, accessionNumber: str) -> str:
     if not cik:
         cik = _edgar_cik_from_accession(accessionNumber)
     if not cik:
+        unavailable = _sec._lookup_unavailable_message(ticker)
+        if unavailable:
+            return _wrap_envelope_v2("list_sec_filing_exhibits", None, error=unavailable, error_code=ErrorCode.PROVIDER_ERROR,
+                                     meta_extra={"error_extra": {"retryable": True}})
         return _wrap_envelope_v2("list_sec_filing_exhibits", None, error=f"Could not resolve CIK for ticker '{ticker}'.", error_code=ErrorCode.TICKER_NOT_FOUND)
 
     index_url, _ = _edgar_build_filing_urls(cik, accessionNumber, None)
     exhibits, not_found = await _edgar_read_exhibit_index(index_url)
+    if not exhibits and not not_found and _edgar_html_read_failed(index_url):
+        return _wrap_envelope_v2("list_sec_filing_exhibits", None, error="SEC filing index could not be read; retry.", error_code=ErrorCode.PROVIDER_ERROR,
+                                 meta_extra={"error_extra": {"retryable": True}})
     # SEC has no filing index for (CIK, accession): the accession is not that company's filing, never an empty
     # exhibit list. Older accessions outside the recent-filings list still read (2.15.0, R4-ACC-EXHIBITS).
     if not_found:
@@ -1251,6 +1276,10 @@ async def get_sec_filing_exhibit_content(ticker: str, accessionNumber: str, file
     if not cik:
         cik = _edgar_cik_from_accession(accessionNumber)
     if not cik:
+        unavailable = _sec._lookup_unavailable_message(ticker)
+        if unavailable:
+            return _wrap_envelope_v2("get_sec_filing_exhibit_content", None, error=unavailable, error_code=ErrorCode.PROVIDER_ERROR,
+                                     meta_extra={"error_extra": {"retryable": True}})
         return _wrap_envelope_v2("get_sec_filing_exhibit_content", None, error=f"Could not resolve CIK for ticker '{ticker}'.", error_code=ErrorCode.TICKER_NOT_FOUND)
 
     accession_nodash = accessionNumber.replace("-", "")
@@ -2276,11 +2305,18 @@ async def get_earnings_call_transcript(
                     **common, "filteredByTopics": None, "content": clean_text[:max_chars], "truncated": truncated,
                 }, warnings=warnings)
 
-            attempted_sources.append(_budget_checked_attempt(_transcript_attempt(
-                "sec_8k_exhibit", "NOT_FOUND", url=index_url, accessionNumber=accession,
-                filingDate=sec_source.get("filingDate"), exhibitsSearched=len(exhibits),
-                candidatesChecked=len(candidate_diagnostics), candidateDiagnostics=candidate_diagnostics,
-            ), sec_mark))
+            if not exhibits and _edgar_html_read_failed(index_url):
+                # An index that could not be read is a failed attempt, not an exhibit that is not there (3.8.0).
+                attempted_sources.append(_budget_checked_attempt(_transcript_attempt(
+                    "sec_8k_exhibit", "FAILED", url=index_url, accessionNumber=accession,
+                    filingDate=sec_source.get("filingDate"), reason="SEC filing index could not be read; retry.",
+                ), sec_mark))
+            else:
+                attempted_sources.append(_budget_checked_attempt(_transcript_attempt(
+                    "sec_8k_exhibit", "NOT_FOUND", url=index_url, accessionNumber=accession,
+                    filingDate=sec_source.get("filingDate"), exhibitsSearched=len(exhibits),
+                    candidatesChecked=len(candidate_diagnostics), candidateDiagnostics=candidate_diagnostics,
+                ), sec_mark))
             sec_fallback = {
                 "ticker": ticker.upper(), "period": period, "status": "SEC_EXHIBIT_NOT_FOUND",
                 "accessionNumber": accession, "filingDate": sec_source.get("filingDate"),
@@ -2410,6 +2446,8 @@ async def get_guidance_history(ticker: str, max_releases: int = 8) -> str:
         warnings.append({"code": "RELEASE_TEXT_NOT_AVAILABLE", "message": f"{unread} of {len(releases)} earnings releases could not be read from SEC; their guidance is missing, not withdrawn. Retry.", "severity": "warning"})
     if not facts:
         warnings.append({"code": "ACTUALS_NOT_READ", "message": "SEC companyfacts could not be read, so outcomes were not evaluated; retry.", "severity": "warning"})
+        if _edgar_company_facts_read_failed(cik_padded):
+            warnings.append(_sec._companyfacts_read_failed_warning())
     out["status"] = ("NO_EARNINGS_RELEASES_FOUND" if not picks else "RELEASE_TEXT_NOT_AVAILABLE" if unread == len(releases)
                      else "PARTIAL" if unread or not facts else "OK")
     out["retryable"] = bool(unread) or not facts

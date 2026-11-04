@@ -148,11 +148,50 @@ async def _edgar_get_company_facts(cik_padded: str) -> dict | None:
         return cached_entry[0]
     try:
         data = await _edgar_get(sec_company_facts_url(cik_padded))
-    except EdgarError:
+    except EdgarError as e:
+        _record_read_failure(_EDGAR_FACTS_READ_FAILED, cik_padded, e.status_code != 404)
         return None
+    _record_read_failure(_EDGAR_FACTS_READ_FAILED, cik_padded, False)
     if data is not None:
         _bounded_set(_EDGAR_FACTS_CACHE, cik_padded, (data, now), _EDGAR_FACTS_CACHE_MAX)
     return data
+
+
+# What the last read of a resource said, for callers that tell a failed read from an absent record (3.8.0): True when
+# the read failed (429, 5xx, timeout, network, unreadable body), False when it succeeded or SEC answered 404. The
+# helpers keep returning None for both, so a caller that does not ask behaves as before.
+_EDGAR_FACTS_READ_FAILED: dict[str, bool] = {}
+_EDGAR_SUBS_READ_FAILED: dict[str, bool] = {}
+_EDGAR_HTML_READ_FAILED: dict[str, bool] = {}
+_EDGAR_LOOKUP_FAILURE: dict[str, str | None] = {}
+_READ_STATE_MAX = 500
+
+
+def _record_read_failure(state: dict[str, bool], key: str, failed: bool) -> None:
+    _bounded_set(state, key, failed, _READ_STATE_MAX)
+
+
+def _edgar_company_facts_read_failed(cik_padded: str | None) -> bool:
+    """True when the last companyfacts read for the CIK failed (a 404 is absence, not failure)."""
+    return bool(cik_padded) and _EDGAR_FACTS_READ_FAILED.get(cik_padded, False)
+
+
+def _edgar_html_read_failed(url: str | None) -> bool:
+    """True when the last read of the document failed (a 404 is absence, not failure)."""
+    return bool(url) and _EDGAR_HTML_READ_FAILED.get(url, False)
+
+
+def _sec_lookup_failure(ticker: str) -> str | None:
+    """Why the last `_get_submissions_for_ticker(ticker)` came back empty when SEC could not be read: "TICKER_INDEX" (no
+    CIK and the ticker index was not read), "SUBMISSIONS" (a CIK and a failed submissions read), else None (SEC answered:
+    the ticker or its submissions are absent)."""
+    return _EDGAR_LOOKUP_FAILURE.get(ticker.upper())
+
+
+def _sec_lookup_unavailable_message(failure: str, ticker: str) -> str:
+    if failure == "TICKER_INDEX":
+        return f"SEC's ticker index could not be read, so {ticker.upper()} was not resolved to a CIK; retry."
+    return "SEC submissions could not be read; retry."
 
 
 async def _edgar_read_submissions(cik_padded: str) -> dict:
@@ -173,9 +212,12 @@ async def _edgar_read_submissions(cik_padded: str) -> dict:
 async def _edgar_get_submissions(cik_padded: str) -> dict | None:
     """Fetch the EDGAR submissions JSON for a CIK, with 15-minute in-process caching; None when the read fails."""
     try:
-        return await _edgar_read_submissions(cik_padded)
-    except EdgarError:
+        data = await _edgar_read_submissions(cik_padded)
+    except EdgarError as e:
+        _record_read_failure(_EDGAR_SUBS_READ_FAILED, cik_padded, e.status_code != 404)
         return None
+    _record_read_failure(_EDGAR_SUBS_READ_FAILED, cik_padded, False)
+    return data
 
 
 def _edgar_build_filing_urls(cik: int, accession_number: str, primary_doc: str | None) -> tuple[str, str | None]:
@@ -223,9 +265,11 @@ async def _edgar_read_exhibit_index(index_url: str) -> tuple[list[dict], bool]:
 
     not_found is True only when SEC answered the filing index with HTTP 404 (the accession is not a filing of that
     CIK); a timeout, 5xx or any other failed read is not_found False with no exhibits (2.15.0, R4-ACC-EXHIBITS).
+    `_edgar_html_read_failed(index_url)` tells that failed read from an index that lists nothing (3.8.0).
     """
     text, http_status = await asyncio.get_running_loop().run_in_executor(
         None, _url_policy.in_context(_fetch_edgar_html_status, index_url, 500_000))
+    _record_read_failure(_EDGAR_HTML_READ_FAILED, index_url, text is None and http_status != 404)
     return (_parse_exhibit_index_html(text) if text else []), http_status == 404
 
 
@@ -279,7 +323,10 @@ def _fetch_edgar_html_status(url: str, max_bytes: int) -> tuple[str | None, int 
 
 
 def _fetch_edgar_html(url: str, max_bytes: int) -> str | None:
-    return _fetch_edgar_html_status(url, max_bytes)[0]
+    text, status = _fetch_edgar_html_status(url, max_bytes)
+    if text is None:
+        _record_read_failure(_EDGAR_HTML_READ_FAILED, url, status != 404)
+    return text
 
 
 # EDGAR archive documents never change once filed, and composite tools read
@@ -336,10 +383,17 @@ async def _cached_archive_read(key: tuple[str, int], fetch, *args):
 
 
 async def _edgar_get_html(url: str, max_bytes: int = 5_000_000) -> str | None:
-    """Fetch an HTML document from EDGAR, reading at most max_bytes uncompressed bytes."""
+    """Fetch an HTML document from EDGAR, reading at most max_bytes uncompressed bytes.
+
+    None for a 404 and for a failed read alike; `_edgar_html_read_failed(url)` tells them apart (3.8.0).
+    """
     if not url.startswith(_EDGAR_ARCHIVE_PREFIX):
-        return await asyncio.get_running_loop().run_in_executor(None, _url_policy.in_context(_fetch_edgar_html, url, max_bytes))
-    return await _cached_archive_read((url, max_bytes), _fetch_edgar_html, url, max_bytes)
+        text = await asyncio.get_running_loop().run_in_executor(None, _url_policy.in_context(_fetch_edgar_html, url, max_bytes))
+    else:
+        text = await _cached_archive_read((url, max_bytes), _fetch_edgar_html, url, max_bytes)
+    if text is not None:
+        _record_read_failure(_EDGAR_HTML_READ_FAILED, url, False)
+    return text
 
 
 # Whole-document reads for the filing tools (outline, section, tables, table), as the Worker's fetchSecDocument:
@@ -468,10 +522,14 @@ async def _resolve_cik_for_ticker(ticker: str) -> str | None:
 async def _get_submissions_for_ticker(ticker: str) -> tuple[str | None, dict | None]:
     # Both lookups are cached: CIKs indefinitely (they do not change) and
     # submissions for 15 minutes, so newly filed documents appear quickly.
+    key = ticker.upper()
     cik_padded = await _resolve_cik_for_ticker(ticker)
     if not cik_padded:
+        _bounded_set(_EDGAR_LOOKUP_FAILURE, key, None if _edgar_ticker_map_loaded() else "TICKER_INDEX", _READ_STATE_MAX)
         return None, None
-    return cik_padded, await _edgar_get_submissions(cik_padded)
+    subs = await _edgar_get_submissions(cik_padded)
+    _bounded_set(_EDGAR_LOOKUP_FAILURE, key, "SUBMISSIONS" if subs is None and _EDGAR_SUBS_READ_FAILED.get(cik_padded, False) else None, _READ_STATE_MAX)
+    return cik_padded, subs
 
 
 async def _edgar_read_json(url: str) -> dict:

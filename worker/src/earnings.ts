@@ -24,11 +24,16 @@ import {
   resolveCikForTicker,
   edgarGetJson,
   resolveEx991Url,
+  resolveEx991UrlRead,
   edgarGetHtml,
+  edgarReadHtml,
+  edgarReadJson,
   getSubmissionsForTicker,
+  secLookupUnavailable,
+  companyfactsReadFailedWarning,
   edgarCikFromAccession,
   edgarBuildFilingUrls,
-  edgarListExhibitsFromIndex,
+  edgarReadExhibitIndex,
   getEdgarTickerCikMap,
   edgarFetchPublicHtml,
 } from "./clients/edgar.js";
@@ -1174,7 +1179,8 @@ export async function getEarningsCallTranscript(
       };
     } else {
       const { edgarIndexUrl } = edgarBuildFilingUrls(cik, accessionNumber, null);
-      const exhibits = await edgarListExhibitsFromIndex(edgarIndexUrl);
+      const exhibitIndex = await edgarReadExhibitIndex(edgarIndexUrl);
+      const exhibits = exhibitIndex.exhibits;
       officialReleaseSource = transcriptOfficialReleaseSource(secSource, exhibits, cik, accessionNumber);
       const candidates = exhibits.filter(isSecTranscriptCandidate);
       const candidateDiagnostics: Record<string, unknown>[] = [];
@@ -1246,14 +1252,24 @@ export async function getEarningsCallTranscript(
         });
       }
 
-      attemptedSources.push(budgetCheckedAttempt(transcriptAttempt("sec_8k_exhibit", "NOT_FOUND", {
-        url: edgarIndexUrl,
-        accessionNumber,
-        filingDate: secSource.filingDate ?? null,
-        exhibitsSearched: exhibits.length,
-        candidatesChecked: candidateDiagnostics.length,
-        candidateDiagnostics,
-      }), secMark));
+      if (exhibitIndex.failed) {
+        // An index that could not be read is a failed attempt, not an exhibit that is not there (3.8.0).
+        attemptedSources.push(budgetCheckedAttempt(transcriptAttempt("sec_8k_exhibit", "FAILED", {
+          url: edgarIndexUrl,
+          accessionNumber,
+          filingDate: secSource.filingDate ?? null,
+          reason: "SEC filing index could not be read; retry.",
+        }), secMark));
+      } else {
+        attemptedSources.push(budgetCheckedAttempt(transcriptAttempt("sec_8k_exhibit", "NOT_FOUND", {
+          url: edgarIndexUrl,
+          accessionNumber,
+          filingDate: secSource.filingDate ?? null,
+          exhibitsSearched: exhibits.length,
+          candidatesChecked: candidateDiagnostics.length,
+          candidateDiagnostics,
+        }), secMark));
+      }
       secFallback = {
         ticker: ticker.toUpperCase(), period, status: "SEC_EXHIBIT_NOT_FOUND", accessionNumber,
         filingDate: secSource.filingDate ?? null,
@@ -1354,8 +1370,10 @@ export function earningsReleasePicks(submissions: Record<string, unknown>, cikIn
 
 /** An earnings-release 8-K's text: EX-99.1 when the index names one, else the 8-K itself. */
 export async function readReleaseText(cikInt: number, accessionNumber: string, primaryUrl: string): Promise<{ url: string; status: string; text: string | null }> {
-  const ex991 = await resolveEx991Url(cikInt, accessionNumber).catch(() => null);
-  const url = ex991 ?? primaryUrl;
+  const resolved = await resolveEx991UrlRead(cikInt, accessionNumber).catch(() => ({ url: null, indexFailed: false }));
+  // An index that could not be read does not say the 8-K has no EX-99.1: the cover page is not the release (3.8.0).
+  if (!resolved.url && resolved.indexFailed) return { url: primaryUrl, status: "NOT_READ", text: null };
+  const url = resolved.url ?? primaryUrl;
   const html = await edgarGetHtml(url, 5_000_000).catch(() => null);
   return html ? { url, status: "READ", text: _stripHtmlTagsIdx(_sanitizeFilingHtml(html)) } : { url, status: "NOT_READ", text: null };
 }
@@ -1365,18 +1383,40 @@ function nowIsoUtc(): string {
 }
 
 
+/** The warning for an earnings release whose text could not be read (the message the operating-driver ledger gives). */
+function releaseTextUnreadWarning(url: string | null): Record<string, unknown> {
+  return { code: "RELEASE_TEXT_NOT_AVAILABLE", message: `The earnings release ${url} could not be read from SEC; retry.`, severity: "warning" };
+}
+
+/**
+ * The period an earnings source's text states, and whether its document could not be read. A public page counts as failed
+ * whenever the fetch returns nothing; an SEC document only for a failed read, not a 404 (3.8.0).
+ */
+async function readEarningsPeriodFromSource(
+  src: Record<string, unknown>,
+  resolved?: { url: string; sourceType: string },
+): Promise<{ info: EarningsPeriodInfo; readFailed: boolean; url: string }> {
+  const content = resolved ?? await resolveEarningsContentSource(src);
+  const unresolved: EarningsPeriodInfo = { period: null, periodStatus: "UNRESOLVED", periodEvidence: null };
+  if (!content.url) return { info: unresolved, readFailed: false, url: content.url };
+  let html: string | null;
+  let readFailed: boolean;
+  if (content.url.startsWith(SEC_ARCHIVES_PREFIX)) {
+    const read = await edgarReadHtml(content.url, 5_000_000);
+    html = read.text;
+    readFailed = !html && read.failed;
+  } else {
+    html = await fetchPublicHtml(content.url);
+    readFailed = html == null;
+  }
+  return { info: html ? extractEarningsPeriodFromText(_stripHtmlTagsIdx(_sanitizeFilingHtml(html))) : unresolved, readFailed, url: content.url };
+}
+
 async function resolveEarningsPeriodFromSource(
   src: Record<string, unknown>,
   resolved?: { url: string; sourceType: string },
 ): Promise<EarningsPeriodInfo> {
-  const content = resolved ?? await resolveEarningsContentSource(src);
-  if (!content.url) return { period: null, periodStatus: "UNRESOLVED", periodEvidence: null };
-  const html = content.url.startsWith(SEC_ARCHIVES_PREFIX)
-    ? await edgarGetHtml(content.url, 5_000_000)
-    : await fetchPublicHtml(content.url);
-  return html
-    ? extractEarningsPeriodFromText(_stripHtmlTagsIdx(_sanitizeFilingHtml(html)))
-    : { period: null, periodStatus: "UNRESOLVED", periodEvidence: null };
+  return (await readEarningsPeriodFromSource(src, resolved)).info;
 }
 
 function isPaywalledUrl(url: string): boolean {
@@ -1561,8 +1601,14 @@ function parseIxbrlConceptValues(html: string): Map<string, number> {
 }
 
 async function resolveLatestEarningsSecSource(ticker: string): Promise<Record<string, unknown> | null> {
-  const { cikPadded, submissions } = await getSubmissionsForTicker(ticker);
-  if (!cikPadded || !submissions) return null;
+  return (await readLatestEarningsSecSource(ticker)).source;
+}
+
+/** resolveLatestEarningsSecSource, and why there is none when SEC could not be read (3.8.0). */
+async function readLatestEarningsSecSource(ticker: string): Promise<{ source: Record<string, unknown> | null; unavailable: string | null }> {
+  const lookup = await getSubmissionsForTicker(ticker);
+  const { cikPadded, submissions } = lookup;
+  if (!cikPadded || !submissions) return { source: null, unavailable: secLookupUnavailable(lookup, ticker) };
 
   const cikInt = parseInt(cikPadded, 10);
   const recent = ((submissions.filings as Record<string, unknown>)?.recent as Record<string, unknown[]>) ?? {};
@@ -1588,23 +1634,28 @@ async function resolveLatestEarningsSecSource(ticker: string): Promise<Record<st
       const accClean = acc.replace(/-/g, "");
       const documentUrl = secArchiveDocumentUrl(cikInt, accClean, primaryDoc);
       return {
-        sourceType: "sec_8k",
-        url: documentUrl,
-        filingDate: dates[i] ?? null,
-        acceptedAt: acceptedDts[i] ?? null,
-        accessionNumber: acc,
-        cikPadded,
-        items: itemStr,
-        isInlineXBRL: !!(isInlineXBRL[i]),
-        confidence: "HIGH",
+        source: {
+          sourceType: "sec_8k",
+          url: documentUrl,
+          filingDate: dates[i] ?? null,
+          acceptedAt: acceptedDts[i] ?? null,
+          accessionNumber: acc,
+          cikPadded,
+          items: itemStr,
+          isInlineXBRL: !!(isInlineXBRL[i]),
+          confidence: "HIGH",
+        },
+        unavailable: null,
       };
     }
   }
-  return null;
+  return { source: null, unavailable: null };
 }
 
 async function resolveLatestEarningsRelease(ticker: string): Promise<Record<string, unknown>> {
-  const sec = await resolveLatestEarningsSecSource(ticker);
+  const { source: sec, unavailable } = await readLatestEarningsSecSource(ticker);
+  // A submissions or ticker-index read that failed is not "no 8-K": the fallbacks below stay, and the payload says so (3.8.0).
+  const lookupWarnings = unavailable ? [{ code: "SEC_LOOKUP_UNAVAILABLE", message: unavailable, severity: "warning" }] : [];
   if (sec) {
     const reportingTs = toIsoUtc((sec.acceptedAt as string | null) ?? null) ?? toIsoUtc((sec.filingDate as string | null) ?? null);
     return {
@@ -1647,7 +1698,7 @@ async function resolveLatestEarningsRelease(ticker: string): Promise<Record<stri
         },
       ],
       confidence: "MEDIUM",
-      warnings: [{ code: "SEC_8K_NOT_FOUND", message: "SEC 8-K earnings release source not found" }],
+      warnings: [{ code: "SEC_8K_NOT_FOUND", message: "SEC 8-K earnings release source not found" }, ...lookupWarnings],
     };
   }
 
@@ -1660,7 +1711,7 @@ async function resolveLatestEarningsRelease(ticker: string): Promise<Record<stri
     reportedAt: null,
     sources: [],
     confidence: "NOT_FOUND",
-    warnings: [],
+    warnings: lookupWarnings,
   };
 }
 
@@ -1680,9 +1731,13 @@ export async function getLatestEarningsRelease(ticker: string, _period = "latest
     }
     (release.sources as unknown[])[0] = withContent;
   }
-  const periodInfo = String(src.sourceType ?? "") === "yahoo_estimate"
-    ? { period: null, periodStatus: "UNRESOLVED" as const, periodEvidence: null }
-    : await resolveEarningsPeriodFromSource(src, content ?? undefined);
+  const periodRead = String(src.sourceType ?? "") === "yahoo_estimate"
+    ? { info: { period: null, periodStatus: "UNRESOLVED" as const, periodEvidence: null }, readFailed: false, url: "" }
+    : await readEarningsPeriodFromSource(src, content ?? undefined);
+  const periodInfo = periodRead.info;
+  if (periodRead.readFailed) {
+    release.warnings = [...(Array.isArray(release.warnings) ? release.warnings : []), releaseTextUnreadWarning(periodRead.url)];
+  }
   return JSON.stringify({
     ...release,
     period: periodInfo.period ?? release.period ?? "latest",
@@ -1999,7 +2054,9 @@ export async function extractEarningsMetrics(
     }
     const contentSourceType = contentUrl !== srcUrl ? "sec_8k_ex991" : "sec_8k";
 
-    const html = await edgarGetHtml(contentUrl, 5_000_000);
+    const contentRead = await edgarReadHtml(contentUrl, 5_000_000);
+    const html = contentRead.text;
+    if (!html && contentRead.failed) warnings.push(releaseTextUnreadWarning(contentUrl));
     if (html) {
       const contentEv = (excerpt: string | null): Record<string, unknown> | null =>
         excerpt ? { url: contentUrl, sourceType: contentSourceType, publishedAt, retrievedAt, excerpt } : null;
@@ -2228,13 +2285,15 @@ export async function getGuidanceHistory(ticker: string, maxReleases = 8): Promi
       filingDate: p.filingDate, accessionNumber: p.accessionNumber, ...(await readReleaseText(cikInt, p.accessionNumber, p.primaryUrl)),
     }))));
   }
-  const companyfacts = await edgarGetJson(secCompanyFactsUrl(cikPadded)).catch(() => null);
+  const factsRead = await edgarReadJson(secCompanyFactsUrl(cikPadded));
+  const companyfacts = factsRead.ok ? factsRead.json : null;
   const out = guidanceHistory(ticker, releases, companyfacts);
   const unread = releases.filter((r) => r.status !== "READ").length;
   const warnings: Record<string, unknown>[] = [];
   if (picks.length === 0) warnings.push({ code: "NO_EARNINGS_RELEASES_FOUND", message: "No 8-K reporting results of operations (Item 2.02) is in SEC's recent submissions.", severity: "warning" });
   if (unread > 0) warnings.push({ code: "RELEASE_TEXT_NOT_AVAILABLE", message: `${unread} of ${releases.length} earnings releases could not be read from SEC; their guidance is missing, not withdrawn. Retry.`, severity: "warning" });
   if (!companyfacts) warnings.push({ code: "ACTUALS_NOT_READ", message: "SEC companyfacts could not be read, so outcomes were not evaluated; retry.", severity: "warning" });
+  if (!factsRead.ok) warnings.push(companyfactsReadFailedWarning());
   out.status = picks.length === 0 ? "NO_EARNINGS_RELEASES_FOUND" : unread === releases.length ? "RELEASE_TEXT_NOT_AVAILABLE" : unread > 0 || !companyfacts ? "PARTIAL" : "OK";
   out.retryable = unread > 0 || !companyfacts;
   out.warnings = warnings;
