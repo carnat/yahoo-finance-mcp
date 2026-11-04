@@ -309,7 +309,7 @@
       "name": "pricing.ts",
       "kind": "module",
       "language": "typescript",
-      "loc": 2696,
+      "loc": 2703,
       "file": "worker/src/pricing.ts"
      },
      {
@@ -333,7 +333,7 @@
       "name": "pricing_notices.py",
       "kind": "module",
       "language": "python",
-      "loc": 73,
+      "loc": 77,
       "file": "yfmcp/pricing_notices.py"
      },
      {
@@ -341,7 +341,7 @@
       "name": "pricing.py",
       "kind": "module",
       "language": "python",
-      "loc": 2817,
+      "loc": 2825,
       "file": "yfmcp/tools/pricing.py"
      }
     ]
@@ -364,7 +364,7 @@
       "name": "fundamentals.py",
       "kind": "module",
       "language": "python",
-      "loc": 2219,
+      "loc": 2229,
       "file": "yfmcp/tools/fundamentals.py"
      }
     ]
@@ -474,7 +474,7 @@
       "name": "sec.ts",
       "kind": "module",
       "language": "typescript",
-      "loc": 3104,
+      "loc": 3121,
       "file": "worker/src/sec.ts"
      },
      {
@@ -538,7 +538,7 @@
       "name": "sec.py",
       "kind": "module",
       "language": "python",
-      "loc": 3181,
+      "loc": 3194,
       "file": "yfmcp/tools/sec.py"
      }
     ]
@@ -751,7 +751,7 @@
       "name": "earnings.ts",
       "kind": "module",
       "language": "typescript",
-      "loc": 2406,
+      "loc": 2413,
       "file": "worker/src/earnings.ts"
      },
      {
@@ -799,7 +799,7 @@
       "name": "earnings.py",
       "kind": "module",
       "language": "python",
-      "loc": 2251,
+      "loc": 2260,
       "file": "yfmcp/tools/earnings.py"
      }
     ]
