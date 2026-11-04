@@ -309,7 +309,7 @@
       "name": "pricing.ts",
       "kind": "module",
       "language": "typescript",
-      "loc": 2687,
+      "loc": 2696,
       "file": "worker/src/pricing.ts"
      },
      {
@@ -341,7 +341,7 @@
       "name": "pricing.py",
       "kind": "module",
       "language": "python",
-      "loc": 2811,
+      "loc": 2817,
       "file": "yfmcp/tools/pricing.py"
      }
     ]
