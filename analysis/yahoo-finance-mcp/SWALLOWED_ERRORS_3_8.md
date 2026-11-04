@@ -48,5 +48,5 @@ Not changed:
 ## Outcome
 
 - Owner approved 2026-11-04 07:36Z ("Yes, as recommended").
-- 3.8.0 (SEC reads), 3.8.1 (Yahoo enrichment) and 3.8.2 (option expiries) shipped; details in docs/provider-runtime-guidance.md. 3.8.1 also holds back the options-flow string codes and the Python-only partial rows.
+- 3.8.0 (SEC reads), 3.8.1 (Yahoo enrichment), 3.8.2 (option expiries) and 3.8.3 (unreadable tool and source output) shipped; details in docs/provider-runtime-guidance.md. 3.8.1 also holds back the options-flow string codes and the Python-only partial rows.
 - Held back for new names: the management-commentary "not read" signal and the skipped annual-coverage check.

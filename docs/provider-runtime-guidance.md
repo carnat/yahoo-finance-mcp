@@ -3190,6 +3190,23 @@ F-024, F-026, F-029). Both runtimes change alike.
 - **Tests:** 21 new parity cases in `scripts/parity/cases_audit_2251.py`.
 - **Rollback:** redeploy 2.25.0.
 
+## Unreadable Tool and Source Output Is Reported (3.8.3)
+
+- **Why:** Phase 6 swallowed-error audit, part 4 of 4 (owner decision 2026-11-04). It changes both runtimes and uses
+  existing codes only.
+- **`extract_sec_filing_fact`:** when the fact reader's result cannot be parsed, the tool now fails with
+  `PROVIDER_ERROR` (retryable), "SEC fact result could not be read; retry.". Before, it reported the fact as
+  `NOT_DISCLOSED`.
+- **Company IR page news source (structured adapter):** when an approved source returns a body that is not JSON,
+  the source is now `SOURCE_VALIDATION_FAILED` with the existing `COMPANY_IR_PAGE_VALIDATION_FAILED` warning
+  ("unexpected non-JSON body for structured adapter"). Before, it was a silent empty result.
+- **Left as is:** there are about 40 places where one tool parses another tool's JSON. In each one the fallback
+  can't be reached because the component always returns JSON, or the input is a real "no data" answer, or the
+  failure is already reported.
+- **Tests:** `scripts/parity/cases_parse_reads_383.py` has 4 cases.
+- **Unchanged:** `schemaHash` and `manifestHash`.
+- **Rollback:** redeploy 3.8.2.
+
 ## Skipped Option Expiries Are Reported (3.8.2)
 
 - **Why:** Phase 6 swallowed-error audit, part 3 of 4. The owner decided on 2026-11-04 that this release adds one

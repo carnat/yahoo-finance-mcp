@@ -87,7 +87,7 @@
       "name": "tools.ts",
       "kind": "module",
       "language": "typescript",
-      "loc": 1260,
+      "loc": 1261,
       "file": "worker/src/tools.ts"
      },
      {
@@ -538,7 +538,7 @@
       "name": "sec.py",
       "kind": "module",
       "language": "python",
-      "loc": 3180,
+      "loc": 3181,
       "file": "yfmcp/tools/sec.py"
      }
     ]
@@ -830,7 +830,7 @@
       "name": "company-ir-page.ts",
       "kind": "module",
       "language": "typescript",
-      "loc": 385,
+      "loc": 386,
       "file": "worker/src/news/providers/company-ir-page.ts"
      },
      {
@@ -926,7 +926,7 @@
       "name": "company_ir_page.py",
       "kind": "module",
       "language": "python",
-      "loc": 356,
+      "loc": 357,
       "file": "yfmcp/news/providers/company_ir_page.py"
      },
      {
