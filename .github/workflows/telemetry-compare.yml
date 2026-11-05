@@ -22,6 +22,11 @@ on:
         default: "domain"
         type: choice
         options: [domain, action]
+      diagnostics:
+        description: "Also report upstream calls, cache sources and error codes (not judged)"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -47,9 +52,11 @@ jobs:
           COMPARE_START: ${{ inputs.compare_start }}
           COMPARE_END: ${{ inputs.compare_end }}
           GROUP_BY: ${{ inputs.group_by }}
+          DIAGNOSTICS: ${{ inputs.diagnostics }}
         run: |
           args=(--out telemetry-compare.json --group-by "${GROUP_BY:-domain}")
           if [ -n "$COMPARE_START" ]; then args+=(--compare-start "$COMPARE_START"); fi
+          if [ "$DIAGNOSTICS" = "true" ]; then args+=(--diagnostics); fi
           if [ -n "$COMPARE_END" ]; then args+=(--compare-end "$COMPARE_END"); fi
           set +e
           python scripts/compare_telemetry_windows.py "${args[@]}"
