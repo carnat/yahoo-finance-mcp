@@ -144,6 +144,25 @@ ORDER BY {group_cols}
 FORMAT JSON"""
 
 
+def breakdown_sql(dataset: str, start: datetime, end: datetime, group_by: str = "domain") -> str:
+    """Requests by upstream count (double4), response size bucket (blob6) and server version
+    (blob2), for diagnosis: tells a per-request change from a change in the request mix."""
+    by_action = group_by == "action"
+    action_col = "\n  index1 AS action_name," if by_action else ""
+    group_cols = "action_group, action_name" if by_action else "action_group"
+    return f"""SELECT
+  blob1 AS action_group,{action_col}
+  double4 AS upstream_count,
+  blob6 AS size_bucket,
+  blob2 AS server_version,
+  SUM(_sample_interval) AS requests
+FROM {dataset}
+WHERE {_where(start, end, exclude_header=True)}
+GROUP BY {group_cols}, upstream_count, size_bucket, server_version
+ORDER BY {group_cols}, upstream_count, size_bucket, server_version
+FORMAT JSON"""
+
+
 def _group_name(row: dict[str, Any]) -> str:
     group = _safe(row.get("action_group")) or "-"
     if "action_name" in row:
@@ -153,10 +172,17 @@ def _group_name(row: dict[str, Any]) -> str:
 
 def _empty_diagnostic() -> dict[str, Any]:
     return {"requests": 0.0, "upstream": 0.0, "timeouts": 0.0, "retries": 0.0,
-            "cacheSource": {s: 0.0 for s in CACHE_SOURCES + ("none",)}, "errorCodes": {}}
+            "cacheSource": {s: 0.0 for s in CACHE_SOURCES + ("none",)}, "errorCodes": {},
+            "upstreamCounts": {}, "sizeBuckets": {}, "versions": {}}
 
 
-def window_diagnostics(rows: list[dict[str, Any]], error_rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+def _count_key(value: Any) -> str:
+    n = _num(value)
+    return str(int(n)) if n == int(n) else str(n)
+
+
+def window_diagnostics(rows: list[dict[str, Any]], error_rows: list[dict[str, Any]],
+                       breakdown_rows: list[dict[str, Any]] | None = None) -> dict[str, dict[str, Any]]:
     """Per group: upstream requests per request, cache source counts, error codes. Not judged."""
     out: dict[str, dict[str, Any]] = {}
     for row in rows:
@@ -176,6 +202,13 @@ def window_diagnostics(rows: list[dict[str, Any]], error_rows: list[dict[str, An
         entry = out.setdefault(_group_name(row), _empty_diagnostic())
         code = _safe(row.get("error_code")) or "-"
         entry["errorCodes"][code] = entry["errorCodes"].get(code, 0.0) + _num(row.get("requests"))
+    for row in breakdown_rows or []:
+        entry = out.setdefault(_group_name(row), _empty_diagnostic())
+        n = _num(row.get("requests"))
+        for field, key in (("upstreamCounts", _count_key(row.get("upstream_count"))),
+                           ("sizeBuckets", _safe(row.get("size_bucket")) or "-"),
+                           ("versions", _safe(row.get("server_version")) or "-")):
+            entry[field][key] = entry[field].get(key, 0.0) + n
     return {
         name: {
             "upstreamPerRequest": round(e["upstream"] / e["requests"], 4) if e["requests"] else None,
@@ -183,6 +216,9 @@ def window_diagnostics(rows: list[dict[str, Any]], error_rows: list[dict[str, An
             "retriesPerRequest": round(e["retries"] / e["requests"], 4) if e["requests"] else None,
             "cacheSource": {s: _clean(n) for s, n in e["cacheSource"].items()},
             "errorCodes": {c: _clean(n) for c, n in sorted(e["errorCodes"].items())},
+            "upstreamCounts": {c: _clean(n) for c, n in sorted(e["upstreamCounts"].items(), key=lambda kv: float(kv[0]))},
+            "sizeBuckets": {c: _clean(n) for c, n in sorted(e["sizeBuckets"].items())},
+            "versions": {c: _clean(n) for c, n in sorted(e["versions"].items())},
         }
         for name, e in sorted(out.items())
     }
@@ -286,8 +322,10 @@ def build_report(transport: Transport, account_id: str, token: str,
     if diagnostics:
         base_err = run_sql(transport, account_id, token, error_code_sql(dataset, *baseline, group_by=group_by))
         comp_err = run_sql(transport, account_id, token, error_code_sql(dataset, *compare, group_by=group_by))
-        result["diagnostics"] = {"baseline": window_diagnostics(base_rows, base_err),
-                                 "compare": window_diagnostics(comp_rows, comp_err)}
+        base_mix = run_sql(transport, account_id, token, breakdown_sql(dataset, *baseline, group_by=group_by))
+        comp_mix = run_sql(transport, account_id, token, breakdown_sql(dataset, *compare, group_by=group_by))
+        result["diagnostics"] = {"baseline": window_diagnostics(base_rows, base_err, base_mix),
+                                 "compare": window_diagnostics(comp_rows, comp_err, comp_mix)}
     return {
         "schemaVersion": SCHEMA_VERSION,
         "dataset": dataset,

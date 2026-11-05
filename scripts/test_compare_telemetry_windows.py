@@ -155,6 +155,11 @@ class TestRequests(unittest.TestCase):
                 sql = body.decode()
                 if "AS error_code" in sql:
                     rows = [{"action_group": "stock_pricing", "error_code": "PROVIDER_TIMEOUT", "requests": "3"}]
+                elif "AS upstream_count" in sql:
+                    rows = [{"action_group": "stock_pricing", "upstream_count": 1.0, "size_bucket": "1-10K",
+                             "server_version": "3.9.0", "requests": "25"},
+                            {"action_group": "stock_pricing", "upstream_count": 2.0, "size_bucket": "10-100K",
+                             "server_version": "3.9.0", "requests": "15"}]
                 elif f"toDateTime({BASE_FROM})" in sql:
                     rows = [diag_row("stock_pricing", 40, 40, 30)]
                 else:
@@ -165,8 +170,10 @@ class TestRequests(unittest.TestCase):
         code, out, err = run(COMPARE_ARGS + ["--diagnostics"], t)
         self.assertNotIn(TOKEN, out + err)
         self.assertEqual(code, 0)
-        self.assertEqual(len(t.calls), 4)
+        self.assertEqual(len(t.calls), 6)
         self.assertIn("SUM(_sample_interval * double4) AS upstream_total", t.calls[0][2].decode())
+        self.assertIn("double4 AS upstream_count", t.calls[4][2].decode())
+        self.assertIn("blob2 AS server_version", t.calls[4][2].decode())
         self.assertIn("blob4 IN ('tool_error', 'rpc_error', 'exception')", t.calls[2][2].decode())
         diag = json.loads(out)["diagnostics"]
         self.assertEqual(diag["baseline"]["stock_pricing"]["upstreamPerRequest"], 1.0)
@@ -177,6 +184,9 @@ class TestRequests(unittest.TestCase):
         self.assertEqual(diag["compare"]["stock_pricing"]["cacheSource"]["edge"], 10)
         self.assertEqual(diag["compare"]["stock_pricing"]["cacheSource"]["none"], 30)
         self.assertEqual(diag["compare"]["stock_pricing"]["errorCodes"], {"PROVIDER_TIMEOUT": 3})
+        self.assertEqual(diag["compare"]["stock_pricing"]["upstreamCounts"], {"1": 25, "2": 15})
+        self.assertEqual(diag["compare"]["stock_pricing"]["sizeBuckets"], {"1-10K": 25, "10-100K": 15})
+        self.assertEqual(diag["compare"]["stock_pricing"]["versions"], {"3.9.0": 40})
 
     def test_no_diagnostics_by_default(self):
         t = FakeTransport()
