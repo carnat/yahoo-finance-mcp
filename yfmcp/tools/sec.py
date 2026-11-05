@@ -2297,7 +2297,7 @@ async def list_sec_company_filings(ticker: str, filing_type: str = "10-K", limit
             "items": str(items[i]) if i < len(items) and items[i] is not None else "",
         })
 
-    retrieved_at = datetime.datetime.now(tz=datetime.timezone.utc).isoformat()
+    retrieved_at = datetime.datetime.now(tz=datetime.timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
     return json.dumps({
         "ticker": ticker,
         "cik": cik_padded,
@@ -2874,7 +2874,7 @@ async def _build_sec_filing_index(ticker: str, filing_type: str, accession_numbe
         html = html.encode("utf-16-le", "surrogatepass")[: 2 * _SEC_DOCUMENT_READ_MAX_CHARS].decode("utf-16-le", "ignore")
 
     index = _build_filing_index_from_html(html)
-    indexed_at = datetime.datetime.now(tz=datetime.timezone.utc).isoformat()
+    indexed_at = datetime.datetime.now(tz=datetime.timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
     result = json.dumps({
         "ticker": ticker,
@@ -3075,7 +3075,7 @@ async def list_sec_material_filings(
         more = ", and more matching filings exist in SEC's recent submissions" if more_available else ""
         warnings.append({"code": "LIMIT_CAPPED", "message": (
             f"limit {limit} is above the maximum of {_SEC_MATERIAL_FILINGS_MAX}; at most {_SEC_MATERIAL_FILINGS_MAX} filings are returned{more}."), "severity": "warning"})
-    retrieved_at = datetime.datetime.now(tz=datetime.timezone.utc).isoformat()
+    retrieved_at = datetime.datetime.now(tz=datetime.timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
     return json.dumps({
         "ticker": ticker,
         "cik": cik_padded,

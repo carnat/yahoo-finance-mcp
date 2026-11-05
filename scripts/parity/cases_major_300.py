@@ -621,20 +621,12 @@ _EIGHT_K_HTML = "<html><body><p>Item 2.02 Results of Operations. The press relea
 _EX99_HTML = "<html><body><p>Acme Reports Fourth Quarter Fiscal 2026 Results. Revenue was $1.0 billion.</p></body></html>"
 
 
-def _seconds(stamp):
-    """An ISO timestamp without its milliseconds: Python's _to_iso_utc writes 2026-07-14T21:05:00Z where the Worker's toIsoUtc writes
-    2026-07-14T21:05:00.000Z (a general difference of the two helpers, open: see the 3.0.0 report); the instant is what is compared."""
-    return stamp.replace(".000Z", "Z") if isinstance(stamp, str) else stamp
-
-
 def _f59_view(v: dict) -> dict:
+    """The payload as returned, timestamps included: since 3.10.0 Python writes reportedAt with the Worker's milliseconds."""
     d = v["data"] if isinstance(v, dict) and "meta" in v and isinstance(v.get("data"), dict) else v
     out = json.loads(json.dumps(d))
-    out["reportedAt"] = _seconds(out.get("reportedAt"))
     for source in out.get("sources") or []:
         source.pop("retrievedAt", None)
-        if "publishedAt" in source:
-            source["publishedAt"] = _seconds(source["publishedAt"])
     return out
 
 
@@ -650,7 +642,7 @@ def _f59_case(name: str, tkr: str, cik: int, filings: list[dict], docs: dict, in
 def _f59_expect(cik: int, accn: str, *, content: str, period: str, status: str, evidence, items: str = "2.02,9.01") -> dict:
     return {
         "ticker": None, "eventType": "earnings_release", "period": period, "periodStatus": status, "periodEvidence": evidence,
-        "reportedAt": "2026-07-14T21:05:00Z",
+        "reportedAt": "2026-07-14T21:05:00.000Z",
         "sources": [{"sourceType": "sec_8k", "url": _doc_url(cik, accn, "r8k.htm"), "contentUrl": content, "filingDate": "2026-07-14",
                      "acceptedAt": "2026-07-14T21:05:00.000Z", "accessionNumber": accn, "cikPadded": f"{cik:010d}", "items": items,
                      "isInlineXBRL": False, "confidence": "HIGH"}],
@@ -686,7 +678,7 @@ _F59_NEWEST["ticker"] = "ZF59D"
 _F59_NEWEST["sources"][0]["url"] = _doc_url(850004, "0000850004-26-000009", "other8k.htm")
 _F59_NEWEST["sources"][0]["filingDate"] = "2026-07-20"
 _F59_NEWEST["sources"][0]["acceptedAt"] = "2026-07-20T21:05:00.000Z"
-_F59_NEWEST["reportedAt"] = "2026-07-20T21:05:00Z"
+_F59_NEWEST["reportedAt"] = "2026-07-20T21:05:00.000Z"
 CASES += [
     _f59_case("major300.f59.item_202_8k_is_chosen_over_a_newer_8k_for_another_item", "ZF59C", 850003, _F59_ITEMS_ROWS,
               {_doc_url(850003, _ACC3, "r8k.htm"): _EIGHT_K_HTML, _doc_url(850003, _ACC3, "ex991.htm"): _EX99_HTML}, True, _F59_ITEMS),
@@ -747,9 +739,9 @@ _PAST, _FUTURE = 1_577_836_800, 4_070_908_800   # 2020-01-01 and 2099-01-01 (UTC
 CASES += [
     _f59_yahoo_case("major300.f59.yahoo_estimate_fallback_has_no_content_url", "ZF59F", 850006, [_FUTURE, _PAST], {
         "ticker": "ZF59F", "eventType": "earnings_release", "period": "latest", "periodStatus": "UNRESOLVED", "periodEvidence": None,
-        "reportedAt": "2020-01-01T00:00:00Z",
+        "reportedAt": "2020-01-01T00:00:00.000Z",
         "sources": [{"sourceType": "yahoo_estimate", "url": "https://finance.yahoo.com/quote/ZF59F/analysis",
-                     "publishedAt": "2020-01-01T00:00:00Z", "confidence": "MEDIUM"}],
+                     "publishedAt": "2020-01-01T00:00:00.000Z", "confidence": "MEDIUM"}],
         "confidence": "MEDIUM", "warnings": [{"code": "SEC_8K_NOT_FOUND", "message": "SEC 8-K earnings release source not found"}]}),
     _f59_yahoo_case("major300.f59.nothing_found_has_no_sources", "ZF59G", 850007, [_FUTURE], {
         "ticker": "ZF59G", "eventType": "earnings_release", "period": "latest", "periodStatus": "UNRESOLVED", "periodEvidence": None,

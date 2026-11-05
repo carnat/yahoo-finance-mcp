@@ -45,7 +45,7 @@ class ProviderJsonResult:
 
 
 def _utc_now_iso() -> str:
-    return datetime.datetime.now(datetime.timezone.utc).isoformat()
+    return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 def _cache_key(provider: str, operation: str, params: dict[str, object]) -> str:

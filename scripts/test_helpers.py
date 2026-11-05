@@ -139,6 +139,22 @@ class TestToIsoUtc(unittest.TestCase):
         result = srv._utc_now_iso()
         self.assertTrue(result.endswith("Z"))
         self.assertIsNotNone(srv._to_iso_utc(result))
+        # The Worker's new Date().toISOString(): three millisecond digits (3.10.0).
+        self.assertRegex(result, r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$")
+
+
+class TestToIsoUtcMs(unittest.TestCase):
+    """yfmcp.util._to_iso_utc_ms: the Worker's toIsoUtc, used by the earnings tools (3.10.0)."""
+
+    def test_formats(self):
+        from yfmcp.util import _to_iso_utc_ms
+        self.assertEqual(_to_iso_utc_ms("2026-07-14"), "2026-07-14T00:00:00Z")
+        self.assertEqual(_to_iso_utc_ms("2026-07-14T21:05:00Z"), "2026-07-14T21:05:00.000Z")
+        self.assertEqual(_to_iso_utc_ms("2026-07-14T17:05:00-04:00"), "2026-07-14T21:05:00.000Z")
+        self.assertEqual(_to_iso_utc_ms("2026-07-14T21:05:00.123456Z"), "2026-07-14T21:05:00.123Z")
+        self.assertIsNone(_to_iso_utc_ms("20260714"))
+        self.assertIsNone(_to_iso_utc_ms(1747312200))
+        self.assertIsNone(_to_iso_utc_ms("not-a-date"))
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

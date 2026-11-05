@@ -35,7 +35,8 @@ from yfmcp.validation import _validate_ticker, _sanitize_sec_html
 from yfmcp.cache import TTL_EDGAR, _tool_cache
 from yfmcp.util import (
     _utc_now_iso,
-    _to_iso_utc,
+    _to_iso_utc_ms,
+    yahoo_iso,
     _filter_paragraphs_by_topics,
     _safe_json_loads,
     _compact_excerpt,
@@ -360,7 +361,7 @@ def _latest_past_earnings_date(dates: list, now: datetime.datetime | None = None
     for d in dates:
         if not isinstance(d, str):
             continue
-        iso = _to_iso_utc(d)
+        iso = _to_iso_utc_ms(d)
         if iso is None:
             continue
         try:
@@ -379,7 +380,7 @@ async def _resolve_latest_earnings_release(ticker: str) -> dict:
     unavailable = None if sec else _sec._lookup_unavailable_message(ticker)
     lookup_warnings = [{"code": "SEC_LOOKUP_UNAVAILABLE", "message": unavailable, "severity": "warning"}] if unavailable else []
     if sec:
-        reporting_ts = _to_iso_utc(sec.get("acceptedAt")) or _to_iso_utc(sec.get("filingDate"))
+        reporting_ts = _to_iso_utc_ms(sec.get("acceptedAt")) or _to_iso_utc_ms(sec.get("filingDate"))
         return {
             "ticker": ticker.upper(),
             "eventType": "earnings_release",
@@ -406,12 +407,12 @@ async def _resolve_latest_earnings_release(ticker: str) -> dict:
             "period": "latest",
             "periodStatus": "UNRESOLVED",
             "periodEvidence": None,
-            "reportedAt": _to_iso_utc(published),
+            "reportedAt": _to_iso_utc_ms(published),
             "sources": [
                 {
                     "sourceType": "yahoo_estimate",
                     "url": yahoo_url,
-                    "publishedAt": _to_iso_utc(published),
+                    "publishedAt": _to_iso_utc_ms(published),
                     "retrievedAt": _utc_now_iso(),
                     "confidence": "MEDIUM",
                 }
@@ -726,7 +727,10 @@ async def extract_earnings_metrics(
     content = await _resolve_earnings_content_source(src)
     src_url = content["url"]
     src_type = content["sourceType"] if src.get("sourceType") else "yahoo"
-    src_published = _to_iso_utc(src.get("filingDate") or src.get("publishedAt"))
+    # The top-level source names the release's own source (sec_8k), as the Worker's does; the evidence names the
+    # document read (sec_8k_ex991 for the exhibit). 3.10.0.
+    release_source_type = str(src.get("sourceType") or "") or "yahoo"
+    src_published = _to_iso_utc_ms(src.get("filingDate") or src.get("publishedAt"))
     retrieved_at = _utc_now_iso()
     period_info = _extract_earnings_period_from_text("")
 
@@ -806,7 +810,7 @@ async def extract_earnings_metrics(
         "periodStatus": period_info["periodStatus"],
         "periodEvidence": period_info["periodEvidence"],
         "reportedAt": release.get("reportedAt"),
-        "source": src_type if src_type else "yahoo",
+        "source": release_source_type,
         "metrics": metrics,
         "evidence": evidence_items,
         "confidence": overall_conf,
@@ -891,7 +895,7 @@ async def extract_guidance(ticker: str, period: str = "latest") -> str:
                 "high": hi,
                 "midpoint": (lo + hi) / 2.0,
                 "unit": "USD",
-                "evidence": [{"url": src_url, "sourceType": content["sourceType"], "publishedAt": _to_iso_utc(src.get("filingDate")), "retrievedAt": _utc_now_iso(), "excerpt": _compact_excerpt(patterns["revenue"]["excerpt"])}],
+                "evidence": [{"url": src_url, "sourceType": content["sourceType"], "publishedAt": _to_iso_utc_ms(src.get("filingDate")), "retrievedAt": _utc_now_iso(), "excerpt": _compact_excerpt(patterns["revenue"]["excerpt"])}],
             }
     if patterns["grossMargin"]:
         lo = float(patterns["grossMargin"]["low"])
@@ -905,7 +909,7 @@ async def extract_guidance(ticker: str, period: str = "latest") -> str:
             "lowPct": lo,
             "highPct": hi,
             "midpointPct": (lo + hi) / 2.0,
-            "evidence": [{"url": src_url, "sourceType": content["sourceType"], "publishedAt": _to_iso_utc(src.get("filingDate")), "retrievedAt": _utc_now_iso(), "excerpt": _compact_excerpt(patterns["grossMargin"]["excerpt"])}],
+            "evidence": [{"url": src_url, "sourceType": content["sourceType"], "publishedAt": _to_iso_utc_ms(src.get("filingDate")), "retrievedAt": _utc_now_iso(), "excerpt": _compact_excerpt(patterns["grossMargin"]["excerpt"])}],
         }
     if patterns["eps"]:
         lo = float(patterns["eps"]["low"])
@@ -920,7 +924,7 @@ async def extract_guidance(ticker: str, period: str = "latest") -> str:
             "high": hi,
             "midpoint": (lo + hi) / 2.0,
             "unit": "USD/share",
-            "evidence": [{"url": src_url, "sourceType": content["sourceType"], "publishedAt": _to_iso_utc(src.get("filingDate")), "retrievedAt": _utc_now_iso(), "excerpt": _compact_excerpt(patterns["eps"]["excerpt"])}],
+            "evidence": [{"url": src_url, "sourceType": content["sourceType"], "publishedAt": _to_iso_utc_ms(src.get("filingDate")), "retrievedAt": _utc_now_iso(), "excerpt": _compact_excerpt(patterns["eps"]["excerpt"])}],
         }
     found = any(base[k]["status"] == "FOUND" for k in ("revenue", "grossMargin", "eps"))
     return _wrap_envelope_v2("extract_guidance", {
@@ -971,7 +975,7 @@ async def extract_management_commentary(ticker: str, period: str = "latest", top
                 "evidence": [{
                     "sourceType": source_type,
                     "url": src_url,
-                    "publishedAt": _to_iso_utc(src.get("filingDate") or src.get("publishedAt")),
+                    "publishedAt": _to_iso_utc_ms(src.get("filingDate") or src.get("publishedAt")),
                     "retrievedAt": _utc_now_iso(),
                     "excerpt": excerpt[:240],
                     "matchedTerms": hit["matchedTerms"],
@@ -1613,9 +1617,11 @@ def _is_sec_transcript_candidate(exhibit: dict) -> bool:
 
 
 def _metadata_epoch_iso(value: object) -> str | None:
+    """The Worker's metadataEpochIso: ``new Date(seconds * 1000).toISOString()``."""
     try:
-        return datetime.datetime.fromtimestamp(float(value), tz=datetime.timezone.utc).isoformat()
-    except (TypeError, ValueError, OSError):
+        numeric = float(value)  # type: ignore[arg-type]
+        return yahoo_iso(numeric) if math.isfinite(numeric) else None
+    except (TypeError, ValueError, OSError, OverflowError):
         return None
 
 

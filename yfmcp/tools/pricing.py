@@ -1878,7 +1878,7 @@ async def get_market_snapshot(
             results[t] = parsed
         return json.dumps({"tickers": results})
 
-    retrieved_at = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None).isoformat() + "Z"
+    retrieved_at = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
     component_status: dict[str, str] = {}
     failed_components: list[str] = []
