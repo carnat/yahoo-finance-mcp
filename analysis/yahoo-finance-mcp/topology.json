@@ -254,7 +254,7 @@
       "name": "util.py",
       "kind": "module",
       "language": "python",
-      "loc": 370,
+      "loc": 394,
       "file": "yfmcp/util.py"
      },
      {
@@ -799,7 +799,7 @@
       "name": "earnings.py",
       "kind": "module",
       "language": "python",
-      "loc": 2260,
+      "loc": 2266,
       "file": "yfmcp/tools/earnings.py"
      }
     ]
@@ -1166,6 +1166,12 @@
       "name": "reconciliation (cron)",
       "kind": "job",
       "file": ".github/workflows/reconciliation.yml"
+     },
+     {
+      "id": "job:telemetry-compare",
+      "name": "telemetry-compare (manual)",
+      "kind": "job",
+      "file": ".github/workflows/telemetry-compare.yml"
      },
      {
       "id": "job:telemetry-export",
@@ -4539,6 +4545,7 @@
   "job:ir-source-discovery",
   "job:news-quality-audit",
   "job:reconciliation",
+  "job:telemetry-compare",
   "job:telemetry-export",
   "server.py#transport",
   "tool:analyst_data",

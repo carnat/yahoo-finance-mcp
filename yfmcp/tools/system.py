@@ -46,7 +46,7 @@ def _public_metadata() -> dict:
         "runtimeHash": hashlib.sha256(f"{BUILD_VERSION}|{schema_hash}|{tool_mode}".encode("utf-8")).hexdigest()[:16],
         "toolMode": tool_mode,
         "envelopeSchemaVersion": "2026-07-08",
-        "generatedAt": datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
+        "generatedAt": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
         "privacyScope": "public_market_data_only",
         # The local stdio server has no HTTP request, so these are always null.
         "authorizationHeaderPresent": None,

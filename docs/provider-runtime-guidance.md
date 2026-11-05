@@ -3190,6 +3190,30 @@ F-024, F-026, F-029). Both runtimes change alike.
 - **Tests:** 21 new parity cases in `scripts/parity/cases_audit_2251.py`.
 - **Rollback:** redeploy 2.25.0.
 
+## Python Timestamps And Earnings Source Match The Worker (3.10.0)
+
+- **Why:** the last Python/Worker differences left pinned from 3.0.0 (see the F59 entry above; owner go-ahead
+  2026-11-05). Only Python changes. No field is added or removed.
+- **Earnings timestamps:** the earnings tools (`get_latest_earnings_release`, `index_earnings_release`,
+  `extract_earnings_metrics` and the other release extractors) write timestamps as the Worker's `toIsoUtc` does
+  (`yfmcp.util._to_iso_utc_ms`): a date-only value stays `2026-07-14T00:00:00Z`; any other instant carries three
+  millisecond digits, so `reportedAt` is `2026-07-14T21:05:00.000Z` (was `...21:05:00Z`). A compact digit string
+  such as `20260714` is not read as a date, as in the Worker. Transcript `eventDate` / `updatedAt` from epoch
+  seconds also carry milliseconds and a `Z` (were `+00:00`).
+- **"Now" timestamps:** every Python "now" value (`meta.generatedAt`, `retrievedAt`, `indexedAt`, provider
+  `fetchedAt`, health `generatedAt`) is written as the Worker's `new Date().toISOString()`:
+  `2026-11-05T17:57:21.123Z`. Before, Python wrote six fraction digits, and some fields ended in `+00:00`.
+- **Not changed:** the news tools keep `_to_iso_utc`, which matches the Worker's news formatter (zero milliseconds
+  dropped in both runtimes since 2.17.0).
+- **`extract_earnings_metrics` `source`:** the top-level `source` names the release's own source, `sec_8k`, as in the
+  Worker (Python named the exhibit it read, `sec_8k_ex991`). Evidence rows still name the document read
+  (`sec_8k_ex991` for the EX-99.1 exhibit) in both runtimes.
+- **Meta block:** Python's status-table meta (`capabilityStatus`, `failureMode`, `evidenceRequired`, `sourceType`)
+  was already aligned in 3.7.0 (D7); nothing changes here.
+- **Tests:** `scripts/parity/cases_divergence_3100.py` (10 cases); the F59 cases in `cases_major_300.py` now compare
+  timestamps as written instead of stripping `.000`; `scripts/test_helpers.py` checks both helpers.
+- **Rollback:** redeploy 3.9.0.
+
 ## Remaining Swallowed Reads Are Reported (3.9.0)
 
 - **Why:** the leftovers of the Phase 6 swallowed-error audit (owner decision 2026-11-04 09:48Z;
@@ -4020,7 +4044,7 @@ F-024, F-026, F-029). Both runtimes change alike.
 - **F17, Python `get_ownership_holders`:** returns the Worker's payload, the holder type's Yahoo quoteSummary module with Yahoo's `{raw, fmt}` values unwrapped (camelCase keys, dates as `YYYY-MM-DD`), instead of yfinance's renamed columns.
 - **F47, Python `get_company_events_calendar` (upcoming):** `calendar` is the Worker's `{earnings: {earningsDate, earningsAverage, earningsLow, earningsHigh, revenueAverage, revenueLow, revenueHigh}, exDividendDate, dividendDate}` from Yahoo's calendarEvents, instead of yfinance's `Earnings Date`-style keys. A Yahoo result without calendar events returns that shape empty, as the Worker does.
 - **F20, `confidence` holds only `HIGH`, `MEDIUM`, `LOW` or null:** wherever a payload carried a status string in `confidence` (`EXTRACTION_FAILED`, `NOT_DISCLOSED`, `NOT_DECISION_GRADE`, `FILING_NOT_FOUND_TRY_OTHER_TYPE`, `FILING_TEXT_NOT_AVAILABLE`, `TICKER_NOT_FOUND`, `NOT_FOUND`), `confidence` is null and the string moves to the object's `status` when it has none (an existing `status` is kept). The rule runs over the whole response in both envelopes. The V2 envelope's fact enrichment no longer writes `NOT_DECISION_GRADE`: an untagged fact without a value has null confidence, and one with a value is still LOW. A fact's null confidence is not replaced by its parent's. Evidence-pack components are normalised before they are hashed; a stored evidence cut read back by `get_evidence_cut` is returned verbatim, so a cut stored before 3.0.0 can still carry the old strings and its SHA-256 still verifies.
-- **F59, `get_latest_earnings_release` sources:** both runtimes return the Worker's entry for the 8-K, `{sourceType: "sec_8k", url, contentUrl, filingDate, acceptedAt, accessionNumber, cikPadded, items, isInlineXBRL, confidence}`. `contentUrl` (new) is the document whose text is read: the EX-99.1 exhibit when the 8-K has one, else the 8-K. Python drops `sec_8k_ex991` in this entry, `primaryDocumentUrl`, the top-level `errorCode` and `meta.generatedAt`. Tools that read the release (`index_earnings_release` and the extractors) still report the content they read as `sec_8k_ex991`. Python's `period` falls back to `"latest"` when the release states no period, as the Worker's does (it was null). Left as they were, and pinned in the harness: Python writes timestamps such as `reportedAt` without milliseconds (`...21:05:00Z` against the Worker's `...21:05:00.000Z`), and Python's `extract_earnings_metrics` top-level `source` names `sec_8k_ex991` where the Worker's names `sec_8k`.
+- **F59, `get_latest_earnings_release` sources:** both runtimes return the Worker's entry for the 8-K, `{sourceType: "sec_8k", url, contentUrl, filingDate, acceptedAt, accessionNumber, cikPadded, items, isInlineXBRL, confidence}`. `contentUrl` (new) is the document whose text is read: the EX-99.1 exhibit when the 8-K has one, else the 8-K. Python drops `sec_8k_ex991` in this entry, `primaryDocumentUrl`, the top-level `errorCode` and `meta.generatedAt`. Tools that read the release (`index_earnings_release` and the extractors) still report the content they read as `sec_8k_ex991`. Python's `period` falls back to `"latest"` when the release states no period, as the Worker's does (it was null). Left as they were in 3.0.0 and aligned in 3.10.0: Python wrote timestamps such as `reportedAt` without milliseconds, and Python's `extract_earnings_metrics` top-level `source` named `sec_8k_ex991` where the Worker's names `sec_8k`.
 - **F60, one period vocabulary:** `reconcile_metric_sources` takes `latest` (the latest quarter, now the default), `FY<yyyy>` or `FY<yyyy> Q<n>`. `FY<yyyy> Q<n>` is the issuer's fiscal quarter (SEC fy/fp of the filing that first reported it, else counted from the prior fiscal year end), the quarter `fiscalQuarter`/`fiscalYears` already reported. Before, `Q<n> <yyyy>` was the calendar quarter of the period end, which is a different quarter for off-calendar issuers such as AAPL and MSFT. `latest_quarter`, `latest_annual` and `Q<n> <yyyy>` return `INPUT_VALIDATION_ERROR` ("period must be latest, FY<yyyy> or FY<yyyy> Q<n>."); ask for the latest annual period as `FY<yyyy>`. The extractors' `latest`, `FY<yyyy>` and bare `<yyyy>` are unchanged.
 - **Notices:** no `DEPRECATED_FIELD` notice remains; the 2.8.0 and 2.27.0 notices are gone with their fields.
 - **Evidence hashes:** payloads of evidence-only actions lost the seven null boundary fields, so a new evidence cut's hash differs from a 2.x cut of the same data.

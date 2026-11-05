@@ -69,7 +69,7 @@ class _YahooHttpError(Exception):
 
 
 def _utc_now_iso() -> str:
-    return datetime.datetime.now(datetime.timezone.utc).isoformat()
+    return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 def _canonical_source_url(ticker: str, quarter: str, year: int, event_id: str) -> str:

@@ -229,7 +229,36 @@ def _sort_by_relevance(
 # ISO UTC date/time helpers
 # ---------------------------------------------------------------------------
 def _utc_now_iso() -> str:
-    return datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+    """Now as the Worker's ``new Date().toISOString()`` writes it, e.g. 2026-11-05T17:57:21.123Z (3.10.0)."""
+    return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def _iso_ms(moment: datetime.datetime) -> str:
+    """A UTC instant as the Worker's ``toISOString()`` writes it: always three millisecond digits and a Z."""
+    return moment.astimezone(datetime.timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def _to_iso_utc_ms(raw: object) -> str | None:
+    """The Worker's ``toIsoUtc`` (worker/src/util.ts), used by the earnings tools (3.10.0).
+
+    A date-only string stays ``YYYY-MM-DDT00:00:00Z``; any other timestamp is written with milliseconds
+    (2026-07-14T21:05:00.000Z), as ``toISOString`` does. The news tools keep :func:`_to_iso_utc`, which matches the
+    Worker's news formatter (zero milliseconds dropped since 2.17.0).
+    """
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    value = raw.strip()
+    if _re.match(r"^\d{4}-\d{2}-\d{2}$", value):
+        return f"{value}T00:00:00Z"
+    if value.isdigit():
+        return None  # JavaScript's Date reads no compact or epoch digit string
+    plain = _to_iso_utc(value)
+    if plain is None:
+        return None
+    try:
+        return _iso_ms(datetime.datetime.fromisoformat(plain.replace("Z", "+00:00")))
+    except ValueError:
+        return None
 
 
 def _to_iso_utc(raw: object) -> str | None:

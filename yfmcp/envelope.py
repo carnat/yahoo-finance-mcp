@@ -466,7 +466,7 @@ def _wrap_envelope_v2(
       }
     }
     """
-    generated_at = datetime.datetime.now(tz=datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+    generated_at = datetime.datetime.now(tz=datetime.timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
     meta: dict = {
         "tool": tool_name,
         "generatedAt": generated_at,
