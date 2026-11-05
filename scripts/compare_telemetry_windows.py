@@ -98,9 +98,13 @@ CACHE_SOURCES = ("memory", "edge", "upstream", "mixed")
 
 
 def _diagnostic_cols() -> str:
-    """Upstream requests (double4) and the cache source mix (blob9); reported, never judged."""
+    """Upstream requests (double4), provider timeouts (double7), provider retries (double10:
+    a fresh crumb after 401 or the other Yahoo host after 429) and the cache source mix (blob9);
+    reported, never judged."""
     cache = ",\n  ".join(f"sumIf(_sample_interval, blob9 = '{s}') AS cache_{s}" for s in CACHE_SOURCES)
-    return f",\n  SUM(_sample_interval * double4) AS upstream_total,\n  {cache}"
+    return (",\n  SUM(_sample_interval * double4) AS upstream_total,"
+            "\n  SUM(_sample_interval * double7) AS timeouts_total,"
+            f"\n  SUM(_sample_interval * double10) AS retries_total,\n  {cache}")
 
 
 def window_sql(dataset: str, start: datetime, end: datetime, group_by: str = "domain",
@@ -147,16 +151,21 @@ def _group_name(row: dict[str, Any]) -> str:
     return group
 
 
+def _empty_diagnostic() -> dict[str, Any]:
+    return {"requests": 0.0, "upstream": 0.0, "timeouts": 0.0, "retries": 0.0,
+            "cacheSource": {s: 0.0 for s in CACHE_SOURCES + ("none",)}, "errorCodes": {}}
+
+
 def window_diagnostics(rows: list[dict[str, Any]], error_rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     """Per group: upstream requests per request, cache source counts, error codes. Not judged."""
     out: dict[str, dict[str, Any]] = {}
     for row in rows:
-        entry = out.setdefault(_group_name(row), {"requests": 0.0, "upstream": 0.0,
-                                                  "cacheSource": {s: 0.0 for s in CACHE_SOURCES + ("none",)},
-                                                  "errorCodes": {}})
+        entry = out.setdefault(_group_name(row), _empty_diagnostic())
         requests = _num(row.get("requests"))
         entry["requests"] += requests
         entry["upstream"] += _num(row.get("upstream_total"))
+        entry["timeouts"] += _num(row.get("timeouts_total"))
+        entry["retries"] += _num(row.get("retries_total"))
         named = 0.0
         for s in CACHE_SOURCES:
             n = _num(row.get(f"cache_{s}"))
@@ -164,14 +173,14 @@ def window_diagnostics(rows: list[dict[str, Any]], error_rows: list[dict[str, An
             named += n
         entry["cacheSource"]["none"] += max(requests - named, 0.0)
     for row in error_rows:
-        entry = out.setdefault(_group_name(row), {"requests": 0.0, "upstream": 0.0,
-                                                  "cacheSource": {s: 0.0 for s in CACHE_SOURCES + ("none",)},
-                                                  "errorCodes": {}})
+        entry = out.setdefault(_group_name(row), _empty_diagnostic())
         code = _safe(row.get("error_code")) or "-"
         entry["errorCodes"][code] = entry["errorCodes"].get(code, 0.0) + _num(row.get("requests"))
     return {
         name: {
             "upstreamPerRequest": round(e["upstream"] / e["requests"], 4) if e["requests"] else None,
+            "timeoutsPerRequest": round(e["timeouts"] / e["requests"], 4) if e["requests"] else None,
+            "retriesPerRequest": round(e["retries"] / e["requests"], 4) if e["requests"] else None,
             "cacheSource": {s: _clean(n) for s, n in e["cacheSource"].items()},
             "errorCodes": {c: _clean(n) for c, n in sorted(e["errorCodes"].items())},
         }

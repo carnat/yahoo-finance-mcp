@@ -146,6 +146,7 @@ class TestRequests(unittest.TestCase):
     def test_diagnostics_add_upstream_cache_and_error_codes(self):
         def diag_row(group: str, requests: int, upstream: int, edge: int) -> dict:
             return {**row(group, requests, 100, 500), "upstream_total": str(upstream),
+                    "timeouts_total": "0", "retries_total": str(upstream // 2),
                     "cache_memory": "0", "cache_edge": str(edge), "cache_upstream": "0", "cache_mixed": "0"}
 
         class DiagTransport(FakeTransport):
@@ -170,6 +171,9 @@ class TestRequests(unittest.TestCase):
         diag = json.loads(out)["diagnostics"]
         self.assertEqual(diag["baseline"]["stock_pricing"]["upstreamPerRequest"], 1.0)
         self.assertEqual(diag["compare"]["stock_pricing"]["upstreamPerRequest"], 2.0)
+        self.assertEqual(diag["compare"]["stock_pricing"]["retriesPerRequest"], 1.0)
+        self.assertEqual(diag["compare"]["stock_pricing"]["timeoutsPerRequest"], 0.0)
+        self.assertIn("SUM(_sample_interval * double10) AS retries_total", t.calls[0][2].decode())
         self.assertEqual(diag["compare"]["stock_pricing"]["cacheSource"]["edge"], 10)
         self.assertEqual(diag["compare"]["stock_pricing"]["cacheSource"]["none"], 30)
         self.assertEqual(diag["compare"]["stock_pricing"]["errorCodes"], {"PROVIDER_TIMEOUT": 3})
