@@ -121,6 +121,28 @@ class TestRequests(unittest.TestCase):
             self.assertIn("FORMAT JSON", sql)
             self.assertNotIn("count()", sql)
 
+    def test_group_by_action_groups_by_domain_and_action(self):
+        def action_row(group: str, action: str, requests: int, p50: float, p95: float) -> dict:
+            return {**row(group, requests, p50, p95), "action_name": action}
+        t = FakeTransport([action_row("stock_pricing", "get_stock_snapshot", 40, 100, 500),
+                           action_row("stock_pricing", "get_history", 5, 50, 90)],
+                          [action_row("stock_pricing", "get_stock_snapshot", 40, 110, 550),
+                           action_row("stock_pricing", "get_history", 5, 500, 900)])
+        code, out, _ = run(COMPARE_ARGS + ["--group-by", "action"], t)
+        self.assertEqual(code, 0)
+        sql = t.calls[0][2].decode()
+        self.assertIn("index1 AS action_name", sql)
+        self.assertIn("GROUP BY action_group, action_name", sql)
+        report = json.loads(out)
+        self.assertEqual(report["groupBy"], "action")
+        self.assertEqual(report["groupsJudged"], ["stock_pricing.get_stock_snapshot"])
+        self.assertEqual(report["groupsSkippedLowVolume"], ["stock_pricing.get_history"])
+
+    def test_group_by_domain_is_the_default_and_has_no_action_column(self):
+        t = FakeTransport()
+        run(COMPARE_ARGS, t)
+        self.assertNotIn("index1", t.calls[0][2].decode())
+
     def test_default_baseline_window(self):
         t = FakeTransport()
         run(COMPARE_ARGS, t)

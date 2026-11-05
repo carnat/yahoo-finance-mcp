@@ -16,6 +16,12 @@ on:
         description: "Comparison window end, ISO 8601 UTC (empty: start of the current hour)"
         required: false
         default: ""
+      group_by:
+        description: "Group by action group (domain, the D10 judgement) or by tool action (diagnosis)"
+        required: false
+        default: "domain"
+        type: choice
+        options: [domain, action]
 
 permissions:
   contents: read
@@ -40,8 +46,9 @@ jobs:
           CLOUDFLARE_TELEMETRY_TOKEN: ${{ secrets.CLOUDFLARE_TELEMETRY_TOKEN }}
           COMPARE_START: ${{ inputs.compare_start }}
           COMPARE_END: ${{ inputs.compare_end }}
+          GROUP_BY: ${{ inputs.group_by }}
         run: |
-          args=(--out telemetry-compare.json)
+          args=(--out telemetry-compare.json --group-by "${GROUP_BY:-domain}")
           if [ -n "$COMPARE_START" ]; then args+=(--compare-start "$COMPARE_START"); fi
           if [ -n "$COMPARE_END" ]; then args+=(--compare-end "$COMPARE_END"); fi
           set +e
