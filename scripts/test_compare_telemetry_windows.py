@@ -143,6 +143,44 @@ class TestRequests(unittest.TestCase):
         run(COMPARE_ARGS, t)
         self.assertNotIn("index1", t.calls[0][2].decode())
 
+    def test_diagnostics_add_upstream_cache_and_error_codes(self):
+        def diag_row(group: str, requests: int, upstream: int, edge: int) -> dict:
+            return {**row(group, requests, 100, 500), "upstream_total": str(upstream),
+                    "cache_memory": "0", "cache_edge": str(edge), "cache_upstream": "0", "cache_mixed": "0"}
+
+        class DiagTransport(FakeTransport):
+            def __call__(self, url: str, headers: dict, body: bytes) -> bytes:
+                self.calls.append((url, headers, body))
+                sql = body.decode()
+                if "AS error_code" in sql:
+                    rows = [{"action_group": "stock_pricing", "error_code": "PROVIDER_TIMEOUT", "requests": "3"}]
+                elif f"toDateTime({BASE_FROM})" in sql:
+                    rows = [diag_row("stock_pricing", 40, 40, 30)]
+                else:
+                    rows = [diag_row("stock_pricing", 40, 80, 10)]
+                return json.dumps({"meta": [], "data": rows, "rows": len(rows)}).encode()
+
+        t = DiagTransport()
+        code, out, err = run(COMPARE_ARGS + ["--diagnostics"], t)
+        self.assertNotIn(TOKEN, out + err)
+        self.assertEqual(code, 0)
+        self.assertEqual(len(t.calls), 4)
+        self.assertIn("SUM(_sample_interval * double4) AS upstream_total", t.calls[0][2].decode())
+        self.assertIn("blob4 IN ('tool_error', 'rpc_error', 'exception')", t.calls[2][2].decode())
+        diag = json.loads(out)["diagnostics"]
+        self.assertEqual(diag["baseline"]["stock_pricing"]["upstreamPerRequest"], 1.0)
+        self.assertEqual(diag["compare"]["stock_pricing"]["upstreamPerRequest"], 2.0)
+        self.assertEqual(diag["compare"]["stock_pricing"]["cacheSource"]["edge"], 10)
+        self.assertEqual(diag["compare"]["stock_pricing"]["cacheSource"]["none"], 30)
+        self.assertEqual(diag["compare"]["stock_pricing"]["errorCodes"], {"PROVIDER_TIMEOUT": 3})
+
+    def test_no_diagnostics_by_default(self):
+        t = FakeTransport()
+        _, out, _ = run(COMPARE_ARGS, t)
+        self.assertEqual(len(t.calls), 2)
+        self.assertNotIn("diagnostics", json.loads(out))
+        self.assertNotIn("double4", t.calls[0][2].decode())
+
     def test_default_baseline_window(self):
         t = FakeTransport()
         run(COMPARE_ARGS, t)

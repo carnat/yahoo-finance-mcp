@@ -94,7 +94,17 @@ def _iso(moment: datetime) -> str:
 GROUP_BY_CHOICES = ("domain", "action")
 
 
-def window_sql(dataset: str, start: datetime, end: datetime, group_by: str = "domain") -> str:
+CACHE_SOURCES = ("memory", "edge", "upstream", "mixed")
+
+
+def _diagnostic_cols() -> str:
+    """Upstream requests (double4) and the cache source mix (blob9); reported, never judged."""
+    cache = ",\n  ".join(f"sumIf(_sample_interval, blob9 = '{s}') AS cache_{s}" for s in CACHE_SOURCES)
+    return f",\n  SUM(_sample_interval * double4) AS upstream_total,\n  {cache}"
+
+
+def window_sql(dataset: str, start: datetime, end: datetime, group_by: str = "domain",
+               diagnostics: bool = False) -> str:
     """One row per action group, or per (group, action) with group_by="action" (index1 holds the action)."""
     outcome_cols = ",\n  ".join(f"sumIf(_sample_interval, blob4 = '{o}') AS outcome_{o}" for o in OUTCOMES)
     by_action = group_by == "action"
@@ -105,7 +115,7 @@ def window_sql(dataset: str, start: datetime, end: datetime, group_by: str = "do
   SUM(_sample_interval) AS requests,
   {outcome_cols},
   quantileExactWeighted(0.5)(double1, _sample_interval) AS latency_p50,
-  quantileExactWeighted(0.95)(double1, _sample_interval) AS latency_p95
+  quantileExactWeighted(0.95)(double1, _sample_interval) AS latency_p95{_diagnostic_cols() if diagnostics else ""}
 FROM {dataset}
 WHERE {_where(start, end, exclude_header=True)}
 GROUP BY {group_cols}
@@ -113,13 +123,67 @@ ORDER BY {group_cols}
 FORMAT JSON"""
 
 
+def error_code_sql(dataset: str, start: datetime, end: datetime, group_by: str = "domain") -> str:
+    """Error-plus-exception rows by error code (blob5), for diagnosis."""
+    by_action = group_by == "action"
+    action_col = "\n  index1 AS action_name," if by_action else ""
+    group_cols = "action_group, action_name, error_code" if by_action else "action_group, error_code"
+    outcomes = ", ".join(f"'{o}'" for o in ERROR_OUTCOMES)
+    return f"""SELECT
+  blob1 AS action_group,{action_col}
+  blob5 AS error_code,
+  SUM(_sample_interval) AS requests
+FROM {dataset}
+WHERE {_where(start, end, exclude_header=True)} AND blob4 IN ({outcomes})
+GROUP BY {group_cols}
+ORDER BY {group_cols}
+FORMAT JSON"""
+
+
+def _group_name(row: dict[str, Any]) -> str:
+    group = _safe(row.get("action_group")) or "-"
+    if "action_name" in row:
+        group = f"{group}.{_safe(row.get('action_name')) or '-'}"
+    return group
+
+
+def window_diagnostics(rows: list[dict[str, Any]], error_rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Per group: upstream requests per request, cache source counts, error codes. Not judged."""
+    out: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        entry = out.setdefault(_group_name(row), {"requests": 0.0, "upstream": 0.0,
+                                                  "cacheSource": {s: 0.0 for s in CACHE_SOURCES + ("none",)},
+                                                  "errorCodes": {}})
+        requests = _num(row.get("requests"))
+        entry["requests"] += requests
+        entry["upstream"] += _num(row.get("upstream_total"))
+        named = 0.0
+        for s in CACHE_SOURCES:
+            n = _num(row.get(f"cache_{s}"))
+            entry["cacheSource"][s] += n
+            named += n
+        entry["cacheSource"]["none"] += max(requests - named, 0.0)
+    for row in error_rows:
+        entry = out.setdefault(_group_name(row), {"requests": 0.0, "upstream": 0.0,
+                                                  "cacheSource": {s: 0.0 for s in CACHE_SOURCES + ("none",)},
+                                                  "errorCodes": {}})
+        code = _safe(row.get("error_code")) or "-"
+        entry["errorCodes"][code] = entry["errorCodes"].get(code, 0.0) + _num(row.get("requests"))
+    return {
+        name: {
+            "upstreamPerRequest": round(e["upstream"] / e["requests"], 4) if e["requests"] else None,
+            "cacheSource": {s: _clean(n) for s, n in e["cacheSource"].items()},
+            "errorCodes": {c: _clean(n) for c, n in sorted(e["errorCodes"].items())},
+        }
+        for name, e in sorted(out.items())
+    }
+
+
 def window_metrics(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     """Per action group: requests, outcome counts, p50/p95 latencyMs, error-plus-exception rate."""
     groups: dict[str, dict[str, Any]] = {}
     for row in rows:
-        group = _safe(row.get("action_group")) or "-"
-        if "action_name" in row:
-            group = f"{group}.{_safe(row.get('action_name')) or '-'}"
+        group = _group_name(row)
         requests = _num(row.get("requests"))
         outcomes = {o: _num(row.get(f"outcome_{o}")) for o in OUTCOMES}
         if group in groups:  # two raw values that both map to "invalid": merge counts, drop percentiles
@@ -199,14 +263,22 @@ def judge(baseline: dict[str, dict[str, Any]], compare: dict[str, dict[str, Any]
 
 def build_report(transport: Transport, account_id: str, token: str,
                  baseline: tuple[datetime, datetime], compare: tuple[datetime, datetime],
-                 dataset: str = DATASET, group_by: str = "domain") -> dict[str, Any]:
+                 dataset: str = DATASET, group_by: str = "domain",
+                 diagnostics: bool = False) -> dict[str, Any]:
     if not ACCOUNT_ID.match(account_id):
         raise ExportError("CLOUDFLARE_ACCOUNT_ID is not a 32-character hex account id")
     if not re.match(r"^[A-Za-z0-9_]{1,64}$", dataset):
         raise ExportError("dataset name must be [A-Za-z0-9_]")
-    base_rows = run_sql(transport, account_id, token, window_sql(dataset, *baseline, group_by=group_by))
-    comp_rows = run_sql(transport, account_id, token, window_sql(dataset, *compare, group_by=group_by))
+    base_rows = run_sql(transport, account_id, token,
+                        window_sql(dataset, *baseline, group_by=group_by, diagnostics=diagnostics))
+    comp_rows = run_sql(transport, account_id, token,
+                        window_sql(dataset, *compare, group_by=group_by, diagnostics=diagnostics))
     result = judge(window_metrics(base_rows), window_metrics(comp_rows))
+    if diagnostics:
+        base_err = run_sql(transport, account_id, token, error_code_sql(dataset, *baseline, group_by=group_by))
+        comp_err = run_sql(transport, account_id, token, error_code_sql(dataset, *compare, group_by=group_by))
+        result["diagnostics"] = {"baseline": window_diagnostics(base_rows, base_err),
+                                 "compare": window_diagnostics(comp_rows, comp_err)}
     return {
         "schemaVersion": SCHEMA_VERSION,
         "dataset": dataset,
@@ -236,6 +308,8 @@ def main(argv: list[str] | None = None, transport: Transport = urllib_transport)
     parser.add_argument("--dataset", default=DATASET)
     parser.add_argument("--group-by", choices=GROUP_BY_CHOICES, default="domain",
                         help="judge per action group (default) or per tool action, for diagnosis")
+    parser.add_argument("--diagnostics", action="store_true",
+                        help="also report upstream requests per call, cache sources and error codes (not judged)")
     parser.add_argument("--out", default=None, help="write the JSON report here instead of stdout")
     try:
         args = parser.parse_args(argv)
@@ -261,7 +335,8 @@ def main(argv: list[str] | None = None, transport: Transport = urllib_transport)
         print("CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_TELEMETRY_TOKEN must be set.", file=sys.stderr)
         return EXIT_USAGE
     try:
-        report = build_report(transport, account_id, token, baseline, compare, args.dataset, args.group_by)
+        report = build_report(transport, account_id, token, baseline, compare, args.dataset, args.group_by,
+                              args.diagnostics)
     except ExportError as error:
         print(f"telemetry comparison failed: {error}", file=sys.stderr)
         return EXIT_QUERY_FAILED
