@@ -1,0 +1,68 @@
+name: Telemetry comparison
+
+# Phase 4 exit check (D10): compares a telemetry window with the pre-Phase 4
+# baseline, synthetic header-transport traffic excluded
+# (scripts/compare_telemetry_windows.py). Manual only. The report holds
+# aggregates per action group and is printed to the job summary.
+
+on:
+  workflow_dispatch:
+    inputs:
+      compare_start:
+        description: "Comparison window start, ISO 8601 UTC (empty: end minus 7 days)"
+        required: false
+        default: ""
+      compare_end:
+        description: "Comparison window end, ISO 8601 UTC (empty: start of the current hour)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: telemetry-compare
+  cancel-in-progress: false
+
+jobs:
+  compare:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.11"
+
+      - name: Compare windows
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_TELEMETRY_TOKEN: ${{ secrets.CLOUDFLARE_TELEMETRY_TOKEN }}
+          COMPARE_START: ${{ inputs.compare_start }}
+          COMPARE_END: ${{ inputs.compare_end }}
+        run: |
+          args=(--out telemetry-compare.json)
+          if [ -n "$COMPARE_START" ]; then args+=(--compare-start "$COMPARE_START"); fi
+          if [ -n "$COMPARE_END" ]; then args+=(--compare-end "$COMPARE_END"); fi
+          set +e
+          python scripts/compare_telemetry_windows.py "${args[@]}"
+          code=$?
+          set -e
+          {
+            echo "## Telemetry comparison (exit $code)"
+            echo
+            echo '```json'
+            if [ -f telemetry-compare.json ]; then cat telemetry-compare.json; fi
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ -f telemetry-compare.json ]; then cat telemetry-compare.json; fi
+          exit $code
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: telemetry-compare-${{ github.run_id }}
+          path: telemetry-compare.json
+          retention-days: 90
+          if-no-files-found: warn
