@@ -966,7 +966,7 @@ PROVIDER_FAILURE_STATUSES = {"PROVIDER_ERROR", "RATE_LIMIT", "PROVIDER_TIMEOUT",
 
 def evidence_quality(*, ticker: str, as_of: str, quote: dict | None, filings: list[dict] | None, filings_status: str,
                      consensus: dict | None, storage_available: bool) -> dict:
-    """Status, freshness and coverage per doctrine-relevant evidence family, from light inputs only.
+    """Status, freshness and coverage per evidence family, from light inputs only.
 
     Families that need a full extraction report readiness, not results.
     """

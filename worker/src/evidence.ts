@@ -924,7 +924,7 @@ const ANNUAL_REPORT_STALE_DAYS = 365 + 120 + 7;
 const PROVIDER_FAILURE_STATUSES = new Set(["PROVIDER_ERROR", "RATE_LIMIT", "PROVIDER_TIMEOUT", "ERROR", "TIMEOUT", "PROVIDER_BUDGET_EXHAUSTED"]);
 
 /**
- * Status, freshness and coverage per doctrine-relevant evidence family, from
+ * Status, freshness and coverage per evidence family, from
  * light inputs only (quote, SEC submissions, consensus coverage, storage).
  * Families that need a full extraction report readiness, not results.
  */
