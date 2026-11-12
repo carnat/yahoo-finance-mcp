@@ -41,7 +41,7 @@ v2 (2026-10-15) folds in the owner's answers to every v1 open question. The sour
 - **Phase 6 major release (F5, F17, F20, F45, F47):** breaking changes, so a major version. A fresh functional audit runs first (owner, 2026-10-22), to set a new baseline.
 - **F41:** deferred (a new capability, P5).
 - **TF9 (Thai dividend history empty):** deferred until `SEC_OPEN_DATA_API_KEY` is a cloud environment secret.
-- **OPS-TEL-3:** after the Phase 4 exit comparison.
+- **OPS-TEL-3:** after the Phase 4 exit comparison. *Already resolved by the explanatory comment in `worker/wrangler.toml` (R4b-1); no flag change is needed.*
 - The low-severity items in `F_TRIAGE.md` §5 are unclassified.
 
 **Universal information outlet (owner direction, 2026-10-15; §7 Q14).** The MCP is a doctrine-neutral information outlet. It publishes facts, provenance and evidence quality in universal language, so any caller can use the data whatever decision framework they follow. It does not carry any one doctrine's vocabulary, permissions or strategy thresholds. Consequences:
@@ -481,13 +481,13 @@ Each R-release is a set of **separately released** behaviour changes that must b
   - [x] **Source-text test cleanup is merged** (pilot lesson 2): no test reads `server.py` or `yahoo-finance.ts` text directly; they read through one helper that covers all domain modules, or check behaviour.
   - [x] Each hub unit's spec lists its scope from the topology (`#shared` plus the client functions), as in `phase3_news_region.json`. *(`PHASE4_SPEC.md` and `phase4_*_region.json`, 2026-10-19. Planner decisions in §11a. They add a fifth "shared utilities" unit, and a topology override that assigns cross-called tool handlers to their catalog domain, so `#shared` means hub code only.)*
   - [x] R4 is released (2.11.1–2.15.0, complete 2026-10-18).
-  - [ ] **The telemetry baseline window is captured** (Q10). It runs from 2026-10-17, and the first eligible day is 2026-10-24. Exclude the preview-canary requests (Q3i finding F6).
+  - [x] **The telemetry baseline window is captured** (Q10). It runs from 2026-10-17, and the first eligible day is 2026-10-24. Exclude the preview-canary requests (Q3i finding F6). *(2026-10-17 to 2026-10-24, the default baseline in `scripts/compare_telemetry_windows.py`; header-credential canary traffic is excluded.)*
 - **Exit criteria:**
   - [ ] No `#shared` region remains.
   - [ ] Zero SEC fetches happen outside the client in either runtime (grep).
   - [ ] Q3g is released: both runtimes consume `MarketInputs`, and the unused helper is removed or repurposed only after fixtures prove the replacement.
   - [ ] Harness, acceptance and canaries are green.
-  - [ ] Latency and error rates compared against the baseline show no regression beyond agreed bounds.
+  - [x] Latency and error rates compared against the baseline show no regression beyond agreed bounds. *2026-11-12: PASS over 2026-11-05 to 2026-11-12 per tool (D10 bounds; `telemetry-compare.yml` run 43151956175). The 29 Oct to 5 Nov window failed on `get_market_quote` and `get_price_slope`. The diagnostics (PRs #357 to #360) traced that to the request mix: a few multi-ticker requests and release-day checks on 3.0.0. It was not 429/401 retries, and the code path is unchanged. `get_market_quote` now passes (p50 222 vs 307 ms, 0 % errors). `get_price_slope` is below the 30-request volume floor.*
 - **Relative size: L.**
 - **Risk: High.**
   - Risk 1: the highest fan-in, so a subtle client change breaks distant tools. *Mitigation:* full harness after each unit, one client per PR.
