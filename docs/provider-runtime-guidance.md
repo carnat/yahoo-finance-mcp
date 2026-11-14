@@ -3190,6 +3190,19 @@ F-024, F-026, F-029). Both runtimes change alike.
 - **Tests:** 21 new parity cases in `scripts/parity/cases_audit_2251.py`.
 - **Rollback:** redeploy 2.25.0.
 
+## recentUpgradeCount30d Without Rating History (4.0.1)
+
+- **Change:** `get_analyst_consensus` field `recentUpgradeCount30d` is now `null` in the Worker when the provider
+  returns no rating-history rows. No rows is missing data, not zero upgrades. Python already returned `null` in that
+  case, so the two runtimes now match.
+- **Unchanged:** when rating-history rows exist the count is as before, and is `0` when none of the rows is an
+  upgrade in the last 30 days. The `CONSENSUS_TARGET_BELOW_PRICE_DESPITE_UPGRADES` warning is unchanged: it fires only
+  with at least one recent upgrade. Python is unchanged.
+- **Contract:** no new fields, enum values or warning codes.
+- **Parity:** new case `major400.consensus.no_rating_history_count_is_null` in `scripts/parity/cases_major_400.py`;
+  the comment that recorded the divergence as open is removed.
+- **Approval and rollback:** owner approved 2026-11-14 11:30Z. Rollback: redeploy 4.0.0.
+
 ## Breaking Changes (4.0.0)
 
 - **Why:** the removals announced by the `DEPRECATED_FIELD` notices of 3.11.0 ("Neutrality Label Notices (3.11.0)"),

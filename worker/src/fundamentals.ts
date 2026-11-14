@@ -618,7 +618,8 @@ export async function getAnalystConsensus(ticker: string | string[]): Promise<st
   const cutoffSec = Date.now() / 1000 - 30 * 86400;
   const upgradeHistory = (result.upgradeDowngradeHistory as Record<string, unknown>) ?? {};
   const history = (upgradeHistory.history as Record<string, unknown>[]) ?? [];
-  const recentUpgradeCount30d = history.filter((h) => {
+  // 4.0.1: null when the provider returns no rating-history rows (no data, not zero upgrades), as in Python.
+  const recentUpgradeCount30d: number | null = history.length === 0 ? null : history.filter((h) => {
     const tsRaw = raw(h.epochGradeDate) as number | null;
     if (tsRaw == null || tsRaw < cutoffSec) return false;
     const action = h.action ?? h.Action ?? "";
@@ -627,7 +628,7 @@ export async function getAnalystConsensus(ticker: string | string[]): Promise<st
     return classifyAnalystChange(action, fromGrade, toGrade) === "UPGRADE";
   }).length;
 
-  if (targetMean != null && lastPrice != null && targetMean < lastPrice && recentUpgradeCount30d > 0) {
+  if (targetMean != null && lastPrice != null && targetMean < lastPrice && recentUpgradeCount30d != null && recentUpgradeCount30d > 0) {
     warnings.push({
       code: "CONSENSUS_TARGET_BELOW_PRICE_DESPITE_UPGRADES",
       message: `The mean price target is below the current price, with ${recentUpgradeCount30d} upgrade(s) in the last 30 days.`,
