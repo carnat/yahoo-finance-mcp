@@ -104,7 +104,7 @@ import {
 import { validateAccession, validateTicker } from "./validate.js";
 import { buildValuationEvidencePack, getConsensusForecastCurve, getEpsRevisions, getEvidenceCut, getEvidenceQuality, listEvidenceCuts } from "./evidence-pack.js";
 import { withAuthorityBoundary } from "./evidence.js";
-import { deprecationWarningsFor, parseMinAdvUsd } from "./deprecations.js";
+import { parseMinAdvUsd } from "./deprecations.js";
 import {
   DEFAULT_MAX_NET_DEBT_TO_EBITDA,
   DEFAULT_MIN_INTEREST_COVERAGE,
@@ -382,8 +382,6 @@ function successOptions(name: string): McpSuccessOptions {
   const status = TOOL_RELIABILITY_STATUS[name];
   return {
     ...(status ? { metaExtra: { ...status } } : {}),
-    // 3.11.0: DEPRECATED_FIELD notices for the neutrality-audit labels.
-    successWarnings: (data) => deprecationWarningsFor(name, data),
   };
 }
 
@@ -1213,8 +1211,7 @@ const TOOL_HANDLERS: ReadonlyMap<string, ToolHandler> = new Map<string, ToolHand
   ["calculate_price_target_distance", (args) => {
     return getPriceTargetBracket(
       str(args.ticker),
-      num(args.reference_target_price ?? args.io_pt, 0),
-      args.io_pt != null,
+      num(args.reference_target_price, 0),
     );
   }],
   ["analyze_position_signals", (args) => getPositionScoreInputs(tickerArg(args.ticker))],

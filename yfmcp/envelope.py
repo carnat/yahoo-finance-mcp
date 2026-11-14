@@ -13,7 +13,7 @@ import re
 from typing import NotRequired, TypedDict
 
 from yfmcp.build_info import BUILD_DATE, SERVER_VERSION
-from yfmcp.deprecations import TOOL_RELIABILITY_STATUS, deprecation_warnings_for
+from yfmcp.deprecations import TOOL_RELIABILITY_STATUS
 from yfmcp.pricing_notices import lift_payload_warnings
 from yfmcp.url_policy import SUBREQUEST_BUDGET, SUBREQUEST_BUDGET_WARNING, SUBREQUEST_LIMIT
 
@@ -618,11 +618,6 @@ def _envelope_tool_result(tool: str, result: object) -> object:
                 if payload_warnings:
                     existing = parsed["meta"].get("warnings")
                     parsed["meta"]["warnings"] = [*(existing if isinstance(existing, list) else []), *payload_warnings]
-                # 3.11.0: DEPRECATED_FIELD notices follow the lifted payload warnings, as the Worker's successWarnings.
-                notices = deprecation_warnings_for(tool, parsed.get("data"))
-                if notices:
-                    existing = parsed["meta"].get("warnings")
-                    parsed["meta"]["warnings"] = [*(existing if isinstance(existing, list) else []), *notices]
                 parsed["data"] = _confidence_levels(tool, _enrich_facts(parsed.get("data")))
             return json.dumps(parsed)
         if parsed.get("error") is True:
@@ -647,9 +642,6 @@ def _envelope_tool_result(tool: str, result: object) -> object:
     meta = _success_meta(tool, data_date=_payload_data_date(parsed))
     if payload_warnings:
         meta["warnings"] = [*meta.get("warnings", []), *payload_warnings]
-    notices = deprecation_warnings_for(tool, data)
-    if notices:
-        meta["warnings"] = [*meta.get("warnings", []), *notices]
     return json.dumps({"ok": True, "data": data, "meta": meta, "error": None})
 
 

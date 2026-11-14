@@ -1041,9 +1041,11 @@ class TestPr2DataQuality(unittest.TestCase):
 
         srv.yf.Ticker = lambda ticker: FakeTicker()  # type: ignore[assignment]
         data = json.loads(_run(srv.get_earnings_momentum("NBIS")))
-        self.assertEqual(data["forwardRevisionSignal"], "POSITIVE")
-        self.assertNotEqual(data["compositeMomentumSignal"], "NEGATIVE")
-        self.assertIn("90d only as fallback/context", data["compositeMethodNote"])
+        self.assertEqual(data["revisionBand"], "UP")
+        self.assertEqual(data["revisionSignalDriver"], "30d")
+        self.assertIn("A 90d revision never overrides a 30d or 7d one.", data["compositeMethodNote"])
+        for removed in ("forwardRevisionSignal", "compositeMomentumSignal", "historicalSurpriseSignal", "momentumFlag"):
+            self.assertNotIn(removed, data)
 
     def test_price_target_distance_has_no_strategy_labels(self):
         class FakeTicker:
@@ -1055,7 +1057,8 @@ class TestPr2DataQuality(unittest.TestCase):
         srv.yf.Ticker = lambda ticker: FakeTicker()  # type: ignore[assignment]
         data = json.loads(_run(srv.calculate_price_target_distance("ASTS", reference_target_price=120.0)))
         # 3.0.0: bracket, inferredTag, tag and tagNote are removed; priceAtOrAboveTarget gives the direction.
-        for removed in ("bracket", "inferredTag", "tag", "tagNote"):
+        # 4.0.0: ioPt, eqfPct and invertedFlag are removed too.
+        for removed in ("bracket", "inferredTag", "tag", "tagNote", "ioPt", "eqfPct", "invertedFlag"):
             self.assertNotIn(removed, data)
         self.assertIs(data["priceAtOrAboveTarget"], False)
         self.assertEqual(data["currentToTargetRatioPct"], 83.3)

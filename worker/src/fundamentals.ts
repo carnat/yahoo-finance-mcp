@@ -627,19 +627,11 @@ export async function getAnalystConsensus(ticker: string | string[]): Promise<st
     return classifyAnalystChange(action, fromGrade, toGrade) === "UPGRADE";
   }).length;
 
-  let targetLagSignal = "UNKNOWN";
-  if (targetMean != null && lastPrice != null) {
-    if (targetMean >= lastPrice) {
-      targetLagSignal = "CURRENT";
-    } else if (recentUpgradeCount30d > 0) {
-      targetLagSignal = "LIKELY_STALE_OR_LAGGING";
-      warnings.push({
-        code: "CONSENSUS_TARGET_BELOW_PRICE_DESPITE_UPGRADES",
-        message: `The mean price target is below the current price, with ${recentUpgradeCount30d} upgrade(s) in the last 30 days.`,
-      });
-    } else {
-      targetLagSignal = "POSSIBLY_STALE";
-    }
+  if (targetMean != null && lastPrice != null && targetMean < lastPrice && recentUpgradeCount30d > 0) {
+    warnings.push({
+      code: "CONSENSUS_TARGET_BELOW_PRICE_DESPITE_UPGRADES",
+      message: `The mean price target is below the current price, with ${recentUpgradeCount30d} upgrade(s) in the last 30 days.`,
+    });
   }
 
   output.currentPrice = lastPrice;
@@ -648,8 +640,7 @@ export async function getAnalystConsensus(ticker: string | string[]): Promise<st
       ? +((lastPrice - targetMean) / lastPrice * 100).toFixed(2)
       : null;
   output.recentUpgradeCount30d = recentUpgradeCount30d;
-  output.targetLagSignal = targetLagSignal;
-  // 3.11.0 (NL7): the factual comparison targetLagSignal reads as staleness.
+  // NL7 (3.11.0): the mean target against the current price; targetLagSignal, which read it as staleness, went in 4.0.0.
   output.targetVsPrice = targetVsPrice(targetMean, lastPrice);
   output.warnings = warnings;
 
@@ -1284,8 +1275,8 @@ export async function getCreditHealth(
     const interestAnnual = interest.value;
 
     // Leverage needs a positive earnings base: over zero or negative EBITDA the ratio has no meaning (a loss-maker
-    // with net debt would read as a negative ratio and the CLEAN tier), so it is withheld with the tier and the
-    // stress flag; NEGATIVE_EARNINGS_BASE says why (R5-fundamentals).
+    // with net debt would read as a negative ratio and the lowest band), so it is withheld with the band and the
+    // stress test; NEGATIVE_EARNINGS_BASE says why (R5-fundamentals).
     const netDebtToEbitda = netDebt != null && operationalEbitdaAnnual != null && operationalEbitdaAnnual > 0
       ? +(netDebt / operationalEbitdaAnnual).toFixed(2) : null;
     const interestCoverageEbit = ebitAnnual != null && interestAnnual != null && interestAnnual !== 0
@@ -1294,23 +1285,11 @@ export async function getCreditHealth(
       ? +(operationalEbitdaAnnual / Math.abs(interestAnnual)).toFixed(2) : null;
     const interestCoverage = interestCoverageEbit;
 
-    let creditStressFlag: boolean | null = null;
-    if (netDebtToEbitda != null && interestCoverageEbit != null) {
-      creditStressFlag = netDebtToEbitda > 2.5 && interestCoverageEbit < 3;
-    }
-
-    let debtTier: string | null = null;
-    if (netDebtToEbitda != null) {
-      if (netDebtToEbitda < 1) debtTier = "CLEAN";
-      else if (netDebtToEbitda <= 2.5) debtTier = "MODERATE";
-      else if (netDebtToEbitda <= 4) debtTier = "ELEVATED";
-      else debtTier = "STRESSED";
-    } else if (netDebt != null && operationalEbitdaAnnual != null && operationalEbitdaAnnual < 0) {
-      // A loss-maker has no leverage tier: the state is named instead of reading as CLEAN (R5-fundamentals).
-      debtTier = "NEGATIVE_EARNINGS_BASE";
-    }
-    // 3.11.0 (NL6): the bands debtTier names, and the stress test with caller-chosen thresholds.
-    const leverage = leverageBand(netDebtToEbitda, debtTier === "NEGATIVE_EARNINGS_BASE");
+    // NL6 (3.11.0; debtTier and creditStressFlag went in 4.0.0): the leverage band, NEGATIVE_EARNINGS_BASE for a
+    // loss-maker with known net debt, and the stress test with caller-chosen thresholds.
+    const negativeEarningsBase = netDebtToEbitda == null && netDebt != null && operationalEbitdaAnnual != null
+      && operationalEbitdaAnnual < 0;
+    const leverage = leverageBand(netDebtToEbitda, negativeEarningsBase);
     const meetsStress = meetsCreditStressThreshold(netDebtToEbitda, interestCoverageEbit, maxNetDebtToEbitda, minInterestCoverage);
 
     const missingComponents: string[] = [];
@@ -1326,7 +1305,7 @@ export async function getCreditHealth(
     if (interestCoverage == null) unavailableMetrics.push("interestCoverage");
     if (interestCoverageEbit == null) unavailableMetrics.push("interestCoverageEbit");
     if (interestCoverageEbitda == null) unavailableMetrics.push("interestCoverageEbitda");
-    if (creditStressFlag == null) unavailableMetrics.push("creditStressFlag");
+    if (meetsStress == null) unavailableMetrics.push("meetsCreditStressThreshold");
 
     const computedMetrics: string[] = [];
     if (netDebt != null) computedMetrics.push("netDebtUsd");
@@ -1335,8 +1314,8 @@ export async function getCreditHealth(
     if (interestCoverage != null) computedMetrics.push("interestCoverage");
     if (interestCoverageEbit != null) computedMetrics.push("interestCoverageEbit");
     if (interestCoverageEbitda != null) computedMetrics.push("interestCoverageEbitda");
-    if (creditStressFlag != null) computedMetrics.push("creditStressFlag");
-    if (debtTier != null) computedMetrics.push("debtTier");
+    if (meetsStress != null) computedMetrics.push("meetsCreditStressThreshold");
+    if (leverage != null) computedMetrics.push("leverageBand");
 
     const warnings: Record<string, unknown>[] = [];
     if (interestAnnual == null) {
@@ -1404,8 +1383,6 @@ export async function getCreditHealth(
       interestCoverage,
       interestCoverageEbit,
       interestCoverageEbitda,
-      creditStressFlag,
-      debtTier,
       leverageBand: leverage,
       meetsCreditStressThreshold: meetsStress,
       creditStressThresholds: { maxNetDebtToEbitda, minInterestCoverage },
@@ -1475,20 +1452,6 @@ export async function getEarningsMomentum(
         revision90d = +((current - ago90d) / Math.abs(ago90d) * 100).toFixed(2);
     }
 
-    let revisionDirection: string | null = null;
-    if (revision30d != null) {
-      if (Math.abs(revision30d) < 3) revisionDirection = "STABLE";
-      else if (revision30d > 0) revisionDirection = "UPGRADING";
-      else revisionDirection = "DOWNGRADING";
-    }
-
-    let momentumFlag: string | null = null;
-    if (revision30d != null) {
-      if (revision30d > 10) momentumFlag = "STRONG";
-      else if (revision30d >= 0) momentumFlag = "POSITIVE";
-      else if (revision30d > -10) momentumFlag = "NEGATIVE";
-      else momentumFlag = "COLLAPSING";
-    }
 
     let beatCount = 0;
     let totalQuarters = 0;
@@ -1534,49 +1497,16 @@ export async function getEarningsMomentum(
     const preRevenue = (totalQuarters === 0 && (!earningsHistory || earningsHistory.length === 0))
       || (actualEpsValues.length > 0 && actualEpsValues.every(v => Math.abs(v) < PRE_REVENUE_EPS_EPSILON));
     if (preRevenue) {
-      momentumFlag = "NO_HISTORY";
       warnings.push({
         code: "PRE_REVENUE_NO_HISTORY",
         message: "Earnings history appears pre-revenue or unavailable; momentum fields are not reliable.",
       });
     }
 
-    let historicalSurpriseSignal = "UNKNOWN";
-    if (beatRate != null) {
-      if (beatRate >= 0.75) historicalSurpriseSignal = "STRONG";
-      else if (beatRate >= 0.55) historicalSurpriseSignal = "POSITIVE";
-      else if (beatRate >= 0.4) historicalSurpriseSignal = "NEUTRAL";
-      else historicalSurpriseSignal = "NEGATIVE";
-    }
-
-    let forwardRevisionSignal = "UNKNOWN";
-    let revisionSignalDriver = "none";
-    if (revision30d != null) {
-      revisionSignalDriver = "30d";
-      if (revision30d <= -3) forwardRevisionSignal = "NEGATIVE";
-      else if (revision30d >= 3) forwardRevisionSignal = "POSITIVE";
-      else if (revision7d != null && revision7d <= -3) {
-        revisionSignalDriver = "30d_neutral_7d";
-        forwardRevisionSignal = "NEGATIVE";
-      } else if (revision7d != null && revision7d >= 3) {
-        revisionSignalDriver = "30d_neutral_7d";
-        forwardRevisionSignal = "POSITIVE";
-      } else forwardRevisionSignal = "NEUTRAL";
-    } else if (revision7d != null) {
-      revisionSignalDriver = "7d";
-      if (revision7d <= -3) forwardRevisionSignal = "NEGATIVE";
-      else if (revision7d >= 3) forwardRevisionSignal = "POSITIVE";
-      else forwardRevisionSignal = "NEUTRAL";
-    } else if (revision90d != null) {
-      revisionSignalDriver = "90d_fallback";
-      if (revision90d <= -3) forwardRevisionSignal = "NEGATIVE";
-      else if (revision90d >= 3) forwardRevisionSignal = "POSITIVE";
-      else forwardRevisionSignal = "NEUTRAL";
-    }
-    // 3.11.0 (NL3): one revision band with the caller's threshold; revisionSignalDriver names its driver.
+    // NL3 (3.11.0): one revision band with the caller's threshold; revisionSignalDriver names its driver.
     const band = revisionBand(revision30d, revision7d, revision90d, revisionThresholdPct);
-    revisionSignalDriver = band.driver;
-    const compositeMethodNote = "Forward revision signal uses 30d revision as primary, 7d as confirmation when 30d is neutral or missing, and 90d only as fallback/context; a negative 90d revision does not override positive recent revisions.";
+    const revisionSignalDriver = band.driver;
+    const compositeMethodNote = "revisionBand uses the 30d revision as primary and the 7d when the 30d is inside the band; with no 30d revision it uses the 7d, then the 90d as a fallback. A 90d revision never overrides a 30d or 7d one.";
     if (revision30d != null && revision30d >= 3 && revision90d != null && revision90d <= -3) {
       warnings.push({
         code: "LONGER_LOOKBACK_REVISION_DIVERGENCE",
@@ -1593,36 +1523,6 @@ export async function getEarningsMomentum(
       });
     }
 
-    let compositeMomentumSignal = "UNKNOWN";
-    if (historicalSurpriseSignal === "UNKNOWN" && forwardRevisionSignal === "UNKNOWN") {
-      compositeMomentumSignal = "UNKNOWN";
-    } else if (
-      forwardRevisionSignal === "NEGATIVE"
-      && (historicalSurpriseSignal === "STRONG" || historicalSurpriseSignal === "POSITIVE")
-    ) {
-      compositeMomentumSignal = "MIXED_NEGATIVE_REVISION";
-    } else if (forwardRevisionSignal === "POSITIVE" && historicalSurpriseSignal === "NEGATIVE") {
-      compositeMomentumSignal = "MIXED_POSITIVE_REVISION";
-    } else if (
-      forwardRevisionSignal === "POSITIVE"
-      && (historicalSurpriseSignal === "STRONG" || historicalSurpriseSignal === "POSITIVE")
-    ) {
-      compositeMomentumSignal = "STRONG_POSITIVE";
-    } else if (forwardRevisionSignal === "NEGATIVE") {
-      compositeMomentumSignal = "NEGATIVE";
-    } else {
-      compositeMomentumSignal = "NEUTRAL";
-    }
-
-    const interpretationNoteBySignal: Record<string, string> = {
-      STRONG_POSITIVE: "Historical earnings surprises and forward estimate revisions are both supportive.",
-      MIXED_NEGATIVE_REVISION: "Historical beat performance is strong, but forward revisions are negative.",
-      MIXED_POSITIVE_REVISION: "Historical surprise trend is weak, but forward revisions are improving.",
-      NEGATIVE: "Both historical surprise trend and forward revisions indicate weakness.",
-      NEUTRAL: "Signals are mixed or modest without a strong directional bias.",
-      UNKNOWN: "Insufficient data to classify both historical and forward signals.",
-    };
-
     const dataQuality = revision30d == null || beatRate == null ? "PARTIAL" : "OK";
 
     return JSON.stringify({
@@ -1633,8 +1533,6 @@ export async function getEarningsMomentum(
       revision90d,
       revisionBand: band.band,
       revisionThresholdPct,
-      revisionDirection,
-      momentumFlag,
       beatRate,
       beatRateBand: beatRateBand(beatRate),
       beatCount,
@@ -1643,10 +1541,6 @@ export async function getEarningsMomentum(
       avgSurprisePct: preRevenue ? null : avgSurprise,
       preRevenue,
       currentBeatStreak: beatStreak,
-      historicalSurpriseSignal,
-      forwardRevisionSignal,
-      compositeMomentumSignal,
-      interpretationNote: interpretationNoteBySignal[compositeMomentumSignal],
       compositeMethodNote,
       revisionSignalDriver,
       warnings,
@@ -1694,7 +1588,6 @@ export async function getAnalystUpgradeRadar(ticker: string | string[], daysBack
       return JSON.stringify({
         ticker,
         windowDays: daysBack,
-        netSentiment: 0,
         netUpgrades: 0,
         upgrades: 0,
         downgrades: 0,
@@ -1736,12 +1629,6 @@ export async function getAnalystUpgradeRadar(ticker: string | string[], daysBack
       const { ptFrom, ptTo, ptDirection } = analystPriceTargetChange(entry, signal);
       const mixedSignal = (signal === "UPGRADE" && ptDirection === "LOWERED") || (signal === "DOWNGRADE" && ptDirection === "RAISED");
 
-      let strengthFlag: string;
-      // A mixed signal wins over the rating direction in both directions (2.14.0).
-      if (mixedSignal) strengthFlag = "MIXED";
-      else if (signal === "UPGRADE") strengthFlag = "BULLISH";
-      else if (signal === "DOWNGRADE") strengthFlag = "BEARISH";
-      else strengthFlag = "NEUTRAL";
 
       changes.push({
         date: gradeDate ?? (epochDate ? new Date(epochDate * 1000).toISOString().slice(0, 10) : null),
@@ -1753,11 +1640,10 @@ export async function getAnalystUpgradeRadar(ticker: string | string[], daysBack
         ptTo,
         ptDirection,
         mixedSignal,
-        strengthFlag,
       });
     }
 
-    const netSentiment = upgradeCount - downgradeCount;
+    const netUpgrades = upgradeCount - downgradeCount;
     const parts: string[] = [];
     if (upgradeCount) parts.push(`${upgradeCount} UPGRADE(s)`);
     if (downgradeCount) parts.push(`${downgradeCount} DOWNGRADE(s)`);
@@ -1767,8 +1653,7 @@ export async function getAnalystUpgradeRadar(ticker: string | string[], daysBack
     return JSON.stringify({
       ticker,
       windowDays: daysBack,
-      netSentiment,
-      netUpgrades: netSentiment,
+      netUpgrades,
       upgrades: upgradeCount,
       downgrades: downgradeCount,
       initiations: initiationCount,

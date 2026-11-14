@@ -163,7 +163,7 @@ CASES += [
 
 
 # ═══════════════════════════════════════════════════════════════════════════════════════════════
-# Section 5: get_analyst_upgrade_radar strengthFlag (BR-SHR-003/004). Python reads yfinance upgrades_downgrades (stubbed);
+# Section 5: get_analyst_upgrade_radar signal and mixedSignal (BR-SHR-003/004). Python reads yfinance upgrades_downgrades (stubbed);
 # the Worker reads Yahoo's upgradeDowngradeHistory (served). One rating change per case, one day old.
 # ═══════════════════════════════════════════════════════════════════════════════════════════════
 
@@ -189,17 +189,17 @@ def _radar_case(name: str, action: str, from_grade: str, to_grade: str, prior: f
         name=name, ids=["BR-SHR-003", "BR-SHR-004"], py=py,
         ts={"js": 'return JSON.parse(await m.yahooFinance.getAnalystUpgradeRadar("RDR", 30));', "isolate": True},
         routes={**YAHOO_AUTH_ROUTES, "https://query1.finance.yahoo.com/v10/finance/quoteSummary/RDR?*": {"json": history}},
-        select=lambda v: [{k: c.get(k) for k in ("signal", "ptDirection", "mixedSignal", "strengthFlag")} for c in v.get("changes") or []],
+        select=lambda v: [{k: c.get(k) for k in ("signal", "ptDirection", "mixedSignal")} for c in v.get("changes") or []],
         **kw)
 
 
 CASES += [
     _radar_case("shr.analyst.upgrade_with_a_cut_target_is_mixed", "up", "Hold", "Buy", 120.0, 100.0,
-                expect=[{"signal": "UPGRADE", "ptDirection": "LOWERED", "mixedSignal": True, "strengthFlag": "MIXED"}]),
+                expect=[{"signal": "UPGRADE", "ptDirection": "LOWERED", "mixedSignal": True}]),
     _radar_case("shr.analyst.downgrade_with_a_raised_target_is_mixed", "down", "Buy", "Hold", 100.0, 120.0,
-                expect=[{"signal": "DOWNGRADE", "ptDirection": "RAISED", "mixedSignal": True, "strengthFlag": "MIXED"}]),
-    _radar_case("shr.analyst.downgrade_without_a_mixed_signal_is_bearish", "down", "Buy", "Hold", 120.0, 100.0,
-                expect=[{"signal": "DOWNGRADE", "ptDirection": "LOWERED", "mixedSignal": False, "strengthFlag": "BEARISH"}]),
-    _radar_case("shr.analyst.upgrade_without_a_mixed_signal_is_bullish", "up", "Hold", "Buy", 100.0, 120.0,
-                expect=[{"signal": "UPGRADE", "ptDirection": "RAISED", "mixedSignal": False, "strengthFlag": "BULLISH"}]),
+                expect=[{"signal": "DOWNGRADE", "ptDirection": "RAISED", "mixedSignal": True}]),
+    _radar_case("shr.analyst.downgrade_without_a_mixed_signal", "down", "Buy", "Hold", 120.0, 100.0,
+                expect=[{"signal": "DOWNGRADE", "ptDirection": "LOWERED", "mixedSignal": False}]),
+    _radar_case("shr.analyst.upgrade_without_a_mixed_signal", "up", "Hold", "Buy", 100.0, 120.0,
+                expect=[{"signal": "UPGRADE", "ptDirection": "RAISED", "mixedSignal": False}]),
 ]

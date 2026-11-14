@@ -282,7 +282,7 @@ class TestMarketSnapshotSchema(unittest.TestCase):
                 "ticker": ticker,
                 "pctVs50dma": -0.05,
                 "pctVs200dma": 12.04,
-                "trend": "MIXED",
+                "maAlignment": "MIXED",
                 "dataDate": "2026-05-15",
             })
 
@@ -351,7 +351,8 @@ class TestMarketSnapshotSchema(unittest.TestCase):
         self._mock_all_components(self.srv)
         result = json.loads(_run(self.srv.get_market_snapshot("ASTS")))
         trend = result["trend"]
-        self.assertIsNotNone(trend["maTrend"])
+        self.assertNotIn("maTrend", trend)
+        self.assertIsNotNone(trend["maAlignment"])
         self.assertIsNotNone(trend["rsi14"])
         self.assertIsNotNone(trend["macdHistogram"])
 

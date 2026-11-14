@@ -3190,6 +3190,51 @@ F-024, F-026, F-029). Both runtimes change alike.
 - **Tests:** 21 new parity cases in `scripts/parity/cases_audit_2251.py`.
 - **Rollback:** redeploy 2.25.0.
 
+## Breaking Changes (4.0.0)
+
+- **Why:** the removals announced by the `DEPRECATED_FIELD` notices of 3.11.0 ("Neutrality Label Notices (3.11.0)"),
+  from the neutrality audit of label vocabularies (NL1-NL13; owner approved 2026-11-14, NL12 and NL13 confirmed the
+  same day). 3.11.0 was live from 2026-11-14 06:49Z. Both runtimes. Labels that remain are factual classifications or
+  bands with a stated threshold the caller can set.
+- **Removed:**
+
+  | Tool | Removed | Use instead |
+  | --- | --- | --- |
+  | `analyze_moving_average_position` | `trend` | `maAlignment` |
+  | `get_market_snapshot` | `trend.maTrend` | `trend.maAlignment` |
+  | `get_analyst_rating_changes` | `netSentiment`, `changes[].strengthFlag` | `netUpgrades`, `changes[].signal`, `changes[].mixedSignal` |
+  | `analyze_earnings_momentum` | `momentumFlag`, `revisionDirection`, `forwardRevisionSignal`, `historicalSurpriseSignal`, `compositeMomentumSignal`, `interpretationNote` | `revisionBand`, `beatRateBand` |
+  | `get_short_momentum` | `squeezeRisk`, `flag` | `shortPctFloat`, `daysToCover` |
+  | `analyze_options_flow_window` | `bracket` | `pcRatio`, `putVolTrend` |
+  | `analyze_credit_health` | `debtTier`, `creditStressFlag` | `leverageBand`, `meetsCreditStressThreshold` |
+  | `get_analyst_consensus` | `targetLagSignal` | `targetVsPrice` |
+  | `analyze_position_signals` | `analystInputs.analystNetSentiment`, `earningsInputs.momentumFlag`, `technicalInputs.maPosition` | `analystNetUpgrades`, `revisionBand`, `maAlignment` |
+  | `calculate_price_target_distance` | `ioPt`, `eqfPct`, `invertedFlag`; the `io_pt` argument | `referenceTargetPrice`, `referenceTargetPct`, `priceAtOrAboveTarget`; `reference_target_price` |
+  | `find_put_hedge_candidates` | `candidates[].ivFlag` | `candidates[].ivPctile` |
+
+  The 3.11.0 `DEPRECATED_FIELD` notices go with the fields.
+- **Changed values and text:**
+  - `find_put_hedge_candidates` `decisionUse` is `CANDIDATE_SCREEN_ONLY` (was `HEDGE_SCREEN_ONLY`).
+  - `analyze_options_flow_window` `formattedBlock` reads `OPTIONS FLOW [<window>] <ticker> | P/C: ... | IV vs 1y RV
+    range: ... | Put vol / 1% stock ADV: ... | Trend: ...` (was `OPTIONS FLOW SCAN ...`, ending `| Advisory: <bracket>
+    bracket`); with LOW chain quality it reads `OPTIONS FLOW: DATA QUALITY LOW — raw chain unreliable.`
+  - `analyze_earnings_momentum` `compositeMethodNote` describes the `revisionBand` rule.
+  - `analyze_credit_health` `computedMetrics` and `unavailableMetrics` name `meetsCreditStressThreshold` and
+    `leverageBand` instead of `creditStressFlag` and `debtTier`.
+  - `calculate_price_target_distance` without a positive `reference_target_price` returns `INPUT_VALIDATION_ERROR`
+    "reference_target_price must be a positive number". An `io_pt` argument is no longer read: in expanded mode it is
+    ignored like any unknown argument (so a call with only `io_pt` gets that error); in grouped mode the `screening`
+    group refuses it ("unexpected parameter(s): io_pt").
+  - `get_analyst_rating_changes` description lists all four `signal` values (UPGRADE, DOWNGRADE, INITIATED,
+    MAINTAIN).
+- **Unchanged:** the warnings `CONSENSUS_TARGET_BELOW_PRICE_DESPITE_UPGRADES`, `PRE_REVENUE_NO_HISTORY`,
+  `LONGER_LOOKBACK_REVISION_DIVERGENCE` and `MIXED_EARNINGS_SIGNAL` (the last two keep their fixed 3% test), and the
+  component name `maPosition` in `componentStatus` of `analyze_position_signals` and `get_market_snapshot`.
+- **CI:** `scripts/test_neutrality_contract.py` fails if a listing names a removed field or the retired values
+  BULLISH, BEARISH, COLLAPSING, HEDGE_SCREEN_ONLY, LIKELY_STALE_OR_LAGGING or POSSIBLY_STALE.
+- **Tests:** `scripts/parity/cases_major_400.py`; label cases in `cases_labels_3110.py`.
+- **Rollback:** redeploy 3.11.0.
+
 ## Neutrality Label Notices (3.11.0)
 
 - **Why:** the brief's Phase 6 neutrality audit of label vocabularies (report

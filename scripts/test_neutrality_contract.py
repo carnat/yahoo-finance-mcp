@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Neutrality contract (3.0.0, Phase 6 exit).
+"""Neutrality contract (3.0.0, Phase 6 exit; extended in 4.0.0).
 
 Both runtimes' tool listings, in expanded and grouped mode, must not carry
 doctrine vocabulary in any name, description, enum or schema key, and must not
 advertise a field that 3.0.0 removed (the 2.8.0 N1-N3 and 2.27.0 F5/F45/F61
-deprecations).
+deprecations) or that 4.0.0 removed (the 3.11.0 neutrality-label deprecations,
+NL1-NL13), nor the retired label values.
 """
 
 from __future__ import annotations
@@ -26,18 +27,28 @@ ESBUILD = WORKER / "node_modules" / ".bin" / "esbuild"
 sys.path.insert(0, str(ROOT))
 
 DOCTRINE = re.compile(r"doctrine", re.IGNORECASE)
+# Label values retired in 4.0.0 (NL1-NL4, NL11).
+RETIRED_LABELS = re.compile(r"\b(BULLISH|BEARISH|COLLAPSING|HEDGE_SCREEN_ONLY|LIKELY_STALE_OR_LAGGING|POSSIBLY_STALE)\b")
 
 # Keys removed everywhere in 3.0.0.
 REMOVED_KEYS = {
     "doctrineUse", "g2", "opportunity", "scenarioWeights", "selectedMethod", "selectedMultiple",
     "inferredTag", "tagNote", "gatePass", "gateThresholdUsd", "liquidityGatePass",
     "t1_inputs", "t2_inputs", "t4_inputs", "t5_inputs", "putVolVs10dAvg",
+    # 4.0.0 (neutrality labels NL1-NL13).
+    "momentumFlag", "revisionDirection", "forwardRevisionSignal", "historicalSurpriseSignal",
+    "compositeMomentumSignal", "interpretationNote", "strengthFlag", "netSentiment", "analystNetSentiment",
+    "targetLagSignal", "squeezeRisk", "debtTier", "creditStressFlag", "maTrend", "ioPt", "eqfPct",
+    "invertedFlag", "ivFlag", "io_pt",
 }
 # Keys removed from one tool's output only (other tools keep a field of the same name).
 REMOVED_KEYS_BY_TOOL = {
     "calculate_price_target_distance": {"bracket", "tag", "priceTarget", "action"},
-    "analyze_options_flow_window": {"ivPctile", "fieldNotes"},
+    "analyze_options_flow_window": {"ivPctile", "fieldNotes", "bracket"},
     "get_analyst_rating_changes": {"upgrades30d", "downgrades30d", "initiations30d"},
+    # 4.0.0: generic words, so checked on their own tool only.
+    "analyze_moving_average_position": {"trend"},
+    "get_short_momentum": {"flag"},
 }
 
 _LIST_TOOLS = """
@@ -126,6 +137,11 @@ class NeutralityContract(unittest.TestCase):
         for runtime, mode, tools in self._each():
             hits = [t.get("name") for t in tools if DOCTRINE.search(json.dumps(t))]
             self.assertEqual(hits, [], f"{runtime}/{mode}: doctrine vocabulary in tools {hits}")
+
+    def test_no_retired_label_value_in_any_listing(self) -> None:
+        for runtime, mode, tools in self._each():
+            hits = sorted({m.group(0) for t in tools for m in RETIRED_LABELS.finditer(json.dumps(t))})
+            self.assertEqual(hits, [], f"{runtime}/{mode}: retired label values {hits}")
 
     def test_no_removed_field_in_any_output_schema(self) -> None:
         for runtime, mode, tools in self._each():

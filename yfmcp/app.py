@@ -330,7 +330,7 @@ This server provides financial market data from Yahoo Finance and SEC EDGAR via 
 - extract_funding_capex_schedule: Contractual schedules by due period and funding/capex statements classified CONTRACTUAL, COMPANY_DISCLOSED_COMMITTED, COMPANY_GUIDED, AWARDED_CONTINGENT or UNRESOLVED, with timing and source.
 - extract_operating_driver_ledger: Operating drivers as disclosed: XBRL driver series, the filer's own tagged KPIs, and filing/release statements with figures by category, each REPORTED_ACTUAL, TARGET_OR_PLAN or UNCLEAR with timing and source; nothing derived.
 - analyze_share_count_trend: Historical shares outstanding for dilution/buyback questions; Yahoo context, not filing confirmation.
-- analyze_credit_health: Net Debt/EBITDA, interest coverage, debt tier, credit stress flag.
+- analyze_credit_health: Net Debt/EBITDA, interest coverage, leverage band, credit stress threshold.
 - get_corporate_actions: Dividends, splits, and fund capital-gain distribution history.
 - get_ownership_holders: Major holders, institutional holders, mutual funds, or insider transactions.
 - get_expanded_institutional_ownership: Deeper institutional ownership via eligible Finnhub coverage; optional Alpha fallback requires allow_scarce_fallback=true. Verify material claims against SEC 13F filings.

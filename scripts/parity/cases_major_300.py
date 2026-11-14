@@ -29,7 +29,7 @@ from unittest.mock import AsyncMock, patch
 import pandas as pd
 
 from scripts.parity.cases_neutrality import (
-    FACT, POSITION_ROUTES, PRESS, SECTION, SECTION_ROUTES, _NOTICE_PRICE_TARGET_COPIES, _position_case, _worker,
+    FACT, POSITION_ROUTES, PRESS, SECTION, SECTION_ROUTES, _position_case, _worker,
 )
 from scripts.parity.cases_pricing_evidence_tools import (
     GATE_NOW, QUOTE_TIME, YAHOO_AUTH_ROUTES, _bracket_case, _gate_case, _ts_with_clock,
@@ -198,7 +198,7 @@ CASES += [
 
 PRICE_TARGET_KEYS = sorted([
     "ticker", "currentPrice", "priceBasis", "observationType", "priceTimestamp", "marketState", "marketOpen", "referenceTargetPrice",
-    "referenceTargetPct", "currentToTargetRatioPct", "distanceToTargetPct", "distanceConvention", "ioPt", "eqfPct", "invertedFlag",
+    "referenceTargetPct", "currentToTargetRatioPct", "distanceToTargetPct", "distanceConvention",
     "priceAtOrAboveTarget", "dataDate", "recommendedNextAction"])
 
 CASES += [
@@ -207,7 +207,7 @@ CASES += [
     _bracket_case("major300.price_target.envelope_key_set_and_no_warnings", ["BR-PRC-022"], 120.0, 100.0,
                   market_time=QUOTE_TIME, via="envelope",
                   select=lambda v: {"keys": sorted(v["data"]), "warnings": v["meta"]["warnings"]},
-                  expect={"keys": PRICE_TARGET_KEYS, "warnings": [_NOTICE_PRICE_TARGET_COPIES]}),
+                  expect={"keys": PRICE_TARGET_KEYS, "warnings": []}),
 ]
 
 
@@ -273,7 +273,7 @@ _POS_HISTORY_SUMMARY["quoteSummary"]["result"][0]["upgradeDowngradeHistory"] = {
 _counts_case = _position_case(
     "major300.position.analyst_inputs_take_the_radars_plain_counts",
     lambda v: {k: v["data"]["analystInputs"][k] for k in ("upgrades30d", "downgrades30d", "initiations30d")},
-    components={"get_analyst_upgrade_radar": {"netSentiment": 1, "upgrades": 1, "downgrades": 0, "initiations": 0}},
+    components={"get_analyst_upgrade_radar": {"netUpgrades": 1, "upgrades": 1, "downgrades": 0, "initiations": 0}},
     ids=("Q14-N3",), expect={"upgrades30d": 1, "downgrades30d": 0, "initiations30d": 0})
 _counts_case.routes = {**POSITION_ROUTES, "https://query1.finance.yahoo.com/v10/finance/quoteSummary/*": {"json": _POS_HISTORY_SUMMARY}}
 CASES.append(_counts_case)
@@ -372,7 +372,7 @@ CASES += [
                expect={"goneKeys": [], "named": ["ivVsRealizedRangePct", "putVolPer1PctStockAdv"]}),
     _flow_case("major300.options_flow.result_key_set", lambda v: sorted(v), expect=sorted([
         "ticker", "windowLabel", "dataDate", "pcRatio", "ivVsRealizedRangePct", "putVolPer1PctStockAdv", "putVolTrend", "expiry",
-        "expirySelection", "maxPainStrike", "bracket", "formattedBlock", "realizedVolPriceBasis", "historicalObservationType",
+        "expirySelection", "maxPainStrike", "formattedBlock", "realizedVolPriceBasis", "historicalObservationType",
         "historicalBarStatus", "freshnessStatus", "excludedIncompleteBar", "retryAttempted", "fallbackUsed",
         "recommendedNextAction", "dataQuality", "warnings"])),
 ]

@@ -1,23 +1,19 @@
-"""Parity cases for 3.11.0, the neutrality label notices (audit NL1-NL13,
+"""Parity cases for the neutrality replacement labels (3.11.0, audit NL1-NL13,
 /mnt/project-files/audits/neutrality-labels-2026-11-12.md; docs/provider-runtime-guidance.md
-"Neutrality Label Notices (3.11.0)").
+"Neutrality Label Notices (3.11.0)"). The DEPRECATED_FIELD notices and the deprecated fields went in 4.0.0
+(cases_major_400.py).
 
 - The replacement labels (yfmcp/labels.py, worker/src/labels.ts) at every band boundary.
-- The DEPRECATED_FIELD notices (``deprecation_warnings_for`` / ``deprecationWarningsFor``): one per notice whose
-  fields the payload carries, at the top level, one level down in a batch, under ``tickers``, or in an array element.
-- End to end: the new fields in analyze_credit_health and analyze_earnings_momentum, and the notice reaching
-  meta.warnings for analyze_position_signals. Nothing deprecated changes value.
+- End to end: the new fields in analyze_credit_health and analyze_earnings_momentum, and the replacement fields of
+  analyze_position_signals.
 """
 
 from __future__ import annotations
-
-import json
 
 from scripts.parity.harness import Case
 from scripts.parity.cases_neutrality import _position_case
 from scripts.parity.cases_pricing_evidence_tools import M, BEAT, MISS, _credit_case, _momentum_case
 from yfmcp import labels
-from yfmcp.deprecations import deprecation_warnings_for
 
 CASES: list[Case] = []
 
@@ -104,81 +100,21 @@ for label, value, expect in [("absent", None, None), ("valid", 2.5, 2.5),
                       expect=expect))
 
 
-# Notices.
-REMOVAL = "will be removed in the next major version"
-
-
-def _notice_case(name: str, tool: str, data, expect_fields: list[list[str]]) -> Case:
-    return Case(name=f"labels3110.notice.{name}", ids=["NL3110"],
-                py=lambda: deprecation_warnings_for(tool, json.loads(json.dumps(data))),
-                ts={"js": "return m.deprecations.deprecationWarningsFor(args[0], args[1]);", "args": [tool, data]},
-                select=lambda v: [n["fields"] for n in v], expect=expect_fields)
-
-
-CASES += [
-    _notice_case("ma_trend", "analyze_moving_average_position", {"trend": "BULLISH", "maAlignment": "ABOVE_BOTH"}, [["trend"]]),
-    _notice_case("ma_batch_one_level_down", "analyze_moving_average_position", {"AAPL": {"trend": "MIXED"}, "MSFT": {"error": True}},
-                 [["trend"]]),
-    _notice_case("snapshot_tickers", "get_market_snapshot", {"tickers": {"AAPL": {"trend": {"maTrend": "BULLISH"}}}},
-                 [["trend.maTrend"]]),
-    _notice_case("snapshot_without_trend_block", "get_market_snapshot", {"ticker": "AAPL", "quote": {}}, []),
-    _notice_case("rating_strength_in_changes", "get_analyst_rating_changes",
-                 {"netSentiment": 1, "changes": [{"signal": "UPGRADE", "strengthFlag": "BULLISH"}]},
-                 [["netSentiment", "changes[].strengthFlag"]]),
-    _notice_case("rating_strength_only_in_array", "get_analyst_rating_changes",
-                 {"changes": [{"signal": "UPGRADE"}, {"strengthFlag": "NEUTRAL"}]}, [["netSentiment", "changes[].strengthFlag"]]),
-    _notice_case("earnings", "analyze_earnings_momentum", {"momentumFlag": "POSITIVE", "revisionBand": "FLAT"},
-                 [["momentumFlag", "revisionDirection", "forwardRevisionSignal", "historicalSurpriseSignal",
-                   "compositeMomentumSignal", "interpretationNote"]]),
-    _notice_case("short", "get_short_momentum", {"squeezeRisk": "LOW", "flag": None}, [["squeezeRisk", "flag"]]),
-    _notice_case("options_bracket", "analyze_options_flow_window", {"bracket": None, "pcRatio": 0.9}, [["bracket"]]),
-    _notice_case("credit", "analyze_credit_health", {"debtTier": "CLEAN"}, [["debtTier", "creditStressFlag"]]),
-    _notice_case("consensus", "get_analyst_consensus", {"targetLagSignal": "CURRENT"}, [["targetLagSignal"]]),
-    _notice_case("position", "analyze_position_signals", {"technicalInputs": {"maPosition": "BULLISH"}},
-                 [["analystInputs.analystNetSentiment", "earningsInputs.momentumFlag", "technicalInputs.maPosition"]]),
-    _notice_case("price_target", "calculate_price_target_distance", {"ioPt": 200, "eqfPct": 95.0}, [["ioPt", "eqfPct", "invertedFlag"]]),
-    _notice_case("hedge_iv_flag", "find_put_hedge_candidates", {"candidates": [{"strike": 90, "ivFlag": None}]},
-                 [["candidates[].ivFlag"]]),
-    _notice_case("hedge_no_candidates", "find_put_hedge_candidates", {"candidates": []}, []),
-    _notice_case("other_tool_with_same_key", "get_market_quote", {"trend": "x", "bracket": "y"}, []),
-    # Messages and replacement text, verbatim in both runtimes.
-    Case(name="labels3110.notice.full_rows", ids=["NL3110"],
-         py=lambda: deprecation_warnings_for("analyze_credit_health", {"debtTier": "CLEAN"})
-         + deprecation_warnings_for("get_short_momentum", {"flag": None}),
-         ts={"js": "return [...m.deprecations.deprecationWarningsFor('analyze_credit_health', {debtTier: 'CLEAN'}), "
-                   "...m.deprecations.deprecationWarningsFor('get_short_momentum', {flag: null})];"},
-         expect=[
-             {"code": "DEPRECATED_FIELD",
-              "message": f"debtTier, creditStressFlag are deprecated and {REMOVAL}; use leverageBand (the netDebtToEbitda band) "
-                         "and meetsCreditStressThreshold (set with max_net_debt_to_ebitda and min_interest_coverage).",
-              "severity": "info", "fields": ["debtTier", "creditStressFlag"],
-              "replacement": "leverageBand, meetsCreditStressThreshold"},
-             {"code": "DEPRECATED_FIELD",
-              "message": f"squeezeRisk, flag are deprecated and {REMOVAL}; they have no replacement label; read shortPctFloat and daysToCover.",
-              "severity": "info", "fields": ["squeezeRisk", "flag"], "replacement": "shortPctFloat, daysToCover"},
-         ]),
-]
-
-
 # End to end with the existing provider stubs (default thresholds).
 CASES += [
     _credit_case("labels3110.credit.card_example_new_fields", ["NL3110", "BR-FND-007"],
                  {"debt": [410 * M], "cash": [100 * M]}, {"op": [15 * M] * 4, "da": [10 * M] * 4, "int": [6.25 * M] * 4},
-                 ("creditStressFlag", "debtTier", "leverageBand", "meetsCreditStressThreshold", "creditStressThresholds"),
-                 expect={"creditStressFlag": True, "debtTier": "ELEVATED", "leverageBand": "2_5X_TO_4X",
+                 ("leverageBand", "meetsCreditStressThreshold", "creditStressThresholds"),
+                 expect={"leverageBand": "2_5X_TO_4X",
                          "meetsCreditStressThreshold": True,
                          "creditStressThresholds": {"maxNetDebtToEbitda": 2.5, "minInterestCoverage": 3}}),
     _momentum_case("labels3110.momentum.beat_rate_band", ["NL3110"], [BEAT, BEAT, MISS, BEAT],
-                   ("beatRate", "beatRateBand", "historicalSurpriseSignal", "revisionThresholdPct"),
-                   expect={"beatRate": 0.75, "beatRateBand": "75_TO_100PCT", "historicalSurpriseSignal": "STRONG",
-                           "revisionThresholdPct": 3}),
-    _position_case("labels3110.position.new_fields_and_notice",
+                   ("beatRate", "beatRateBand", "revisionThresholdPct"),
+                   expect={"beatRate": 0.75, "beatRateBand": "75_TO_100PCT", "revisionThresholdPct": 3}),
+    _position_case("labels3110.position.new_fields",
                    lambda v: {"maAlignment": "maAlignment" in v["data"]["technicalInputs"],
                               "analystNetUpgrades": "analystNetUpgrades" in v["data"]["analystInputs"],
-                              "revisionBand": "revisionBand" in v["data"]["earningsInputs"],
-                              "notices": [w["fields"] for w in v["meta"]["warnings"] if w.get("code") == "DEPRECATED_FIELD"]},
+                              "revisionBand": "revisionBand" in v["data"]["earningsInputs"]},
                    ids=("NL3110",),
-                   expect={"maAlignment": True, "analystNetUpgrades": True, "revisionBand": True,
-                           "notices": [["analystInputs.analystNetSentiment", "earningsInputs.momentumFlag",
-                                        "technicalInputs.maPosition"]]}),
+                   expect={"maAlignment": True, "analystNetUpgrades": True, "revisionBand": True}),
 ]
