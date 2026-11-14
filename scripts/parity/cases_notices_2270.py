@@ -72,18 +72,30 @@ CASES += [
 ]
 
 
-def _boundary_case(name: str, ids: list[str], tool: str, data, expect_data) -> Case:
+def _boundary_case(name: str, ids: list[str], tool: str, data, expect_data, expect_warnings=None) -> Case:
     return Case(
         name=name, ids=ids,
         py=lambda: json.loads(_envelope_tool_result(tool, json.dumps(data))),
-        ts={"js": "m.response.setWorkerEnv({}); return JSON.parse(m.response.mcpSuccess(args[0], JSON.stringify(args[1])));",
+        ts={"js": "m.response.setWorkerEnv({}); "
+                  # successWarnings as the Worker's successOptions wires it (3.11.0 DEPRECATED_FIELD notices).
+                  "const opts = {successWarnings: (d) => m.deprecations.deprecationWarningsFor(args[0], d)}; "
+                  "return JSON.parse(m.response.mcpSuccess(args[0], JSON.stringify(args[1]), opts));",
             "args": [tool, data]},
         select=lambda v: {"ok": v["ok"], "data": v["data"], "warnings": v["meta"]["warnings"]},
-        expect={"ok": True, "data": expect_data, "warnings": []})
+        expect={"ok": True, "data": expect_data, "warnings": expect_warnings or []})
 
 
 _RATING = {"ticker": "AAPL", "windowDays": 30, "netSentiment": 1, "upgrades": 2, "upgrades30d": 2, "downgrades": 1,
            "downgrades30d": 1, "initiations": 0, "initiations30d": 0, "changes": [], "summary": "2 UPGRADE(s), 1 DOWNGRADE(s)"}
+
+# 3.11.0: netSentiment itself carries a DEPRECATED_FIELD notice; the 3.0.0 window copies still get none.
+_RATING_NOTICE = {
+    "code": "DEPRECATED_FIELD",
+    "message": "netSentiment, changes[].strengthFlag are deprecated and will be removed in the next major version; "
+               "use netUpgrades (upgrades minus downgrades); each change's signal and mixedSignal carry what strengthFlag restated.",
+    "severity": "info", "fields": ["netSentiment", "changes[].strengthFlag"],
+    "replacement": "netUpgrades, changes[].signal, changes[].mixedSignal",
+}
 
 CASES += [
     _boundary_case("notices2270.boundary.status_string_gets_no_notice", ["F20", "F61"], "extract_exposure",
@@ -95,7 +107,8 @@ CASES += [
     _boundary_case("notices2270.boundary.options_flow_removed_aliases_get_no_notice", ["F61"], "analyze_options_flow_window",
                    {"ticker": "AAPL", "ivPctile": 40, "quality": {"confidence": "NOT_DECISION_GRADE"}},
                    {"ticker": "AAPL", "ivPctile": 40, "quality": {"confidence": None, "status": "NOT_DECISION_GRADE"}}),
-    _boundary_case("notices2270.boundary.rating_window_copies_get_no_notice", ["F61"], "get_analyst_rating_changes", _RATING, _RATING),
+    _boundary_case("notices2270.boundary.rating_window_copies_get_no_notice", ["F61"], "get_analyst_rating_changes", _RATING, _RATING,
+                   [_RATING_NOTICE]),
     _boundary_case("notices2270.boundary.holders_yfinance_columns_get_no_notice", ["F17", "F61"], "get_ownership_holders",
                    {"rows": [{"Date Reported": "2026-06-30", "Holder": "Vanguard", "pctHeld": 0.09}]},
                    {"rows": [{"Date Reported": "2026-06-30", "Holder": "Vanguard", "pctHeld": 0.09}]}),

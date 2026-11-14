@@ -104,7 +104,13 @@ import {
 import { validateAccession, validateTicker } from "./validate.js";
 import { buildValuationEvidencePack, getConsensusForecastCurve, getEpsRevisions, getEvidenceCut, getEvidenceQuality, listEvidenceCuts } from "./evidence-pack.js";
 import { withAuthorityBoundary } from "./evidence.js";
-import { parseMinAdvUsd } from "./deprecations.js";
+import { deprecationWarningsFor, parseMinAdvUsd } from "./deprecations.js";
+import {
+  DEFAULT_MAX_NET_DEBT_TO_EBITDA,
+  DEFAULT_MIN_INTEREST_COVERAGE,
+  DEFAULT_REVISION_THRESHOLD_PCT,
+  parsePositiveNumberArg,
+} from "./labels.js";
 
 import { TOOLS, annotationsForTool, ENVELOPE_V2_OUTPUT_SCHEMA, LLM_DETAILED_OUTPUT_TOOLS, envelopedToolOutputSchema, GROUPED_TOOLS, GROUPED_ACTIONS, type Tool } from "./schemas.js";
 
@@ -376,6 +382,8 @@ function successOptions(name: string): McpSuccessOptions {
   const status = TOOL_RELIABILITY_STATUS[name];
   return {
     ...(status ? { metaExtra: { ...status } } : {}),
+    // 3.11.0: DEPRECATED_FIELD notices for the neutrality-audit labels.
+    successWarnings: (data) => deprecationWarningsFor(name, data),
   };
 }
 
@@ -793,9 +801,31 @@ const TOOL_HANDLERS: ReadonlyMap<string, ToolHandler> = new Map<string, ToolHand
   }],
   ["analyze_volume_ratio", (args) => getVolumeRatio(tickerArg(args.ticker), num(args.period, 10))],
   ["analyze_moving_average_position", (args) => getMaPosition(tickerArg(args.ticker))],
-  ["analyze_credit_health", (args) => getCreditHealth(tickerArg(args.ticker))],
+  ["analyze_credit_health", (args) => {
+    // 3.11.0 (NL6): caller-chosen credit-stress thresholds.
+    const maxRatio = parsePositiveNumberArg("max_net_debt_to_ebitda", args.max_net_debt_to_ebitda);
+    if (maxRatio != null && typeof maxRatio === "object") {
+      return mcpFailure("analyze_credit_health", ErrorCode.INPUT_VALIDATION_ERROR, maxRatio.error);
+    }
+    const minCoverage = parsePositiveNumberArg("min_interest_coverage", args.min_interest_coverage);
+    if (minCoverage != null && typeof minCoverage === "object") {
+      return mcpFailure("analyze_credit_health", ErrorCode.INPUT_VALIDATION_ERROR, minCoverage.error);
+    }
+    return getCreditHealth(
+      tickerArg(args.ticker),
+      maxRatio ?? DEFAULT_MAX_NET_DEBT_TO_EBITDA,
+      minCoverage ?? DEFAULT_MIN_INTEREST_COVERAGE,
+    );
+  }],
   ["get_short_momentum", (args) => getShortMomentum(tickerArg(args.ticker))],
-  ["analyze_earnings_momentum", (args) => getEarningsMomentum(tickerArg(args.ticker))],
+  ["analyze_earnings_momentum", (args) => {
+    // 3.11.0 (NL3): caller-chosen revision band.
+    const threshold = parsePositiveNumberArg("revision_threshold_pct", args.revision_threshold_pct);
+    if (threshold != null && typeof threshold === "object") {
+      return mcpFailure("analyze_earnings_momentum", ErrorCode.INPUT_VALIDATION_ERROR, threshold.error);
+    }
+    return getEarningsMomentum(tickerArg(args.ticker), threshold ?? DEFAULT_REVISION_THRESHOLD_PCT);
+  }],
   ["summarize_options_flow", (args) => getOptionsSummary(str(args.ticker), args.expiry_hint != null ? str(args.expiry_hint) : undefined)],
   ["find_put_hedge_candidates", (args) => {
     return getPutHedgeCandidates(
@@ -1184,6 +1214,7 @@ const TOOL_HANDLERS: ReadonlyMap<string, ToolHandler> = new Map<string, ToolHand
     return getPriceTargetBracket(
       str(args.ticker),
       num(args.reference_target_price ?? args.io_pt, 0),
+      args.io_pt != null,
     );
   }],
   ["analyze_position_signals", (args) => getPositionScoreInputs(tickerArg(args.ticker))],

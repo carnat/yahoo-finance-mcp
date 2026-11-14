@@ -15,7 +15,8 @@ from pydantic import Field
 from yfmcp import url_policy
 from yfmcp.app import yfinance_server
 from yfmcp.schemas import _MARKET_SNAPSHOT_OUTPUT_SCHEMA, _TOOL_OUTPUT_SCHEMAS
-from yfmcp.deprecations import MIN_ADV_USD_DESCRIPTION, meets_minimum, parse_min_adv_usd
+from yfmcp.deprecations import IO_PT_ARGUMENT_DEPRECATION, MIN_ADV_USD_DESCRIPTION, meets_minimum, parse_min_adv_usd
+from yfmcp.labels import ma_alignment
 from yfmcp.envelope import ErrorCode, _classify_error_message, _mcp_failure
 from yfmcp.validation import _validate_ticker
 from yfmcp.cache import _PRICE_TTL, _STMT_TTL, _tool_cache
@@ -1448,6 +1449,8 @@ async def get_ma_position(ticker: str | list[str]) -> str:
         "regime50": regime_50,
         "regime200": regime_200,
         "trend": trend,
+        # 3.11.0 (NL1): the factual name for what trend labels BULLISH/BEARISH.
+        "maAlignment": ma_alignment(regime_50, regime_200),
         "dataDate": data_date,
         "recommendedNextAction": "NONE",
     })
@@ -1459,7 +1462,7 @@ async def get_ma_position(ticker: str | list[str]) -> str:
 # ---------------------------------------------------------------------------
 @yfinance_server.tool(
     name="get_short_momentum",
-    description="""Get short interest with pre-computed momentum: MoM delta, direction, squeeze risk, and flag. dataDate is the short-interest observation date, not today's market date.
+    description="""Get short interest with the month-over-month change (momDeltaPct; momDirection FLAT within 2% either way, else RISING or FALLING), shortPctFloat (percent), daysToCover, and the SEC/provider observation date in dataDate (not today's market date). squeezeRisk and flag are deprecated. Max 5 tickers per call; split larger lists into multiple calls.
 
 Args:
     ticker: str | list[str]
@@ -2011,6 +2014,7 @@ async def get_market_snapshot(
             "pctFrom50dma": ma.get("pctVs50dma") if ma else None,
             "pctFrom200dma": ma.get("pctVs200dma") if ma else None,
             "maTrend": ma.get("trend") if ma else None,
+            "maAlignment": ma.get("maAlignment") if ma else None,
             "rsi14": tech.get("rsi14") if tech else None,
             "macdHistogram": tech.get("macdHistogram") if tech else None,
         },
@@ -3063,7 +3067,7 @@ async def get_price_target_bracket(
     except Exception:
         pass
 
-    return json.dumps({
+    return json.dumps(with_notices({
         "ticker": ticker,
         "currentPrice": _round_half_away_from_zero(current_price, 4),
         "priceBasis": "REGULAR_MARKET_PRICE",
@@ -3083,7 +3087,7 @@ async def get_price_target_bracket(
         "priceAtOrAboveTarget": current_price >= target_price if current_price > 0 and target_price > 0 else None,
         "dataDate": data_date,
         "recommendedNextAction": "NONE",
-    })
+    }, [{**IO_PT_ARGUMENT_DEPRECATION, "fields": list(IO_PT_ARGUMENT_DEPRECATION["fields"])}] if io_pt is not None else []))
 
 
 @yfinance_server.tool(
@@ -3109,12 +3113,12 @@ async def analyze_price_performance(ticker: str | list[str]) -> str:
     return await get_price_stats(ticker)
 
 
-@yfinance_server.tool(name="analyze_moving_average_position", description="Canonical alias for get_ma_position.", after="analyze_price_performance")
+@yfinance_server.tool(name="analyze_moving_average_position", description="Live regular-market price against the trailing 50- and 200-day averages: pctVs50dma and pctVs200dma, regime50 and regime200 (ABOVE when the price is at or above that average, else BELOW) and maAlignment (ABOVE_BOTH, BELOW_BOTH or MIXED). trend is deprecated; use maAlignment. Read priceTimestamp.", after="analyze_price_performance")
 async def analyze_moving_average_position(ticker: str | list[str]) -> str:
     return await get_ma_position(ticker)
 
 
-@yfinance_server.tool(name="analyze_volume_ratio", description="Canonical alias for get_volume_ratio.", after="analyze_moving_average_position")
+@yfinance_server.tool(name="analyze_volume_ratio", description="Analyze the latest completed-session volume ratio. volumeFlag is HIGH above 1.5 and LOW below 0.7 on ratio10d (latest completed volume / prior 10-session average), else NORMAL. PARTIAL/INCOMPLETE means retry; do not use a volume signal.", after="analyze_moving_average_position")
 async def analyze_volume_ratio(ticker: str | list[str], period: int = 10) -> str:
     return await get_volume_ratio(ticker, period)
 
@@ -3136,21 +3140,24 @@ async def summarize_options_flow(ticker: str, expiry_hint: str | None = None) ->
     return await get_options_summary(ticker=ticker, expiry_hint=expiry_hint)
 
 
-@yfinance_server.tool(name="analyze_options_flow_window", description="Analyze an event-window options flow reading. LOW chain quality returns RETRY and must not support derivative conclusions.", after="summarize_options_flow")
-async def analyze_options_flow_window(ticker: str, window_label: str) -> str:
+@yfinance_server.tool(name="analyze_options_flow_window", description="Analyze options flow for the first expiry after today in a caller-labelled event window. With window_label T-7 or T-2, put volume is compared with the T-14 or T-7 reading of the last 72 hours for putVolTrend: INCREASING above +10%, DECREASING below -10%, else STABLE. bracket is deprecated; read pcRatio and putVolTrend. LOW chain quality returns RETRY and must not support derivative conclusions.", after="summarize_options_flow")
+async def analyze_options_flow_window(
+    ticker: str,
+    window_label: Annotated[str, Field(description="The caller's label for the window, echoed as windowLabel. T-14, T-7 and T-2 are stored so that T-7 and T-2 can compare with the window before.")],
+) -> str:
     return await get_options_flow_scan(ticker, window_label)
 
 
-@yfinance_server.tool(name="find_put_hedge_candidates", description="Find OTM put hedge candidates using executable ask cost. Contracts require a two-sided quote plus liquidity evidence; PARTIAL means retry and do not use budgetFeasible as a decision.", after="analyze_options_flow_window")
+@yfinance_server.tool(name="find_put_hedge_candidates", description="Find OTM put hedge candidates using executable ask cost. Contracts require a two-sided quote plus liquidity evidence; PARTIAL means retry and do not use budgetFeasible as a decision. Each candidate's ivFlag is deprecated; read its ivPctile.", after="analyze_options_flow_window")
 async def find_put_hedge_candidates(ticker: str, otm_pct_min: float = 8, otm_pct_max: float = 12, budget_usd: float = 500, expiry_after: str = "") -> str:
     return await get_put_hedge_candidates(ticker, otm_pct_min, otm_pct_max, budget_usd, expiry_after)
 
 
-@yfinance_server.tool(name="calculate_price_target_distance", description="Compare current price to a user-supplied reference price target with both the legacy ratio and directional percent distance.", after="find_put_hedge_candidates")
+@yfinance_server.tool(name="calculate_price_target_distance", description="Compare current price to a user-supplied reference price target. Returns both the legacy current/target ratio and directional percent distance to target. The older copies of referenceTargetPrice, referenceTargetPct and priceAtOrAboveTarget are deprecated (see the DEPRECATED_FIELD notice).", after="find_put_hedge_candidates")
 async def calculate_price_target_distance(
     ticker: str,
-    reference_target_price: float | None = None,
-    io_pt: float | None = None,
+    reference_target_price: Annotated[float | None, Field(description="Preferred: user-supplied reference target price.")] = None,
+    io_pt: Annotated[float | None, Field(description="Deprecated alias for reference_target_price; removed in the next major version.")] = None,
 ) -> str:
     return await get_price_target_bracket(
         ticker, reference_target_price=reference_target_price, io_pt=io_pt

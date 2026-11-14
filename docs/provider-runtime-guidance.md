@@ -3190,6 +3190,78 @@ F-024, F-026, F-029). Both runtimes change alike.
 - **Tests:** 21 new parity cases in `scripts/parity/cases_audit_2251.py`.
 - **Rollback:** redeploy 2.25.0.
 
+## Neutrality Label Notices (3.11.0)
+
+- **Why:** the brief's Phase 6 neutrality audit of label vocabularies (report
+  `/mnt/project-files/audits/neutrality-labels-2026-11-12.md`, findings NL1-NL14; owner approved 2026-11-14). A
+  label must be a factual classification or a band with a documented threshold the caller can override. This is the
+  notice-only minor: nothing deprecated changes value, every replacement is added alongside, and the removals ship
+  in 4.0.0. Both runtimes.
+- **DEPRECATED_FIELD notices** (`meta.warnings`, severity `info`, with `fields` and `replacement`; never in `data`),
+  emitted when the payload carries the field, also one level down in a batch and under `tickers`:
+
+  | Tool | Deprecated | Use instead |
+  |---|---|---|
+  | `analyze_moving_average_position` | `trend` (BULLISH/BEARISH/MIXED) | `maAlignment` |
+  | `get_market_snapshot` | `trend.maTrend` | `trend.maAlignment` |
+  | `get_analyst_rating_changes` | `netSentiment`, `changes[].strengthFlag` | `netUpgrades`, `changes[].signal`, `changes[].mixedSignal` |
+  | `analyze_earnings_momentum` | `momentumFlag`, `revisionDirection`, `forwardRevisionSignal`, `historicalSurpriseSignal`, `compositeMomentumSignal`, `interpretationNote` | `revisionBand`, `beatRateBand` |
+  | `get_short_momentum` | `squeezeRisk`, `flag` (emoji) | none; `shortPctFloat`, `daysToCover` |
+  | `analyze_options_flow_window` | `bracket` | none; `pcRatio`, `putVolTrend` |
+  | `analyze_credit_health` | `debtTier`, `creditStressFlag` | `leverageBand`, `meetsCreditStressThreshold` |
+  | `get_analyst_consensus` | `targetLagSignal` | `targetVsPrice` |
+  | `analyze_position_signals` | `analystInputs.analystNetSentiment`, `earningsInputs.momentumFlag`, `technicalInputs.maPosition` | `analystNetUpgrades`, `revisionBand`, `maAlignment` in the same groups |
+  | `calculate_price_target_distance` | `ioPt`, `eqfPct`, `invertedFlag`; the `io_pt` argument | `referenceTargetPrice`, `referenceTargetPct`, `priceAtOrAboveTarget`; `reference_target_price` |
+  | `find_put_hedge_candidates` | `candidates[].ivFlag` (emoji) | `candidates[].ivPctile` |
+
+  The `io_pt` notice is added only when the caller passes `io_pt`.
+- **New fields and their rules:**
+  - `maAlignment`: ABOVE_BOTH when the price is at or above both the 50- and 200-day averages, BELOW_BOTH when below
+    both, else MIXED; null when either is unknown.
+  - `revisionBand` (UP, FLAT, DOWN or null) and `revisionThresholdPct`: the 30-day revision at or beyond
+    `revision_threshold_pct` (new optional input, default 3) either way; inside the band a 7-day revision beyond it
+    decides; with no 30-day revision the 7-day, then the 90-day, is used. `revisionSignalDriver` names the one used, at
+    the caller's threshold. With the default it equals `forwardRevisionSignal` (POSITIVE=UP, NEUTRAL=FLAT,
+    NEGATIVE=DOWN, UNKNOWN=null), which stays at 3.
+  - `beatRateBand`: `75_TO_100PCT`, `55_TO_75PCT`, `40_TO_55PCT`, `0_TO_40PCT` (lower bound inclusive), null with no
+    beat rate.
+  - `leverageBand`: `BELOW_1X` (under 1), `1X_TO_2_5X` (to 2.5), `2_5X_TO_4X` (to 4), `ABOVE_4X`, or
+    `NEGATIVE_EARNINGS_BASE`; the same bands `debtTier` named CLEAN, MODERATE, ELEVATED, STRESSED.
+  - `meetsCreditStressThreshold` and `creditStressThresholds`: `netDebtToEbitda` above `max_net_debt_to_ebitda` and
+    `interestCoverageEbit` below `min_interest_coverage` (new optional inputs, defaults 2.5 and 3, the fixed values
+    `creditStressFlag` uses); null when either is unknown.
+  - `targetVsPrice`: AT_OR_ABOVE or BELOW, the mean target against the current price.
+  - `netUpgrades`: upgrades minus downgrades (the same number as `netSentiment`).
+  - A non-positive or non-numeric `revision_threshold_pct`, `max_net_debt_to_ebitda` or `min_interest_coverage` is
+    refused with `INPUT_VALIDATION_ERROR` ("... must be a positive number when supplied.").
+- **Wording:** the `CONSENSUS_TARGET_BELOW_PRICE_DESPITE_UPGRADES` message now states the fact: "The mean price target
+  is below the current price, with N upgrade(s) in the last 30 days." (it said the target "may lag"). The code is
+  unchanged.
+- **Descriptions (NL9, NL10):** the label-producing tools state their thresholds: `volumeFlag` (HIGH above 1.5, LOW
+  below 0.7 on `ratio10d`), `momDirection` (FLAT within 2%), `putVolTrend` (10% either way against the previous
+  window), and the new fields above. `window_label` and `days_back` are described. The output schema drops
+  `pcSentiment`, which no runtime emits (NL14). `schemaHash` and `manifestHash` change.
+- **`decisionUse` values (NL11),** documented here once. They state how far a payload can be relied on, never what to
+  do in the market:
+
+  | Value | Meaning |
+  |---|---|
+  | `EVIDENCE_ONLY` | Stored or computed evidence; no conclusion is drawn. |
+  | `CONTEXT_ONLY` | Provider or news context; confirm material facts elsewhere. |
+  | `CONTEXT_ONLY_NOT_A_PRICE_TARGET` | Valuation arithmetic from public inputs; not a price target. |
+  | `MECHANICAL_NOT_CONSENSUS` | A mechanical calculation (share counts); not a consensus figure. |
+  | `COMPANY_DISCLOSED_NOT_FORECAST` | What the company disclosed; not a forecast. |
+  | `USE_OFFICIAL_EVIDENCE` | Resolved to an official source (SEC exhibit, approved IR page, company registry). |
+  | `CHECK_OFFICIAL_RELEASES` | A material item from a secondary source; confirm with `get_company_press_releases` or `verify_company_event`. |
+  | `HEDGE_SCREEN_ONLY` | A screen of option contracts; renamed `CANDIDATE_SCREEN_ONLY` in 4.0.0. |
+
+- **Planned for 4.0.0 (breaking):** remove every deprecated field above and the `io_pt` argument;
+  `formattedBlock` of `analyze_options_flow_window` loses its "Advisory: ... bracket" segment and is titled "OPTIONS
+  FLOW"; `HEDGE_SCREEN_ONLY` becomes `CANDIDATE_SCREEN_ONLY`; `scripts/test_neutrality_contract.py` fails on the
+  retired names.
+- **Tests:** `scripts/parity/cases_labels_3110.py`.
+- **Rollback:** redeploy 3.10.0.
+
 ## Python Timestamps And Earnings Source Match The Worker (3.10.0)
 
 - **Why:** the last Python/Worker differences left pinned from 3.0.0 (see the F59 entry above; owner go-ahead

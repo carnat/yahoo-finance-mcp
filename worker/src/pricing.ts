@@ -8,7 +8,8 @@
 import { setBounded } from "./cache.js";
 import { ErrorCode, classifyErrorMessage, mcpFailure } from "./response.js";
 import { tickerCap } from "./tool-catalog.js";
-import { meetsMinimum } from "./deprecations.js";
+import { IO_PT_ARGUMENT_DEPRECATION, meetsMinimum } from "./deprecations.js";
+import { maAlignment } from "./labels.js";
 import { yahooQuoteSummaryUrl, yahooChartUrl, yahooOptionsUrl, yahooScreenerUrl, yahooSearchUrl } from "./clients/endpoints.js";
 import { raw, yGet, enc, noData, iso, evictYahooGet } from "./clients/yahoo.js";
 import { dailyBarDate, roundHalfAwayFromZero, getLastTradingDate, clampInt, addIsoYears } from "./util.js";
@@ -1589,6 +1590,8 @@ export async function getMaPosition(ticker: string | string[]): Promise<string> 
       regime50,
       regime200,
       trend,
+      // 3.11.0 (NL1): the factual name for what trend labels BULLISH/BEARISH.
+      maAlignment: maAlignment(regime50, regime200),
       // The quote's own date, never today's (R5-pricing-1, Q3d).
       dataDate: (fi.lastTradeDate as string | null) ?? null,
       recommendedNextAction: "NONE",
@@ -2166,7 +2169,8 @@ export async function getOptionsFlowScan(ticker: string, windowLabel: string): P
   }
 }
 
-export async function getPriceTargetBracket(ticker: string, ioPt: number): Promise<string> {
+/** `ioPtArgument`: the caller passed the deprecated io_pt argument (3.11.0, NL8), which adds its notice. */
+export async function getPriceTargetBracket(ticker: string, ioPt: number, ioPtArgument = false): Promise<string> {
   if (!(ioPt > 0)) {
     // A caller's bad input, not a provider failure (2.25.2, F42).
     return mcpFailure("calculate_price_target_distance", ErrorCode.INPUT_VALIDATION_ERROR, "reference_target_price (or io_pt alias) must be a positive number");
@@ -2183,7 +2187,7 @@ export async function getPriceTargetBracket(ticker: string, ioPt: number): Promi
     const referenceTargetPct = roundHalfAwayFromZero(currentPrice / ioPt * 100, 1);
     const distanceToTargetPct = currentPrice !== 0 ? roundHalfAwayFromZero((ioPt - currentPrice) / currentPrice * 100, 1) : null;
 
-    return JSON.stringify({
+    return JSON.stringify(withNotices({
       ticker,
       currentPrice: roundHalfAwayFromZero(currentPrice, 4),
       priceBasis: "REGULAR_MARKET_PRICE",
@@ -2204,7 +2208,7 @@ export async function getPriceTargetBracket(ticker: string, ioPt: number): Promi
       // The quote's own date, never today's (R5-pricing-1, Q3d).
       dataDate: (fi.lastTradeDate as string | null) ?? null,
       recommendedNextAction: "NONE",
-    });
+    }, ioPtArgument ? [{ ...IO_PT_ARGUMENT_DEPRECATION, fields: [...IO_PT_ARGUMENT_DEPRECATION.fields] }] : []));
   } catch (e) {
     return JSON.stringify({ error: true, message: `${e instanceof Error ? e.message : String(e)}`, ticker });
   }
@@ -2244,6 +2248,7 @@ export async function getPositionScoreInputs(ticker: string | string[]): Promise
 
     const t1 = {
       analystNetSentiment: upgrade.netSentiment ?? null,
+      analystNetUpgrades: upgrade.netUpgrades ?? null,
       upgrades30d: upgrade.upgrades ?? null,
       downgrades30d: upgrade.downgrades ?? null,
       initiations30d: upgrade.initiations ?? null,
@@ -2264,6 +2269,7 @@ export async function getPositionScoreInputs(ticker: string | string[]): Promise
       currentBeatStreak: earnings.currentBeatStreak ?? null,
       avgSurprisePct: earnings.preRevenue ? null : (earnings.avgSurprisePct ?? null),
       momentumFlag: earnings.momentumFlag ?? null,
+      revisionBand: earnings.revisionBand ?? null,
       preRevenue: Boolean(earnings.preRevenue),
     };
 
@@ -2272,6 +2278,7 @@ export async function getPositionScoreInputs(ticker: string | string[]): Promise
       macd: tech.macd ?? null,
       macdHistogram: tech.macdHistogram ?? null,
       maPosition: ma.trend ?? null,
+      maAlignment: ma.maAlignment ?? null,
       pctFrom50dma: ma.pctVs50dma ?? null,
       pctFrom200dma: ma.pctVs200dma ?? null,
       lastClose: tech.lastClose ?? null,
@@ -2738,6 +2745,7 @@ export async function getMarketSnapshot(
       pctFrom50dma: (ma?.pctVs50dma as number | null) ?? null,
       pctFrom200dma: (ma?.pctVs200dma as number | null) ?? null,
       maTrend: (ma?.trend as string | null) ?? null,
+      maAlignment: (ma?.maAlignment as string | null) ?? null,
       rsi14: (tech?.rsi14 as number | null) ?? null,
       macdHistogram: (tech?.macdHistogram as number | null) ?? null,
     },

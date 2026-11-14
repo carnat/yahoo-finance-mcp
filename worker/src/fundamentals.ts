@@ -27,6 +27,16 @@ import { yGet, enc, iso, valuationMarketInputs, fetchTimeseriesByDate, noData, r
 import { stripHtmlTags } from "./clients/html.js";
 import { clampInt, parseObjectJson, getLastTradingDate } from "./util.js";
 import { runPartialBatch } from "./batch.js";
+import {
+  DEFAULT_MAX_NET_DEBT_TO_EBITDA,
+  DEFAULT_MIN_INTEREST_COVERAGE,
+  DEFAULT_REVISION_THRESHOLD_PCT,
+  beatRateBand,
+  leverageBand,
+  meetsCreditStressThreshold,
+  revisionBand,
+  targetVsPrice,
+} from "./labels.js";
 import { resolveNewsCompanyIdentity } from "./news/identity.js";
 import { getCompanyNews } from "./news.js";
 import { snapshotComponentMessage } from "./pricing.js";
@@ -625,7 +635,7 @@ export async function getAnalystConsensus(ticker: string | string[]): Promise<st
       targetLagSignal = "LIKELY_STALE_OR_LAGGING";
       warnings.push({
         code: "CONSENSUS_TARGET_BELOW_PRICE_DESPITE_UPGRADES",
-        message: "Consensus price target may lag recent market or analyst sentiment changes.",
+        message: `The mean price target is below the current price, with ${recentUpgradeCount30d} upgrade(s) in the last 30 days.`,
       });
     } else {
       targetLagSignal = "POSSIBLY_STALE";
@@ -639,6 +649,8 @@ export async function getAnalystConsensus(ticker: string | string[]): Promise<st
       : null;
   output.recentUpgradeCount30d = recentUpgradeCount30d;
   output.targetLagSignal = targetLagSignal;
+  // 3.11.0 (NL7): the factual comparison targetLagSignal reads as staleness.
+  output.targetVsPrice = targetVsPrice(targetMean, lastPrice);
   output.warnings = warnings;
 
   return JSON.stringify(output);
@@ -1185,9 +1197,17 @@ export async function getRecommendations(
   );
 }
 
-export async function getCreditHealth(ticker: string | string[]): Promise<string> {
+export async function getCreditHealth(
+  ticker: string | string[],
+  maxNetDebtToEbitda: number = DEFAULT_MAX_NET_DEBT_TO_EBITDA,
+  minInterestCoverage: number = DEFAULT_MIN_INTEREST_COVERAGE,
+): Promise<string> {
   if (Array.isArray(ticker)) {
-    return runPartialBatch(ticker, (t) => getCreditHealth(t), tickerCap("analyze_credit_health"));
+    return runPartialBatch(
+      ticker,
+      (t) => getCreditHealth(t, maxNetDebtToEbitda, minInterestCoverage),
+      tickerCap("analyze_credit_health"),
+    );
   }
   try {
     // One row per quarter, newest first (fetchTimeseries itself returns one
@@ -1289,6 +1309,9 @@ export async function getCreditHealth(ticker: string | string[]): Promise<string
       // A loss-maker has no leverage tier: the state is named instead of reading as CLEAN (R5-fundamentals).
       debtTier = "NEGATIVE_EARNINGS_BASE";
     }
+    // 3.11.0 (NL6): the bands debtTier names, and the stress test with caller-chosen thresholds.
+    const leverage = leverageBand(netDebtToEbitda, debtTier === "NEGATIVE_EARNINGS_BASE");
+    const meetsStress = meetsCreditStressThreshold(netDebtToEbitda, interestCoverageEbit, maxNetDebtToEbitda, minInterestCoverage);
 
     const missingComponents: string[] = [];
     if (totalDebt == null) missingComponents.push("totalDebtUsd");
@@ -1383,6 +1406,9 @@ export async function getCreditHealth(ticker: string | string[]): Promise<string
       interestCoverageEbitda,
       creditStressFlag,
       debtTier,
+      leverageBand: leverage,
+      meetsCreditStressThreshold: meetsStress,
+      creditStressThresholds: { maxNetDebtToEbitda, minInterestCoverage },
       dataQuality,
       missingComponents,
       unavailableMetrics,
@@ -1408,9 +1434,12 @@ function beatStreakQuarter(value: unknown): string | null {
   return null;
 }
 
-export async function getEarningsMomentum(ticker: string | string[]): Promise<string> {
+export async function getEarningsMomentum(
+  ticker: string | string[],
+  revisionThresholdPct: number = DEFAULT_REVISION_THRESHOLD_PCT,
+): Promise<string> {
   if (Array.isArray(ticker)) {
-    return runPartialBatch(ticker, (t) => getEarningsMomentum(t), tickerCap("analyze_earnings_momentum"));
+    return runPartialBatch(ticker, (t) => getEarningsMomentum(t, revisionThresholdPct), tickerCap("analyze_earnings_momentum"));
   }
   try {
     const ea = JSON.parse(await getEarningsAnalysis(ticker));
@@ -1544,6 +1573,9 @@ export async function getEarningsMomentum(ticker: string | string[]): Promise<st
       else if (revision90d >= 3) forwardRevisionSignal = "POSITIVE";
       else forwardRevisionSignal = "NEUTRAL";
     }
+    // 3.11.0 (NL3): one revision band with the caller's threshold; revisionSignalDriver names its driver.
+    const band = revisionBand(revision30d, revision7d, revision90d, revisionThresholdPct);
+    revisionSignalDriver = band.driver;
     const compositeMethodNote = "Forward revision signal uses 30d revision as primary, 7d as confirmation when 30d is neutral or missing, and 90d only as fallback/context; a negative 90d revision does not override positive recent revisions.";
     if (revision30d != null && revision30d >= 3 && revision90d != null && revision90d <= -3) {
       warnings.push({
@@ -1599,9 +1631,12 @@ export async function getEarningsMomentum(ticker: string | string[]): Promise<st
       revision7d,
       revision30d,
       revision90d,
+      revisionBand: band.band,
+      revisionThresholdPct,
       revisionDirection,
       momentumFlag,
       beatRate,
+      beatRateBand: beatRateBand(beatRate),
       beatCount,
       beatSample: totalQuarters,
       totalQuarters,
@@ -1660,6 +1695,7 @@ export async function getAnalystUpgradeRadar(ticker: string | string[], daysBack
         ticker,
         windowDays: daysBack,
         netSentiment: 0,
+        netUpgrades: 0,
         upgrades: 0,
         downgrades: 0,
         initiations: 0,
@@ -1732,6 +1768,7 @@ export async function getAnalystUpgradeRadar(ticker: string | string[], daysBack
       ticker,
       windowDays: daysBack,
       netSentiment,
+      netUpgrades: netSentiment,
       upgrades: upgradeCount,
       downgrades: downgradeCount,
       initiations: initiationCount,

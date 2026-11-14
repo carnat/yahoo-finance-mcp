@@ -37,6 +37,17 @@ from yfmcp.clients.yahoo import _safe_parse, _valuation_market_inputs
 from yfmcp.envelope import SERVER_VERSION, ErrorCode, _mcp_failure
 from yfmcp.evidence import EPS_BASIS as _EPS_BASIS
 from yfmcp.fiscal_calendar import fiscal_year_naming
+from yfmcp.labels import (
+    DEFAULT_MAX_NET_DEBT_TO_EBITDA,
+    DEFAULT_MIN_INTEREST_COVERAGE,
+    DEFAULT_REVISION_THRESHOLD_PCT,
+    beat_rate_band,
+    leverage_band,
+    meets_credit_stress_threshold,
+    parse_positive_number_arg,
+    revision_band,
+    target_vs_price,
+)
 from yfmcp.pricing_notices import take_notices, unique_notices, with_notices
 from yfmcp.schemas import FinancialType, HolderType, RecommendationType
 from yfmcp.tools.news import get_company_news
@@ -458,13 +469,7 @@ def _target_analyst_count_or_warn(company, warnings: list) -> int | None:
 
 @yfinance_server.tool(
     name="get_analyst_consensus",
-    description="""Get a compact analyst consensus summary for one or more tickers.
-
-Returns pre-aggregated data so you do NOT need to call get_recommendations separately.
-Includes:
-- Current market price plus consensus price targets (low, high, mean, median) and % upside to the mean target
-- Recommendation breakdown (strongBuy, buy, hold, sell, strongSell counts) for recent periods
-- Dominant consensus rating
+    description="""Get analyst consensus for one or more tickers. priceTargets.current is the current market price; low/high/mean/median are consensus targets and pctUpsideFromLastPrice uses the mean target. targetVsPrice is AT_OR_ABOVE or BELOW (mean target against the current price); targetLagSignal is deprecated. Max 5 tickers per call.
 
 Args:
     ticker: str | list[str]
@@ -596,7 +601,7 @@ async def get_analyst_consensus(ticker: str | list[str]) -> str:
             target_lag_signal = "LIKELY_STALE_OR_LAGGING"
             warnings.append({
                 "code": "CONSENSUS_TARGET_BELOW_PRICE_DESPITE_UPGRADES",
-                "message": "Consensus price target may lag recent market or analyst sentiment changes.",
+                "message": f"The mean price target is below the current price, with {recent_upgrade_count_30d} upgrade(s) in the last 30 days.",
             })
         else:
             target_lag_signal = "POSSIBLY_STALE"
@@ -609,6 +614,8 @@ async def get_analyst_consensus(ticker: str | list[str]) -> str:
     output["pctBelowCurrentPrice"] = pct_below_current_price
     output["recentUpgradeCount30d"] = recent_upgrade_count_30d
     output["targetLagSignal"] = target_lag_signal
+    # 3.11.0 (NL7): the factual comparison targetLagSignal reads as staleness.
+    output["targetVsPrice"] = target_vs_price(target_mean, last_price)
     output["warnings"] = warnings
 
     result = json.dumps(output)
@@ -1084,10 +1091,16 @@ async def get_market_calendar(
     })
 
 
-async def get_credit_health(ticker: str | list[str]) -> str:
+async def get_credit_health(
+    ticker: str | list[str],
+    max_net_debt_to_ebitda: float = DEFAULT_MAX_NET_DEBT_TO_EBITDA,
+    min_interest_coverage: float = DEFAULT_MIN_INTEREST_COVERAGE,
+) -> str:
     """Return credit health metrics for one or more tickers."""
     if isinstance(ticker, list):
-        results = await _run_ticker_batch(ticker, get_credit_health)
+        results = await _run_ticker_batch(
+            ticker, lambda t: get_credit_health(t, max_net_debt_to_ebitda, min_interest_coverage)
+        )
         return json.dumps({t: _safe_parse(r, t) for t, r in zip(ticker, results)})
     company = yf.Ticker(ticker)
 
@@ -1259,6 +1272,11 @@ async def get_credit_health(ticker: str | list[str]) -> str:
         debt_tier = "NEGATIVE_EARNINGS_BASE"
     else:
         debt_tier = None
+    # 3.11.0 (NL6): the bands debtTier names, and the stress test with caller-chosen thresholds.
+    leverage = leverage_band(net_debt_to_ebitda, debt_tier == "NEGATIVE_EARNINGS_BASE")
+    meets_stress = meets_credit_stress_threshold(
+        net_debt_to_ebitda, interest_coverage_ebit, max_net_debt_to_ebitda, min_interest_coverage
+    )
 
     missing_components = []
     if total_debt is None:
@@ -1372,6 +1390,12 @@ async def get_credit_health(ticker: str | list[str]) -> str:
         "interestCoverageEbitda": interest_coverage_ebitda,
         "creditStressFlag": credit_stress,
         "debtTier": debt_tier,
+        "leverageBand": leverage,
+        "meetsCreditStressThreshold": meets_stress,
+        "creditStressThresholds": {
+            "maxNetDebtToEbitda": max_net_debt_to_ebitda,
+            "minInterestCoverage": min_interest_coverage,
+        },
         "dataQuality": data_quality,
         "missingComponents": missing_components,
         "unavailableMetrics": unavailable_metrics,
@@ -1392,10 +1416,13 @@ def _beat_streak_quarter(value) -> str | None:
     return None if pd.isna(stamp) else stamp.strftime("%Y-%m-%d")
 
 
-async def get_earnings_momentum(ticker: str | list[str]) -> str:
+async def get_earnings_momentum(
+    ticker: str | list[str],
+    revision_threshold_pct: float = DEFAULT_REVISION_THRESHOLD_PCT,
+) -> str:
     """Return earnings momentum for one or more tickers."""
     if isinstance(ticker, list):
-        results = await _run_ticker_batch(ticker, get_earnings_momentum)
+        results = await _run_ticker_batch(ticker, lambda t: get_earnings_momentum(t, revision_threshold_pct))
         return json.dumps({t: _safe_parse(r, t) for t, r in zip(ticker, results)})
     company = yf.Ticker(ticker)
     try:
@@ -1583,6 +1610,8 @@ async def get_earnings_momentum(ticker: str | list[str]) -> str:
             forward_revision_signal = "NEUTRAL"
     else:
         forward_revision_signal = "UNKNOWN"
+    # 3.11.0 (NL3): one revision band with the caller's threshold; revisionSignalDriver names its driver.
+    band, revision_driver = revision_band(revision_30d, revision_7d, revision_90d, revision_threshold_pct)
 
     composite_method_note = (
         "Forward revision signal uses 30d revision as primary, 7d as confirmation when 30d is neutral or missing, "
@@ -1633,9 +1662,12 @@ async def get_earnings_momentum(ticker: str | list[str]) -> str:
         "revision7d": revision_7d,
         "revision30d": revision_30d,
         "revision90d": revision_90d,
+        "revisionBand": band,
+        "revisionThresholdPct": revision_threshold_pct,
         "revisionDirection": revision_direction,
         "momentumFlag": momentum_flag,
         "beatRate": beat_rate,
+        "beatRateBand": beat_rate_band(beat_rate),
         "beatCount": beat_count,
         "beatSample": total_quarters,
         "totalQuarters": total_quarters,
@@ -1716,6 +1748,7 @@ async def get_analyst_upgrade_radar(ticker: str | list[str], days_back: int = 30
             "ticker": ticker,
             "windowDays": days_back,
             "netSentiment": 0,
+            "netUpgrades": 0,
             "upgrades": 0,
             "downgrades": 0,
             "initiations": 0,
@@ -1801,6 +1834,7 @@ async def get_analyst_upgrade_radar(ticker: str | list[str], days_back: int = 30
         "ticker": ticker,
         "windowDays": days_back,
         "netSentiment": net_sentiment,
+        "netUpgrades": net_sentiment,
         "upgrades": upgrade_count,
         "downgrades": downgrade_count,
         "initiations": initiation_count,
@@ -2056,6 +2090,7 @@ async def get_position_score_inputs(ticker: str) -> str:
     # T1: analyst sentiment
     t1: dict = {
         "analystNetSentiment": upgrade.get("netSentiment"),
+        "analystNetUpgrades": upgrade.get("netUpgrades"),
         "upgrades30d": upgrade.get("upgrades"),
         "downgrades30d": upgrade.get("downgrades"),
         "initiations30d": upgrade.get("initiations"),
@@ -2078,6 +2113,7 @@ async def get_position_score_inputs(ticker: str) -> str:
         "currentBeatStreak": earnings.get("currentBeatStreak"),
         "avgSurprisePct": None if earnings.get("preRevenue") else earnings.get("avgSurprisePct"),
         "momentumFlag": earnings.get("momentumFlag"),
+        "revisionBand": earnings.get("revisionBand"),
         "preRevenue": bool(earnings.get("preRevenue")),
     }
 
@@ -2087,6 +2123,7 @@ async def get_position_score_inputs(ticker: str) -> str:
         "macd": tech.get("macd"),
         "macdHistogram": tech.get("macdHistogram"),
         "maPosition": ma.get("trend"),
+        "maAlignment": ma.get("maAlignment"),
         "pctFrom50dma": ma.get("pctVs50dma"),
         "pctFrom200dma": ma.get("pctVs200dma"),
         "lastClose": tech.get("lastClose"),
@@ -2133,9 +2170,30 @@ async def analyze_financial_ratios(ticker: str | list[str], history_periods: int
     return await get_financial_ratios(ticker, history_periods, frequency)
 
 
-@yfinance_server.tool(name="analyze_credit_health", description="Canonical alias for get_credit_health.")
-async def analyze_credit_health(ticker: str | list[str]) -> str:
-    return await get_credit_health(ticker)
+@yfinance_server.tool(name="analyze_credit_health", description="Leverage and interest coverage from Yahoo quarterly statements: netDebtToEbitda on operational EBITDA, interestCoverageEbit and interestCoverageEbitda. leverageBand is BELOW_1X (under 1), 1X_TO_2_5X (to 2.5), 2_5X_TO_4X (to 4) or ABOVE_4X, or NEGATIVE_EARNINGS_BASE when operational EBITDA is negative. meetsCreditStressThreshold is netDebtToEbitda above max_net_debt_to_ebitda (default 2.5) and interestCoverageEbit below min_interest_coverage (default 3). debtTier and creditStressFlag are deprecated.")
+async def analyze_credit_health(
+    ticker: str | list[str],
+    max_net_debt_to_ebitda: Annotated[float | None, Field(
+        json_schema_extra={"exclusiveMinimum": 0},
+        description="Optional net debt / EBITDA above which meetsCreditStressThreshold can be true (default 2.5).",
+    )] = None,
+    min_interest_coverage: Annotated[float | None, Field(
+        json_schema_extra={"exclusiveMinimum": 0},
+        description="Optional EBIT interest coverage below which meetsCreditStressThreshold can be true (default 3).",
+    )] = None,
+) -> str:
+    # 3.11.0 (NL6): caller-chosen credit-stress thresholds.
+    max_ratio, max_error = parse_positive_number_arg("max_net_debt_to_ebitda", max_net_debt_to_ebitda)
+    if max_error:
+        return _mcp_failure("analyze_credit_health", ErrorCode.INPUT_VALIDATION_ERROR, max_error)
+    min_coverage, min_error = parse_positive_number_arg("min_interest_coverage", min_interest_coverage)
+    if min_error:
+        return _mcp_failure("analyze_credit_health", ErrorCode.INPUT_VALIDATION_ERROR, min_error)
+    return await get_credit_health(
+        ticker,
+        DEFAULT_MAX_NET_DEBT_TO_EBITDA if max_ratio is None else max_ratio,
+        DEFAULT_MIN_INTEREST_COVERAGE if min_coverage is None else min_coverage,
+    )
 
 
 @yfinance_server.tool(name="get_corporate_actions", description="Get stock splits, dividends, and fund capital-gain distributions from Yahoo Finance, oldest first. Every split is returned; dividends and capital gains are limited to the most recent `limit` on or after `start_date`.")
@@ -2157,14 +2215,27 @@ async def get_analyst_recommendations(ticker: str, recommendation_type: Recommen
     return await get_recommendations(ticker, recommendation_type, months_back)
 
 
-@yfinance_server.tool(name="get_analyst_rating_changes", description="Canonical alias for get_analyst_upgrade_radar.")
-async def get_analyst_rating_changes(ticker: str | list[str], days_back: int = 30) -> str:
+@yfinance_server.tool(name="get_analyst_rating_changes", description="Analyst rating changes from Yahoo in the last days_back days. Each change has signal (UPGRADE, DOWNGRADE or INITIATED, from the firm's action and grades), ptDirection and mixedSignal (rating and price target moved in opposite directions); the totals add netUpgrades (upgrades minus downgrades). netSentiment and strengthFlag are deprecated.")
+async def get_analyst_rating_changes(
+    ticker: str | list[str],
+    days_back: Annotated[int, Field(description="Window in days (default 30).")] = 30,
+) -> str:
     return await get_analyst_upgrade_radar(ticker, days_back)
 
 
-@yfinance_server.tool(name="analyze_earnings_momentum", description="Canonical alias for get_earnings_momentum.")
-async def analyze_earnings_momentum(ticker: str | list[str]) -> str:
-    return await get_earnings_momentum(ticker)
+@yfinance_server.tool(name="analyze_earnings_momentum", description="EPS estimate revisions (7, 30 and 90 days, percent) and beat history from Yahoo. revisionBand is UP or DOWN when the 30-day revision moves at least revision_threshold_pct (default 3) either way; inside that band a 7-day revision outside it decides, else FLAT; with no 30-day revision the 7-day, then the 90-day, is used (revisionSignalDriver names the one used). beatRateBand bands beatRate: 75_TO_100PCT, 55_TO_75PCT, 40_TO_55PCT or 0_TO_40PCT (lower bound inclusive). momentumFlag, revisionDirection, forwardRevisionSignal, historicalSurpriseSignal, compositeMomentumSignal and interpretationNote are deprecated.")
+async def analyze_earnings_momentum(
+    ticker: str | list[str],
+    revision_threshold_pct: Annotated[float | None, Field(
+        json_schema_extra={"exclusiveMinimum": 0},
+        description="Optional revision, in percent, at which revisionBand turns UP or DOWN (default 3).",
+    )] = None,
+) -> str:
+    # 3.11.0 (NL3): caller-chosen revision band.
+    threshold, threshold_error = parse_positive_number_arg("revision_threshold_pct", revision_threshold_pct)
+    if threshold_error:
+        return _mcp_failure("analyze_earnings_momentum", ErrorCode.INPUT_VALIDATION_ERROR, threshold_error)
+    return await get_earnings_momentum(ticker, DEFAULT_REVISION_THRESHOLD_PCT if threshold is None else threshold)
 
 
 @yfinance_server.tool(name="get_company_events_calendar", description="Get a ticker's upcoming Yahoo calendar estimates or paginated earnings history. Yahoo dates are UNVERIFIED provider data; confirm material dates with official releases.")
