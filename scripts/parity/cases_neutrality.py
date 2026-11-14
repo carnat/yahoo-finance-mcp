@@ -179,6 +179,32 @@ def _snapshot_volume(v: dict) -> dict:
     return {k: volume.get(k) for k in ("meetsMinimum", "minAdvUsd", "avgVolume20d", "ratio20d")}
 
 
+# 3.11.0: DEPRECATED_FIELD notices on successful responses; the texts are written out again here, on purpose.
+_NOTICE_PRICE_TARGET_COPIES = {
+    "code": "DEPRECATED_FIELD",
+    "message": "ioPt, eqfPct, invertedFlag are deprecated and will be removed in the next major version; "
+               "use referenceTargetPrice, referenceTargetPct and priceAtOrAboveTarget.",
+    "severity": "info", "fields": ["ioPt", "eqfPct", "invertedFlag"],
+    "replacement": "referenceTargetPrice, referenceTargetPct, priceAtOrAboveTarget",
+}
+_NOTICE_SNAPSHOT_MA_TREND = {
+    "code": "DEPRECATED_FIELD",
+    "message": "trend.maTrend is deprecated and will be removed in the next major version; "
+               "use trend.maAlignment (ABOVE_BOTH, BELOW_BOTH or MIXED).",
+    "severity": "info", "fields": ["trend.maTrend"], "replacement": "trend.maAlignment",
+}
+_NOTICE_POSITION_LABELS = {
+    "code": "DEPRECATED_FIELD",
+    "message": "analystInputs.analystNetSentiment, earningsInputs.momentumFlag, technicalInputs.maPosition are deprecated "
+               "and will be removed in the next major version; use analystInputs.analystNetUpgrades, "
+               "earningsInputs.revisionBand and technicalInputs.maAlignment.",
+    "severity": "info",
+    "fields": ["analystInputs.analystNetSentiment", "earningsInputs.momentumFlag", "technicalInputs.maPosition"],
+    "replacement": "analystInputs.analystNetUpgrades, earningsInputs.revisionBand, technicalInputs.maAlignment",
+}
+
+
+
 def _snapshot_envelope_view(v: dict) -> dict:
     return {"ok": v.get("ok"), **_snapshot_volume(v["data"]), "warnings": v["meta"]["warnings"]}
 
@@ -202,7 +228,7 @@ CASES += [
     _gate_case("neutral.n3b.snapshot_envelope_carries_volume_meets_minimum_and_no_notice", ["BR-PRC-003", "Q14-N3"],
                **EURX, min_adv=150_000_000, via="snapshot_envelope", select=_snapshot_envelope_view,
                expect={"ok": True, "meetsMinimum": True, "minAdvUsd": 150000000,
-                       "avgVolume20d": 1000000, "ratio20d": 1, "warnings": []}),
+                       "avgVolume20d": 1000000, "ratio20d": 1, "warnings": [_NOTICE_SNAPSHOT_MA_TREND]}),
 ]
 
 
@@ -222,10 +248,10 @@ _N3A_AT_TARGET = {"ok": True, "priceAtOrAboveTarget": True, "labelKeys": []}
 CASES += [
     _bracket_case("neutral.n3a.envelope_has_the_flag_no_labels_and_no_notice", ["BR-PRC-022", "Q14-N3"], 70.0, 100.0,
                   market_time=QUOTE_TIME, via="envelope", select=_bracket_envelope_view,
-                  expect={**_N3A_LONG, "warnings": []}),
+                  expect={**_N3A_LONG, "warnings": [_NOTICE_PRICE_TARGET_COPIES]}),
     _bracket_case("neutral.n3a.envelope_flag_true_at_the_target", ["BR-PRC-022", "Q14-N3"], 100.0, 100.0,
                   market_time=QUOTE_TIME, via="envelope", select=_bracket_envelope_view,
-                  expect={**_N3A_AT_TARGET, "warnings": []}),
+                  expect={**_N3A_AT_TARGET, "warnings": [_NOTICE_PRICE_TARGET_COPIES]}),
     # A failure carries no data and no notice.
     _bracket_case("neutral.n3a.envelope_failure_carries_no_notice", ["BR-PRC-022", "Q14-N3"], None, 100.0,
                   market_time=QUOTE_TIME, via="envelope",
@@ -454,17 +480,17 @@ def _groups_view(v: dict) -> dict:
 
 
 CASES += [
-    # 3.2.0: the components' rows reach meta.warnings; there is no deprecation notice.
+    # 3.2.0: the components' rows reach meta.warnings; 3.11.0 adds the position-label deprecation notice after them.
     _position_case("neutral.n3c.tier_numbered_groups_are_gone_and_only_component_rows_are_warned", _groups_view,
                    expect={"ok": True, "removedGroups": [], "groups": sorted(GROUPS),
-                           "warnings": PY_COMPONENTS["get_price_stats"]["_warnings"]}),
+                           "warnings": [*PY_COMPONENTS["get_price_stats"]["_warnings"], _NOTICE_POSITION_LABELS]}),
     # 3.0.0: analystInputs takes its 30-day counts from the radar's plain upgrades/downgrades/initiations.
     _position_case("neutral.n3c.twins_carry_the_source_group_key_sets_t1", lambda v: sorted(v["data"]["analystInputs"]),
-                   expect=["analystCount", "analystNetSentiment", "dominantRating", "downgrades30d", "initiations30d", "upgrades30d"]),
+                   expect=["analystCount", "analystNetSentiment", "analystNetUpgrades", "dominantRating", "downgrades30d", "initiations30d", "upgrades30d"]),
     _position_case("neutral.n3c.twins_carry_the_source_group_key_sets_t2", lambda v: sorted(v["data"]["pricePositionInputs"]),
                    expect=["currentPrice", "fiftyTwoWeekHigh", "fiftyTwoWeekLow", "pctFromYearHigh", "pctFromYearLow"]),
     _position_case("neutral.n3c.twins_carry_the_source_group_key_sets_t4", lambda v: sorted(v["data"]["earningsInputs"]),
-                   expect=["avgSurprisePct", "beatRate", "currentBeatStreak", "momentumFlag", "preRevenue"]),
+                   expect=["avgSurprisePct", "beatRate", "currentBeatStreak", "momentumFlag", "preRevenue", "revisionBand"]),
 ]
 
 # Q3i calls 1 to 3 and G6 (3.2.0, R5-pricing part 3): the Worker gives Python's macd, six componentStatus keys with
@@ -475,7 +501,7 @@ _POS_DECISION = "FINDING Q14-N3c: analyze_position_signals runtime asymmetry tha
 CASES += [
     _position_case("neutral.n3c.technical_inputs_carry_macd_in_both",
                    lambda v: {"technicalInputs": sorted(v["data"]["technicalInputs"])},
-                   expect={"technicalInputs": ["lastClose", "maPosition", "macd", "macdHistogram", "pctFrom200dma", "pctFrom50dma", "rsi14"]}),
+                   expect={"technicalInputs": ["lastClose", "maAlignment", "maPosition", "macd", "macdHistogram", "pctFrom200dma", "pctFrom50dma", "rsi14"]}),
     _position_case("neutral.n3c.component_status_has_six_keys_and_failed_components_in_both",
                    lambda v: {"componentStatusKeys": sorted(v["data"]["componentStatus"]),
                               "failedComponents": v["data"].get("failedComponents")},

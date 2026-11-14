@@ -29,7 +29,7 @@ from unittest.mock import AsyncMock, patch
 import pandas as pd
 
 from scripts.parity.cases_neutrality import (
-    FACT, POSITION_ROUTES, PRESS, SECTION, SECTION_ROUTES, _position_case, _worker,
+    FACT, POSITION_ROUTES, PRESS, SECTION, SECTION_ROUTES, _NOTICE_PRICE_TARGET_COPIES, _position_case, _worker,
 )
 from scripts.parity.cases_pricing_evidence_tools import (
     GATE_NOW, QUOTE_TIME, YAHOO_AUTH_ROUTES, _bracket_case, _gate_case, _ts_with_clock,
@@ -207,7 +207,7 @@ CASES += [
     _bracket_case("major300.price_target.envelope_key_set_and_no_warnings", ["BR-PRC-022"], 120.0, 100.0,
                   market_time=QUOTE_TIME, via="envelope",
                   select=lambda v: {"keys": sorted(v["data"]), "warnings": v["meta"]["warnings"]},
-                  expect={"keys": PRICE_TARGET_KEYS, "warnings": []}),
+                  expect={"keys": PRICE_TARGET_KEYS, "warnings": [_NOTICE_PRICE_TARGET_COPIES]}),
 ]
 
 

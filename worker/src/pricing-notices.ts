@@ -13,6 +13,8 @@ import { PAYLOAD_WARNINGS_KEY } from "./response.js";
 export { PAYLOAD_WARNINGS_KEY, liftPayloadWarnings } from "./response.js";
 
 export type PricingNotice = { code: string; message: string; ticker?: string };
+/** A payload notice with extra keys, such as a DEPRECATED_FIELD row (severity, fields, replacement). */
+type PayloadNotice = PricingNotice & Record<string, unknown>;
 
 export function zeroVolumeNotice(ticker: string): PricingNotice {
   return {
@@ -45,7 +47,7 @@ export function freshnessNotices(ticker: string, freshnessReason: string | null 
 }
 
 /** Sets `_warnings` on a payload when there are notices; leaves the payload unchanged otherwise. */
-export function withNotices<T extends Record<string, unknown>>(payload: T, notices: PricingNotice[]): T {
+export function withNotices<T extends Record<string, unknown>>(payload: T, notices: PayloadNotice[]): T {
   if (notices.length > 0) (payload as Record<string, unknown>)[PAYLOAD_WARNINGS_KEY] = notices;
   return payload;
 }
