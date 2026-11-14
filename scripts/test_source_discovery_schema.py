@@ -189,10 +189,10 @@ class TestPublicConnectorSurfaceSource(unittest.TestCase):
     def test_reference_target_parameter_is_exposed(self) -> None:
         ts_win = self._window(self.ts, 'name: "calculate_price_target_distance"', span=900)
         self.assertIn("reference_target_price", ts_win)
-        self.assertIn("io_pt", ts_win)
+        self.assertNotIn("io_pt", ts_win)
         py_sig_win = self._window(self.py, "async def calculate_price_target_distance", span=260)
         self.assertIn("reference_target_price", py_sig_win)
-        self.assertIn("io_pt", py_sig_win)
+        self.assertNotIn("io_pt", py_sig_win)
 
     def test_private_aliases_are_not_registered(self) -> None:
         private_aliases = [

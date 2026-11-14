@@ -1489,7 +1489,7 @@ CASES += [
 # ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 BRACKET_NOW = _epoch("2026-10-09", "12:00", "UTC")
-BRACKET_KEYS = ("referenceTargetPct", "distanceToTargetPct", "invertedFlag", "priceAtOrAboveTarget",
+BRACKET_KEYS = ("referenceTargetPct", "distanceToTargetPct", "priceAtOrAboveTarget",
                 "dataDate", "error", "message")
 
 
@@ -1533,13 +1533,13 @@ CASES += [
     # Card: price $70, reference target $100 -> 70.0, distance 42.9. 3.0.0: no bracket or tag labels.
     _bracket_case("prc.bracket.card_example_ratio_and_distance", ["BR-PRC-022"], 70.0, 100.0, market_time=QUOTE_TIME,
                   expect={"referenceTargetPct": 70.0, "distanceToTargetPct": 42.9,
-                          "invertedFlag": False, "priceAtOrAboveTarget": False, "dataDate": "2026-10-08", "error": None, "message": None}),
+                          "priceAtOrAboveTarget": False, "dataDate": "2026-10-08", "error": None, "message": None}),
     _bracket_case("prc.bracket.eighty_five_pct_ratio", ["BR-PRC-022"], 85.0, 100.0, market_time=QUOTE_TIME,
                   keys=("referenceTargetPct",), expect={"referenceTargetPct": 85.0}),
     _bracket_case("prc.bracket.exactly_75_ratio", ["BR-PRC-022"], 75.0, 100.0, market_time=QUOTE_TIME,
                   keys=("referenceTargetPct",), expect={"referenceTargetPct": 75.0}),
-    _bracket_case("prc.bracket.exactly_100_is_inverted", ["BR-PRC-022"], 100.0, 100.0, market_time=QUOTE_TIME,
-                  keys=("referenceTargetPct", "invertedFlag"), expect={"referenceTargetPct": 100.0, "invertedFlag": True}),
+    _bracket_case("prc.bracket.exactly_100_ratio", ["BR-PRC-022"], 100.0, 100.0, market_time=QUOTE_TIME,
+                  keys=("referenceTargetPct",), expect={"referenceTargetPct": 100.0}),
     # 2.8.0 (Q14-N3): priceAtOrAboveTarget = currentPrice >= referenceTargetPrice on the raw prices.
     _bracket_case("prc.bracket.price_at_or_above_target_false_below_the_target", ["BR-PRC-022", "Q14-N3"], 99.0, 100.0,
                   market_time=QUOTE_TIME, keys=("referenceTargetPct", "priceAtOrAboveTarget"),
@@ -1550,13 +1550,13 @@ CASES += [
     _bracket_case("prc.bracket.price_at_or_above_target_true_above_the_target", ["BR-PRC-022", "Q14-N3"], 120.0, 100.0,
                   market_time=QUOTE_TIME, keys=("referenceTargetPct", "priceAtOrAboveTarget"),
                   expect={"referenceTargetPct": 120.0, "priceAtOrAboveTarget": True}),
-    # The flag reads the raw prices: 99.96 rounds to 100.0% (invertedFlag true) but is still below the target.
+    # The flag reads the raw prices: 99.96 rounds to 100.0% but is still below the target.
     _bracket_case("prc.bracket.price_at_or_above_target_uses_raw_prices_not_the_rounded_pct_below", ["BR-PRC-022", "Q14-N3"], 99.96, 100.0,
-                  market_time=QUOTE_TIME, keys=("referenceTargetPct", "invertedFlag", "priceAtOrAboveTarget"),
-                  expect={"referenceTargetPct": 100.0, "invertedFlag": True, "priceAtOrAboveTarget": False}),
+                  market_time=QUOTE_TIME, keys=("referenceTargetPct", "priceAtOrAboveTarget"),
+                  expect={"referenceTargetPct": 100.0, "priceAtOrAboveTarget": False}),
     _bracket_case("prc.bracket.price_at_or_above_target_uses_raw_prices_not_the_rounded_pct_above", ["BR-PRC-022", "Q14-N3"], 100.04, 100.0,
-                  market_time=QUOTE_TIME, keys=("referenceTargetPct", "invertedFlag", "priceAtOrAboveTarget"),
-                  expect={"referenceTargetPct": 100.0, "invertedFlag": True, "priceAtOrAboveTarget": True}),
+                  market_time=QUOTE_TIME, keys=("referenceTargetPct", "priceAtOrAboveTarget"),
+                  expect={"referenceTargetPct": 100.0, "priceAtOrAboveTarget": True}),
     # A price that is not positive gives null (the target is validated positive before this point).
     _bracket_case("prc.bracket.price_at_or_above_target_null_for_a_non_positive_price", ["BR-PRC-022", "Q14-N3"], -5.0, 100.0,
                   market_time=QUOTE_TIME, keys=("referenceTargetPct", "priceAtOrAboveTarget"),
@@ -1577,10 +1577,10 @@ CASES += [
     # 2.25.2 (F42): a non-positive target is the caller's input error, not a provider error.
     _bracket_case("prc.bracket.non_positive_target_is_rejected", ["BR-PRC-022", "F42"], 70.0, 0.0, market_time=QUOTE_TIME,
                   keys=("ok", "error"),
-                  expect={"ok": False, "error": {"code": "INPUT_VALIDATION_ERROR", "message": "reference_target_price (or io_pt alias) must be a positive number"}}),
+                  expect={"ok": False, "error": {"code": "INPUT_VALIDATION_ERROR", "message": "reference_target_price must be a positive number"}}),
     _bracket_case("prc.bracket.negative_target_is_an_input_error_through_the_envelope", ["BR-PRC-022", "F42"], 70.0, -10.0,
                   market_time=QUOTE_TIME, via="envelope", keys=("ok", "error"),
-                  expect={"ok": False, "error": {"code": "INPUT_VALIDATION_ERROR", "message": "reference_target_price (or io_pt alias) must be a positive number"}}),
+                  expect={"ok": False, "error": {"code": "INPUT_VALIDATION_ERROR", "message": "reference_target_price must be a positive number"}}),
     # Q3d: the ratio is rounded to 1 dp: 75.04 reads as 75.0 (the bracket thresholds that used it were removed in 3.0.0).
     _bracket_case("prc.bracket.q3d_ratio_is_rounded_to_one_decimal", ["BR-PRC-022"], 75.04, 100.0, market_time=QUOTE_TIME,
                   keys=("referenceTargetPct",), expect={"referenceTargetPct": 75.0}),
@@ -1657,7 +1657,7 @@ def _credit_case(name: str, ids: list[str], balance: dict, income: dict, keys: t
 
 
 RATIO_KEYS = ("netDebtUsd", "operationalEbitdaUsd", "operationalEbitdaSource", "netDebtToEbitda",
-              "interestCoverageEbit", "interestCoverageEbitda", "creditStressFlag", "debtTier")
+              "interestCoverageEbit", "interestCoverageEbitda", "meetsCreditStressThreshold", "leverageBand")
 
 
 def _credit_inputs(debt, cash, op_q, da_q, int_q, quarters=4):
@@ -1670,68 +1670,68 @@ CASES += [
                  *_credit_inputs(500 * M, 20 * M, 30 * M, 10 * M, 12.5 * M), RATIO_KEYS,
                  expect={"netDebtUsd": 480 * M, "operationalEbitdaUsd": 160 * M, "operationalEbitdaSource": "ttm_operating_income_plus_da",
                          "netDebtToEbitda": 3.0, "interestCoverageEbit": 2.4, "interestCoverageEbitda": 3.2,
-                         "creditStressFlag": True, "debtTier": "ELEVATED"}),
+                         "meetsCreditStressThreshold": True, "leverageBand": "2_5X_TO_4X"}),
     # Card BR-FND-006: debt $500M, cash $100M; 4 quarters of op income 40M, D&A 10M, interest 8M.
     _credit_case("fnd.credit.card_net_debt_and_coverage_example", ["BR-FND-006"],
                  *_credit_inputs(500 * M, 100 * M, 40 * M, 10 * M, 8 * M), RATIO_KEYS,
                  expect={"netDebtUsd": 400 * M, "operationalEbitdaUsd": 200 * M, "operationalEbitdaSource": "ttm_operating_income_plus_da",
                          "netDebtToEbitda": 2.0, "interestCoverageEbit": 5.0, "interestCoverageEbitda": 6.25,
-                         "creditStressFlag": False, "debtTier": "MODERATE"}),
-    # Card BR-FND-007: leverage 3.10x and EBIT coverage 2.40x -> stressed flag, ELEVATED.
-    _credit_case("fnd.credit.card_stress_flag_and_elevated_tier", ["BR-FND-007"],
+                         "meetsCreditStressThreshold": False, "leverageBand": "1X_TO_2_5X"}),
+    # Card BR-FND-007: leverage 3.10x and EBIT coverage 2.40x -> meets the stress threshold, 2_5X_TO_4X.
+    _credit_case("fnd.credit.card_stress_threshold_and_2_5x_to_4x_band", ["BR-FND-007"],
                  {"debt": [410 * M], "cash": [100 * M]}, {"op": [15 * M] * 4, "da": [10 * M] * 4, "int": [6.25 * M] * 4},
-                 ("netDebtToEbitda", "interestCoverageEbit", "creditStressFlag", "debtTier"),
-                 expect={"netDebtToEbitda": 3.1, "interestCoverageEbit": 2.4, "creditStressFlag": True, "debtTier": "ELEVATED"}),
-    # Tier boundaries (net debt / operational EBITDA of 100M): <1 CLEAN, <=2.5 MODERATE, <=4 ELEVATED, >4 STRESSED.
-    *[_credit_case(f"fnd.credit.tier_boundary_{label}", ["BR-FND-007"],
+                 ("netDebtToEbitda", "interestCoverageEbit", "meetsCreditStressThreshold", "leverageBand"),
+                 expect={"netDebtToEbitda": 3.1, "interestCoverageEbit": 2.4, "meetsCreditStressThreshold": True, "leverageBand": "2_5X_TO_4X"}),
+    # Band boundaries (net debt / operational EBITDA of 100M): <1 BELOW_1X, <=2.5 1X_TO_2_5X, <=4 2_5X_TO_4X, >4 ABOVE_4X.
+    *[_credit_case(f"fnd.credit.band_boundary_{label}", ["BR-FND-007"],
                    {"debt": [int(net * M) + 10 * M], "cash": [10 * M]}, {"op": [20 * M] * 4, "da": [5 * M] * 4, "int": [1 * M] * 4},
-                   ("netDebtToEbitda", "debtTier"), expect={"netDebtToEbitda": ratio, "debtTier": tier})
-      for label, net, ratio, tier in [("0_9x_is_clean", 90, 0.9, "CLEAN"), ("1_0x_is_moderate", 100, 1.0, "MODERATE"),
-                                     ("2_5x_is_moderate", 250, 2.5, "MODERATE"), ("4_0x_is_elevated", 400, 4.0, "ELEVATED"),
-                                     ("4_5x_is_stressed", 450, 4.5, "STRESSED")]],
+                   ("netDebtToEbitda", "leverageBand"), expect={"netDebtToEbitda": ratio, "leverageBand": tier})
+      for label, net, ratio, tier in [("0_9x_is_below_1x", 90, 0.9, "BELOW_1X"), ("1_0x_is_1x_to_2_5x", 100, 1.0, "1X_TO_2_5X"),
+                                     ("2_5x_is_1x_to_2_5x", 250, 2.5, "1X_TO_2_5X"), ("4_0x_is_2_5x_to_4x", 400, 4.0, "2_5X_TO_4X"),
+                                     ("4_5x_is_above_4x", 450, 4.5, "ABOVE_4X")]],
     # Stress needs both leverage above 2.5x and EBIT coverage under 3x: coverage of exactly 3.00 is not stressed.
     _credit_case("fnd.credit.coverage_of_exactly_three_is_not_stressed", ["BR-FND-007"],
                  {"debt": [410 * M], "cash": [100 * M]}, {"op": [15 * M] * 4, "da": [10 * M] * 4, "int": [5 * M] * 4},
-                 ("netDebtToEbitda", "interestCoverageEbit", "creditStressFlag"),
-                 expect={"netDebtToEbitda": 3.1, "interestCoverageEbit": 3.0, "creditStressFlag": False}),
-    _credit_case("fnd.credit.net_cash_gives_negative_leverage_and_clean_tier", ["BR-FND-007"],
+                 ("netDebtToEbitda", "interestCoverageEbit", "meetsCreditStressThreshold"),
+                 expect={"netDebtToEbitda": 3.1, "interestCoverageEbit": 3.0, "meetsCreditStressThreshold": False}),
+    _credit_case("fnd.credit.net_cash_gives_negative_leverage_and_lowest_band", ["BR-FND-007"],
                  {"debt": [50 * M], "cash": [250 * M]}, {"op": [40 * M] * 4, "da": [10 * M] * 4, "int": [1 * M] * 4},
-                 ("netDebtUsd", "netDebtToEbitda", "debtTier", "creditStressFlag"),
-                 expect={"netDebtUsd": -200 * M, "netDebtToEbitda": -1.0, "debtTier": "CLEAN", "creditStressFlag": False}),
-    _credit_case("fnd.credit.missing_interest_leaves_coverage_and_stress_flag_null", ["BR-FND-006", "BR-FND-007"],
+                 ("netDebtUsd", "netDebtToEbitda", "leverageBand", "meetsCreditStressThreshold"),
+                 expect={"netDebtUsd": -200 * M, "netDebtToEbitda": -1.0, "leverageBand": "BELOW_1X", "meetsCreditStressThreshold": False}),
+    _credit_case("fnd.credit.missing_interest_leaves_coverage_and_stress_threshold_null", ["BR-FND-006", "BR-FND-007"],
                  {"debt": [500 * M], "cash": [100 * M]}, {"op": [40 * M] * 4, "da": [10 * M] * 4},
-                 ("netDebtToEbitda", "interestCoverageEbit", "interestCoverageEbitda", "creditStressFlag", "debtTier", "dataQuality"),
+                 ("netDebtToEbitda", "interestCoverageEbit", "interestCoverageEbitda", "meetsCreditStressThreshold", "leverageBand", "dataQuality"),
                  expect={"netDebtToEbitda": 2.0, "interestCoverageEbit": None, "interestCoverageEbitda": None,
-                         "creditStressFlag": None, "debtTier": "MODERATE", "dataQuality": "PARTIAL"}),
+                         "meetsCreditStressThreshold": None, "leverageBand": "1X_TO_2_5X", "dataQuality": "PARTIAL"}),
     _credit_case("fnd.credit.provider_ebitda_is_the_fallback_when_da_is_missing", ["BR-FND-004", "BR-FND-006"],
                  {"debt": [500 * M], "cash": [100 * M]}, {"op": [40 * M] * 4, "ebitda": [50 * M] * 4},
                  ("operationalEbitdaUsd", "operationalEbitdaSource", "netDebtToEbitda"),
                  expect={"operationalEbitdaUsd": 200 * M, "operationalEbitdaSource": "provider_ebitda_fallback", "netDebtToEbitda": 2.0}),
     _credit_case("fnd.credit.zero_operational_ebitda_gives_no_leverage", ["BR-FND-006"],
                  {"debt": [500 * M], "cash": [100 * M]}, {"op": [10 * M] * 4, "da": [-10 * M] * 4, "int": [1 * M] * 4},
-                 ("operationalEbitdaUsd", "netDebtToEbitda", "debtTier", "creditStressFlag"),
-                 expect={"operationalEbitdaUsd": 0, "netDebtToEbitda": None, "debtTier": None, "creditStressFlag": None}),
+                 ("operationalEbitdaUsd", "netDebtToEbitda", "leverageBand", "meetsCreditStressThreshold"),
+                 expect={"operationalEbitdaUsd": 0, "netDebtToEbitda": None, "leverageBand": None, "meetsCreditStressThreshold": None}),
 
     # R5-fundamentals (BR-FND-007): leverage needs a positive earnings base. A loss-maker with net debt no longer
-    # reads as a negative ratio and the CLEAN tier: leverage and stress flag are withheld, the tier names the state.
-    _credit_case("fnd.credit.loss_maker_with_net_debt_has_the_negative_earnings_base_tier", ["BR-FND-007"],
+    # reads as a negative ratio and the lowest band: leverage and the stress test are withheld, the band names the state.
+    _credit_case("fnd.credit.loss_maker_with_net_debt_has_the_negative_earnings_base_band", ["BR-FND-007"],
                  {"debt": [300 * M], "cash": [200 * M]}, {"op": [-10 * M] * 4, "da": [5 * M] * 4, "int": [2 * M] * 4},
-                 ("operationalEbitdaUsd", "netDebtToEbitda", "debtTier", "creditStressFlag", "interestCoverageEbit", "warningCodes"),
-                 expect={"operationalEbitdaUsd": -20 * M, "netDebtToEbitda": None, "debtTier": "NEGATIVE_EARNINGS_BASE",
-                         "creditStressFlag": None, "interestCoverageEbit": -5.0, "warningCodes": ["NEGATIVE_EARNINGS_BASE"]}),
-    _credit_case("fnd.credit.loss_maker_with_net_cash_has_the_negative_earnings_base_tier", ["BR-FND-007"],
+                 ("operationalEbitdaUsd", "netDebtToEbitda", "leverageBand", "meetsCreditStressThreshold", "interestCoverageEbit", "warningCodes"),
+                 expect={"operationalEbitdaUsd": -20 * M, "netDebtToEbitda": None, "leverageBand": "NEGATIVE_EARNINGS_BASE",
+                         "meetsCreditStressThreshold": None, "interestCoverageEbit": -5.0, "warningCodes": ["NEGATIVE_EARNINGS_BASE"]}),
+    _credit_case("fnd.credit.loss_maker_with_net_cash_has_the_negative_earnings_base_band", ["BR-FND-007"],
                  {"debt": [100 * M], "cash": [300 * M]}, {"op": [-10 * M] * 4, "da": [5 * M] * 4, "int": [2 * M] * 4},
-                 ("netDebtUsd", "netDebtToEbitda", "debtTier", "creditStressFlag", "unavailableMetrics"),
-                 expect={"netDebtUsd": -200 * M, "netDebtToEbitda": None, "debtTier": "NEGATIVE_EARNINGS_BASE", "creditStressFlag": None,
-                         "unavailableMetrics": ["netDebtToEbitda", "creditStressFlag"]}),
+                 ("netDebtUsd", "netDebtToEbitda", "leverageBand", "meetsCreditStressThreshold", "unavailableMetrics"),
+                 expect={"netDebtUsd": -200 * M, "netDebtToEbitda": None, "leverageBand": "NEGATIVE_EARNINGS_BASE", "meetsCreditStressThreshold": None,
+                         "unavailableMetrics": ["netDebtToEbitda", "meetsCreditStressThreshold"]}),
     # R5-fundamentals (BR-FND-004/006): three income quarters are not a year. The TTM components are reported
     # missing, so EBITDA, leverage and coverage are null and dataQuality is PARTIAL in both runtimes.
     _credit_case("fnd.credit.three_quarters_are_not_a_ttm", ["BR-FND-004", "BR-FND-006"],
                  {"debt": [500 * M], "cash": [100 * M]},
                  {"op": [40 * M] * 3, "da": [10 * M] * 3, "int": [8 * M] * 3, "ebitda": [50 * M] * 3},
-                 ("operationalEbitdaUsd", "ebitUsd", "netDebtToEbitda", "interestCoverageEbit", "debtTier", "dataQuality", "missingComponents"),
+                 ("operationalEbitdaUsd", "ebitUsd", "netDebtToEbitda", "interestCoverageEbit", "leverageBand", "dataQuality", "missingComponents"),
                  expect={"operationalEbitdaUsd": None, "ebitUsd": None, "netDebtToEbitda": None, "interestCoverageEbit": None,
-                         "debtTier": None, "dataQuality": "PARTIAL",
+                         "leverageBand": None, "dataQuality": "PARTIAL",
                          "missingComponents": ["ebitdaUsd", "operationalEbitdaUsd", "ebitUsd", "interestExpenseUsd"]}),
     # A gap inside the four quarters is the same: D&A missing for one quarter is not a TTM, so operational EBITDA
     # falls back to the complete provider EBITDA (the existing fallback and its warning).
@@ -1746,8 +1746,8 @@ CASES += [
     # total debt; both runtimes report total debt missing, as the Worker did.
     _credit_case("fnd.credit.long_term_debt_alone_is_not_total_debt", ["BR-FND-004", "BR-FND-006"],
                  {"long_term_debt": [300 * M], "cash": [100 * M]}, {"op": [40 * M] * 4, "da": [10 * M] * 4, "int": [8 * M] * 4},
-                 ("totalDebtUsd", "netDebtUsd", "netDebtToEbitda", "debtTier"),
-                 expect={"totalDebtUsd": None, "netDebtUsd": None, "netDebtToEbitda": None, "debtTier": None}),
+                 ("totalDebtUsd", "netDebtUsd", "netDebtToEbitda", "leverageBand"),
+                 expect={"totalDebtUsd": None, "netDebtUsd": None, "netDebtToEbitda": None, "leverageBand": None}),
 ]
 
 
@@ -1794,7 +1794,7 @@ def _momentum_case(name: str, ids: list[str], history: list | None, keys: tuple,
 
 
 BEAT, MISS = (1.05, 1.00, 0.05), (0.95, 1.00, -0.05)
-MOMENTUM_KEYS = ("beatRate", "beatCount", "totalQuarters", "avgSurprisePct", "currentBeatStreak", "preRevenue", "momentumFlag")
+MOMENTUM_KEYS = ("beatRate", "beatCount", "totalQuarters", "avgSurprisePct", "currentBeatStreak", "preRevenue")
 
 CASES += [
     # Card BR-SHR-012: 4 quarters, 3 beats, surprise ratios 0.05, 0.02, -0.01, 0.04 -> beatRate 0.75, avgSurprisePct 2.50.
@@ -1828,14 +1828,14 @@ CASES += [
     # Pre-revenue rule: no history, or every actual EPS effectively zero (< 1e-9).
     _momentum_case("shr.momentum.no_history_is_pre_revenue", ["BR-SHR-012"], None, MOMENTUM_KEYS + ("warningCodes", "dataQuality"),
                    expect={"beatRate": None, "beatCount": 0, "totalQuarters": 0, "avgSurprisePct": None, "currentBeatStreak": 0,
-                           "preRevenue": True, "momentumFlag": "NO_HISTORY", "warningCodes": ["PRE_REVENUE_NO_HISTORY"], "dataQuality": "PARTIAL"}),
+                           "preRevenue": True, "warningCodes": ["PRE_REVENUE_NO_HISTORY"], "dataQuality": "PARTIAL"}),
     _momentum_case("shr.momentum.all_zero_actuals_are_pre_revenue_and_hide_average_surprise", ["BR-SHR-012"],
                    [(0.0, 0.05, -1.0), (5e-10, 0.04, -0.99)], MOMENTUM_KEYS,
                    expect={"beatRate": 0, "beatCount": 0, "totalQuarters": 2, "avgSurprisePct": None, "currentBeatStreak": 0,
-                           "preRevenue": True, "momentumFlag": "NO_HISTORY"}),
+                           "preRevenue": True}),
     _momentum_case("shr.momentum.actual_of_exactly_epsilon_is_not_pre_revenue", ["BR-SHR-012"],
-                   [(1e-9, 0.05, -1.0)], ("preRevenue", "momentumFlag", "avgSurprisePct"),
-                   expect={"preRevenue": False, "momentumFlag": None, "avgSurprisePct": -100}),
+                   [(1e-9, 0.05, -1.0)], ("preRevenue", "avgSurprisePct"),
+                   expect={"preRevenue": False, "avgSurprisePct": -100}),
 ]
 
 

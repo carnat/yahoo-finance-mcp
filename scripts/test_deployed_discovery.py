@@ -745,7 +745,7 @@ def main() -> int:
     calls: list[tuple[str, dict]] = [
         ("health_check", {}),
         ("analyze_position_signals", {"ticker": "ASTS"}),
-        ("calculate_price_target_distance", {"ticker": "ASTS", "io_pt": 95}),
+        ("calculate_price_target_distance", {"ticker": "ASTS", "reference_target_price": 95}),
         ("check_volume_liquidity_threshold", {"ticker": "ASTS"}),
         ("summarize_options_flow", {"ticker": "ASTS"}),
         ("analyze_options_flow_window", {"ticker": "ASTS", "window_label": "audit"}),

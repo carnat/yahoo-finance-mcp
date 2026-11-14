@@ -1842,7 +1842,7 @@ def _radar_failure_case(name, ids, **kw) -> Case:
     js = _worker_js("""
 const realStringify = JSON.stringify;
 JSON.stringify = function (value, ...rest) {
-  if (value && typeof value === "object" && (("netSentiment" in value && "upgrades" in value) || value.message === "radar boom")) throw new Error("radar boom");
+  if (value && typeof value === "object" && (("netUpgrades" in value && "upgrades" in value) || value.message === "radar boom")) throw new Error("radar boom");
   return realStringify.call(JSON, value, ...rest);
 };
 let raw;

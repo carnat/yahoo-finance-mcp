@@ -69,7 +69,7 @@
         "screen_stocks": "screen_stocks",
         "search_ticker": "search_ticker"
       },
-      "description": "Stock discovery, screening, and position analysis.\n\nActions:\n- search_ticker: Resolve name/ISIN to ticker. Params: query, exchange, max_results\n- screen_stocks: Predefined screens. Params: screener_name, count\n- analyze_position_signals: Aggregate inputs. Params: ticker\n- calculate_price_target_distance: Legacy current/target ratio plus directional distance to target. Params: ticker, reference_target_price, io_pt (deprecated alias)"
+      "description": "Stock discovery, screening, and position analysis.\n\nActions:\n- search_ticker: Resolve name/ISIN to ticker. Params: query, exchange, max_results\n- screen_stocks: Predefined screens. Params: screener_name, count\n- analyze_position_signals: Aggregate inputs. Params: ticker\n- calculate_price_target_distance: Legacy current/target ratio plus directional distance to target. Params: ticker, reference_target_price"
     },
     "sec_extractors": {
       "actions": {

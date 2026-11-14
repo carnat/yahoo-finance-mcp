@@ -469,7 +469,7 @@ def _target_analyst_count_or_warn(company, warnings: list) -> int | None:
 
 @yfinance_server.tool(
     name="get_analyst_consensus",
-    description="""Get analyst consensus for one or more tickers. priceTargets.current is the current market price; low/high/mean/median are consensus targets and pctUpsideFromLastPrice uses the mean target. targetVsPrice is AT_OR_ABOVE or BELOW (mean target against the current price); targetLagSignal is deprecated. Max 5 tickers per call.
+    description="""Get analyst consensus for one or more tickers. priceTargets.current is the current market price; low/high/mean/median are consensus targets and pctUpsideFromLastPrice uses the mean target. targetVsPrice is AT_OR_ABOVE or BELOW (mean target against the current price). Max 5 tickers per call.
 
 Args:
     ticker: str | list[str]
@@ -593,18 +593,14 @@ async def get_analyst_consensus(ticker: str | list[str]) -> str:
         output["recommendationSummary"] = None
         warnings.append(_component_failed_warning("Recommendation summary"))
 
-    target_lag_signal = "UNKNOWN"
-    if target_mean is not None and last_price is not None:
-        if target_mean >= last_price:
-            target_lag_signal = "CURRENT"
-        elif recent_upgrade_count_30d is not None and recent_upgrade_count_30d > 0:
-            target_lag_signal = "LIKELY_STALE_OR_LAGGING"
-            warnings.append({
-                "code": "CONSENSUS_TARGET_BELOW_PRICE_DESPITE_UPGRADES",
-                "message": f"The mean price target is below the current price, with {recent_upgrade_count_30d} upgrade(s) in the last 30 days.",
-            })
-        else:
-            target_lag_signal = "POSSIBLY_STALE"
+    if (
+        target_mean is not None and last_price is not None and target_mean < last_price
+        and recent_upgrade_count_30d is not None and recent_upgrade_count_30d > 0
+    ):
+        warnings.append({
+            "code": "CONSENSUS_TARGET_BELOW_PRICE_DESPITE_UPGRADES",
+            "message": f"The mean price target is below the current price, with {recent_upgrade_count_30d} upgrade(s) in the last 30 days.",
+        })
 
     pct_below_current_price = None
     if target_mean is not None and last_price is not None and last_price > 0:
@@ -613,8 +609,7 @@ async def get_analyst_consensus(ticker: str | list[str]) -> str:
     output["currentPrice"] = last_price
     output["pctBelowCurrentPrice"] = pct_below_current_price
     output["recentUpgradeCount30d"] = recent_upgrade_count_30d
-    output["targetLagSignal"] = target_lag_signal
-    # 3.11.0 (NL7): the factual comparison targetLagSignal reads as staleness.
+    # NL7 (3.11.0): the mean target against the current price; targetLagSignal, which read it as staleness, went in 4.0.0.
     output["targetVsPrice"] = target_vs_price(target_mean, last_price)
     output["warnings"] = warnings
 
@@ -1244,8 +1239,8 @@ async def get_credit_health(
         data_quality = "PARTIAL"
 
     # Leverage needs a positive earnings base: over zero or negative EBITDA the ratio has no meaning (a loss-maker
-    # with net debt would read as a negative ratio and the CLEAN tier), so it is withheld with the tier and the
-    # stress flag; NEGATIVE_EARNINGS_BASE says why (R5-fundamentals).
+    # with net debt would read as a negative ratio and the lowest band), so it is withheld with the band and the
+    # stress test; NEGATIVE_EARNINGS_BASE says why (R5-fundamentals).
     net_debt_to_ebitda = (
         round(net_debt / operational_ebitda_annual, 2)
         if net_debt is not None and operational_ebitda_annual is not None and operational_ebitda_annual > 0 else None
@@ -1254,26 +1249,13 @@ async def get_credit_health(
     interest_coverage_ebitda = round(operational_ebitda_annual / abs(interest_annual), 2) if operational_ebitda_annual is not None and interest_annual and interest_annual != 0 else None
     interest_coverage = interest_coverage_ebit
 
-    credit_stress = None
-    if net_debt_to_ebitda is not None and interest_coverage_ebit is not None:
-        credit_stress = net_debt_to_ebitda > 2.5 and interest_coverage_ebit < 3
-
-    if net_debt_to_ebitda is not None:
-        if net_debt_to_ebitda < 1:
-            debt_tier = "CLEAN"
-        elif net_debt_to_ebitda <= 2.5:
-            debt_tier = "MODERATE"
-        elif net_debt_to_ebitda <= 4:
-            debt_tier = "ELEVATED"
-        else:
-            debt_tier = "STRESSED"
-    elif net_debt is not None and operational_ebitda_annual is not None and operational_ebitda_annual < 0:
-        # A loss-maker has no leverage tier: the state is named instead of reading as CLEAN (R5-fundamentals).
-        debt_tier = "NEGATIVE_EARNINGS_BASE"
-    else:
-        debt_tier = None
-    # 3.11.0 (NL6): the bands debtTier names, and the stress test with caller-chosen thresholds.
-    leverage = leverage_band(net_debt_to_ebitda, debt_tier == "NEGATIVE_EARNINGS_BASE")
+    # NL6 (3.11.0; debtTier and creditStressFlag went in 4.0.0): the leverage band, NEGATIVE_EARNINGS_BASE for a
+    # loss-maker with known net debt, and the stress test with caller-chosen thresholds.
+    negative_earnings_base = (
+        net_debt_to_ebitda is None and net_debt is not None
+        and operational_ebitda_annual is not None and operational_ebitda_annual < 0
+    )
+    leverage = leverage_band(net_debt_to_ebitda, negative_earnings_base)
     meets_stress = meets_credit_stress_threshold(
         net_debt_to_ebitda, interest_coverage_ebit, max_net_debt_to_ebitda, min_interest_coverage
     )
@@ -1301,8 +1283,8 @@ async def get_credit_health(
         unavailable_metrics.append("interestCoverageEbit")
     if interest_coverage_ebitda is None:
         unavailable_metrics.append("interestCoverageEbitda")
-    if credit_stress is None:
-        unavailable_metrics.append("creditStressFlag")
+    if meets_stress is None:
+        unavailable_metrics.append("meetsCreditStressThreshold")
 
     computed_metrics = []
     if net_debt is not None:
@@ -1317,10 +1299,10 @@ async def get_credit_health(
         computed_metrics.append("interestCoverageEbit")
     if interest_coverage_ebitda is not None:
         computed_metrics.append("interestCoverageEbitda")
-    if credit_stress is not None:
-        computed_metrics.append("creditStressFlag")
-    if debt_tier is not None:
-        computed_metrics.append("debtTier")
+    if meets_stress is not None:
+        computed_metrics.append("meetsCreditStressThreshold")
+    if leverage is not None:
+        computed_metrics.append("leverageBand")
 
     warnings = []
     if interest_annual is None:
@@ -1388,8 +1370,6 @@ async def get_credit_health(
         "interestCoverage": interest_coverage,
         "interestCoverageEbit": interest_coverage_ebit,
         "interestCoverageEbitda": interest_coverage_ebitda,
-        "creditStressFlag": credit_stress,
-        "debtTier": debt_tier,
         "leverageBand": leverage,
         "meetsCreditStressThreshold": meets_stress,
         "creditStressThresholds": {
@@ -1489,30 +1469,6 @@ async def get_earnings_momentum(
             if current is not None and ago_90d is not None and ago_90d != 0:
                 revision_90d = round((current - ago_90d) / abs(ago_90d) * 100, 2)
 
-    # Revision direction
-    if revision_30d is not None:
-        if abs(revision_30d) < 3:
-            revision_direction = "STABLE"
-        elif revision_30d > 0:
-            revision_direction = "UPGRADING"
-        else:
-            revision_direction = "DOWNGRADING"
-    else:
-        revision_direction = None
-
-    # Momentum flag
-    if revision_30d is not None:
-        if revision_30d > 10:
-            momentum_flag = "STRONG"
-        elif revision_30d >= 0:
-            momentum_flag = "POSITIVE"
-        elif revision_30d > -10:
-            momentum_flag = "NEGATIVE"
-        else:
-            momentum_flag = "COLLAPSING"
-    else:
-        momentum_flag = None
-
     # From earningsHistory (last 4 quarters)
     beat_count = 0
     total_quarters = 0
@@ -1559,63 +1515,18 @@ async def get_earnings_momentum(
         bool(actual_eps_values) and all(abs(v) < _PRE_REVENUE_EPS_EPSILON for v in actual_eps_values)
     )
     if pre_revenue:
-        momentum_flag = "NO_HISTORY"
         avg_surprise = None
         warnings.append({
             "code": "PRE_REVENUE_NO_HISTORY",
             "message": "Earnings history appears pre-revenue or unavailable; momentum fields are not reliable.",
         })
 
-    if beat_rate is None:
-        historical_surprise_signal = "UNKNOWN"
-    elif beat_rate >= 0.75:
-        historical_surprise_signal = "STRONG"
-    elif beat_rate >= 0.55:
-        historical_surprise_signal = "POSITIVE"
-    elif beat_rate >= 0.40:
-        historical_surprise_signal = "NEUTRAL"
-    else:
-        historical_surprise_signal = "NEGATIVE"
-
-    revision_driver = "none"
-    if revision_30d is not None:
-        revision_driver = "30d"
-        if revision_30d <= -3:
-            forward_revision_signal = "NEGATIVE"
-        elif revision_30d >= 3:
-            forward_revision_signal = "POSITIVE"
-        elif revision_7d is not None and revision_7d <= -3:
-            revision_driver = "30d_neutral_7d"
-            forward_revision_signal = "NEGATIVE"
-        elif revision_7d is not None and revision_7d >= 3:
-            revision_driver = "30d_neutral_7d"
-            forward_revision_signal = "POSITIVE"
-        else:
-            forward_revision_signal = "NEUTRAL"
-    elif revision_7d is not None:
-        revision_driver = "7d"
-        if revision_7d <= -3:
-            forward_revision_signal = "NEGATIVE"
-        elif revision_7d >= 3:
-            forward_revision_signal = "POSITIVE"
-        else:
-            forward_revision_signal = "NEUTRAL"
-    elif revision_90d is not None:
-        revision_driver = "90d_fallback"
-        if revision_90d <= -3:
-            forward_revision_signal = "NEGATIVE"
-        elif revision_90d >= 3:
-            forward_revision_signal = "POSITIVE"
-        else:
-            forward_revision_signal = "NEUTRAL"
-    else:
-        forward_revision_signal = "UNKNOWN"
-    # 3.11.0 (NL3): one revision band with the caller's threshold; revisionSignalDriver names its driver.
+    # NL3 (3.11.0): one revision band with the caller's threshold; revisionSignalDriver names its driver.
     band, revision_driver = revision_band(revision_30d, revision_7d, revision_90d, revision_threshold_pct)
 
     composite_method_note = (
-        "Forward revision signal uses 30d revision as primary, 7d as confirmation when 30d is neutral or missing, "
-        "and 90d only as fallback/context; a negative 90d revision does not override positive recent revisions."
+        "revisionBand uses the 30d revision as primary and the 7d when the 30d is inside the band; with no 30d "
+        "revision it uses the 7d, then the 90d as a fallback. A 90d revision never overrides a 30d or 7d one."
     )
     if revision_30d is not None and revision_30d >= 3 and revision_90d is not None and revision_90d <= -3:
         warnings.append({
@@ -1632,28 +1543,6 @@ async def get_earnings_momentum(
             "message": "Historical beat streak is positive, but forward estimates were revised down.",
         })
 
-    if historical_surprise_signal == "UNKNOWN" and forward_revision_signal == "UNKNOWN":
-        composite_momentum_signal = "UNKNOWN"
-    elif forward_revision_signal == "NEGATIVE" and historical_surprise_signal in {"STRONG", "POSITIVE"}:
-        composite_momentum_signal = "MIXED_NEGATIVE_REVISION"
-    elif forward_revision_signal == "POSITIVE" and historical_surprise_signal == "NEGATIVE":
-        composite_momentum_signal = "MIXED_POSITIVE_REVISION"
-    elif forward_revision_signal == "POSITIVE" and historical_surprise_signal in {"STRONG", "POSITIVE"}:
-        composite_momentum_signal = "STRONG_POSITIVE"
-    elif forward_revision_signal == "NEGATIVE":
-        composite_momentum_signal = "NEGATIVE"
-    else:
-        composite_momentum_signal = "NEUTRAL"
-
-    interpretation_note_map = {
-        "STRONG_POSITIVE": "Historical earnings surprises and forward estimate revisions are both supportive.",
-        "MIXED_NEGATIVE_REVISION": "Historical beat performance is strong, but forward revisions are negative.",
-        "MIXED_POSITIVE_REVISION": "Historical surprise trend is weak, but forward revisions are improving.",
-        "NEGATIVE": "Both historical surprise trend and forward revisions indicate weakness.",
-        "NEUTRAL": "Signals are mixed or modest without a strong directional bias.",
-        "UNKNOWN": "Insufficient data to classify both historical and forward signals.",
-    }
-
     if any(v is None for v in [revision_30d, beat_rate]):
         data_quality = "PARTIAL"
 
@@ -1664,8 +1553,6 @@ async def get_earnings_momentum(
         "revision90d": revision_90d,
         "revisionBand": band,
         "revisionThresholdPct": revision_threshold_pct,
-        "revisionDirection": revision_direction,
-        "momentumFlag": momentum_flag,
         "beatRate": beat_rate,
         "beatRateBand": beat_rate_band(beat_rate),
         "beatCount": beat_count,
@@ -1674,10 +1561,6 @@ async def get_earnings_momentum(
         "avgSurprisePct": avg_surprise,
         "preRevenue": pre_revenue,
         "currentBeatStreak": beat_streak,
-        "historicalSurpriseSignal": historical_surprise_signal,
-        "forwardRevisionSignal": forward_revision_signal,
-        "compositeMomentumSignal": composite_momentum_signal,
-        "interpretationNote": interpretation_note_map[composite_momentum_signal],
         "compositeMethodNote": composite_method_note,
         "revisionSignalDriver": revision_driver,
         "warnings": warnings,
@@ -1747,7 +1630,6 @@ async def get_analyst_upgrade_radar(ticker: str | list[str], days_back: int = 30
         return json.dumps({
             "ticker": ticker,
             "windowDays": days_back,
-            "netSentiment": 0,
             "netUpgrades": 0,
             "upgrades": 0,
             "downgrades": 0,
@@ -1794,17 +1676,6 @@ async def get_analyst_upgrade_radar(ticker: str | list[str], days_back: int = 30
 
         mixed_signal = (signal == "UPGRADE" and pt_direction == "LOWERED") or (signal == "DOWNGRADE" and pt_direction == "RAISED")
 
-        # Strength flag
-        # A mixed signal wins over the rating direction in both directions (2.14.0).
-        if mixed_signal:
-            strength_flag = "MIXED"
-        elif signal == "UPGRADE":
-            strength_flag = "BULLISH"
-        elif signal == "DOWNGRADE":
-            strength_flag = "BEARISH"
-        else:
-            strength_flag = "NEUTRAL"
-
         changes.append({
             "date": date_str,
             "firm": firm,
@@ -1815,10 +1686,9 @@ async def get_analyst_upgrade_radar(ticker: str | list[str], days_back: int = 30
             "ptTo": pt_to,
             "ptDirection": pt_direction,
             "mixedSignal": mixed_signal,
-            "strengthFlag": strength_flag,
         })
 
-    net_sentiment = upgrade_count - downgrade_count
+    net_upgrades = upgrade_count - downgrade_count
 
     # Summary
     parts = []
@@ -1833,8 +1703,7 @@ async def get_analyst_upgrade_radar(ticker: str | list[str], days_back: int = 30
     return json.dumps({
         "ticker": ticker,
         "windowDays": days_back,
-        "netSentiment": net_sentiment,
-        "netUpgrades": net_sentiment,
+        "netUpgrades": net_upgrades,
         "upgrades": upgrade_count,
         "downgrades": downgrade_count,
         "initiations": initiation_count,
@@ -2089,7 +1958,6 @@ async def get_position_score_inputs(ticker: str) -> str:
 
     # T1: analyst sentiment
     t1: dict = {
-        "analystNetSentiment": upgrade.get("netSentiment"),
         "analystNetUpgrades": upgrade.get("netUpgrades"),
         "upgrades30d": upgrade.get("upgrades"),
         "downgrades30d": upgrade.get("downgrades"),
@@ -2112,7 +1980,6 @@ async def get_position_score_inputs(ticker: str) -> str:
         "beatRate": earnings.get("beatRate"),
         "currentBeatStreak": earnings.get("currentBeatStreak"),
         "avgSurprisePct": None if earnings.get("preRevenue") else earnings.get("avgSurprisePct"),
-        "momentumFlag": earnings.get("momentumFlag"),
         "revisionBand": earnings.get("revisionBand"),
         "preRevenue": bool(earnings.get("preRevenue")),
     }
@@ -2122,7 +1989,6 @@ async def get_position_score_inputs(ticker: str) -> str:
         "rsi14": tech.get("rsi14"),
         "macd": tech.get("macd"),
         "macdHistogram": tech.get("macdHistogram"),
-        "maPosition": ma.get("trend"),
         "maAlignment": ma.get("maAlignment"),
         "pctFrom50dma": ma.get("pctVs50dma"),
         "pctFrom200dma": ma.get("pctVs200dma"),
@@ -2170,7 +2036,7 @@ async def analyze_financial_ratios(ticker: str | list[str], history_periods: int
     return await get_financial_ratios(ticker, history_periods, frequency)
 
 
-@yfinance_server.tool(name="analyze_credit_health", description="Leverage and interest coverage from Yahoo quarterly statements: netDebtToEbitda on operational EBITDA, interestCoverageEbit and interestCoverageEbitda. leverageBand is BELOW_1X (under 1), 1X_TO_2_5X (to 2.5), 2_5X_TO_4X (to 4) or ABOVE_4X, or NEGATIVE_EARNINGS_BASE when operational EBITDA is negative. meetsCreditStressThreshold is netDebtToEbitda above max_net_debt_to_ebitda (default 2.5) and interestCoverageEbit below min_interest_coverage (default 3). debtTier and creditStressFlag are deprecated.")
+@yfinance_server.tool(name="analyze_credit_health", description="Leverage and interest coverage from Yahoo quarterly statements: netDebtToEbitda on operational EBITDA, interestCoverageEbit and interestCoverageEbitda. leverageBand is BELOW_1X (under 1), 1X_TO_2_5X (to 2.5), 2_5X_TO_4X (to 4) or ABOVE_4X, or NEGATIVE_EARNINGS_BASE when operational EBITDA is negative. meetsCreditStressThreshold is netDebtToEbitda above max_net_debt_to_ebitda (default 2.5) and interestCoverageEbit below min_interest_coverage (default 3).")
 async def analyze_credit_health(
     ticker: str | list[str],
     max_net_debt_to_ebitda: Annotated[float | None, Field(
@@ -2215,7 +2081,7 @@ async def get_analyst_recommendations(ticker: str, recommendation_type: Recommen
     return await get_recommendations(ticker, recommendation_type, months_back)
 
 
-@yfinance_server.tool(name="get_analyst_rating_changes", description="Analyst rating changes from Yahoo in the last days_back days. Each change has signal (UPGRADE, DOWNGRADE or INITIATED, from the firm's action and grades), ptDirection and mixedSignal (rating and price target moved in opposite directions); the totals add netUpgrades (upgrades minus downgrades). netSentiment and strengthFlag are deprecated.")
+@yfinance_server.tool(name="get_analyst_rating_changes", description="Analyst rating changes from Yahoo in the last days_back days. Each change has signal (UPGRADE, DOWNGRADE, INITIATED or MAINTAIN, from the firm's action and grades), ptDirection and mixedSignal (rating and price target moved in opposite directions); the totals add netUpgrades (upgrades minus downgrades).")
 async def get_analyst_rating_changes(
     ticker: str | list[str],
     days_back: Annotated[int, Field(description="Window in days (default 30).")] = 30,
@@ -2223,7 +2089,7 @@ async def get_analyst_rating_changes(
     return await get_analyst_upgrade_radar(ticker, days_back)
 
 
-@yfinance_server.tool(name="analyze_earnings_momentum", description="EPS estimate revisions (7, 30 and 90 days, percent) and beat history from Yahoo. revisionBand is UP or DOWN when the 30-day revision moves at least revision_threshold_pct (default 3) either way; inside that band a 7-day revision outside it decides, else FLAT; with no 30-day revision the 7-day, then the 90-day, is used (revisionSignalDriver names the one used). beatRateBand bands beatRate: 75_TO_100PCT, 55_TO_75PCT, 40_TO_55PCT or 0_TO_40PCT (lower bound inclusive). momentumFlag, revisionDirection, forwardRevisionSignal, historicalSurpriseSignal, compositeMomentumSignal and interpretationNote are deprecated.")
+@yfinance_server.tool(name="analyze_earnings_momentum", description="EPS estimate revisions (7, 30 and 90 days, percent) and beat history from Yahoo. revisionBand is UP or DOWN when the 30-day revision moves at least revision_threshold_pct (default 3) either way; inside that band a 7-day revision outside it decides, else FLAT; with no 30-day revision the 7-day, then the 90-day, is used (revisionSignalDriver names the one used). beatRateBand bands beatRate: 75_TO_100PCT, 55_TO_75PCT, 40_TO_55PCT or 0_TO_40PCT (lower bound inclusive).")
 async def analyze_earnings_momentum(
     ticker: str | list[str],
     revision_threshold_pct: Annotated[float | None, Field(

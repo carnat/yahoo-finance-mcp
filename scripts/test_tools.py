@@ -346,7 +346,7 @@ TEST_CASES: list[TestCase] = [
     (
         "analyze_moving_average_position",
         {"ticker": "AAPL"},
-        [("trend", NOT_NULL)],
+        [("maAlignment", NOT_NULL)],
     ),
     # ── pre-computed alpha signals ────────────────────────────────────────
     (

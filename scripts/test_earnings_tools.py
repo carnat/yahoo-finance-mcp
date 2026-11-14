@@ -513,9 +513,10 @@ class TestSemanticQualityFixes(unittest.TestCase):
 
         with patch("server.yf.Ticker", return_value=_Ticker()):
             data = _parse(_run(srv.get_earnings_momentum("VRT")))
-        self.assertEqual(data.get("historicalSurpriseSignal"), "STRONG")
-        self.assertEqual(data.get("forwardRevisionSignal"), "NEGATIVE")
-        self.assertEqual(data.get("compositeMomentumSignal"), "MIXED_NEGATIVE_REVISION")
+        self.assertEqual(data.get("beatRateBand"), "75_TO_100PCT")
+        self.assertEqual(data.get("revisionBand"), "DOWN")
+        for removed in ("historicalSurpriseSignal", "forwardRevisionSignal", "compositeMomentumSignal", "interpretationNote"):
+            self.assertNotIn(removed, data)
         self.assertEqual(data.get("beatSample"), 4)
         warning_codes = [w.get("code") for w in data.get("warnings", []) if isinstance(w, dict)]
         self.assertIn("MIXED_EARNINGS_SIGNAL", warning_codes)
@@ -568,7 +569,8 @@ class TestSemanticQualityFixes(unittest.TestCase):
 
         with patch("server.yf.Ticker", return_value=_Ticker()):
             data = _parse(_run(srv.get_analyst_consensus("VRT")))
-        self.assertEqual(data.get("targetLagSignal"), "LIKELY_STALE_OR_LAGGING")
+        self.assertNotIn("targetLagSignal", data)
+        self.assertEqual(data.get("targetVsPrice"), "BELOW")
         self.assertEqual(data.get("recentUpgradeCount30d"), 1)
         self.assertEqual(data.get("priceTargets", {}).get("mean"), 355.52)
         self.assertEqual(data.get("priceTargets", {}).get("current"), 370.94)

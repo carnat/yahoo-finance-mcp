@@ -70,7 +70,7 @@ def _default_for(name: str, schema: dict[str, Any], runtime_defaults: dict[str, 
         "section_name": "Item 1",
         "document_url": "https://www.sec.gov/Archives/edgar/data/320193/000032019323000106/aapl-20230930x10k.htm",
         "accession_number": "0000320193-23-000106",
-        "io_pt": 250,
+        "reference_target_price": 250,
     }
     return lookup.get(name, "sample")
 

@@ -8,7 +8,7 @@
 import { setBounded } from "./cache.js";
 import { ErrorCode, classifyErrorMessage, mcpFailure } from "./response.js";
 import { tickerCap } from "./tool-catalog.js";
-import { IO_PT_ARGUMENT_DEPRECATION, meetsMinimum } from "./deprecations.js";
+import { meetsMinimum } from "./deprecations.js";
 import { maAlignment } from "./labels.js";
 import { yahooQuoteSummaryUrl, yahooChartUrl, yahooOptionsUrl, yahooScreenerUrl, yahooSearchUrl } from "./clients/endpoints.js";
 import { raw, yGet, enc, noData, iso, evictYahooGet } from "./clients/yahoo.js";
@@ -1568,13 +1568,6 @@ export async function getMaPosition(ticker: string | string[]): Promise<string> 
     const regime50 = pctVs50 != null ? (pctVs50 >= 0 ? "ABOVE" : "BELOW") : null;
     const regime200 = pctVs200 != null ? (pctVs200 >= 0 ? "ABOVE" : "BELOW") : null;
 
-    let trend: string | null = null;
-    if (regime50 != null && regime200 != null) {
-      if (regime50 === "ABOVE" && regime200 === "ABOVE") trend = "BULLISH";
-      else if (regime50 === "BELOW" && regime200 === "BELOW") trend = "BEARISH";
-      else trend = "MIXED";
-    }
-
     return JSON.stringify({
       ticker,
       lastPrice,
@@ -1589,8 +1582,7 @@ export async function getMaPosition(ticker: string | string[]): Promise<string> 
       pctVs200dma: pctVs200,
       regime50,
       regime200,
-      trend,
-      // 3.11.0 (NL1): the factual name for what trend labels BULLISH/BEARISH.
+      // NL1 (3.11.0): trend (BULLISH/BEARISH/MIXED) went in 4.0.0.
       maAlignment: maAlignment(regime50, regime200),
       // The quote's own date, never today's (R5-pricing-1, Q3d).
       dataDate: (fi.lastTradeDate as string | null) ?? null,
@@ -1640,17 +1632,6 @@ export async function getShortMomentum(ticker: string | string[]): Promise<strin
       else momDirection = "FALLING";
     }
 
-    let squeezeRisk: string | null = null;
-    if (shortPctFloat != null) {
-      if (shortPctFloat > 30 && shortRatio != null && shortRatio < 3) squeezeRisk = "HIGH";
-      else if (shortPctFloat > 20) squeezeRisk = "MODERATE";
-      else squeezeRisk = "LOW";
-    }
-
-    let flag: string | null = null;
-    if (shortPctFloat != null && shortPctFloat > 30) flag = "🔴 CRITICAL SHORT";
-    else if (shortPctFloat != null && shortPctFloat > 20) flag = "⚠️ HIGH SHORT";
-
     return JSON.stringify({
       ticker,
       shortPctFloat,
@@ -1659,8 +1640,6 @@ export async function getShortMomentum(ticker: string | string[]): Promise<strin
       sharesShortPriorMonth: sharesShortPrior,
       momDeltaPct,
       momDirection,
-      squeezeRisk,
-      flag,
       dateShortInterest: observationDate,
       dataDate: observationDate,
       dataDateBasis: observationDate ? "SHORT_INTEREST_OBSERVATION" : "UNAVAILABLE",
@@ -1737,7 +1716,6 @@ export async function getPutHedgeCandidates(
       volume: number;
       quoteStatus: "TWO_SIDED";
       ivPctile: number | null;
-      ivFlag: string | null;
       otmPct: number;
     }
     const candidates: Candidate[] = [];
@@ -1806,7 +1784,6 @@ export async function getPutHedgeCandidates(
             volume,
             quoteStatus: "TWO_SIDED",
             ivPctile,
-            ivFlag: ivPctile != null && ivPctile > 70 ? "⚠️ HIGH IV" : null,
             otmPct: +((currentPrice - strike) / currentPrice * 100).toFixed(2),
           });
         }
@@ -1866,7 +1843,7 @@ export async function getPutHedgeCandidates(
       budgetGapUsd,
       status,
       decisionGrade: false,
-      decisionUse: "HEDGE_SCREEN_ONLY",
+      decisionUse: "CANDIDATE_SCREEN_ONLY",
       consideredContracts: consideredContracts.length,
       excludedContracts,
       dataQuality,
@@ -2117,22 +2094,14 @@ export async function getOptionsFlowScan(ticker: string, windowLabel: string): P
       else if (ratioChange < 0.9) putVolTrend = "DECREASING";
     }
 
-    // Bracket suppressed when data quality is LOW
-    let bracket: string | null = null;
-    if (quality !== "LOW" && pcRatio != null) {
-      if (pcRatio >= 1.3 || (pcRatio >= 1.0 && putVolTrend === "INCREASING")) bracket = "UPPER";
-      else if (pcRatio <= 0.8 && putVolTrend !== "INCREASING") bracket = "LOWER";
-      else bracket = "MID";
-    }
-
     let formattedBlock: string;
     if (quality === "LOW") {
-      formattedBlock = "OPTIONS FLOW: DATA QUALITY LOW — raw chain unreliable; bracket not assigned.";
+      formattedBlock = "OPTIONS FLOW: DATA QUALITY LOW — raw chain unreliable.";
     } else {
       const ivStr = ivPctile != null ? `${ivPctile}%` : "N/A";
       const pvStr = putVolVs10d != null ? `${putVolVs10d.toFixed(2)}x` : "N/A";
       const pcStr = pcRatio != null ? pcRatio.toFixed(2) : "N/A";
-      formattedBlock = `OPTIONS FLOW SCAN [${windowLabel}] ${ticker} | P/C: ${pcStr} | IV vs 1y RV range: ${ivStr} | Put vol / 1% stock ADV: ${pvStr} | Trend: ${putVolTrend} | Advisory: ${bracket ?? "N/A"} bracket`;
+      formattedBlock = `OPTIONS FLOW [${windowLabel}] ${ticker} | P/C: ${pcStr} | IV vs 1y RV range: ${ivStr} | Put vol / 1% stock ADV: ${pvStr} | Trend: ${putVolTrend}`;
     }
 
     const resultData: Record<string, unknown> = {
@@ -2144,7 +2113,7 @@ export async function getOptionsFlowScan(ticker: string, windowLabel: string): P
       putVolTrend,
       expiry: scanExpiry ?? null,
       expirySelection: "NEXT_AFTER_TODAY",
-      maxPainStrike, bracket, formattedBlock,
+      maxPainStrike, formattedBlock,
       realizedVolPriceBasis,
       historicalObservationType: "COMPLETED_DAILY_PRICE_SERIES",
       historicalBarStatus,
@@ -2169,11 +2138,10 @@ export async function getOptionsFlowScan(ticker: string, windowLabel: string): P
   }
 }
 
-/** `ioPtArgument`: the caller passed the deprecated io_pt argument (3.11.0, NL8), which adds its notice. */
-export async function getPriceTargetBracket(ticker: string, ioPt: number, ioPtArgument = false): Promise<string> {
+export async function getPriceTargetBracket(ticker: string, ioPt: number): Promise<string> {
   if (!(ioPt > 0)) {
     // A caller's bad input, not a provider failure (2.25.2, F42).
-    return mcpFailure("calculate_price_target_distance", ErrorCode.INPUT_VALIDATION_ERROR, "reference_target_price (or io_pt alias) must be a positive number");
+    return mcpFailure("calculate_price_target_distance", ErrorCode.INPUT_VALIDATION_ERROR, "reference_target_price must be a positive number");
   }
   try {
     const fi = JSON.parse(await getFastInfo(ticker)) as Record<string, unknown>;
@@ -2187,7 +2155,7 @@ export async function getPriceTargetBracket(ticker: string, ioPt: number, ioPtAr
     const referenceTargetPct = roundHalfAwayFromZero(currentPrice / ioPt * 100, 1);
     const distanceToTargetPct = currentPrice !== 0 ? roundHalfAwayFromZero((ioPt - currentPrice) / currentPrice * 100, 1) : null;
 
-    return JSON.stringify(withNotices({
+    return JSON.stringify({
       ticker,
       currentPrice: roundHalfAwayFromZero(currentPrice, 4),
       priceBasis: "REGULAR_MARKET_PRICE",
@@ -2200,15 +2168,12 @@ export async function getPriceTargetBracket(ticker: string, ioPt: number, ioPtAr
       currentToTargetRatioPct: referenceTargetPct,
       distanceToTargetPct,
       distanceConvention: "(referenceTargetPrice-currentPrice)/currentPrice*100",
-      ioPt,
-      eqfPct: referenceTargetPct,
-      invertedFlag: referenceTargetPct >= 100,
       // From the raw prices, not the rounded referenceTargetPct (2.8.0).
       priceAtOrAboveTarget: currentPrice > 0 && ioPt > 0 ? currentPrice >= ioPt : null,
       // The quote's own date, never today's (R5-pricing-1, Q3d).
       dataDate: (fi.lastTradeDate as string | null) ?? null,
       recommendedNextAction: "NONE",
-    }, ioPtArgument ? [{ ...IO_PT_ARGUMENT_DEPRECATION, fields: [...IO_PT_ARGUMENT_DEPRECATION.fields] }] : []));
+    });
   } catch (e) {
     return JSON.stringify({ error: true, message: `${e instanceof Error ? e.message : String(e)}`, ticker });
   }
@@ -2247,7 +2212,6 @@ export async function getPositionScoreInputs(ticker: string | string[]): Promise
     const ma = parse(maRaw);
 
     const t1 = {
-      analystNetSentiment: upgrade.netSentiment ?? null,
       analystNetUpgrades: upgrade.netUpgrades ?? null,
       upgrades30d: upgrade.upgrades ?? null,
       downgrades30d: upgrade.downgrades ?? null,
@@ -2268,7 +2232,6 @@ export async function getPositionScoreInputs(ticker: string | string[]): Promise
       beatRate: earnings.beatRate ?? null,
       currentBeatStreak: earnings.currentBeatStreak ?? null,
       avgSurprisePct: earnings.preRevenue ? null : (earnings.avgSurprisePct ?? null),
-      momentumFlag: earnings.momentumFlag ?? null,
       revisionBand: earnings.revisionBand ?? null,
       preRevenue: Boolean(earnings.preRevenue),
     };
@@ -2277,7 +2240,6 @@ export async function getPositionScoreInputs(ticker: string | string[]): Promise
       rsi14: tech.rsi14 ?? null,
       macd: tech.macd ?? null,
       macdHistogram: tech.macdHistogram ?? null,
-      maPosition: ma.trend ?? null,
       maAlignment: ma.maAlignment ?? null,
       pctFrom50dma: ma.pctVs50dma ?? null,
       pctFrom200dma: ma.pctVs200dma ?? null,
@@ -2744,7 +2706,6 @@ export async function getMarketSnapshot(
       twoHundredDayAverage: (quote?.twoHundredDayAverage as number | null) ?? null,
       pctFrom50dma: (ma?.pctVs50dma as number | null) ?? null,
       pctFrom200dma: (ma?.pctVs200dma as number | null) ?? null,
-      maTrend: (ma?.trend as string | null) ?? null,
       maAlignment: (ma?.maAlignment as string | null) ?? null,
       rsi14: (tech?.rsi14 as number | null) ?? null,
       macdHistogram: (tech?.macdHistogram as number | null) ?? null,
