@@ -254,11 +254,14 @@ CASES += [
     _consensus_case("target_below_price_with_upgrades_warns", "MJR4CA", 200.0, 1,
                     {"targetLagSignalPresent": False, "targetVsPrice": "BELOW", "recentUpgradeCount30d": 1,
                      "warningCodes": ["CONSENSUS_TARGET_BELOW_PRICE_DESPITE_UPGRADES"]}),
-    # An upgrade 60 days old is outside the 30-day count. (No upgrade rows at all reads null in Python and 0 in the Worker:
-    # a divergence from before 4.0.0, left open.)
+    # An upgrade 60 days old is outside the 30-day count.
     _consensus_case("target_below_price_with_only_an_old_upgrade_does_not_warn", "MJR4CB", 200.0, 1,
                     {"targetLagSignalPresent": False, "targetVsPrice": "BELOW", "recentUpgradeCount30d": 0,
                      "warningCodes": []}, age_days=60),
+    # 4.0.1: no rating-history rows at all is no data, so the count is null in both runtimes (the Worker said 0).
+    _consensus_case("no_rating_history_count_is_null", "MJR4CD", 200.0, 0,
+                    {"targetLagSignalPresent": False, "targetVsPrice": "BELOW", "recentUpgradeCount30d": None,
+                     "warningCodes": []}),
     _consensus_case("target_above_price_does_not_warn", "MJR4CC", 129.9, 1,
                     {"targetLagSignalPresent": False, "targetVsPrice": "AT_OR_ABOVE", "recentUpgradeCount30d": 1,
                      "warningCodes": []}),
